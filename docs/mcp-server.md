@@ -1,5 +1,7 @@
 # Workflowd MCP server
 
+See [dispatch configuration reload](execution-dispatch.md) for changing agent-run lists.
+
 A thin remote MCP server over the authoritative workflowd SQLite store. It
 runs on mint beside the coordinator, listens on loopback
 (`127.0.0.1:$WORKFLOWD_MCP_PORT`, default 8791), and is fronted by
@@ -8,10 +10,10 @@ no workflow state of its own — every tool call reads or writes the same
 database the coordinator and the remote-enqueue CLI use. Capability discovery
 proxies the daemon's live adapter catalogs.
 
-The server targets MCP revision **2025-11-25** using SDK 1.30.0. All seven
-tools advertise an `outputSchema` and return the corresponding
+The server targets MCP revision **2025-11-25** using SDK 1.30.0. All tools
+advertise an `outputSchema` and return the corresponding
 `structuredContent` in addition to a human-readable text rendering. Tool
-names use the SEP-986 canonical character set. The four query tools carry
+names use the SEP-986 canonical character set. The query tools carry
 `readOnlyHint`; the three receipt tools carry non-destructive and idempotency
 annotations.
 
@@ -41,13 +43,24 @@ contract so agents learn it from the schema itself.
 | Tool | Access | Purpose |
 | --- | --- | --- |
 | `job_status(job_id)` | read | Durable state of one job, plus its recorded result when complete. |
+| `list_agent_runs(status?, repository?, limit?)` | authenticated read | Dispatch runs newest first by acceptance time (default 20, max 100). Requires the same bearer token as `read_agent_mailbox`. |
 | `list_recent_jobs(limit?)` | read | Most recently updated jobs, newest first (default 20, max 100). |
 | `host_health()` | read | Per-host view derived from durable dispatch rows: last runner result, pending dispatches, derivable consumer liveness. |
 | `list_execution_capabilities()` | authenticated read | Live local executor/provider/model identities and advertised thinking metadata, with source freshness and honest availability. See [discovery contract](execution-capabilities.md). |
 | `agent_directory({kind?, id?})` | authenticated read | Stable agent recipients, runner identity/liveness and per-host catalogs, with verified endpoint bindings and explicit expiry. See [directory and ownership protocol](agent-directory.md). |
-| `enqueue_probe(host, probe_id?)` | write | Enqueue a durable remote probe. Ack returns immediately with the job id. Requires the bearer token. |
+| `enqueue_probe(host, probe_id?)` | write | Enqueue a durable remote probe. Ack returns immediately with the job id. Requires the ordinary write bearer token. |
 | `wait_for_agent(parent_session_id, child_session_id, resume_prompt, idempotency_key?)` | write | Register a durable wait so a parent session is woken when a child session finishes. Requires the bearer token. |
-| `dispatch_agent(route, repository, prompt, parent_session_id?, resume_prompt?, idempotency_key?)` | write | Dispatch a coding-agent run by intent. The runner resolves the route, pre-flights it, spawns and verifies the session, and registers it into kernel custody. Requires the bearer token. |
+| `dispatch_agent(route, repository, prompt, parent_session_id?, resume_prompt?, idempotency_key?)` | write | Dispatch a coding-agent run by intent. The runner resolves the route, pre-flights it, spawns and verifies the session, and registers it into kernel custody. Requires the dedicated dispatch bearer token. |
+
+`list_agent_runs` returns `runs` containing `run_id`, `repository`, `route`, `model`,
+`executor`, `idempotency_key`, `status`, `end_reason`, `started_at`, and `ended_at`.
+`started_at` is the durable acceptance time, and equal timestamps are ordered by
+run ID descending. Status matches the stored lifecycle state (`accepted`, `spawning`,
+`spawned`, `verified`, `completed`, `cancelled`, `failed`, or `operator_required`).
+Repository and status filters are exact matches, applied before the limit. Active
+runs have null end fields. The idempotency key is null for historical runs and
+submissions without an explicit key; historical hashed keys cannot be recovered.
+Prompts, mailbox IDs, and final message contents are excluded from this listing.
 
 `enqueue_probe` with an explicit `probe_id` is idempotent (the same identity
 maps to the same job); omitting it generates a fresh probe identity per call.
@@ -217,6 +230,44 @@ What the runner owns, in order:
    exit. The watchdog deliberately never observes a verified codex run; a
    daemon crash mid-run leaves the run row `verified` and the worktree in
    place for manual inspection (codex session resume is a deferred slice).
+6. **Worktree retention.** Once a run has ended with its process confirmed
+   stopped (`completed`, `cancelled` or `failed`) and
+   `WORKFLOWD_AGENT_RUN_WORKTREE_RETENTION_MS` (default two days) has passed
+   since the latest change to the run, its sessions or its working resource,
+   the daemon's worktree janitor removes the run's worktree with
+   `git worktree remove` (never forced) and prunes the repository's worktree
+   records. The run's branch stays. An `operator_required` run keeps its
+   worktree, because its process may still be alive; so does a run whose
+   session is the parent of an open `wait_for_agent`.
+   - **What is deleted.** `git worktree remove` refuses a worktree with
+     uncommitted or untracked changes, and the janitor checks for them first,
+     so those are kept. Ignored files are not kept: build output such as
+     `target/` or `node_modules/`, and an ignored `.env`, are deleted with the
+     worktree. Commit or move anything ignored you want to keep before the
+     retention ends.
+   - **What is kept.** A worktree with uncommitted or untracked changes, a
+     locked worktree, a run path that is a symbolic link, and anything that is
+     not a linked worktree of the configured repository at
+     `<worktree root>/agent-runs/<id>`. The janitor logs a warning and
+     `list_agent_runs` shows `worktree: "retained"` with the reason in
+     `worktree_detail`. It checks a retained worktree again every six hours,
+     so after an operator commits or discards the changes (or unlocks it) the
+     worktree is removed and `list_agent_runs` shows `removed`.
+   - **Pace.** Each iteration requests and executes at most 20 cleanups, then
+     the worker pauses one minute before the next batch, so a backlog (for
+     example on the first deploy) drains in bounded batches instead of
+     running Git back to back. Without a backlog the janitor polls every five
+     minutes.
+   - **Durability.** The work is a durable kernel cleanup request, so runs
+     that ended while the daemon was down are caught up after a restart, and
+     an expired lease is reclaimed.
+   - **Late waits.** After the worktree is removed the run's sessions are no
+     longer resumable. A later `wait_for_agent` on such a session is refused
+     with reason `worktree_removed_after_retention`, naming the run and its
+     caller mailbox; read the result with `read_agent_mailbox` or find the run
+     with `list_agent_runs`.
+   - The janitor is off when workspaces are created through the agent host
+     (`WORKFLOWD_AGENT_HOST_SOCKET`).
 
 With `parent_session_id` + `resume_prompt`, the runner also registers the
 parent's custody (idempotently) and an agent wait in the same dispatch, so
@@ -246,23 +297,33 @@ receipt: end the turn after it arrives.
 
 ## Authorization
 
-The three store query tools need no credential beyond reaching the transport
-(loopback or your tailnet). Capability discovery and all write tools require a bearer token:
+The three store query tools (`job_status`, `list_recent_jobs`, `host_health`)
+need no credential beyond reaching the loopback/tailnet transport. Other tools
+use separate capability credentials:
 
-- `WORKFLOWD_MCP_TOKEN` — token value directly (development only).
-- `WORKFLOWD_MCP_TOKEN_FILE` — path to a file containing the token. The
-  shipped systemd unit provides this via `LoadCredential=mcp-token:...` and
-  `WORKFLOWD_MCP_TOKEN_FILE=%d/mcp-token`, matching the other workflowd
-  units.
+| Capability | Server configuration | Clients |
+| --- | --- | --- |
+| Probe enqueue, waits, mailbox reads, capability discovery | `WORKFLOWD_MCP_TOKEN` or `WORKFLOWD_MCP_TOKEN_FILE` | Trusted monitoring clients and coordinators |
+| `dispatch_agent` only | `WORKFLOWD_MCP_DISPATCH_TOKEN` or `WORKFLOWD_MCP_DISPATCH_TOKEN_FILE` | Trusted non-OpenCode coordinators only |
 
-When neither is set, the store queries remain available; capability discovery
-and write tools refuse every call. The token is never logged or echoed, including in error text.
+Set at most one direct/file source per capability. Empty sources disable that
+capability; there is no fallback from dispatch to the ordinary token. Startup
+rejects identical write and dispatch tokens. The systemd unit loads separate
+`mcp-token` and `mcp-dispatch-token` files. Missing dispatch configuration refuses
+all dispatches, while existing reads and ordinary writes retain their behavior.
+Tokens are never logged or echoed.
+
+No OpenCode agent configuration or environment may hold the dispatch token or
+the daemon's agent-run ingress token. The review server has no MCP servers; see
+[review isolation](review-hardening.md). Do not restore a global workflowd MCP
+entry during redeployment.
 
 `wait_for_agent` additionally needs to reach the daemon's agent-wait ingress,
 which carries its own token:
 
 - `WORKFLOWD_DAEMON_URL` — base URL of the workflowd daemon, e.g.
-  `http://127.0.0.1:8787`. Must be absolute HTTP(S) and carry no credentials.
+  `http://127.0.0.1:8787`. Must be absolute HTTP(S) with no userinfo, query or
+  fragment. Never put secrets in URL paths: validators cannot detect them.
 - `WORKFLOWD_AGENT_WAIT_TOKEN` / `WORKFLOWD_AGENT_WAIT_TOKEN_FILE` — the
   daemon's `WORKFLOWD_AGENT_WAIT_TOKEN`, supplied the same way as the MCP
   token. Set exactly one source.
@@ -271,7 +332,8 @@ which carries its own token:
 
 - `WORKFLOWD_AGENT_RUN_TOKEN` / `WORKFLOWD_AGENT_RUN_TOKEN_FILE` — the
   daemon's `WORKFLOWD_AGENT_RUN_TOKEN`, supplied the same way. Set exactly
-  one source.
+  one source. This daemon credential is held only by services, never by agent
+  configurations; it is distinct from the client's MCP dispatch credential.
 
 A tool whose token is missing stays disabled and refuses calls with a
 message naming the missing settings. A daemon token without
@@ -285,6 +347,7 @@ mkdir -p ~/.config/workflowd
 printf 'WORKFLOWD_MCP_PORT=8791\nWORKFLOWD_DAEMON_URL=http://127.0.0.1:8787\n' \
   > ~/.config/workflowd/mcp.env
 umask 077 && openssl rand -hex 32 > ~/.config/workflowd/mcp-token
+umask 077 && openssl rand -hex 32 > ~/.config/workflowd/mcp-dispatch-token
 # Reuse the same secret the daemon loads as WORKFLOWD_AGENT_WAIT_TOKEN_FILE,
 # so both ends of the proxy agree.
 umask 077 && openssl rand -hex 32 > ~/.config/workflowd/agent-wait-token
@@ -303,23 +366,19 @@ claude mcp add --transport http workflowd https://mint.<tailnet>.ts.net:8791/mcp
   --header "Authorization: Bearer $(cat ~/.config/workflowd/mcp-token)"
 ```
 
-OpenCode (`opencode.json`):
-
-```json
-{
-  "mcp": {
-    "workflowd": {
-      "type": "remote",
-      "url": "https://mint.<tailnet>.ts.net:8791/mcp",
-      "headers": {
-        "Authorization": "Bearer {file:~/.config/workflowd/mcp-token}"
-      }
-    }
-  }
-}
-```
-
-Agents that only need read tools can omit the Authorization header entirely.
+This ordinary client credential cannot dispatch. For dispatch, use the trusted
+coordinator channel below, or a separate HTTP MCP entry in a trusted non-OpenCode
+coordinator using `mcp-dispatch-token`. Keep ordinary writes on the original
+credential. OpenCode receives neither a global workflowd MCP entry nor dispatch
+credentials. The RPI coordinator needs both credentials and must use the channel
+below, rather than a single-bearer HTTP MCP client. Dispatched workers may read
+user-scope MCP configuration (`~/.claude.json` and `~/.codex/config.toml`, or their
+configured home overrides); those configurations must never contain the dispatch
+token. Direct Claude workers use strict empty MCP configuration, without workflowd
+MCP; sandbox workers use only their owned bridge. Until separate agent users are
+available, shell-capable OpenCode agent-run workers are separated from dispatch
+credentials by configuration only, not filesystem access control.
+Unauthenticated store-query clients can omit Authorization.
 
 ## Coordinator channel
 
@@ -328,7 +387,7 @@ result inside its open session, with no resume call and no waiter script.
 `bun run mcp:channel` (`src/mcp-channel.ts`) is a stdio MCP server named
 `workflowd` that Claude Code spawns per session. It declares
 `experimental['claude/channel']`, serves the same tools as the HTTP server, and
-forwards every call to it with the bearer. After a successful `dispatch_agent`
+forwards dispatch with its dedicated bearer and other calls with the ordinary bearer. After a successful `dispatch_agent`
 it watches that receipt's `mailbox_id` for this session only, polls
 `read_agent_mailbox`, and sends exactly one `notifications/claude/channel`
 event: `content` is the terminal mailbox message as canonical JSON, and `meta`
@@ -344,7 +403,8 @@ process; if it exits, the mailbox row stays readable with `read_agent_mailbox`.
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `WORKFLOWD_MCP_URL` | `http://127.0.0.1:8791/mcp` | HTTP MCP server to forward to. |
-| `WORKFLOWD_MCP_TOKEN` / `WORKFLOWD_MCP_TOKEN_FILE` | — | Bearer; set exactly one. |
+| `WORKFLOWD_MCP_TOKEN` / `WORKFLOWD_MCP_TOKEN_FILE` | — | Ordinary bearer, including mailbox reads; set exactly one. |
+| `WORKFLOWD_MCP_DISPATCH_TOKEN` / `WORKFLOWD_MCP_DISPATCH_TOKEN_FILE` | — | Dispatch bearer; set exactly one to enable dispatch. |
 | `WORKFLOWD_CHANNEL_POLL_MS` | `10000` | Mailbox poll interval (worst-case added latency). |
 
 Register it under the name `workflowd` in place of the HTTP entry (remove that
@@ -356,6 +416,7 @@ flag:
 claude mcp add workflowd \
   -e WORKFLOWD_MCP_URL=https://mint.<tailnet>.ts.net:8791/mcp \
   -e WORKFLOWD_MCP_TOKEN_FILE=$HOME/.config/workflowd/mcp-token \
+  -e WORKFLOWD_MCP_DISPATCH_TOKEN_FILE=$HOME/.config/workflowd/mcp-dispatch-token \
   -- bun /path/to/workflowd/src/mcp-channel.ts
 claude --dangerously-load-development-channels server:workflowd
 ```
@@ -457,7 +518,8 @@ enables it, the routes and repositories are then required):
 - `WORKFLOWD_AGENT_RUN_VERIFY_TIMEOUT_MS` (120000),
   `WORKFLOWD_AGENT_RUN_VERIFY_POLL_MS` (2000),
   `WORKFLOWD_AGENT_RUN_PROGRESS_WINDOW_MS` (1200000),
-  `WORKFLOWD_AGENT_RUN_MAX_ATTEMPTS` (3).
+  `WORKFLOWD_AGENT_RUN_MAX_ATTEMPTS` (3),
+  `WORKFLOWD_AGENT_RUN_WORKTREE_RETENTION_MS` (172800000, two days).
 
 ```http
 POST /workflows/agent-runs
@@ -487,9 +549,61 @@ Responses:
 
 ## Resident mailbox subscriptions
 
-Resident workers receive a per-run stdio MCP server exposing `subscribe_to_event`.
-After pushing, subscribe to CI by repository and head SHA, end the turn, then
-continue when the mailbox delivers the result. Agent-run completion selectors are
-also supported. This tool uses run-bound Unix peer authentication, not the shared
-HTTP MCP write bearer. See [agent inboxes and CI](agent-inboxes-ci.md#agent-pattern-push-subscribe-end-the-turn)
-for selectors, delivery guarantees, and the cargo shim change.
+New resident workers are not offered event subscriptions: the injected Codex
+`subscribe_to_event` MCP is disabled and OpenCode no longer receives subscription
+credentials. Existing waits still reconcile and deliver through their original
+custody checks. No live service configuration is changed.
+
+An active skill's end-turn/handoff instructions take precedence: if it requires
+ending at its handoff step (such as rpi-implement's Finish), finish all earlier
+phases first; at that step update the PR, publish the report, and end without
+watching CI.
+
+After pushing and opening/updating a PR, use `gh pr checks PR_NUMBER --repo OWNER/NAME`
+every 60 seconds on draft and ready PRs, without the required-only filter or watch mode.
+Inspect the named `Required checks` aggregate row. The only advisory checks are OpenCode
+Review and AI slop (advisory); ignore those rows and do not infer CI from the command's
+exit code alone. A missing aggregate is pending, never success, even if all visible
+checks pass or `gh` reports "no checks reported". CI is verified only when the aggregate
+is pass/success and every other non-advisory row is pass/success or skipping/skipped.
+SonarCloud Code Analysis and CodeQL PR policy must also be present and pass/success,
+consistent with the required contexts in `src/domain/head-evidence.ts`; a missing
+required context means pending. Any non-advisory pending row means pending; any
+non-advisory fail/failure row means confirmed CI failure, even when the aggregate
+passes. For the aggregate, fail/failure is a confirmed CI failure; a skipped or
+cancelled aggregate is unverified (as is any other non-success terminal state). Any
+other non-advisory terminal state is unverified. Retry missing/pending checks or
+transient observation errors every 60 seconds within the cycle budget. Cap each
+observation cycle at 15 minutes, below the default 20-minute stall window (shorten it
+for a lower configured window). Full CI takes about 25 minutes. Allow a 30-minute total
+observation budget per pushed head, split into bounded cycles; a single 15-minute cycle
+is not the total wait. Shell output is not a stall heartbeat. Missing/pending checks,
+observation timeouts, and transient errors such as "error connecting to api.github.com"
+mean CI is still running for scheduling purposes: continue remaining work and re-check
+in bounded cycles, returning to task work and progress updates between cycles. Never run
+back-to-back blocking waits without returning to task work in between; no single cycle
+may exceed the budget.
+
+Any other observation error means CI is unverified: continue remaining work and report
+it at handoff. Observation errors do not count as confirmed failures. The verified
+result must be for the last pushed head SHA; results for earlier SHAs do not verify it.
+At an early stop, provide the same report as at final handoff plus the failing check's
+link, if applicable.
+
+Verify the pushed head SHA before reporting CI; a changed head must be reported without
+attributing its checks to the pushed SHA. End only at final handoff, an active skill's
+explicit end-turn instruction, or after three unsuccessful repair attempts for the same
+confirmed failure. Missing/pending checks, timeouts, and transient observation errors do
+not count as failures. Once remaining work is complete, use the remaining total budget
+in bounded cycles before handing off any still-unverified CI. Between cycles, review the
+final diff and prepare the handoff report, and provide a progress update. Report the PR
+URL, pushed SHA, and verified required CI result, or CI as unverified and needing
+follow-up with the exact command/error and last required-check states/links (or
+explicitly none). An active skill's end-turn/handoff instructions take precedence over
+this default.
+
+Resident coordinators use `dispatch_agent` / `read_agent_mailbox` or
+`skills/rpi-coordinate/scripts/wait-mailbox.sh` with the receipt's `mailbox_id` for
+child runs. See [agent inboxes and CI](agent-inboxes-ci.md#agent-pattern-bounded-required-check-polling)
+for polling budgets, skill handoffs, and existing-wait escalation when no required
+workflow run appears within ten minutes.

@@ -1,3 +1,5 @@
+import { guardCliCredentials, makeHostCli } from "../agent-host/client"
+import { agentGitEnvironment, type AgentGitConfig } from "../agent-git/config"
 import type { CliPort, CliEvent, CliPreflightError } from "./cli-process-contract"
 import { createHash } from "node:crypto"
 import { chmod, mkdir, readFile, rename, stat, writeFile } from "node:fs/promises"
@@ -9,6 +11,7 @@ import { runWorkspaceCommand } from "../workspace/command"
 import { WorkspaceError } from "../workspace/errors"
 import type { CodexCliPort, CodexExit, CodexPreflightError } from "./codex-cli-port"
 import { cleanupFinishedCustody, incrementalLines } from "./codex-output"
+import { readSandboxBinding } from "../sandbox/binding"
 export type {
   CodexCliPort,
   CodexExit,
@@ -83,7 +86,9 @@ export const parseCodexExecEvent = (line: string): CodexExecEvent => {
       }
       if (field(item, "type") === "error") {
         const message = textField(item, "message")
-        return message !== null ? { type: "error", message } : { type: "other" }
+        return message !== null
+          ? { type: "error", message, codexErrorInfo: field(item, "codexErrorInfo") }
+          : { type: "other" }
       }
       return { type: "other" }
     }
@@ -100,11 +105,14 @@ export const parseCodexExecEvent = (line: string): CodexExecEvent => {
       return {
         type: "turn.failed",
         message: message ?? "codex turn failed without a message",
+        codexErrorInfo: isObject(error) ? field(error, "codexErrorInfo") : undefined,
       }
     }
     case "error": {
       const message = textField(value, "message")
-      return message !== null ? { type: "error", message } : { type: "other" }
+      return message !== null
+        ? { type: "error", message, codexErrorInfo: field(value, "codexErrorInfo") }
+        : { type: "other" }
     }
     default:
       return { type: "other" }
@@ -130,6 +138,8 @@ type CommandResult = {
 type RunCommand = (command: ReadonlyArray<string>) => Promise<CommandResult>
 
 export type CliProcessOptions = {
+  readonly git?: AgentGitConfig | undefined
+  readonly credentialSocket?: string | undefined
   readonly binary: string
   /** CLI-specific protocol; process custody and systemd ownership are shared. */
   readonly driver: {
@@ -225,6 +235,13 @@ const commandFailure = (operation: string, result: CommandResult) =>
 export const makeDurableCliProcess = (
   options: CliProcessOptions,
 ): Extract<CliPort, { readonly ownership: "transient-exec" }> => {
+  if (options.credentialSocket !== undefined)
+    return makeHostCli(
+      options.credentialSocket,
+      options.driver.name === "claude" ? "claude" : "codex",
+      options.driver.parseEvent,
+      options.identity,
+    )
   const pollIntervalMs = options.pollIntervalMs ?? 100
   const unitPrefix = options.unitPrefix ?? "workflowd-agent-"
   if (!/^[a-zA-Z0-9_-]{1,100}$/.test(unitPrefix)) throw new Error("invalid unit prefix")
@@ -470,6 +487,7 @@ export const makeDurableCliProcess = (
 
   return {
     ownership: "transient-exec",
+    executionId: (runId) => executionIdFor(safeRunId(runId), unitPrefix),
     cleanup: (protectedRunIds) =>
       Effect.tryPromise({
         try: async () => {
@@ -508,6 +526,15 @@ export const makeDurableCliProcess = (
           safeRunId(input.runId)
           const directory = join(options.custodyRoot, input.runId)
           const executionId = executionIdFor(input.runId, unitPrefix)
+          if (input.sandboxBindingFile !== undefined) {
+            const binding = await readSandboxBinding(input.directory)
+            if (
+              binding.runId !== input.runId ||
+              binding.sessionId !== executionId ||
+              binding.state !== "active"
+            )
+              throw new Error("Native sandbox execution binding changed")
+          }
           const launchId = crypto.randomUUID()
           const promptPath = join(directory, "prompt")
           const eventsPath = join(directory, "events.jsonl")
@@ -557,8 +584,17 @@ export const makeDurableCliProcess = (
             `--description=workflowd ${cliName} launch ${launchId}`,
             `--working-directory=${input.directory}`,
             "--property=KillMode=control-group",
+            ...(input.sandboxBindingFile === undefined
+              ? []
+              : ["--property=MemoryMax=6G", "--property=MemorySwapMax=0"]),
             ...forwardedEnvironment,
+            ...(options.credentialSocket === undefined
+              ? []
+              : [`--setenv=WORKFLOWD_AGENT_HOST_SOCKET=${options.credentialSocket}`]),
             ...Object.entries(options.identity?.environment(input.runId) ?? {}).map(
+              ([name, value]) => `--setenv=${name}=${value}`,
+            ),
+            ...Object.entries(agentGitEnvironment(options.git)).map(
               ([name, value]) => `--setenv=${name}=${value}`,
             ),
             process.execPath,
@@ -580,6 +616,9 @@ export const makeDurableCliProcess = (
             ...(input.model === null ? [] : ["--model", input.model]),
             ...(input.effort === undefined ? [] : ["--effort", input.effort]),
             ...(input.provider == null ? [] : ["--provider", input.provider]),
+            ...(input.sandboxBindingFile === undefined
+              ? []
+              : ["--sandbox-binding-file", input.sandboxBindingFile]),
           ]
           // Retain the manifest on every uncertain launch/inspection outcome. A manager
           // command error or timeout does not prove the native execution stopped.
@@ -636,15 +675,19 @@ export const makeEventQueue = () => {
 
 export type CodexCliOptions = Omit<CliProcessOptions, "driver">
 export const makeCodexCli = (options: CodexCliOptions) =>
-  makeDurableCliProcess({
-    ...options,
-    driver: {
-      name: "codex",
-      workerPath: fileURLToPath(new URL("./codex-worker.ts", import.meta.url)),
-      parseEvent: parseCodexExecEvent,
-      preflight: codexPreflight(options.binary),
-    },
-  })
+  guardCliCredentials(
+    makeDurableCliProcess({
+      ...options,
+      driver: {
+        name: "codex",
+        workerPath: fileURLToPath(new URL("./codex-worker.ts", import.meta.url)),
+        parseEvent: parseCodexExecEvent,
+        preflight: codexPreflight(options.binary),
+      },
+    }),
+    options.credentialSocket,
+    "codex",
+  )
 const codexPreflight = (binary: string) =>
   Effect.gen(function* () {
     yield* runWorkspaceCommand("check codex cli", [binary, "--version"]).pipe(

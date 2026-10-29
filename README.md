@@ -132,12 +132,12 @@ Session-reference metadata is retained with its execution. Workflowd does not co
 
 ### Policies
 
-- Reviews run through the read-only `pr-reviewer` agent.
+- Reviews run through the read-only `pr-reviewer` agent. Automatic review requires a trusted author association (OWNER, MEMBER, COLLABORATOR) or a same-repository head; other PRs are tracked and skipped with a reason. An allowlisted commenter can request `/agent review`.
 - Fix Work is disabled by default. Reviews and `/agent fix` cannot enqueue or execute fixes unless `WORKFLOWD_FIX_WORK_ENABLED=true` is explicitly configured.
-- When Fix Work is enabled, a review requesting changes automatically queues `pr-fixer` only when all of these checks pass: the review is actionable, the head is in the same repository, the branch begins with `opencode/` or `plan/` by default, and the PR author's exact GitHub login is listed in `WORKFLOWD_TRUSTED_AGENT_USERS` (login matching is case-insensitive).
+- The hardened `pr-fixer` is read-only: keep Fix Work disabled. Under the existing scheduling policy, a review requesting changes queues `pr-fixer` only when all of these checks pass: the review is actionable, the head is in the same repository, the branch begins with `opencode/` or `plan/` by default, and the PR author's exact GitHub login is listed in `WORKFLOWD_TRUSTED_AGENT_USERS` (login matching is case-insensitive).
 - The trusted identity is the PR author reported by GitHub and persisted with the current PR generation. It is not inferred from repository write access, branch name, branch creator, commit author, or organization membership. Therefore an unlisted collaborator's same-repository branch remains review-only even when its name has an eligible prefix. Command authorization is an additional check, not an override: `/agent fix` cannot run Fix Work for an unlisted author or ineligible branch.
-- The fixer verifies changes and commits without pushing. The controller validates the `Workflowd-Job: <job-id>` trailer and commit SHA, then pushes without force-pushing.
-- Enable Fix Work only for trusted agent-owned pull requests because fixer verification runs repository commands on this host.
+- The Fix Work protocol requires its executor to verify changes and commit without pushing; the shipped read-only fixer cannot fulfill this protocol. The controller validates the `Workflowd-Job: <job-id>` trailer and commit SHA, then pushes without force-pushing.
+- A separately isolated mutation executor is required before enabling Fix Work; verification executes repository commands.
 - A subsequent `pull_request.synchronize` webhook queues the follow-up review.
 - Authorized users may leave `/agent review`, `/agent fix`, or `/agent status` comments. Configure them with `WORKFLOWD_COMMAND_USERS`.
 - The OpenCode server must set `OPENCODE_DISABLE_PROJECT_CONFIG=1`, so an untrusted PR cannot replace the automation agents or permissions. The shipped systemd drop-in enforces this.
@@ -207,16 +207,18 @@ Do not configure a bypass that permits `OpenCode Review` to be skipped for ordin
 
 ## Installed Layout
 
-The shipped user unit assumes:
+The shipped controller, runner and MCP user units assume:
 
-- Repository: `%h/Documents/repos/workflowd`
-- Bun: `%h/.bun/bin/bun`
+- Active release: `/opt/workflowd/deploy/current`, a stable symlink into `/opt/workflowd/deploy/releases/`
+- Pinned Bun executable: `/opt/workflowd/bin/bun`
 - OpenCode unit: `opencode-server.service`, bound to `127.0.0.1:4096` with Basic authentication
 - Workflowd listener: `127.0.0.1:8787`
 - Non-secret environment file: `%h/.config/workflowd/env`
 - Credential source files: `%h/.config/workflowd/github-webhook-secret` and `%h/.config/workflowd/opencode-server-password`
 
-Edit the unit if the repository or Bun is installed elsewhere.
+See the [verified deployment runbook](deploy/verified-deploy.md) for the installed
+layout, operator state, retained releases and migration steps. Review all three
+units and their drop-ins if the release path or pinned Bun is installed elsewhere.
 
 ## OpenCode 2 Server
 
@@ -243,6 +245,7 @@ install -m 0600 deploy/workflowd.env.example "$HOME/.config/workflowd/env"
 The required installed values are:
 
 - `GITHUB_APP_ID`: numeric GitHub App ID
+- `WORKFLOWD_ALLOWED_INSTALLATION_ACCOUNT_IDS`: required in automation mode; comma-separated immutable numeric GitHub account IDs allowed to hold App installations (production: `81005232,319835875`, BNasraoui and quality-sh). Missing, empty, malformed, unsafe, or duplicate IDs prevent startup.
 - `GITHUB_PRIVATE_KEY_PATH`: absolute path to the App PEM file
 - `OPENCODE_SERVER_USERNAME`: must match the OpenCode server, normally `opencode`
 - `WORKFLOWD_OPENCODE_ATTACH_URL`: credential-free OpenCode URL reachable from reviewer tailnet machines
@@ -251,6 +254,20 @@ The required installed values are:
 - `WORKFLOWD_FIX_WORK_ENABLED`: set `true` to fix trusted agent-owned pull requests; keep `false` for review-only operation
 - `WORKFLOWD_TRUSTED_AGENT_USERS`: comma-separated allowlist of PR-author GitHub logins eligible for Fix Work; required and non-empty when Fix Work is enabled
 - `WORKFLOWD_GIT_SIGNING_KEY`: full OpenPGP fingerprint of the GitHub-registered controller key used to sign and verify Fix Work commits; required when Fix Work is enabled
+
+PR automation requires `WORKFLOWD_PR_REPOSITORIES`, a non-empty JSON array such as `[{"repository":"owner/repo","installationId":123456}]`, using the same repository/installation format as the CI allowlist. Both fields must match; repository names are case-insensitive. After HMAC verification and JSON parsing, the installation guard handles its four lifecycle events before the ingestion allowlist is checked. Other deliveries from installations outside the configured union are acknowledged with 202 (`installation-not-configured`) before full event decoding or normal delivery recording. The union contains only PR automation and CI repository installations. Sandbox policies, worker identities, QRSPI, and resident settings do not add installations: the sandbox gate is polled, and resident CI subscriptions use the CI allowlist. Other deliveries without a valid installation ID, including GitHub ping, receive 202 (`missing-installation`) without persistence. The existing body-size limit applies to all deliveries. PR and comment events from a configured installation still require the PR repository allowlist; unmatched repositories are recorded as ignored (`pr-repository-not-allowlisted`) and never enqueue reviews or commands. Configure this before upgrading: automation startup rejects a missing, empty, malformed, or duplicate-repository list. `WORKFLOWD_MODE=execution` does not require it. This setting is independent of `WORKFLOWD_CI_REPOSITORIES`.
+
+For mint, the owner must set both the account-ID allowlist above and this value in the effective workflowd environment before deploying this change:
+
+```sh
+WORKFLOWD_PR_REPOSITORIES='[{"repository":"BNasraoui/workflowd","installationId":147573449}]'
+```
+
+Do not add `quality-sh/provenance` to this PR allowlist: outsider pull requests on that public repository would start reviews. Configure its actual installation only in the sandbox policy and, if needed, the CI allowlist. After review and merge, update the deployment checkout, run `bun install --frozen-lockfile`, restart the coordinator, and verify an allowed signed delivery is handled while a signed unknown-installation PR delivery leaves no delivery/job rows. Make GitHub App 4337845 public and install it on provenance only after the rejection is deployed and verified. This controls ingestion, not the App's broad permission grants; a separate gate App can narrow those permissions. Existing stored deliveries are not pruned by this change, and configured installations retain the current storage behavior.
+
+A public GitHub App can be installed by anyone, and those installations send validly signed webhooks. The installation guard claims the durable delivery record and returns 202 for `installation.created`, `installation.unsuspend`, `installation.new_permissions_accepted`, and `installation_repositories.added`. Undecodable guard payloads fail without storing a delivery. Guard-handled events return immediately without normal event decoding or delivery recording. A daemon-scoped worker looks up each installation with an App JWT and deletes it only if GitHub reports an account outside the allowlist. A payload/account mismatch for an allowed installation is audited without deletion. Structured `installation_guard` lines record outcomes; account login is optional, and undecodable accounts (including null accounts) are audited and skipped individually.
+
+Reconciliation starts in the background and collects all `/app/installations` pages before deleting foreign installations. Successful passes run ten minutes apart; consecutive failed passes back off to an hour and reset to ten minutes after recovery. `/health` exposes `installationGuard.lastSuccessfulReconciliationAt` as Unix milliseconds (null until a pass succeeds). Background failures and defects are logged without stopping the workers. Requests time out after ten seconds and retry transient failures three times with 1/2/4-second backoff, respecting `retry-after` and `x-ratelimit-reset` within a 60-second cap per delay. GET and DELETE 404 mean already gone. Reconciliation recovers missed webhooks, crashes after a delivery claim, and exhausted retries. Execution mode does not require this setting. Installation and installation-repository events are delivered to Apps with webhooks; no extra event subscription is needed.
 
 Fix Work remains disabled by default. Existing installations that previously set `WORKFLOWD_FIX_WORK_ENABLED=true` must add at least one `WORKFLOWD_TRUSTED_AGENT_USERS` login before upgrading; startup fails closed when the allowlist is absent or empty. No database migration is required: every claimed Fix Work job, including one queued before upgrade, is rechecked against the current repository, branch-prefix, review, and author policy before the fixer runs. Removing a login takes effect after restart; queued and subsequent work for that author is disabled or left review-only.
 
@@ -272,15 +289,14 @@ The OpenCode password file must contain the same password used by `opencode-serv
 
 ## OpenCode Agents
 
-Install both agents and the required server safety drop-in:
+For the automatic review server (`opencode2-server`), install the complete v2
+policy and isolated config root using [the review hardening operator steps](docs/review-hardening.md).
+The overlay declares no MCP servers and both reviewer and fixer deny tools by
+default. Fix Work must remain disabled because the fixer is read-only.
 
-```bash
-install -Dm0644 deploy/opencode/agent/pr-reviewer.md "$HOME/.config/opencode/agent/pr-reviewer.md"
-install -Dm0644 deploy/opencode/agent/pr-fixer.md "$HOME/.config/opencode/agent/pr-fixer.md"
-install -Dm0644 deploy/systemd/opencode-server.service.d/10-disable-project-config.conf "$HOME/.config/systemd/user/opencode-server.service.d/10-disable-project-config.conf"
-```
-
-OpenCode loads agents and configuration only at startup. Restart `opencode-server.service` after independent verification to apply these files. `systemctl --user cat opencode-server.service` must show `Environment=OPENCODE_DISABLE_PROJECT_CONFIG=1` before processing untrusted repositories.
+The Markdown definitions in `deploy/opencode/agent/` are retained for v1 clients;
+they are not the production v2 installation path. Never install a workflowd MCP
+dispatch credential in any OpenCode configuration.
 
 ## Skills
 
@@ -322,7 +338,7 @@ The unit requires `opencode-server.service`, loads both credentials into a prote
 
 Two optional units ship beside it:
 
-- `workflowd-mcp.service` — the remote MCP server on loopback 8791, fronted by `tailscale serve` like the OpenCode server. Without `WORKFLOWD_MCP_TOKEN` it starts read-only; write tools refuse every call. Install steps are in [docs/mcp-server.md](docs/mcp-server.md).
+- `workflowd-mcp.service` — the remote MCP server on loopback 8791, fronted by `tailscale serve` like the OpenCode server. Ordinary writes require `WORKFLOWD_MCP_TOKEN`; dispatch independently requires `WORKFLOWD_MCP_DISPATCH_TOKEN`. Missing credentials disable their respective capabilities. Install steps are in [docs/mcp-server.md](docs/mcp-server.md).
 - `workflowd-runner.service` — a host-specific remote runner. It needs a NATS credential and `deploy/runner.env.example` copied to `~/.config/workflowd/runner.env`; install steps, credential minting, and the `claude_resume` threat model are in [docs/remote-runner.md](docs/remote-runner.md).
 
 Codex agent runs survive workflowd's scheduled credential-rotation restart via

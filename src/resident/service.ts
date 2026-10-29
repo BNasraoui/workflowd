@@ -1,7 +1,35 @@
+import { codexProjectConfig } from "../execution/project-config"
+import type { AgentGitConfig } from "../agent-git/config"
+import {
+  isNonToolItem,
+  isToolFreeTurn,
+  providerFailure,
+  providerRetryDelay,
+} from "../provider-failure"
+import { diagnosticMessage } from "../sandbox/diagnostics"
+import { residentWorkerInstructions } from "./instructions"
+import {
+  guardCliCredentials,
+  makeHostCli,
+  withCredentialAdmission,
+  withCredentialAdmissionPromise,
+} from "../agent-host/client"
+import { credentialReason, agentHostUnitName } from "../agent-host/protocol"
 import { normalizeError } from "../errors"
 import { RunPeers, serveRunSocket } from "../worker-identity/peer"
 import { WorkerIdentity } from "../worker-identity/service"
-import { Context, Effect, Exit, Layer, Option, Queue, Schedule, Schema, Semaphore } from "effect"
+import {
+  Clock,
+  Context,
+  Effect,
+  Exit,
+  Layer,
+  Option,
+  Queue,
+  Schedule,
+  Schema,
+  Semaphore,
+} from "effect"
 import { SqlClient } from "effect/unstable/sql"
 import { CiService } from "../ci/service"
 import { EventSelector, makeSubscriptions } from "./subscriptions"
@@ -26,7 +54,7 @@ import type { ResidentConfig } from "./config"
 import { ExecutionSelectionError } from "../execution-selection"
 import { DirectoryStore } from "../directory/store"
 
-// Optional metadata preserves older completion protocols; absence is not input proof.
+// Older completion protocols remain valid, but absent metadata is not input proof.
 const NativeThread = {
   id: Schema.optionalKey(Schema.String),
   cwd: Schema.optionalKey(Schema.String),
@@ -42,7 +70,15 @@ const ThreadResult = Schema.Struct({
 })
 const TurnEvent = Schema.Struct({
   threadId: Schema.String,
-  turn: Schema.Struct({ id: Schema.String, status: Schema.String }),
+  turn: Schema.Struct({
+    id: Schema.String,
+    status: Schema.String,
+    error: Schema.optional(
+      Schema.NullOr(
+        Schema.Struct({ message: Schema.String, codexErrorInfo: Schema.optional(Schema.Unknown) }),
+      ),
+    ),
+  }),
 })
 const ItemEvent = Schema.Struct({
   threadId: Schema.String,
@@ -60,6 +96,15 @@ const History = Schema.Struct({
       Schema.Struct({
         id: Schema.String,
         status: Schema.String,
+        error: Schema.optional(
+          Schema.NullOr(
+            Schema.Struct({
+              message: Schema.String,
+              codexErrorInfo: Schema.optional(Schema.Unknown),
+            }),
+          ),
+        ),
+        itemsView: Schema.optional(Schema.String),
         items: Schema.optional(
           Schema.Array(
             Schema.Struct({
@@ -81,7 +126,9 @@ export const ResidentCodex = Context.Service<ResidentPort>("workflowd/ResidentCo
 
 export const ResidentCodexLive = (
   config: ResidentConfig & {
+    readonly git?: AgentGitConfig | undefined
     readonly unitPrefix?: string
+    readonly credentialSocket?: string | undefined
     readonly directoryRefreshMs?: number
     readonly directoryLeaseMs?: number
   },
@@ -138,13 +185,17 @@ export const ResidentCodexLive = (
         peers.register(runId, pid)
         if (Option.isSome(identity)) identity.value.register(runId, pid)
       }
+      const revokePeer = (runId: string) => {
+        peers.revoke(runId)
+        if (Option.isSome(identity)) identity.value.revoke(runId)
+      }
       yield* Effect.addFinalizer(() =>
         Effect.forEach(
           [...servers.entries()],
           ([runId, entry]) =>
             Effect.gen(function* () {
               yield* Effect.tryPromise(() => entry.process.close())
-              peers.revoke(runId)
+              revokePeer(runId)
               const row = yield* store.readRun(runId)
               if (row !== null) listeners.get(row.thread_id)?.queue.close()
             }).pipe(Effect.exit),
@@ -157,42 +208,63 @@ export const ResidentCodexLive = (
           Effect.orDie,
         ),
       )
-      const launch = Effect.fn("Resident.launch")(function* (runId: string, attempts: number = 0) {
-        const env = {
-          ...(Option.isSome(identity) ? identity.value.environment(runId) : {}),
-          WORKFLOWD_RUN_ID: runId,
-          WORKFLOWD_CODEX_RESIDENT_SOCKET: config.socket,
-        }
-        const owned = yield* store.readRun(runId)
-        if (owned !== null) yield* store.recordClosure(owned.thread_id, false)
-        const notify = notifyFor(runId)
-        let process: ServerProcess
-        if (transientUnits) {
-          const unit = residentUnitName(runId, unitPrefix)
-          const socket = residentSocket(config.home, runId)
-          const launchId = randomUUID()
-          yield* store.prepareServer(runId, unit, launchId, socket)
-          const launched = yield* Effect.tryPromise(() =>
-            launchAppServer(
-              { binary, home: config.home, env, runId, unitPrefix, launchId },
-              notify,
-            ),
-          )
-          process = launched
-          yield* store.adoptServer(runId, launched.invocation)
-        } else process = yield* Effect.try(() => start({ binary, home: config.home, env }, notify))
-        servers.set(runId, {
-          process,
-          disconnected: false,
-          attempts,
-          lastEventAt: Date.now(),
-          lastDirectoryCheckAt: 0,
-          runtimeDirectory: null,
-        })
-        yield* Effect.try(() => registerPeer(runId, process.pid))
-        yield* Effect.tryPromise(() => process.initialize())
-        return process
-      })
+      const launch = Effect.fn("Resident.launch")(
+        function* (runId: string, attempts: number = 0) {
+          const env = {
+            ...(Option.isSome(identity) ? identity.value.environment(runId) : {}),
+            WORKFLOWD_RUN_ID: runId,
+            WORKFLOWD_CODEX_RESIDENT_SOCKET: config.socket,
+          }
+          const owned = yield* store.readRun(runId)
+          if (owned !== null) yield* store.recordClosure(owned.thread_id, false)
+          const notify = notifyFor(runId)
+          let process: ServerProcess
+          if (transientUnits) {
+            const launchId = randomUUID()
+            const hostRunId = `${runId}-${launchId}`
+            const unit =
+              config.credentialSocket === undefined
+                ? residentUnitName(runId, unitPrefix)
+                : agentHostUnitName(hostRunId)
+            const socket =
+              config.credentialSocket === undefined ? residentSocket(config.home, runId) : hostRunId
+            yield* store.prepareServer(runId, unit, launchId, socket)
+            const launched = yield* Effect.tryPromise(() =>
+              launchAppServer(
+                {
+                  binary,
+                  home: config.home,
+                  env,
+                  runId,
+                  unitPrefix,
+                  launchId,
+                  hostSocket: config.credentialSocket,
+                  git: config.git,
+                },
+                notify,
+              ),
+            )
+            process = launched
+            yield* store.adoptServer(runId, launched.invocation)
+          } else
+            process = yield* Effect.try(() =>
+              start({ binary, home: config.home, env, git: config.git }, notify),
+            )
+          servers.set(runId, {
+            process,
+            disconnected: false,
+            attempts,
+            lastEventAt: Date.now(),
+            lastDirectoryCheckAt: 0,
+            runtimeDirectory: null,
+          })
+          yield* Effect.try(() => registerPeer(runId, process.pid))
+          yield* Effect.tryPromise(() => process.initialize())
+          return process
+        },
+        (effect) => withCredentialAdmission(config.credentialSocket, "codex", effect),
+      )
+      const turnsWithTools = new Set<string>()
       const listeners = new Map<
         string,
         { queue: ReturnType<typeof makeEventQueue>; finish: (exit: CodexExit) => void }
@@ -202,7 +274,17 @@ export const ResidentCodexLive = (
         const entry = runId === undefined ? undefined : servers.get(runId)
         if (entry === undefined)
           return Promise.reject(new Error("Resident run process unavailable"))
-        return entry.process.rpc.request(method, params)
+        return [
+          "thread/resume",
+          "thread/start",
+          "turn/start",
+          "thread/queue/add",
+          "turn/steer",
+        ].includes(method)
+          ? withCredentialAdmissionPromise(config.credentialSocket, "codex", () =>
+              entry.process.rpc.request(method, params),
+            )
+          : entry.process.rpc.request(method, params)
       }
       const observeDirectory = Effect.fn("Resident.observeDirectory")(function* (
         row: { readonly run_id: string; readonly thread_id: string; readonly directory: string },
@@ -219,7 +301,10 @@ export const ResidentCodexLive = (
         )
           yield* directory.value.observeManaged(
             row.run_id,
-            { nativeSessionId: thread.id, directory: thread.cwd },
+            {
+              nativeSessionId: thread.id,
+              directory: thread.cwd,
+            },
             new Date(),
             config.directoryLeaseMs,
           )
@@ -236,7 +321,13 @@ export const ResidentCodexLive = (
           yield* Effect.tryPromise({ try: () => entry.process.close(), catch: normalizeError })
         if (custody?.state === "active") {
           const stopped = yield* Effect.tryPromise(() =>
-            stopAppServer(custody.unit, custody.launch_id, custody.invocation),
+            stopAppServer(
+              custody.unit,
+              custody.launch_id,
+              custody.invocation,
+              config.credentialSocket,
+              custody.socket,
+            ),
           )
           if (!stopped.closed)
             return yield* Effect.fail(new Error("Resident unit closure unconfirmed"))
@@ -254,11 +345,13 @@ export const ResidentCodexLive = (
         threadId: string,
         failed: boolean,
         finalMessage: string | null = null,
+        diagnostic: string = "resident_turn_failed",
+        failure?: { readonly message: string; readonly codexErrorInfo?: unknown },
       ) {
         const row = yield* store.read(threadId)
         const listener = listeners.get(threadId)
         if (row !== null) {
-          peers.revoke(row.run_id)
+          revokePeer(row.run_id)
           yield* closeServer(row.run_id, threadId, row.closure_confirmed === 1)
           servers.delete(row.run_id)
           threadRuns.delete(threadId)
@@ -267,26 +360,32 @@ export const ResidentCodexLive = (
             yield* failed
               ? runs.operatorRequired({
                   runId: row.run_id,
-                  diagnostic: "resident_turn_failed",
+                  diagnostic,
                   now: new Date(),
                   finalMessage,
                 })
               : runs.complete({ runId: row.run_id, now: new Date(), finalMessage })
           }
         }
+        if (failure !== undefined) listener?.queue.push({ type: "turn.failed", ...failure })
         listener?.queue.close()
         listener?.finish({ exitCode: failed ? 1 : 0, stderr: "" })
+        turnsWithTools.delete(threadId)
         listeners.delete(threadId)
       })
       const deliveryLock = yield* Semaphore.make(1)
       const completeTurn = Effect.fn("Resident.completeTurn")(function* (
         event: typeof TurnEvent.Type,
       ) {
+        const row = yield* store.read(event.threadId)
+        if (row === null || row.current_turn !== event.turn.id || row.state === "finished") return
         const queued = yield* Effect.tryPromise(() =>
           request("thread/queue/list", { threadId: event.threadId, cursor: null, limit: 1 }),
         ).pipe(Effect.flatMap(Schema.decodeUnknownEffect(Queued)))
         let queuedWork = queued.data.length > 0 || queued.nextCursor !== null
         let finalMessage: string | null = null
+        let error = event.turn.error
+        let failure = providerFailure(error?.message, error?.codexErrorInfo)
         if (!queuedWork || event.turn.status === "failed") {
           // The next submission may have left the queue before its started notification is handled.
           const history = yield* Effect.tryPromise(() =>
@@ -300,6 +399,37 @@ export const ResidentCodexLive = (
                 (item) =>
                   item.type === "agentMessage" && item.phase !== "commentary" && item.text?.trim(),
               )?.text ?? null
+          const completed = history.thread.turns.find((turn) => turn.id === event.turn.id)
+          error ??= completed?.error
+          failure = providerFailure(error?.message, error?.codexErrorInfo)
+          if (
+            event.turn.status === "failed" &&
+            failure !== undefined &&
+            !queuedWork &&
+            history.thread.turns.at(-1)?.id === event.turn.id &&
+            !turnsWithTools.has(event.threadId) &&
+            isToolFreeTurn(completed)
+          ) {
+            // Inbox receipts bound retries even when native history omits past error fields.
+            const retryId = `provider-retry:${event.threadId}:${event.turn.id}`
+            if ((yield* store.deliveryState(retryId)) !== "pending") return
+            const counts = yield* sql<{
+              count: number
+            }>`SELECT COUNT(*) AS count FROM resident_inbox
+              WHERE thread_id = ${event.threadId} AND id LIKE 'provider-retry:%'`
+            const attempts = counts[0]?.count ?? 2
+            const delay = providerRetryDelay(attempts)
+            if (delay !== undefined) {
+              yield* store.enqueue(
+                retryId,
+                event.threadId,
+                "The provider temporarily refused the previous turn before any tool step. Continue the task from the existing conversation.",
+                (yield* Clock.currentTimeMillis) + delay,
+              )
+              yield* store.completed(event.threadId, event.turn.id, true)
+              return
+            }
+          }
           const last = history.thread.turns.at(-1)
           queuedWork ||=
             last !== undefined && last.id !== event.turn.id && last.status === "inProgress"
@@ -311,8 +441,20 @@ export const ResidentCodexLive = (
             "workflowd app-server restarted. Continue the interrupted task from its durable state. Do not repeat completed external actions.",
           )
         const state = yield* store.completed(event.threadId, event.turn.id, queuedWork)
-        if (state === "finished" || event.turn.status === "failed")
-          yield* finish(event.threadId, event.turn.status !== "completed", finalMessage)
+        if (state === "finished" || event.turn.status === "failed") {
+          const message =
+            error == null ? undefined : (failure?.message ?? diagnosticMessage(error.message))
+          yield* finish(
+            event.threadId,
+            event.turn.status !== "completed",
+            message ?? finalMessage,
+            error == null
+              ? "resident_turn_failed"
+              : `${failure?.reason ?? "resident_turn_failed"}: ${message}`,
+            // The CLI consumer must classify the native error before its own preview truncation.
+            event.turn.status === "failed" && error != null ? error : undefined,
+          )
+        }
       })
       const handle = Effect.fn("Resident.notification")(function* (frame: {
         readonly method: string
@@ -320,11 +462,17 @@ export const ResidentCodexLive = (
       }) {
         if (frame.method === "turn/started") {
           const event = yield* Schema.decodeUnknownEffect(TurnEvent)(frame.params)
+          turnsWithTools.delete(event.threadId)
           yield* store.started(event.threadId, event.turn.id)
           listeners.get(event.threadId)?.queue.push({ type: "turn.started" })
-        } else if (frame.method === "item/completed") {
+        } else if (frame.method === "item/started" || frame.method === "item/completed") {
           const event = yield* Schema.decodeUnknownEffect(ItemEvent)(frame.params)
-          if (event.item.type === "agentMessage" && event.item.text !== undefined)
+          if (!isNonToolItem(event.item.type)) turnsWithTools.add(event.threadId)
+          if (
+            frame.method === "item/completed" &&
+            event.item.type === "agentMessage" &&
+            event.item.text !== undefined
+          )
             listeners
               .get(event.threadId)
               ?.queue.push({ type: "agent_message", text: event.item.text })
@@ -375,7 +523,9 @@ export const ResidentCodexLive = (
           if (!servers.has(row.run_id)) {
             const custody = transientUnits ? yield* store.readServer(row.run_id) : null
             if (custody?.state === "active") {
-              const unit = yield* Effect.tryPromise(() => inspectAppServerUnit(custody.unit))
+              const unit = yield* Effect.tryPromise(() =>
+                inspectAppServerUnit(custody.unit, config.credentialSocket, custody.socket),
+              )
               const mismatch =
                 unit.present &&
                 (unit.description !== `workflowd resident launch ${custody.launch_id}` ||
@@ -398,6 +548,7 @@ export const ResidentCodexLive = (
                       unit: custody.unit,
                       launchId: custody.launch_id,
                       invocation: custody.invocation,
+                      hostSocket: config.credentialSocket,
                     },
                     notifyFor(row.run_id),
                   ),
@@ -417,7 +568,13 @@ export const ResidentCodexLive = (
                   yield* Effect.tryPromise(() => attached.value.initialize())
                 } else {
                   yield* Effect.tryPromise(() =>
-                    stopAppServer(custody.unit, custody.launch_id, custody.invocation),
+                    stopAppServer(
+                      custody.unit,
+                      custody.launch_id,
+                      custody.invocation,
+                      config.credentialSocket,
+                      custody.socket,
+                    ),
                   )
                 }
               }
@@ -432,9 +589,12 @@ export const ResidentCodexLive = (
               cwd: row.directory,
               model: selection?.model ?? row.model,
               ...(selection?.provider == null ? {} : { modelProvider: selection.provider }),
-              ...(selection?.thinking.effort === undefined
-                ? {}
-                : { config: { model_reasoning_effort: selection.thinking.effort } }),
+              config: {
+                ...codexProjectConfig(row.directory),
+                ...(selection?.thinking.effort === undefined
+                  ? {}
+                  : { model_reasoning_effort: selection.thinking.effort }),
+              },
               approvalPolicy: "never",
               sandbox: "danger-full-access",
             }),
@@ -485,7 +645,7 @@ export const ResidentCodexLive = (
           const last = history.thread.turns.at(-1)
           if (last !== undefined && last.id !== row.current_turn)
             yield* store.started(row.thread_id, last.id)
-          if (last?.status === "completed")
+          if (last?.status === "completed" || last?.status === "failed")
             yield* handle({
               method: "turn/completed",
               params: { threadId: row.thread_id, turn: last },
@@ -506,7 +666,13 @@ export const ResidentCodexLive = (
         for (const custody of yield* store.activeServers()) {
           if ((yield* store.readRun(custody.run_id)) !== null) continue
           const stopped = yield* Effect.tryPromise(() =>
-            stopAppServer(custody.unit, custody.launch_id, custody.invocation),
+            stopAppServer(
+              custody.unit,
+              custody.launch_id,
+              custody.invocation,
+              config.credentialSocket,
+              custody.socket,
+            ),
           )
           if (stopped.closed) yield* store.closeServer(custody.run_id)
         }
@@ -514,7 +680,9 @@ export const ResidentCodexLive = (
       yield* restore()
       if (transientUnits) {
         const active = new Set((yield* store.activeServers()).map((row) => row.unit))
-        yield* Effect.tryPromise(() => sweepOrphanAppServers(unitPrefix, active))
+        yield* Effect.tryPromise(() =>
+          sweepOrphanAppServers(unitPrefix, active, config.credentialSocket),
+        )
       }
       const flushUnlocked = Effect.fn("Resident.flush")(function* () {
         for (const message of yield* store.pending()) {
@@ -523,7 +691,18 @@ export const ResidentCodexLive = (
             yield* store.uncertain(message.id, message.thread_id)
             continue
           }
-          if (!message.id.startsWith("dispatch:") && !(yield* hasCustody(message.thread_id))) {
+          const run = message.id.startsWith("provider-retry:") ? yield* runs.read(row.run_id) : null
+          const retryBeforeVerification =
+            run !== null &&
+            (run.state === "spawning" || run.state === "spawned") &&
+            run.directory === row.directory &&
+            threadRuns.get(row.thread_id) === row.run_id &&
+            servers.has(row.run_id)
+          if (
+            !message.id.startsWith("dispatch:") &&
+            !retryBeforeVerification &&
+            !(yield* hasCustody(message.thread_id))
+          ) {
             yield* store.uncertain(message.id, message.thread_id)
             yield* finish(message.thread_id, true)
             continue
@@ -551,6 +730,12 @@ export const ResidentCodexLive = (
           else {
             yield* store.uncertain(message.id, message.thread_id)
             yield* finish(message.thread_id, true)
+            if (typeof outcome === "object")
+              yield* runs.operatorRequired({
+                runId: row.run_id,
+                diagnostic: outcome.reason,
+                now: new Date(),
+              })
           }
         }
       })
@@ -567,7 +752,7 @@ export const ResidentCodexLive = (
                 return yield* Effect.fail(
                   new Error("Resident run/thread custody is missing; closure unconfirmed"),
                 )
-              peers.revoke(runId)
+              revokePeer(runId)
               yield* store.revokeDelivery(row.thread_id)
               yield* finish(row.thread_id, true)
             }),
@@ -601,7 +786,10 @@ export const ResidentCodexLive = (
           ) {
             entry.lastDirectoryCheckAt = Date.now()
             yield* Effect.tryPromise(() =>
-              request("thread/read", { threadId: row.thread_id, includeTurns: false }),
+              request("thread/read", {
+                threadId: row.thread_id,
+                includeTurns: false,
+              }),
             ).pipe(
               Effect.flatMap(Schema.decodeUnknownEffect(History)),
               Effect.timeout("2 seconds"),
@@ -617,13 +805,19 @@ export const ResidentCodexLive = (
           yield* finish(row.thread_id, true)
           return
         }
-        peers.revoke(row.run_id)
+        revokePeer(row.run_id)
         yield* Effect.tryPromise(() => entry.process.close())
         if (transientUnits) {
           const custody = yield* store.readServer(row.run_id)
           if (custody !== null)
             yield* Effect.tryPromise(() =>
-              stopAppServer(custody.unit, custody.launch_id, custody.invocation),
+              stopAppServer(
+                custody.unit,
+                custody.launch_id,
+                custody.invocation,
+                config.credentialSocket,
+                custody.socket,
+              ),
             )
         }
         yield* launch(row.run_id, entry.attempts + 1)
@@ -654,122 +848,137 @@ export const ResidentCodexLive = (
         Effect.forkScoped,
       )
 
-      const cli: CodexCliPort = {
-        ownership: "resident-thread",
-        cancelRun,
-        preflight: Effect.acquireUseRelease(
-          Effect.try(() => start({ binary, home: config.home }, () => {})),
-          (process) =>
-            Effect.tryPromise(async () => {
-              await process.initialize()
-              await process.rpc.request("thread/list", { limit: 1 })
-            }),
-          (process) => Effect.tryPromise(() => process.close()).pipe(Effect.orDie),
-        ).pipe(
-          Effect.mapError(() => ({
-            kind: "cli_unusable" as const,
-            detail: "resident Codex app-server unavailable",
-          })),
-        ),
-        spawn: (input) =>
-          Effect.gen(function* () {
-            if (input.runId === undefined)
-              return yield* Effect.fail(new Error("Resident dispatch requires a durable run ID"))
-            const server = yield* launch(input.runId)
-            input.onSpawn?.(server.pid)
-            const thread = yield* Effect.tryPromise(() =>
-              server.rpc.request("thread/start", {
-                cwd: input.directory,
-                model: input.model,
-                ...(input.provider == null ? {} : { modelProvider: input.provider }),
-                ...(input.effort === undefined
-                  ? {}
-                  : { config: { model_reasoning_effort: input.effort } }),
-                approvalPolicy: "never",
-                sandbox: "danger-full-access",
-              }),
-            ).pipe(Effect.flatMap(Schema.decodeUnknownEffect(ThreadResult)))
-            const rejectSelection = (
-              reason: "unsupported_thinking" | "model_not_available",
-              detail: string,
-            ) =>
-              Effect.gen(function* () {
-                peers.revoke(input.runId)
-                servers.delete(input.runId)
-                yield* Effect.tryPromise(() => server.close())
-                return yield* Effect.fail(new ExecutionSelectionError({ reason, detail }))
+      const cli: CodexCliPort = guardCliCredentials(
+        {
+          ownership: "resident-thread",
+          cancelRun,
+          preflight:
+            config.credentialSocket === undefined
+              ? Effect.acquireUseRelease(
+                  Effect.try(() => start({ binary, home: config.home }, () => {})),
+                  (process) =>
+                    Effect.tryPromise(async () => {
+                      await process.initialize()
+                      await process.rpc.request("thread/list", { limit: 1 })
+                    }),
+                  (process) => Effect.tryPromise(() => process.close()).pipe(Effect.orDie),
+                ).pipe(
+                  Effect.mapError(() => ({
+                    kind: "cli_unusable" as const,
+                    detail: "resident Codex app-server unavailable",
+                  })),
+                )
+              : makeHostCli(config.credentialSocket, "codex", () => ({ type: "other" })).preflight,
+          spawn: (input) =>
+            Effect.gen(function* () {
+              if (input.runId === undefined)
+                return yield* Effect.fail(new Error("Resident dispatch requires a durable run ID"))
+              const server = yield* launch(input.runId)
+              input.onSpawn?.(server.pid)
+              const thread = yield* Effect.tryPromise(() =>
+                server.rpc.request("thread/start", {
+                  cwd: input.directory,
+                  model: input.model,
+                  ...(input.provider == null ? {} : { modelProvider: input.provider }),
+                  config: {
+                    ...codexProjectConfig(input.directory),
+                    ...(input.effort === undefined ? {} : { model_reasoning_effort: input.effort }),
+                  },
+                  approvalPolicy: "never",
+                  sandbox: "danger-full-access",
+                }),
+              ).pipe(Effect.flatMap(Schema.decodeUnknownEffect(ThreadResult)))
+              const rejectSelection = (
+                reason: "unsupported_thinking" | "model_not_available",
+                detail: string,
+              ) =>
+                Effect.gen(function* () {
+                  revokePeer(input.runId)
+                  servers.delete(input.runId)
+                  yield* Effect.tryPromise(() => server.close())
+                  return yield* Effect.fail(new ExecutionSelectionError({ reason, detail }))
+                })
+              if (input.effort !== undefined && thread.reasoningEffort !== input.effort)
+                return yield* rejectSelection(
+                  "unsupported_thinking",
+                  "Native Codex did not confirm the requested reasoning effort",
+                )
+              if (input.model !== null && thread.model !== input.model)
+                return yield* rejectSelection(
+                  "model_not_available",
+                  "Native Codex resolved a different model",
+                )
+              if (input.provider != null && thread.modelProvider !== input.provider)
+                return yield* rejectSelection(
+                  "model_not_available",
+                  "Native Codex resolved a different provider",
+                )
+              const accepted = yield* runs.read(input.runId)
+              if (accepted?.resolvedSelection != null && thread.model !== undefined) {
+                yield* runs.recordResolvedSelection({
+                  runId: input.runId,
+                  now: new Date(),
+                  selection: {
+                    ...accepted.resolvedSelection,
+                    model: thread.model,
+                    provider: thread.modelProvider ?? accepted.resolvedSelection.provider,
+                    thinking:
+                      thread.reasoningEffort == null
+                        ? accepted.resolvedSelection.thinking
+                        : {
+                            ...accepted.resolvedSelection.thinking,
+                            effort: thread.reasoningEffort,
+                          },
+                    evidence: "runtime",
+                  },
+                })
+              }
+              const threadId = thread.thread.id
+              const entry = servers.get(input.runId)
+              if (entry !== undefined) entry.runtimeDirectory = thread.cwd ?? null
+              threadRuns.set(threadId, input.runId)
+              yield* store.attach(input.runId, threadId, input.directory, input.model)
+              const queue = makeEventQueue()
+              let resolveExit: (exit: CodexExit) => void = () => {}
+              const exited = new Promise<CodexExit>((resolve) => {
+                resolveExit = resolve
               })
-            if (input.effort !== undefined && thread.reasoningEffort !== input.effort)
-              return yield* rejectSelection(
-                "unsupported_thinking",
-                "Native Codex did not confirm the requested reasoning effort",
-              )
-            if (input.model !== null && thread.model !== input.model)
-              return yield* rejectSelection(
-                "model_not_available",
-                "Native Codex resolved a different model",
-              )
-            if (input.provider != null && thread.modelProvider !== input.provider)
-              return yield* rejectSelection(
-                "model_not_available",
-                "Native Codex resolved a different provider",
-              )
-            const accepted = yield* runs.read(input.runId)
-            if (accepted?.resolvedSelection != null && thread.model !== undefined) {
-              yield* runs.recordResolvedSelection({
-                runId: input.runId,
-                now: new Date(),
-                selection: {
-                  ...accepted.resolvedSelection,
-                  model: thread.model,
-                  provider: thread.modelProvider ?? accepted.resolvedSelection.provider,
-                  thinking:
-                    thread.reasoningEffort == null
-                      ? accepted.resolvedSelection.thinking
-                      : { ...accepted.resolvedSelection.thinking, effort: thread.reasoningEffort },
-                  evidence: "runtime",
-                },
-              })
-            }
-            const threadId = thread.thread.id
-            const entry = servers.get(input.runId)
-            if (entry !== undefined) entry.runtimeDirectory = thread.cwd ?? null
-            threadRuns.set(threadId, input.runId)
-            yield* store.attach(input.runId, threadId, input.directory, input.model)
-            const queue = makeEventQueue()
-            let resolveExit: (exit: CodexExit) => void = () => {}
-            const exited = new Promise<CodexExit>((resolve) => {
-              resolveExit = resolve
-            })
-            listeners.set(threadId, { queue, finish: resolveExit })
-            queue.push({ type: "thread.started", threadId })
-            const instructions = `You are a resident workflowd worker. After pushing, use subscribe_to_event with {"kind":"ci","repository":"OWNER/NAME","sha":"HEAD_SHA"}, or {"kind":"agent_run","run_id":"RUN_ID"}. Equivalent shell call: bun ${JSON.stringify(import.meta.dir + "/subscribe.ts")} --repo OWNER/NAME --sha HEAD_SHA (or --agent-run RUN_ID). After registration succeeds, END YOUR TURN. workflowd will queue one completion message. Do not sleep or poll.\n\n`
-            yield* store.enqueue(`dispatch:${input.runId}`, threadId, instructions + input.prompt)
-            yield* flush()
-            return {
-              events: queue.iterable,
-              executionId: threadId,
-              cancel: cancelRun(input.runId),
-              exited: Effect.tryPromise({
-                try: () => exited,
-                catch: (cause) =>
-                  new WorkspaceError({
-                    operation: "observe resident exit",
-                    cause: normalizeError(cause),
-                  }),
-              }),
-            }
-          }).pipe(
-            Effect.mapError((error) =>
-              error instanceof ExecutionSelectionError
-                ? error
-                : new WorkspaceError({
-                    operation: "resident dispatch",
-                    cause: new Error("resident dispatch failed; inspect durable inbox"),
-                  }),
+              listeners.set(threadId, { queue, finish: resolveExit })
+              queue.push({ type: "thread.started", threadId })
+              const instructions = residentWorkerInstructions + "\n\n"
+              yield* store.enqueue(`dispatch:${input.runId}`, threadId, instructions + input.prompt)
+              yield* flush()
+              return {
+                events: queue.iterable,
+                executionId: threadId,
+                cancel: cancelRun(input.runId),
+                exited: Effect.tryPromise({
+                  try: () => exited,
+                  catch: (cause) =>
+                    new WorkspaceError({
+                      operation: "observe resident exit",
+                      cause: normalizeError(cause),
+                    }),
+                }),
+              }
+            }).pipe(
+              Effect.mapError((error) =>
+                error instanceof ExecutionSelectionError
+                  ? error
+                  : new WorkspaceError({
+                      operation: "resident dispatch",
+                      cause:
+                        credentialReason(error) !== undefined
+                          ? normalizeError(error)
+                          : new Error("resident dispatch failed; inspect durable inbox"),
+                    }),
+              ),
             ),
-          ),
-      }
+        },
+        config.credentialSocket,
+        "codex",
+      )
+
       const route: ResidentPort["route"] = (request, peerPid) =>
         Effect.gen(function* () {
           if (new URL(request.url).pathname !== "/subscriptions") return undefined
@@ -824,7 +1033,11 @@ export const ResidentCodexLive = (
         }).pipe(Effect.catch(() => Effect.succeed(new Response(null, { status: 409 }))))
       yield* Effect.acquireRelease(
         Effect.tryPromise(() =>
-          serveRunSocket(config.socket, (request, pid) => Effect.runPromise(route(request, pid))),
+          serveRunSocket(
+            config.socket,
+            (request, pid) => Effect.runPromise(route(request, pid)),
+            config.peer,
+          ),
         ),
         (server) => Effect.tryPromise(() => server.close()).pipe(Effect.orDie),
       )

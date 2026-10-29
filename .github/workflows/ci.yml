@@ -10,10 +10,9 @@ permissions: {}
 jobs:
   quality:
     name: ${{ matrix.name }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
-    permissions:
-      contents: read
+    permissions: {}
     strategy:
       fail-fast: false
       matrix:
@@ -30,38 +29,60 @@ jobs:
             command: bun run knip
           - name: Dependency audit
             command: bun run audit
+          - name: PR workflow policy
+            command: bun src/sandbox/ci-policy.ts
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Anonymous checkout
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          set -euo pipefail
+          [[ "$HEAD_SHA" =~ ^[a-f0-9]{40}$ ]]
+          [[ "$BASE_SHA" =~ ^[a-f0-9]{40}$ ]]
+          export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0
+          git init .
+          git remote add origin https://github.com/BNasraoui/workflowd.git
+          git -c credential.helper= -c http.extraHeader= fetch --no-tags origin "$HEAD_SHA" "$BASE_SHA"
+          git checkout --detach "$HEAD_SHA"
       - name: Set up Bun
-        uses: oven-sh/setup-bun@v2
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
         with:
           bun-version: 1.3.14
+          token: ""
+          no-cache: true
       - name: Install dependencies
-        run: bun install --frozen-lockfile
+        run: bun install --frozen-lockfile --ignore-scripts
       - name: Run ${{ matrix.name }}
         run: ${{ matrix.command }}
 
   repository-validation:
     name: Repository integrity
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
-    permissions:
-      contents: read
+    permissions: {}
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Anonymous checkout
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          set -euo pipefail
+          [[ "$HEAD_SHA" =~ ^[a-f0-9]{40}$ ]]
+          [[ "$BASE_SHA" =~ ^[a-f0-9]{40}$ ]]
+          export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0
+          git init .
+          git remote add origin https://github.com/BNasraoui/workflowd.git
+          git -c credential.helper= -c http.extraHeader= fetch --no-tags origin "$HEAD_SHA" "$BASE_SHA"
+          git checkout --detach "$HEAD_SHA"
       - name: Check pull request diff
         if: github.event_name == 'pull_request'
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: git diff --check "$BASE_SHA" "$HEAD_SHA"
+      - name: Lint approval workflow
+        run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7 .github/workflows/ben-approval.yml
       - name: Check push diff
         if: github.event_name == 'push'
         env:
@@ -71,44 +92,284 @@ jobs:
 
   deployment-validation:
     name: Deployment (systemd)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
-    permissions:
-      contents: read
+    permissions: {}
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Anonymous checkout
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          set -euo pipefail
+          [[ "$HEAD_SHA" =~ ^[a-f0-9]{40}$ ]]
+          [[ "$BASE_SHA" =~ ^[a-f0-9]{40}$ ]]
+          export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0
+          git init .
+          git remote add origin https://github.com/BNasraoui/workflowd.git
+          git -c credential.helper= -c http.extraHeader= fetch --no-tags origin "$HEAD_SHA" "$BASE_SHA"
+          git checkout --detach "$HEAD_SHA"
       - name: Set up Bun
-        uses: oven-sh/setup-bun@v2
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
         with:
           bun-version: 1.3.14
-      - name: Verify systemd unit
-        run: >-
-          systemd-analyze --user --recursive-errors=no --man=no --generators=no
-          verify deploy/systemd/workflowd.service
+          token: ""
+          no-cache: true
+      - name: Verify deployment admission and checkout isolation
+        run: python3 -B -m unittest discover -s test/deploy -v
+      - name: Verify systemd units with pinned executable fixture
+        run: |
+          sudo install -D -m 0755 "$(command -v bun)" /opt/workflowd/bin/bun
+          systemd-analyze --user --recursive-errors=no --man=no --generators=no \
+            verify deploy/systemd/workflowd.service \
+              deploy/systemd/workflowd-runner.service deploy/systemd/workflowd-mcp.service
 
   tests:
     name: Tests and changed-line coverage
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      contents: read
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions: {}
     steps:
-      - name: Check out exact head
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          fetch-depth: 0
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Anonymous checkout
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          set -euo pipefail
+          [[ "$HEAD_SHA" =~ ^[a-f0-9]{40}$ ]]
+          [[ "$BASE_SHA" =~ ^[a-f0-9]{40}$ ]]
+          export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0
+          git init .
+          git remote add origin https://github.com/BNasraoui/workflowd.git
+          git -c credential.helper= -c http.extraHeader= fetch --no-tags origin "$HEAD_SHA" "$BASE_SHA"
+          git checkout --detach "$HEAD_SHA"
       - name: Set up Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: 1.3.14
+          token: ""
+          no-cache: true
       - name: Install dependencies
         run: bun install --frozen-lockfile --ignore-scripts
+      - name: Install pinned sandbox OpenCode
+        run: |
+          bun add --global --trust @opencode-ai/cli@0.0.0-beta-19242
+          printf '5e983fb693623f3ea500c63e4da9aa17e90490f120edf612e25c24a34bee405c  %s\n' "$(command -v opencode2)" | sha256sum --check
+      - name: Install pinned native sandbox CLIs
+        run: |
+          bun add --global --trust @openai/codex@0.159.1 @anthropic-ai/claude-code@2.1.296
+          test "$(codex --version)" = 'codex-cli 0.159.1'
+          test "$(claude --version)" = '2.1.296 (Claude Code)'
+      - name: Pin credential probe runtime
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 24.11.1
+          token: ""
+      - name: Record credential probe runtime
+        run: printf 'WORKFLOWD_AGENT_PROBE_NODE=%s\n' "$(command -v node)" >> "$GITHUB_ENV"
+      - name: Prepare sandbox user namespaces
+        run: |
+          # This disposable Ubuntu VM must permit systemd's unprivileged namespaces.
+          # PrivateUsers and filesystem isolation remain required by the E2E tests.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          sudo loginctl enable-linger "$USER"
+          sudo systemctl start "user@$(id -u).service"
+          export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+          export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
+          printf 'XDG_RUNTIME_DIR=%s\nDBUS_SESSION_BUS_ADDRESS=%s\n' "$XDG_RUNTIME_DIR" "$DBUS_SESSION_BUS_ADDRESS" >> "$GITHUB_ENV"
+          systemd-run --user --wait --pipe --collect \
+            -p PrivateUsers=yes -p PrivateTmp=yes -p ProtectSystem=strict \
+            -p ProtectHome=tmpfs -p NoNewPrivileges=yes \
+            -p MemoryMax=256M -p MemorySwapMax=0 /usr/bin/true
+      - name: Verify credential probe entrypoints
+        run: >-
+          systemd-run --user --wait --pipe --collect
+          -p MemoryMax=6G -p MemorySwapMax=0 --working-directory="$PWD"
+          --setenv="PATH=$PATH" --setenv="WORKFLOWD_AGENT_PROBE_NODE=$WORKFLOWD_AGENT_PROBE_NODE"
+          bun test test/agent-user/client-versions.test.ts
+      - name: Prepare disposable credential identities and trusted clients
+        run: |
+          set -euo pipefail
+          sudo groupadd --gid 61000 workflowd-model-auth
+          sudo useradd --uid 61001 --gid 61000 --no-create-home --shell /usr/sbin/nologin ben-fixture
+          sudo useradd --uid 61002 --gid 61000 --no-create-home --shell /usr/sbin/nologin agent-fixture
+          # Fixture children import reviewed source as their real UID. Grant only
+          # read/traverse access to the disposable checkout, preserving private homes.
+          directory="$PWD"
+          while [ "$directory" != / ]; do
+            sudo setfacl -m u:61001:--x,u:61002:--x "$directory"
+            directory=$(dirname "$directory")
+          done
+          sudo setfacl -R -m u:61001:rX,u:61002:rX "$PWD"
+          sudo mkdir -p /opt/workflowd-credential-fixture/bin
+          sudo cp -rf "$HOME/.bun/install/global/node_modules" /opt/workflowd-credential-fixture/
+          sudo chown -R root:root /opt/workflowd-credential-fixture
+          sudo chmod -R go-w /opt/workflowd-credential-fixture
+          sudo install -m 0755 "$(command -v bun)" /opt/workflowd-credential-fixture/bin/bun
+          sudo install -m 0755 "$(command -v node)" /opt/workflowd-credential-fixture/bin/node
+          for client in codex claude opencode2; do
+            source=$(readlink -f "$(command -v "$client")")
+            relative=${source#"$HOME/.bun/install/global/"}
+            test "$relative" != "$source"
+            sudo ln -s "/opt/workflowd-credential-fixture/$relative" "/opt/workflowd-credential-fixture/bin/$client"
+          done
+      - name: Probe two-UID native supervision prerequisites
+        run: >-
+          sudo systemd-run --wait --pipe --collect
+          -p MemoryMax=6G -p MemorySwapMax=0 --working-directory="$PWD"
+          --setenv=PATH=/opt/workflowd-credential-fixture/bin:/usr/bin:/bin
+          --setenv=WORKFLOWD_AGENT_TEST_BEN_UID=61001
+          --setenv=WORKFLOWD_AGENT_TEST_AGENT_UID=61002
+          --setenv=WORKFLOWD_AGENT_TEST_AUTH_GID=61000
+          /opt/workflowd-credential-fixture/bin/bun
+          scripts/evidence/agent-user.mjs --probe-supervision
+      - name: Require two-UID native launch and recovery
+        run: |
+          set -euo pipefail
+          sudo systemd-run --wait --pipe --collect \
+          -p MemoryMax=6G -p MemorySwapMax=0 --working-directory="$PWD" \
+          --setenv=PATH=/opt/workflowd-credential-fixture/bin:/usr/bin:/bin \
+          --setenv=WORKFLOWD_AGENT_DEPLOYED_TEST=1 \
+          --setenv=WORKFLOWD_AGENT_TEST_BEN_UID=61001 \
+          --setenv=WORKFLOWD_AGENT_TEST_AGENT_UID=61002 \
+          --setenv=WORKFLOWD_AGENT_TEST_AUTH_GID=61000 \
+          /opt/workflowd-credential-fixture/bin/bun test \
+          test/agent-user/native.e2e.test.ts \
+          test/kernel/codex-systemd-custody.test.ts \
+          test/kernel/cli-launch-uncertainty.test.ts \
+          test/remote/claude-resume-runner-store.test.ts --reporter=junit --reporter-outfile=/tmp/workflowd-native-tests.xml
+          python3 - <<'PYTEST'
+          import xml.etree.ElementTree as ET
+          cases = ET.parse('/tmp/workflowd-native-tests.xml').findall('.//testcase')
+          for name in [
+              'two-UID native services retain custody across controller restart and refuse forged launches',
+              'the host native protocol uses bounded custody with a simulated manager and real UID children',
+          ]:
+              matching = [case for case in cases if case.get('name') == name]
+              assert len(matching) == 1 and len(matching[0]) == 0, f'Missing or unsuccessful required test: {name}'
+          PYTEST
+      - name: Require two-UID credential admission and repair
+        run: |
+          set -euo pipefail
+          sudo systemd-run --wait --pipe --collect \
+          -p MemoryMax=6G -p MemorySwapMax=0 --working-directory="$PWD" \
+          --setenv=PATH=/opt/workflowd-credential-fixture/bin:/usr/bin:/bin \
+          --setenv=WORKFLOWD_AGENT_TEST_BEN_UID=61001 \
+          --setenv=WORKFLOWD_AGENT_TEST_AGENT_UID=61002 \
+          --setenv=WORKFLOWD_AGENT_TEST_AUTH_GID=61000 \
+          /opt/workflowd-credential-fixture/bin/bun test \
+          test/agent-user/credentials.e2e.test.ts \
+          test/agent-user/credential-dispatch.e2e.test.ts \
+          test/agent-user/opencode-migration.e2e.test.ts --reporter=junit --reporter-outfile=/tmp/workflowd-credential-tests.xml
+          python3 - <<'PYTEST'
+          import xml.etree.ElementTree as ET
+          cases = ET.parse('/tmp/workflowd-credential-tests.xml').findall('.//testcase')
+          assert len(cases) >= 58, f'Expected at least 58 credential tests, got {len(cases)}'
+          assert all(len(case) == 0 for case in cases), 'Credential tests failed or skipped'
+          for name in [
+              'a replaced login refuses even with identical bytes; explicit relink restores both links',
+              'relink auto preserves an opposite-side login replaced during import',
+              'relink ben preserves an opposite-side login replaced during import',
+              'relink caps a source that grows after its size check',
+              'relink swaps back a source replaced after the final path check',
+              'relink preserves an unvalidated displaced login left by an interrupted exchange',
+              'relink preserves a source rewritten in place by a concurrent watcher',
+              'relink refuses an active or uncertain unit recorded in host custody',
+          ]:
+              assert sum(case.get('name') == name for case in cases) == 1, f'Missing required test: {name}'
+          PYTEST
+      - name: Require agent OpenCode migration and three-client App publishing
+        run: |
+          set -euo pipefail
+          sudo systemctl start user@0.service
+          sudo systemd-run --wait --pipe --collect \
+            -p MemoryMax=6G -p MemorySwapMax=0 --working-directory="$PWD" \
+            --setenv=PATH=/opt/workflowd-credential-fixture/bin:/usr/bin:/bin \
+            --setenv=WORKFLOWD_AGENT_TEST_BEN_UID=61001 \
+            --setenv=WORKFLOWD_AGENT_TEST_AGENT_UID=61002 \
+            --setenv=WORKFLOWD_AGENT_TEST_AUTH_GID=61000 \
+            /opt/workflowd-credential-fixture/bin/bun scripts/evidence/agent-user.mjs --probe-opencode
+          sudo systemd-run --wait --pipe --collect \
+            -p MemoryMax=6G -p MemorySwapMax=0 --working-directory="$PWD" \
+            --setenv=XDG_RUNTIME_DIR=/run/user/0 \
+            --setenv=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/0/bus \
+            --setenv=PATH=/opt/workflowd-credential-fixture/bin:/usr/bin:/bin \
+            --setenv=WORKFLOWD_AGENT_TEST_BEN_UID=61001 \
+            --setenv=WORKFLOWD_AGENT_TEST_AGENT_UID=61002 \
+            --setenv=WORKFLOWD_AGENT_TEST_AUTH_GID=61000 \
+            /opt/workflowd-credential-fixture/bin/bun test \
+            test/agent-user/github.e2e.test.ts test/agent-user/opencode.e2e.test.ts \
+            test/worker-identity test/resident \
+            --reporter=junit --reporter-outfile=/tmp/workflowd-publishing-tests.xml
+          python3 - <<'PYTEST'
+          import xml.etree.ElementTree as ET
+          cases = ET.parse('/tmp/workflowd-publishing-tests.xml').findall('.//testcase')
+          assert all(len(case) == 0 for case in cases), 'Publishing tests failed or skipped'
+          for name in [
+              'installed Codex, Claude and OpenCode push and open PRs with run-bound App identity',
+              'agent OpenCode startup retains Git identity and isolates project and controller configuration',
+              'agent OpenCode service checks migrated sole ownership before starting the agent UID',
+              'OpenCode recovered mailbox prompts refuse before provider I/O when migration admission fails',
+              'OpenCode agent-run completion crosses the run-bound subscription socket',
+              'OpenCode restart as controller UID recovers persisted delivery (sending=false)',
+              'OpenCode restart as controller UID recovers persisted delivery (sending=true)',
+          ]:
+              assert sum(case.get('name') == name for case in cases) == 1, f'Missing required test: {name}'
+          PYTEST
+      # These simulated-manager/process fixtures must remain namespace PID 1
+      # to reap orphaned UID children. Host resource commands are denied here.
+      - name: Require administrative credential coverage
+        run: |
+          mkdir -p coverage/administrative
+          sudo systemd-run --wait --pipe --collect \
+            -p MemoryMax=6G -p MemorySwapMax=0 --working-directory="$PWD" \
+            --setenv=PATH=/opt/workflowd-credential-fixture/bin:/usr/bin:/bin \
+            --setenv=WORKFLOWD_AGENT_TEST_BEN_UID=61001 \
+            --setenv=WORKFLOWD_AGENT_TEST_AGENT_UID=61002 \
+            --setenv=WORKFLOWD_AGENT_TEST_AUTH_GID=61000 \
+            /usr/bin/unshare --pid --fork --mount-proc --net \
+            /bin/sh -c 'ip link set lo up && export PATH="$PWD/test/resources/forbidden:$PATH" && exec "$@"' fixture \
+            /opt/workflowd-credential-fixture/bin/bun test --coverage \
+            --coverage-dir=coverage/administrative \
+            --test-name-pattern='^(installed|offline migration|a replaced login|missing links|an admission lease|interrupted repair|repair after|the host|relink |a FIFO|host transport|admitted)' \
+            test/agent-user/client-versions.test.ts \
+            test/agent-user/credentials.e2e.test.ts \
+            test/agent-user/credential-dispatch.e2e.test.ts \
+            test/agent-user/native.e2e.test.ts \
+            test/agent-user/opencode-migration.e2e.test.ts
       - name: Generate Bun LCOV
-        run: bun run test:coverage
+        run: |
+          # Migration needs privileged /proc access; refresh probes need network
+          # isolation. The preceding step checks administrative modules with unchanged Bun
+          # thresholds. Every other module is checked here with those thresholds.
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          config = Path("bunfig.toml").read_text()
+          key = "coveragePathIgnorePatterns = ["
+          assert config.count(key) == 1
+          config = config.replace(key, key + '\n  "src/agent-host/opencode-credentials.ts",\n  "src/agent-host/credentials.ts",\n  "src/agent-host/config.ts",\n  "src/agent-host/credential-relink.ts",\n  "src/agent-host/client.ts",\n  "src/agent-host/server.ts",\n  "test/agent-user/harness.ts",', 1)
+          Path(os.environ["RUNNER_TEMP"], "ordinary-coverage.toml").write_text(config)
+          PY
+          bun test --config="$RUNNER_TEMP/ordinary-coverage.toml" --coverage
+      - name: Include administrative coverage in shared gates
+        run: |
+          # Use the complete, independently threshold-checked administrative record.
+          # No duplicate file records may mask ordinary-suite coverage.
+          python3 - <<'PY'
+          from pathlib import Path
+          paths = ["src/agent-host/" + name + ".ts" for name in ["opencode-credentials", "credentials", "config", "credential-relink", "client", "server"]] + ["test/agent-user/harness.ts"]
+          administrative = Path("coverage/administrative/lcov.info").read_text()
+          report = Path("coverage/lcov.info")
+          ordinary = report.read_text()
+          for path in paths:
+              marker = f"SF:{path}\n"
+              records = [record for record in administrative.split("end_of_record\n") if marker in record.splitlines(keepends=True)]
+              assert len(records) == 1, f"administrative coverage missing or duplicated: {path}"
+              assert marker not in ordinary.splitlines(keepends=True), f"duplicate coverage: {path}"
+              ordinary += records[0] + "end_of_record\n"
+          report.write_text(ordinary)
+          PY
       - name: Require 80% changed executable line coverage
         if: github.event_name == 'pull_request'
         env:
@@ -120,18 +381,29 @@ jobs:
 
   aislop:
     name: AI slop (advisory)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     continue-on-error: true
-    permissions:
-      contents: read
+    permissions: {}
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
+      - name: Anonymous checkout
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          set -euo pipefail
+          [[ "$HEAD_SHA" =~ ^[a-f0-9]{40}$ ]]
+          [[ "$BASE_SHA" =~ ^[a-f0-9]{40}$ ]]
+          export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0
+          git init .
+          git remote add origin https://github.com/BNasraoui/workflowd.git
+          git -c credential.helper= -c http.extraHeader= fetch --no-tags origin "$HEAD_SHA" "$BASE_SHA"
+          git checkout --detach "$HEAD_SHA"
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: 24.11.1
+          token: ""
       - name: Run aislop
         env:
           AISLOP_NO_TELEMETRY: "1"
@@ -146,7 +418,7 @@ jobs:
       - repository-validation
       - deployment-validation
       - tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 1
     permissions: {}
     steps:

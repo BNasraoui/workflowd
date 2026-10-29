@@ -40,6 +40,8 @@ test("Codex exec receives exact native effort and provider with model selection"
     expect(JSON.parse(await readFile(join(root, "args.json"), "utf8"))).toEqual([
       "exec",
       "--json",
+      "-c",
+      `projects={${JSON.stringify(root)}={trust_level="untrusted"}}`,
       "--dangerously-bypass-approvals-and-sandbox",
       "--cd",
       root,

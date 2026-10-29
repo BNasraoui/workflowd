@@ -21,6 +21,7 @@ export type RepositoryRef = typeof RepositoryRef.Type
 export const PullRequestRef = Schema.Struct({
   number: PullRequestNumber,
   author: Schema.NonEmptyString,
+  authorAssociation: Schema.optional(Schema.NonEmptyString),
   ...ReviewTarget.fields,
   draft: Schema.Boolean,
   state: Schema.Literals(["open", "closed"]),
@@ -60,6 +61,7 @@ export const TrackedPullRequestState = Schema.TaggedStruct("TrackedPullRequestSt
 export type TrackedPullRequestState = typeof TrackedPullRequestState.Type
 
 export type PullRequestTransitionIntent = Data.TaggedEnum<{
+  SkipAutomaticReview: { readonly reason: "automatic-review-untrusted-fork" }
   QueueReview: { readonly reviewRequestNumber: ReviewRequestNumber }
   SupersedeGeneration: { readonly generation: GenerationNumber }
   SupersedeReviewRequests: {
@@ -158,12 +160,19 @@ const isReviewable = (snapshot: PullRequestObservation | AuthoritativePullReques
   !snapshot.pullRequest.draft &&
   (snapshot._tag === "AuthoritativePullRequestSnapshot" || reviewableActions.has(snapshot.action))
 
+const automaticReviewTrusted = (
+  snapshot: PullRequestObservation | AuthoritativePullRequestSnapshot,
+) =>
+  snapshot.pullRequest.headRepositoryFullName.toLowerCase() ===
+    snapshot.repository.fullName.toLowerCase() ||
+  ["OWNER", "MEMBER", "COLLABORATOR"].includes(snapshot.pullRequest.authorAssociation ?? "")
+
 const nextReviewRequestNumber = (
   current: TrackedPullRequestState | undefined,
   snapshot: PullRequestObservation | AuthoritativePullRequestSnapshot,
   generation: GenerationNumber,
 ) => {
-  if (!isReviewable(snapshot)) return null
+  if (!isReviewable(snapshot) || !automaticReviewTrusted(snapshot)) return null
   if (current === undefined || current.generation !== generation) {
     return Schema.decodeSync(ReviewRequestNumber)(1)
   }
@@ -210,6 +219,14 @@ export function decidePullRequestTransition(
   const intents: Array<PullRequestTransitionIntent> = []
   if (current !== undefined && current.generation !== generation) {
     intents.push(PullRequestTransitionIntent.SupersedeGeneration({ generation }))
+  }
+
+  if (isReviewable(snapshot) && !automaticReviewTrusted(snapshot)) {
+    intents.push(
+      PullRequestTransitionIntent.SkipAutomaticReview({
+        reason: "automatic-review-untrusted-fork",
+      }),
+    )
   }
 
   const reviewRequestNumber = nextReviewRequestNumber(current, snapshot, generation)

@@ -38,7 +38,13 @@ export async function githubFixture() {
   })
   return {
     directory,
-    github: { appId: 1, privateKeyPath, webhookSecret: "unused" },
+    github: {
+      allowedInstallationAccountIds: [81005232],
+      prRepositories: [],
+      appId: 1,
+      privateKeyPath,
+      webhookSecret: "unused",
+    },
     OctokitClass: Octokit.defaults({
       baseUrl: server.url.toString(),
       log: { debug: () => {}, info: () => {}, warn: () => {}, error: () => {} },

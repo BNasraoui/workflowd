@@ -260,8 +260,9 @@ export const makeLayer = (
     import("../../src/kernel/agent-run-ingress").AgentRunIngressOptions
   > = {},
   claude: import("../../src/kernel/codex-session").CodexCliPort | null = defaultCodex.port,
+  filename = ":memory:",
 ) => {
-  const database = SqliteClient.layer({ filename: ":memory:" })
+  const database = SqliteClient.layer({ filename })
   const bootstrap = WorkflowStoreLive.pipe(Layer.provideMerge(database))
   const events = KernelEventStoreLive.pipe(Layer.provideMerge(bootstrap))
   const sessions = KernelSessionStoreLive.pipe(Layer.provideMerge(bootstrap))

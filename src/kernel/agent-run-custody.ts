@@ -35,7 +35,7 @@ export const makeAgentRunCustody = (dependencies: {
   const ensureResource = (input: {
     readonly resourceId: string
     readonly absolutePath: string
-    readonly kind: "worktree" | "checkout"
+    readonly kind: "workspace" | "worktree" | "checkout"
     readonly createdAt: Date
   }) =>
     Effect.gen(function* () {
@@ -88,11 +88,27 @@ export const makeAgentRunCustody = (dependencies: {
         },
       }[kind]
       const { sessionId } = providerConfig
-      if ((yield* sessions.readSession(sessionId)) === null) {
+      const saved = yield* sessions.readSession(sessionId)
+      if (
+        kind === "claude" &&
+        saved !== null &&
+        (saved.provider_kind !== kind ||
+          saved.server_id !== providerConfig.serverId ||
+          saved.endpoint_identity !== providerConfig.endpointIdentity ||
+          saved.resource_id !== input.resourceId)
+      ) {
+        return yield* refuse(
+          "missing_parent_session",
+          "Claude session conflicts with saved custody",
+        )
+      }
+      if (saved === null) {
         yield* sessions.registerSession({
           providerKind: kind,
           providerVersion: options.identity.providerVersion,
           ...providerConfig,
+          // Coordinator custody owns request processing; the endpoint and
+          // serverId above name the only host allowed to run the CLI.
           owningHostId: options.identity.owningHostId,
           nativeSessionId: input.nativeSessionId,
           resourceId: input.resourceId,
@@ -122,6 +138,21 @@ export const makeAgentRunCustody = (dependencies: {
             "missing_parent_session",
             `host ${parent.host} is not on the claude-hosts allow-list; its sessions cannot be woken`,
           )
+        }
+        const saved = yield* sessions.readSession(claudeSessionCustodyId(parent.nativeSessionId))
+        if (saved !== null) {
+          const resource = yield* sessions.readResource(String(saved.resource_id))
+          if (
+            saved.provider_kind !== "claude" ||
+            saved.server_id !== parent.host ||
+            saved.endpoint_identity !== claudeEndpointIdentity(parent.host) ||
+            resource?.absolute_path !== parent.directory
+          ) {
+            return yield* refuse(
+              "missing_parent_session",
+              "Claude parent host or directory conflicts with saved custody",
+            )
+          }
         }
         if (parent.host !== options.identity.owningHostId) return parent.directory
         if (claude === undefined)

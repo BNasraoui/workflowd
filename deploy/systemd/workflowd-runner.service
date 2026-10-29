@@ -5,13 +5,13 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=%h/Documents/repos/workflowd
+WorkingDirectory=/opt/workflowd/deploy/current
 Environment=HOME=%h
-Environment=PATH=%h/.bun/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PATH=/opt/workflowd/bin:/usr/local/bin:/usr/bin:/bin
 EnvironmentFile=%h/.config/workflowd/runner.env
 LoadCredential=nats-token:%h/.config/workflowd/nats-token
 Environment=WORKFLOWD_NATS_TOKEN_FILE=%d/nats-token
-ExecStart=%h/.bun/bin/bun run runner
+ExecStart=/opt/workflowd/bin/bun /opt/workflowd/deploy/current/src/remote-runner.ts
 Restart=on-failure
 RestartSec=5
 KillSignal=SIGINT

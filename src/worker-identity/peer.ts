@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs"
-import { chmod } from "node:fs/promises"
+import { chmod, chown } from "node:fs/promises"
 import { createServer } from "node:net"
 import { Schema } from "effect"
 import type { Socket } from "node:net"
@@ -39,10 +39,29 @@ export class RunPeers {
   }
 }
 
+export type RunSocketPolicy = { controllerUid: number; agentUid: number; groupGid: number }
+
+export function loadRunSocketPolicy(
+  env: Record<string, string | undefined>,
+): RunSocketPolicy | undefined {
+  if (env.WORKFLOWD_AGENT_UID === undefined && env.WORKFLOWD_AGENT_GID === undefined)
+    return undefined
+  const agentUid = Number(env.WORKFLOWD_AGENT_UID),
+    groupGid = Number(env.WORKFLOWD_AGENT_GID)
+  const controllerUid = process.getuid!()
+  if (
+    ![agentUid, groupGid].every((id) => Number.isSafeInteger(id) && id > 0) ||
+    agentUid === controllerUid
+  )
+    throw new Error("Agent socket identity requires a distinct non-root UID and group")
+  return { controllerUid, agentUid, groupGid }
+}
+
 /** Linux only: fail closed on hosts without a kernel-supplied peer PID. */
 export async function serveRunSocket(
   path: string,
   route: (request: Request, peerPid: number) => Promise<Response | undefined>,
+  policy?: RunSocketPolicy,
 ) {
   if (process.platform !== "linux") throw new Error("Run sockets require Linux SO_PEERCRED")
   const libc = dlopen("libc.so.6", {
@@ -62,7 +81,9 @@ export async function serveRunSocket(
     if (
       libc.symbols.getsockopt(fd, 1, 17, ptr(credentials), ptr(length)) !== 0 ||
       length[0] !== 12 ||
-      credentials[1] !== process.getuid?.() ||
+      !(policy ? [policy.controllerUid, policy.agentUid] : [process.getuid?.()]).includes(
+        credentials[1],
+      ) ||
       credentials[0]! <= 0
     )
       throw new Error("Peer credentials unavailable")
@@ -116,7 +137,8 @@ export async function serveRunSocket(
       server.once("error", reject)
       server.listen(path, resolve)
     })
-    await chmod(path, 0o600)
+    if (policy) await chown(path, process.getuid!(), policy.groupGid)
+    await chmod(path, policy ? 0o660 : 0o600)
   } catch (error) {
     server.close()
     libc.close()

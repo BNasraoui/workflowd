@@ -1,0 +1,43 @@
+name: Agent sandbox lease
+
+on:
+  push:
+    branches: [workflowd/leases/**]
+
+permissions: {}
+
+jobs:
+  sandbox:
+    if: >-
+      github.event.deleted == false &&
+      github.actor_id == '306741873' &&
+      github.repository_id == '1306107007' &&
+      github.event.repository.fork == false
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/agent-sandbox.yml
+    with:
+      agent-image: ${{ vars.SANDBOX_AGENT_IMAGE }}
+      repository-id: "1306107007"
+      app-actor-id: "306741873"
+      tailscale-client-id: ${{ vars.TS_AGENT_CLIENT_ID }}
+      tailscale-audience: ${{ vars.TS_AGENT_AUDIENCE }}
+
+  agent-publish:
+    needs: sandbox
+    environment: agent-publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Publish validated agent result
+        uses: BNasraoui/workflowd/.github/actions/agent-publish@f74e0505155bc32aa2cedef00ba8b08ef1b90007
+        with:
+          github-token: ${{ github.token }}
+          gate-actor-id: "306741873"
+          publisher-private-key: ${{ secrets.GHETTIMONSTER_PRIVATE_KEY }}
+          publisher-app-id: ${{ vars.GHETTIMONSTER_APP_ID }}
+          co-author: "Ben Nasraoui <81005232+BNasraoui@users.noreply.github.com>"

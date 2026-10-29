@@ -167,7 +167,12 @@ const fixture = async (
           headers: { authorization: "Bearer secret", "content-type": "application/json" },
           ...(method === "POST" ? { body: JSON.stringify(input) } : {}),
         }),
-        { webhookSecret: "", now: at, agentRuns: { token: "secret", ...ingress } },
+        {
+          installationIds: new Set(),
+          webhookSecret: "",
+          now: at,
+          agentRuns: { token: "secret", ...ingress },
+        },
       )
     })
   const inspectManifest = Effect.promise(() =>

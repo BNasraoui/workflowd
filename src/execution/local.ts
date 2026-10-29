@@ -1,3 +1,4 @@
+import { withCredentialAdmissionPromise } from "../agent-host/client"
 import type { OpenCodeClient } from "@opencode-ai/client/effect"
 import type { Effect } from "effect"
 import type { AppConfig } from "../config"
@@ -17,19 +18,31 @@ export function localDiscoverySources(
   if (config.executionCapabilities?.codexEnabled)
     sources.push(
       makeCodexDiscovery("codex:local", {
+        credentialSocket: config.credentialSocket,
         command: [config.executionCapabilities.codexBinary, "app-server", "--listen", "stdio://"],
         ...(config.residentCodex === undefined ? {} : { home: config.residentCodex.home }),
       }),
     )
-  if (
-    config.agentRuns?.claudeHosts.includes(config.worker.hostId) ||
-    (config.agentRuns?.claudeRoutes.length ?? 0) > 0
-  )
+  if (config.agentRuns !== undefined)
     sources.push({
       executor: "claude:local",
       kind: "claude",
       protocol: "unsupported",
       discover: () => Promise.resolve({ status: "unsupported" }),
     })
-  return sources
+  return sources.map((source) => ({
+    ...source,
+    checkCredentials: () =>
+      withCredentialAdmissionPromise(
+        config.credentialSocket,
+        source.kind === "codex" ? "codex" : source.kind === "claude" ? "claude" : "opencode",
+        () => Promise.resolve(),
+      ),
+    discover: (signal) =>
+      withCredentialAdmissionPromise(
+        config.credentialSocket,
+        source.kind === "codex" ? "codex" : source.kind === "claude" ? "claude" : "opencode",
+        () => source.discover(signal),
+      ),
+  }))
 }

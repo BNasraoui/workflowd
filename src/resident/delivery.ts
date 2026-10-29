@@ -1,3 +1,4 @@
+import { credentialReason } from "../agent-host/protocol"
 import { Effect, Schema } from "effect"
 const Queued = Schema.Struct({
   data: Schema.Array(Schema.Struct({ clientUserMessageId: Schema.String })),
@@ -61,6 +62,11 @@ export const deliverResident = Effect.fn("Resident.deliver")(
   },
   Effect.matchEffect({
     onSuccess: Effect.succeed,
-    onFailure: () => Effect.succeed("uncertain" as const),
+    onFailure: (error) =>
+      Effect.succeed(
+        credentialReason(error) === undefined
+          ? ("uncertain" as const)
+          : { reason: credentialReason(error)! },
+      ),
   }),
 )

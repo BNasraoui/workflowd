@@ -1,3 +1,5 @@
+import { requireAgentHostSocket } from "../agent-host/config"
+import { loadAgentGitConfig, type AgentGitConfig } from "../agent-git/config"
 import { homedir } from "node:os"
 import { join } from "node:path"
 import { loadRemoteNatsAuth } from "./auth"
@@ -7,6 +9,7 @@ import { loadDirectoryRunnerConfig, type DirectoryRunnerConfig } from "../direct
 
 export type RemoteProcessConfig = {
   readonly directory?: DirectoryRunnerConfig
+  readonly agentGit?: AgentGitConfig
   readonly servers: ReadonlyArray<string>
   readonly auth: RemoteNatsAuth
   readonly hostId: string
@@ -19,6 +22,7 @@ export type RemoteProcessConfig = {
 
 export type RemoteConfigOptions = {
   readonly readFile?: (path: string) => Promise<string>
+  readonly hostPolicyPath?: string
   readonly home?: string
 }
 
@@ -33,6 +37,7 @@ export async function loadRemoteProcessConfig(
   env: Record<string, string | undefined>,
   options: RemoteConfigOptions = {},
 ): Promise<RemoteProcessConfig> {
+  await requireAgentHostSocket(env.WORKFLOWD_AGENT_HOST_SOCKET, options.hostPolicyPath)
   const auth = await loadRemoteNatsAuth(env, options.readFile)
   const rawServers = env.WORKFLOWD_NATS_SERVERS
   if (rawServers === undefined) throw new Error("WORKFLOWD_NATS_SERVERS is required")
@@ -50,8 +55,10 @@ export async function loadRemoteProcessConfig(
       )
     }
   }
+  const agentGit = loadAgentGitConfig(env, claudeDirectories.length > 0)
   return {
     ...(directory === undefined ? {} : { directory }),
+    ...(agentGit === undefined ? {} : { agentGit }),
     servers,
     auth,
     hostId: hostId(env.WORKFLOWD_REMOTE_HOST_ID),

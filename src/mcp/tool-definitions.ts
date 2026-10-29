@@ -1,5 +1,5 @@
 import { ThinkingSelection, RequestedSelection, ResolvedSelection } from "../execution-selection"
-import { MAX_RECENT_JOBS } from "./queries"
+import { MAX_RECENT_JOBS, MAX_AGENT_RUNS, ListAgentRunsArguments, AgentRunSummary } from "./queries"
 import { MAX_RESUME_PROMPT_BYTES } from "../agent-wait-contract"
 import { MAX_AGENT_RUN_PROMPT_BYTES } from "../agent-run-contract"
 import { ExecutionCapabilities } from "../execution-capability-contract"
@@ -44,7 +44,9 @@ const REFUSED_OUTPUT = {
     error: { type: "string" as const, description: "The daemon's refusal category." },
     mailbox_id: {
       type: "string" as const,
-      description: "Mailbox for a child that spawned before refusal.",
+      description:
+        "Mailbox for a child that spawned before refusal, or for an ended run " +
+        "whose worktree was removed after retention.",
     },
   },
   required: ["status", "reason"],
@@ -181,7 +183,10 @@ export const TOOL_DEFINITIONS = [
       " " +
       REFUSAL_CONTRACT +
       " Specifically: the returned wait_id is NOT a result and this tool does " +
-      "NOT block. OpenCode, Codex CLI, and Claude CLI children are supported. " +
+      "NOT block. The returned mailbox_id can be read with read_agent_mailbox " +
+      "for parent-wake delivery failures. Claude wakes start a separate claude --resume " +
+      "process; they cannot reach a live interactive session. Live Claude sessions " +
+      "should use the workflowd channel. OpenCode, Codex CLI, and Claude CLI children are supported. " +
       "The workflowd resume worker prompts the parent session with " +
       "your resume_prompt and, for a dispatched child, its terminal mailbox " +
       "result (run_id, mailbox_id, status, end_reason, and final message or " +
@@ -218,6 +223,7 @@ export const TOOL_DEFINITIONS = [
     outputSchema: withRefusal(
       objectSchema(
         {
+          mailbox_id: { type: "string" },
           wait_id: { type: "string" },
           instance_id: { type: "string" },
           status: { type: "string", enum: ["registered", "duplicate"] },
@@ -249,7 +255,7 @@ export const TOOL_DEFINITIONS = [
       "session, registers it into kernel custody, and only returns a receipt " +
       "after observing the session's first generated token (bounded wait). A " +
       "dead route is refused loudly at dispatch with a machine-readable " +
-      "reason — no silent hangs. Requires bearer-token authorization. " +
+      "reason — no silent hangs. Requires the dedicated dispatch bearer token. " +
       "A dispatch waiting too long for another run to finish preparing the " +
       "same repository is refused with reason repository_busy. " +
       "Claude CLI and Codex CLI routes launch the respective local CLI directly, " +
@@ -402,6 +408,22 @@ export const TOOL_DEFINITIONS = [
       idempotentHint: true,
       openWorldHint: false,
     },
+  },
+  {
+    name: "list_agent_runs",
+    description:
+      "List dispatch_agent runs newest first by acceptance time. Requires the MCP bearer token. " +
+      `Optional status and repository filters; limit 1-${MAX_AGENT_RUNS}, default 20. ` +
+      "started_at is acceptance time; ended_at and end_reason are null for active runs. " +
+      "idempotency_key is null for older runs or dispatches without an explicit key. " +
+      "worktree is present, removing, removed, missing or retained (kept for an operator, " +
+      "with worktree_detail saying why); it is null when the run has no worktree custody.",
+    inputSchema: { ...toJsonSchemaObject(ListAgentRunsArguments), type: "object" as const },
+    outputSchema: objectSchema(
+      { runs: { type: "array", items: toJsonSchemaObject(AgentRunSummary) } },
+      ["runs"],
+    ),
+    annotations: { ...readAnnotations },
   },
   {
     name: "read_agent_mailbox",

@@ -1696,7 +1696,7 @@ describe("Phase 1: Trusted stage snapshots", () => {
               new AgentHarnessError({
                 operation: "validate OpenCode availability",
                 cause: new Error("unavailable"),
-                retryable: true,
+                retryable: false,
               }),
             )
           }),
@@ -1752,7 +1752,7 @@ describe("Phase 1: Trusted stage snapshots", () => {
                   new AgentHarnessError({
                     operation: "validate OpenCode availability",
                     cause: new Error("became unavailable"),
-                    retryable: true,
+                    retryable: false,
                   }),
                 )
           }),
@@ -2206,7 +2206,7 @@ describe("Phase 3: Persisted identity preflight", () => {
             new AgentHarnessError({
               operation: "validate OpenCode availability",
               cause: new Error("persisted selection became unavailable"),
-              retryable: true,
+              retryable: false,
               selection: unavailable,
             }),
           )

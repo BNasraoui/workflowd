@@ -662,6 +662,36 @@ describe("agent-run ingress", () => {
     expect(result.parent[0]!.endpoint_identity).toBe("claude-cli://ben-arch")
   })
 
+  test("refuses a different parent_host for existing Claude custody before spawning", async () => {
+    const state = defaultState()
+    const layer = makeLayer(makeProvider(state), worktrees([]))
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const input = {
+          ...submission,
+          parentSessionId: "claude-parent-1",
+          parentKind: "claude" as const,
+          parentHost: "mint",
+          parentDirectory: "/home/ben/coordination",
+          resumePrompt: "Continue.",
+        }
+        yield* register(input)
+        return yield* register({
+          ...input,
+          idempotencyKey: "different-host",
+          parentHost: "ben-arch",
+        }).pipe(Effect.result)
+      }).pipe(Effect.provide(layer)),
+    )
+    expect(result._tag).toBe("Failure")
+    if (result._tag === "Failure")
+      expect(result.failure).toMatchObject({
+        _tag: "AgentRunRefusalError",
+        reason: "missing_parent_session",
+      })
+    expect(state.created).toHaveLength(1)
+  })
+
   test("a claude parent on an unlisted host is refused before spawning", async () => {
     const state = defaultState()
     const layer = makeLayer(makeProvider(state), worktrees([]))
@@ -815,8 +845,11 @@ describe("agent-run ingress", () => {
     )
     expect(refusal.reason).toBe("provider_not_authenticated")
 
-    // A non-zero exit with no authentication flavor stays no_first_token.
-    const broken = makeCodexCli([{ type: "error", message: "model overloaded" }], 1)
+    // Provider capacity is distinct from missing model output.
+    const broken = makeCodexCli(
+      [{ type: "error", message: "model overloaded", codexErrorInfo: "serverOverloaded" }],
+      1,
+    )
     const layer2 = makeLayer(makeProvider(state), worktrees([]), broken.port)
     const refusal2 = await refusalOf(
       Effect.runPromise(
@@ -825,7 +858,7 @@ describe("agent-run ingress", () => {
         ),
       ),
     )
-    expect(refusal2.reason).toBe("no_first_token")
+    expect(refusal2.reason).toBe("model_at_capacity")
     expect(refusal2.detail).toContain("model overloaded")
   })
 
@@ -999,9 +1032,11 @@ for (const detail of [null, "turn.failed", "error"] as const) {
       }).pipe(Effect.provide(makeLayer(makeProvider(defaultState()), worktrees([]), codex.port))),
     )
     expect(run?.state).toBe("operator_required")
-    expect(run?.diagnostic).toBe(
-      `codex_failed: exit 2${detail === null ? "" : "; provider rejected turn"}; stderr: ${stderr.slice(0, 500)}`,
-    )
+    const prefix = `codex_failed: exit 2${detail === null ? "" : "; provider rejected turn"}; stderr: `
+    expect(run?.diagnostic).toStartWith(prefix + "x".repeat(400))
+    expect(
+      Buffer.byteLength(JSON.stringify(run?.diagnostic?.slice(prefix.length))) - 2,
+    ).toBeLessThanOrEqual(512)
   })
 }
 

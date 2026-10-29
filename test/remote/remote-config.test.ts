@@ -1,3 +1,6 @@
+import { mkdtemp, writeFile, rm } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { expect, test } from "bun:test"
 import { loadRemoteProcessConfig } from "../../src/remote/config"
 
@@ -76,3 +79,43 @@ for (const server of [
     ).rejects.toThrow("NATS server URL")
   })
 }
+
+test("runner rejects an installed host policy without an absolute host socket", async () => {
+  const env = {
+    WORKFLOWD_NATS_SERVERS: "nats://127.0.0.1:4222",
+    WORKFLOWD_NATS_TOKEN: "fixture",
+    WORKFLOWD_REMOTE_HOST_ID: "fixture",
+  }
+  const root = await mkdtemp(join(tmpdir(), "host-policy-"))
+  try {
+    const hostPolicyPath = join(root, "policy.json")
+    await writeFile(hostPolicyPath, "{}")
+    await expect(loadRemoteProcessConfig(env, { hostPolicyPath })).rejects.toThrow(
+      "WORKFLOWD_AGENT_HOST_SOCKET",
+    )
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+  await expect(
+    loadRemoteProcessConfig({ ...env, WORKFLOWD_AGENT_HOST_SOCKET: "relative.sock" }),
+  ).rejects.toThrow("must be absolute")
+})
+
+test("remote Claude workers load the operator git identity and require it when enabled", async () => {
+  const env = {
+    WORKFLOWD_NATS_SERVERS: "nats://localhost:4222",
+    WORKFLOWD_NATS_TOKEN: "test-token",
+    WORKFLOWD_REMOTE_HOST_ID: "host",
+    WORKFLOWD_RUNNER_CLAUDE_DIRS: "/tmp/agents",
+  }
+  await expect(loadRemoteProcessConfig(env)).rejects.toThrow("WORKFLOWD_AGENT_GIT")
+  expect(
+    (
+      await loadRemoteProcessConfig({
+        ...env,
+        WORKFLOWD_AGENT_GIT_NAME: "Agent",
+        WORKFLOWD_AGENT_GIT_EMAIL: "agent@example.test",
+      })
+    ).agentGit,
+  ).toMatchObject({ name: "Agent", email: "agent@example.test" })
+})

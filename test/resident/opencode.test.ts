@@ -1,10 +1,12 @@
+import { createHash } from "node:crypto"
 import { OpenCodeAdapterError } from "../../src/opencode/adapter"
 import { expect, test } from "bun:test"
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
+import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
-import { Effect, Layer } from "effect"
+import { Effect, Layer, Schema } from "effect"
+import { requestRunSocket } from "../../src/worker-identity/socket-client"
 import { SqlClient } from "effect/unstable/sql"
 import { KernelEventStoreLive } from "../../src/kernel/event-store"
 import { AgentRunStore, AgentRunStoreLive } from "../../src/kernel/agent-run-store"
@@ -137,6 +139,24 @@ function fixture() {
     },
   }
 }
+// Model credentials issued before resident subscription provisioning was disabled.
+const prepareLegacy = (
+  mailbox: Effect.Success<ReturnType<typeof makeOpenCodeMailbox>>,
+  fake: ReturnType<typeof fixture>,
+  id: string,
+) =>
+  Effect.gen(function* () {
+    yield* mailbox.prepare(id)
+    const capability = createHash("sha256").update(id).digest("hex")
+    const sql = yield* SqlClient.SqlClient
+    yield* sql`UPDATE resident_threads SET capability_hash = ${createHash("sha256").update(capability).digest("hex")} WHERE run_id = ${id}`
+    fake.environments.set(`ses_${id}`, {
+      ...fake.environments.get(`ses_${id}`)!,
+      WORKFLOWD_SUBSCRIPTION_CAPABILITY: capability,
+      WORKFLOWD_OPENCODE_RESIDENT_SOCKET: options.socket,
+    })
+  })
+
 const request = (
   env: Readonly<Record<string, string>>,
   selector: unknown = target,
@@ -157,7 +177,7 @@ for (const late of [false, true])
         const inbox = yield* makeResidentStore
         for (const id of ["one", "two"]) {
           yield* seed(id)
-          yield* mailbox.prepare(id)
+          yield* prepareLegacy(mailbox, fake, id)
           yield* runs.markVerified({ runId: id, outputTokens: 1, now: new Date() })
         }
         if (late) yield* complete
@@ -207,7 +227,7 @@ for (const late of [false, true])
   })
 
 for (const sending of [false, true])
-  test(`OpenCode restart recovers persisted delivery (sending=${sending})`, async () => {
+  test(`OpenCode restart as controller UID recovers persisted delivery (sending=${sending})`, async () => {
     const directory = await mkdtemp(join(tmpdir(), "workflowd-opencode-inbox-"))
     const filename = join(directory, "test.sqlite")
     const fake = fixture()
@@ -216,7 +236,7 @@ for (const sending of [false, true])
         Effect.gen(function* () {
           const mailbox = yield* makeOpenCodeMailbox(options, fake.provider)
           yield* seed("one")
-          yield* mailbox.prepare("one")
+          yield* prepareLegacy(mailbox, fake, "one")
           const runs = yield* AgentRunStore
           yield* runs.markVerified({ runId: "one", outputTokens: 1, now: new Date() })
           expect((yield* mailbox.route(request(fake.environments.get("ses_one")!))).status).toBe(
@@ -255,7 +275,7 @@ for (const mode of ["gone", "refused", "offline"] as const)
       Effect.gen(function* () {
         const mailbox = yield* makeOpenCodeMailbox(options, fake.provider)
         yield* seed("one")
-        yield* mailbox.prepare("one")
+        yield* prepareLegacy(mailbox, fake, "one")
         const runs = yield* AgentRunStore
         yield* runs.markVerified({ runId: "one", outputTokens: 1, now: new Date() })
         yield* mailbox.route(request(fake.environments.get("ses_one")!))
@@ -278,10 +298,57 @@ test("OpenCode agent-run completion crosses the run-bound subscription socket", 
   const { OpenCodeMailbox, OpenCodeMailboxLive } = await import("../../src/resident/opencode")
   const { subscribeToEvent } = await import("../../src/resident/subscribe")
   const directory = await mkdtemp(join(tmpdir(), "workflowd-opencode-socket-"))
+  const peer =
+    process.env.WORKFLOWD_AGENT_TEST_AGENT_UID === undefined
+      ? undefined
+      : {
+          controllerUid: process.getuid!(),
+          agentUid: Number(process.env.WORKFLOWD_AGENT_TEST_AGENT_UID),
+          groupGid: Number(process.env.WORKFLOWD_AGENT_TEST_AUTH_GID),
+        }
+  await chmod(directory, 0o711)
+  const requestAs =
+    (uid: number): typeof requestRunSocket =>
+    async (socket, path, body) => {
+      const child = Bun.spawn(
+        [
+          "/usr/bin/setpriv",
+          "--reuid",
+          String(uid),
+          "--regid",
+          String(peer!.groupGid),
+          "--clear-groups",
+          process.execPath,
+          "-e",
+          `
+      const { requestRunSocket } = await import(process.env.CLIENT);
+      const response = await requestRunSocket(process.env.SOCKET, process.env.ROUTE, process.env.BODY);
+      console.log(JSON.stringify({ status: response.status, body: await response.text() }));
+    `,
+        ],
+        {
+          env: {
+            CLIENT: join(import.meta.dir, "../../src/worker-identity/socket-client.ts"),
+            SOCKET: socket,
+            ROUTE: path,
+            BODY: body,
+          },
+          stdout: "pipe",
+          stderr: "pipe",
+        },
+      )
+      const output = await new Response(child.stdout).text()
+      expect(await child.exited).toBe(0)
+      const response = Schema.decodeUnknownSync(
+        Schema.Struct({ status: Schema.Number, body: Schema.String }),
+      )(JSON.parse(output))
+      return new Response(response.body, { status: response.status })
+    }
+  const request = peer ? requestAs(peer.agentUid) : requestRunSocket
   const fake = fixture()
   try {
     const live = OpenCodeMailboxLive(
-      { ...options, socket: join(directory, "mailbox.sock") },
+      { ...options, peer, socket: join(directory, "mailbox.sock") },
       fake.provider,
     ).pipe(Layer.provideMerge(layer()))
     await Effect.runPromise(
@@ -290,13 +357,25 @@ test("OpenCode agent-run completion crosses the run-bound subscription socket", 
         const runs = yield* AgentRunStore
         yield* seed("parent")
         yield* seed("child")
-        yield* mailbox.prepare("parent")
+        yield* prepareLegacy(mailbox, fake, "parent")
         yield* runs.markVerified({ runId: "parent", outputTokens: 1, now: new Date() })
         yield* runs.markVerified({ runId: "child", outputTokens: 1, now: new Date() })
-        const env = fake.environments.get("ses_parent")!
+        const env = {
+          ...fake.environments.get("ses_parent")!,
+          WORKFLOWD_OPENCODE_RESIDENT_SOCKET: join(directory, "mailbox.sock"),
+        }
         const receipt = yield* Effect.tryPromise(() =>
-          subscribeToEvent({ kind: "agent_run", run_id: "child" }, env),
+          subscribeToEvent({ kind: "agent_run", run_id: "child" }, env, request),
         )
+        if (peer) {
+          // This UID has the socket's filesystem group but is neither authorized peer UID.
+          const outsider = requestAs(Number(process.env.WORKFLOWD_AGENT_TEST_BEN_UID))
+          expect(
+            (yield* Effect.tryPromise(() =>
+              outsider(env.WORKFLOWD_OPENCODE_RESIDENT_SOCKET, "/subscriptions", "{}"),
+            )).status,
+          ).toBe(403)
+        }
         expect(receipt.deliveryState).toBe("pending")
         yield* runs.complete({ runId: "child", now: new Date() })
         yield* mailbox.tick
@@ -305,7 +384,7 @@ test("OpenCode agent-run completion crosses the run-bound subscription socket", 
         expect(fake.prompts[0]?.text).toContain('"summaryPointer":"ses_child"')
         expect(fake.prompts[0]?.text).toContain('"status":"completed"')
         const duplicate = yield* Effect.tryPromise(() =>
-          subscribeToEvent({ kind: "agent_run", run_id: "child" }, env),
+          subscribeToEvent({ kind: "agent_run", run_id: "child" }, env, request),
         )
         expect(duplicate.id).toBe(receipt.id)
         expect(duplicate.deliveryState).toBe("delivered")
@@ -336,7 +415,23 @@ test("OpenCode session shells retain the worker PATH and HOME without daemon cre
         expect(variables.PATH).toBe(process.env.PATH)
         expect(variables.HOME).toBe(directory)
         expect(variables.GITHUB_TOKEN).toBeUndefined()
-        expect(prompt).not.toContain(variables.WORKFLOWD_SUBSCRIPTION_CAPABILITY!)
+        expect(variables.WORKFLOWD_SUBSCRIPTION_CAPABILITY).toBeUndefined()
+        expect(variables.WORKFLOWD_OPENCODE_RESIDENT_SOCKET).toBeUndefined()
+        expect(prompt).toContain("gh pr checks PR_NUMBER --repo OWNER/NAME every 60 seconds")
+        expect(prompt).toContain("Required checks")
+        expect(prompt).not.toContain("--required --watch")
+        const inbox = yield* makeResidentStore
+        expect((yield* inbox.read("ses_env"))?.capability_hash).toBeNull()
+        yield* (yield* AgentRunStore).markVerified({
+          runId: "env",
+          outputTokens: 1,
+          now: new Date(),
+        })
+        expect(
+          (yield* mailbox.route(
+            request({ ...variables, WORKFLOWD_SUBSCRIPTION_CAPABILITY: "a".repeat(64) }),
+          )).status,
+        ).toBe(403)
         const output = yield* Effect.tryPromise(async () => {
           const child = Bun.spawn(
             ["/bin/bash", "--noprofile", "--norc", "-c", 'bd; printf "\\n%s" "$HOME"'],

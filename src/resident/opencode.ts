@@ -1,5 +1,6 @@
+import { residentWorkerInstructions } from "./instructions"
 import { workerEnvironment } from "./environment"
-import { createHash, randomBytes, timingSafeEqual } from "node:crypto"
+import { createHash, timingSafeEqual } from "node:crypto"
 import { Context, Effect, Layer, Schedule, Schema, Semaphore } from "effect"
 import { SqlClient } from "effect/unstable/sql"
 import type { OpenCodeAdapter, OpenCodeAdapterError } from "../opencode/adapter"
@@ -7,7 +8,7 @@ import type { OpenCodeCompletionSourceOptions } from "../kernel/opencode-complet
 import { AgentRunStore } from "../kernel/agent-run-store"
 import { CiService } from "../ci/service"
 import type { CiConfig } from "../ci/config"
-import { serveRunSocket } from "../worker-identity/peer"
+import { serveRunSocket, type RunSocketPolicy } from "../worker-identity/peer"
 import { makeResidentStore } from "./store"
 import { EventSelector, makeSubscriptions } from "./subscriptions"
 import { deliverOpenCode } from "./opencode-delivery"
@@ -19,6 +20,7 @@ export type OpenCodeMailboxProvider = Pick<OpenCodeAdapter, "sessionExists" | "p
   }) => Effect.Effect<void, OpenCodeAdapterError>
 }
 type Options = Omit<OpenCodeCompletionSourceOptions, "now" | "observationTimeoutMs"> & {
+  readonly peer?: RunSocketPolicy | undefined
   readonly socket: string
   readonly repositories: CiConfig["repositories"]
 }
@@ -53,15 +55,7 @@ export const makeOpenCodeMailbox = (options: Options, provider: OpenCodeMailboxP
       const run = yield* runs.read(runId)
       if (run?.nativeSessionId == null || !(yield* custody(runId)))
         return yield* Effect.fail(new Error("OpenCode mailbox custody unavailable"))
-      const capability = randomBytes(32).toString("hex")
-      yield* inbox.attach(
-        runId,
-        run.nativeSessionId,
-        run.directory,
-        run.modelId,
-        "opencode",
-        hash(capability),
-      )
+      yield* inbox.attach(runId, run.nativeSessionId, run.directory, run.modelId, "opencode")
       yield* inbox.started(run.nativeSessionId, "dispatch")
       yield* provider.setSessionEnvironment({
         sessionID: run.nativeSessionId,
@@ -69,11 +63,9 @@ export const makeOpenCodeMailbox = (options: Options, provider: OpenCodeMailboxP
           // OpenCode v2 replaces the shell environment; these are not additive overrides.
           ...workerEnvironment(),
           WORKFLOWD_RUN_ID: runId,
-          WORKFLOWD_OPENCODE_RESIDENT_SOCKET: options.socket,
-          WORKFLOWD_SUBSCRIPTION_CAPABILITY: capability,
         },
       })
-      return `You are a resident workflowd worker. After pushing, subscribe with: bun ${JSON.stringify(import.meta.dir + "/subscribe.ts")} --repo OWNER/NAME --sha HEAD_SHA (or --agent-run RUN_ID). The subscribe_to_event MCP tool in ${import.meta.dir}/mcp.ts uses the same session environment. Wait for the registration receipt, then end your turn; workflowd sends one completion message. Never print the subscription capability or poll for completion.`
+      return residentWorkerInstructions
     })
     const uncertain = Effect.fn("OpenCodeMailbox.uncertain")(function* (
       id: string,
@@ -108,7 +100,15 @@ export const makeOpenCodeMailbox = (options: Options, provider: OpenCodeMailboxP
         yield* inbox.sending(message.id)
         const outcome = yield* deliverOpenCode(provider, message, run)
         if (outcome === "delivered") yield* inbox.delivered(message.id)
-        else yield* uncertain(message.id, row.thread_id, row.run_id)
+        else {
+          yield* uncertain(message.id, row.thread_id, row.run_id)
+          if (typeof outcome === "object")
+            yield* runs.operatorRequired({
+              runId: row.run_id,
+              diagnostic: outcome.reason,
+              now: new Date(),
+            })
+        }
       }
     })
     const tick = Semaphore.withPermits(
@@ -186,7 +186,11 @@ export const OpenCodeMailboxLive = (options: Options, provider: OpenCodeMailboxP
       const mailbox = yield* makeOpenCodeMailbox(options, provider)
       yield* Effect.acquireRelease(
         Effect.tryPromise(() =>
-          serveRunSocket(options.socket, (request) => Effect.runPromise(mailbox.route(request))),
+          serveRunSocket(
+            options.socket,
+            (request) => Effect.runPromise(mailbox.route(request)),
+            options.peer,
+          ),
         ),
         (server) => Effect.tryPromise(() => server.close()).pipe(Effect.orDie),
       )

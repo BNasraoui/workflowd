@@ -48,7 +48,12 @@ const call = (input: AgentRunSubmission) =>
         headers: { authorization: "Bearer secret", "content-type": "application/json" },
         body: JSON.stringify(input),
       }),
-      { webhookSecret: "", now: at, agentRuns: { token: "secret", ...ingress } },
+      {
+        installationIds: new Set(),
+        webhookSecret: "",
+        now: at,
+        agentRuns: { token: "secret", ...ingress },
+      },
     )
   })
 

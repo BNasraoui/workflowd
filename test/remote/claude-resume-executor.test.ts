@@ -65,10 +65,13 @@ describe("claude resume executor", () => {
   })
 
   test("refuses a directory outside the allow-list, and an unset allow-list refuses all", async () => {
-    const outside = await run(scriptedCli(["x", "y"]), payload({ directory: "/etc/secrets" }))
+    const calls: Array<string> = []
+    const cli = scriptedCli(["x", "y"], { calls })
+    const outside = await run(cli, payload({ directory: "/etc/secrets" }))
     expect(outside).toEqual({ status: "failed", failureReason: "directory_not_allowed" })
-    const noneAllowed = await run(scriptedCli(["x", "y"]), payload(), [])
+    const noneAllowed = await run(cli, payload(), [])
     expect(noneAllowed).toEqual({ status: "failed", failureReason: "directory_not_allowed" })
+    expect(calls).toHaveLength(0)
   })
 
   test("reports a missing transcript before running any turn", async () => {
@@ -141,3 +144,69 @@ describe("claude resume executor", () => {
 
 const makeClaudeCliLike = (home: string): ClaudeCliPort =>
   makeClaudeCli({ binary: "/bin/echo", home })
+
+test("an unavailable real host preserves uncertain resume and recovery for later observation", async () => {
+  const root = await mkdtemp(join(tmpdir(), "resume-host-unavailable-"))
+  try {
+    const executor = makeClaudeResumeExecutor({
+      cli: makeClaudeCli({ binary: "must-not-run", credentialSocket: join(root, "missing.sock") }),
+      allowedDirectories: ["/allowed"],
+    })
+    expect(await Effect.runPromise(executor.execute(payload(), "delivery"))).toEqual({
+      status: "pending",
+    })
+    expect(await Effect.runPromise(executor.recover!(payload(), "delivery"))).toEqual({
+      status: "pending",
+    })
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test("host refusals retain their detail and nonzero exits are not deadline failures", async () => {
+  for (const [message, expected] of [
+    [
+      "host_request_refused: host invocation identity mismatch",
+      {
+        status: "failed",
+        failureReason: "host_request_refused",
+        failureDetail: "host_request_refused: host invocation identity mismatch",
+      },
+    ],
+    ["native host process exited with status 7", { status: "failed", failureReason: "cli_failed" }],
+  ] as const) {
+    const outcome = await run(
+      {
+        sessionExists: () => Effect.succeed(true),
+        resume: () =>
+          Effect.fail(
+            new WorkspaceError({ operation: "wake claude session", cause: new Error(message) }),
+          ),
+      },
+      payload(),
+    )
+    expect(outcome).toEqual(expected)
+  }
+})
+
+test("host refusal during transcript or custody observation retains its reason", async () => {
+  const refusal = new WorkspaceError({
+    operation: "host",
+    cause: new Error("host_request_refused: forged host custody"),
+  })
+  const executor = makeClaudeResumeExecutor({
+    allowedDirectories: ["/allowed"],
+    cli: {
+      sessionExists: () => Effect.fail(refusal),
+      hasDelivery: () => Effect.fail(refusal),
+      resume: () => Effect.die("must not deliver"),
+    },
+  })
+  const expected = {
+    status: "failed",
+    failureReason: "host_request_refused",
+    failureDetail: "host_request_refused: forged host custody",
+  } as const
+  expect(await Effect.runPromise(executor.execute(payload(), "delivery"))).toEqual(expected)
+  expect(await Effect.runPromise(executor.recover!(payload(), "delivery"))).toEqual(expected)
+})

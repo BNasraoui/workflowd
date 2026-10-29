@@ -1,3 +1,4 @@
+import type { PrRepositories } from "./pr-automation-config"
 import { Data, Effect, Schema } from "effect"
 import { decodeCiCompletion, type CiCompletion } from "./ci/event"
 import { Command } from "./domain/command"
@@ -34,6 +35,7 @@ const PullRequestPayload = Schema.Struct({
     draft: Schema.optional(Schema.Boolean),
     state: Schema.Literals(["open", "closed"]),
     user: Schema.Struct({ login: Schema.String }),
+    author_association: Schema.optional(Schema.NonEmptyString),
     head: Schema.Struct({
       sha: Schema.String,
       ref: Schema.String,
@@ -65,6 +67,28 @@ const IssueCommentPayload = Schema.Struct({
 })
 
 export function decodeGitHubEvent(
+  event: string,
+  payload: unknown,
+  repositories: PrRepositories = [],
+): Effect.Effect<GitHubEvent, InvalidGitHubEvent> {
+  return decodeEvent(event, payload).pipe(
+    Effect.map((decoded) => {
+      if (
+        (decoded._tag === "PullRequest" || decoded._tag === "Command") &&
+        !repositories.some(
+          (r) =>
+            r.installationId === decoded.installationId &&
+            r.repository === decoded.repository.fullName.toLowerCase(),
+        )
+      ) {
+        return { _tag: "Ignored" as const, reason: "pr-repository-not-allowlisted" }
+      }
+      return decoded
+    }),
+  )
+}
+
+function decodeEvent(
   event: string,
   payload: unknown,
 ): Effect.Effect<GitHubEvent, InvalidGitHubEvent> {
@@ -153,6 +177,9 @@ export function decodeGitHubEvent(
         pullRequest: {
           number: decoded.pull_request.number,
           author: decoded.pull_request.user.login,
+          ...(decoded.pull_request.author_association === undefined
+            ? {}
+            : { authorAssociation: decoded.pull_request.author_association }),
           baseRef: decoded.pull_request.base.ref,
           baseSha: decoded.pull_request.base.sha,
           draft: decoded.pull_request.draft ?? false,

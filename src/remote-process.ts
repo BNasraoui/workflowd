@@ -33,7 +33,11 @@ export const runRemoteRunnerProcess = (options: RemoteRunnerProcessOptions = {})
     const executor = Layer.succeed(
       ClaudeResumeExecutor,
       makeClaudeResumeExecutor({
-        cli: makeClaudeCli({ binary: config.claudeBinary }),
+        cli: makeClaudeCli({
+          binary: config.claudeBinary,
+          git: config.agentGit,
+          credentialSocket: (options.env ?? process.env).WORKFLOWD_AGENT_HOST_SOCKET,
+        }),
         allowedDirectories: config.claudeDirectories,
       }),
     )

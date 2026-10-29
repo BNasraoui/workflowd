@@ -1,5 +1,10 @@
 # Capability-based local dispatch
 
+Agent-run repository and route lists can be changed without restarting the
+controller. See [configuration reload](config-reload.md) for
+`WORKFLOWD_CONFIG_RELOAD_FILES`, SIGHUP, systemd/noscope setup, and restart-only
+settings. Existing runs keep their original configuration.
+
 `workflowd-ccw.2` consumes the [local catalog](execution-capabilities.md).
 POST `/workflows/agent-runs` accepts exactly one of `route` (a legacy alias)
 or `model` (an explicit identity). Repository authorization and bearer credentials

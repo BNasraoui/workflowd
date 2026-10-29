@@ -1,3 +1,4 @@
+import { agentGitTestEnvironment } from "../helpers/agent-git-config"
 import { expect, test } from "bun:test"
 import { loadConfig } from "../../src/config"
 import { Effect } from "effect"
@@ -5,10 +6,16 @@ import { localDiscoverySources } from "../../src/execution/local"
 import { loadExecutionCapabilitiesDaemon } from "../../src/mcp/auth"
 
 const env = {
+  ...agentGitTestEnvironment,
   GITHUB_APP_ID: "123",
+  WORKFLOWD_AGENT_GIT_NAME: "Agent",
+  WORKFLOWD_AGENT_GIT_EMAIL: "agent@example.test",
+  WORKFLOWD_PR_REPOSITORIES: '[{"repository":"example-owner/example","installationId":91}]',
+  WORKFLOWD_ALLOWED_INSTALLATION_ACCOUNT_IDS: "81005232,319835875",
   GITHUB_PRIVATE_KEY_PATH: "/fixture/key",
   GITHUB_WEBHOOK_SECRET: "secret",
   OPENCODE_SERVER_PASSWORD: "secret",
+  WORKFLOWD_REVIEW_OPENCODE_PASSWORD: "review-password",
   WORKFLOWD_OPENCODE_ATTACH_URL: "http://localhost:4096",
   WORKFLOWD_HOST_ID: "box",
 }

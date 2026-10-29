@@ -81,6 +81,38 @@ const layer = (executor: ClaudeResumeExecutorPort) => {
 }
 
 describe("runner store claude_resume at-most-once", () => {
+  test("mint rejects both a ben-arch envelope and a ben-arch payload inside a mint envelope", async () => {
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const store = yield* RemoteRunnerStore
+        const localFence = { ...fence, hostId: "mint" }
+        yield* store.recordBatch(
+          "mint",
+          [{ deliveryId: "f", data: yield* encodeRemoteFence(localFence), message: localFence }],
+          now,
+        )
+        const outcomes = []
+        for (const hostId of ["ben-arch", "mint"]) {
+          const message = { ...command, commandId: `cmd-${hostId}`, hostId }
+          outcomes.push(
+            ...(yield* store.recordBatch(
+              "mint",
+              [{ deliveryId: hostId, data: yield* encodeRemoteCommand(message), message }],
+              now,
+            )),
+          )
+        }
+        return { outcomes, recoverable: yield* store.recoverReceived() }
+      }).pipe(
+        Effect.provide(
+          layer(countingExecutor({ status: "failed", failureReason: "cli_failed" }, { count: 0 })),
+        ),
+      ),
+    )
+    expect(result.outcomes.map((row) => row.disposition)).toEqual(["wrong_host", "wrong_host"])
+    expect(result.recoverable).toHaveLength(0)
+  })
+
   test("executes once, then replays the stored result on redelivery without re-running", async () => {
     const runs = { count: 0 }
     const ack = '{"acknowledged":true,"summary":"ok"}'
@@ -139,4 +171,71 @@ describe("runner store claude_resume at-most-once", () => {
     expect(result.pending).toHaveLength(1)
     expect(result.pending[0]).toMatchObject({ commandId: "cmd-1", status: "failed" })
   })
+})
+
+test("a spent Claude claim consults durable host custody before recording interruption", async () => {
+  let starts = 0
+  const recovered: string[] = []
+  const executor = {
+    execute: () =>
+      Effect.sync(() => {
+        starts++
+        return { status: "failed" as const, failureReason: "cli_failed" as const }
+      }),
+    recover: (_payload: ClaudeResumeJobV1, deliveryId: string) =>
+      Effect.sync(() => {
+        recovered.push(deliveryId)
+        return { status: "succeeded" as const, output: '{"acknowledged":true}' }
+      }),
+  }
+  await Effect.runPromise(
+    Effect.gen(function* () {
+      yield* deliver
+      const sql = yield* SqlClient.SqlClient
+      yield* sql`UPDATE remote_runner_inbox SET execution_count = 1 WHERE command_id = ${command.commandId}`
+      const store = yield* RemoteRunnerStore
+      const result = yield* store.executeClaudeResume(command, now)
+      expect(result.status).toBe("succeeded")
+      expect(starts).toBe(0)
+      expect(recovered).toEqual([command.commandId])
+      yield* store.executeClaudeResume(command, now)
+      expect(recovered).toHaveLength(1)
+    }).pipe(Effect.provide(layer(executor))),
+  )
+})
+
+test("host uncertainty keeps the spent execution claim recoverable without publishing a failure", async () => {
+  let executions = 0
+  let observations = 0
+  const executor: ClaudeResumeExecutorPort = {
+    execute: () =>
+      Effect.sync(() => {
+        executions++
+        return { status: "pending" as const }
+      }),
+    recover: () =>
+      Effect.sync(() =>
+        ++observations === 1
+          ? { status: "pending" as const }
+          : { status: "succeeded" as const, output: "{}" },
+      ),
+  }
+  const result = await Effect.runPromise(
+    Effect.gen(function* () {
+      const store = yield* RemoteRunnerStore
+      yield* deliver
+      expect((yield* store.executeClaudeResume(command, now).pipe(Effect.result))._tag).toBe(
+        "Failure",
+      )
+      expect(yield* store.pendingResults()).toHaveLength(0)
+      expect((yield* store.executeClaudeResume(command, now).pipe(Effect.result))._tag).toBe(
+        "Failure",
+      )
+      expect(yield* store.pendingResults()).toHaveLength(0)
+      return yield* store.executeClaudeResume(command, now)
+    }).pipe(Effect.provide(layer(executor))),
+  )
+  expect(result.status).toBe("succeeded")
+  expect(executions).toBe(1)
+  expect(observations).toBe(2)
 })

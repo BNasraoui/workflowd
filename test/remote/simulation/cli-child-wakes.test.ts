@@ -572,7 +572,18 @@ test("runner refuses a Claude parent directory outside its configured prefixes w
       failureReason: "directory_not_allowed",
     })
     expect(state.requests[0]?.state).toBe("operator_required")
-    expect(state.inbox).toHaveLength(1)
+    const messages = state.inbox.map((message): unknown => JSON.parse(message.prompt))
+    expect(messages).toContainEqual(
+      expect.objectContaining({ run_id: receipt.runId, status: "completed" }),
+    )
+    expect(messages).toContainEqual(
+      expect.objectContaining({
+        kind: "agent_wake_failed",
+        reason: "remote_delivery_failed",
+        failure_reason: "directory_not_allowed",
+      }),
+    )
+    expect(state.inbox).toHaveLength(2)
     expect(await Bun.file(join(fixture.parentDirectory, "wakes.jsonl")).exists()).toBe(false)
   } finally {
     await fixture.close()

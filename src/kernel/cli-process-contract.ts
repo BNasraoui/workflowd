@@ -1,3 +1,4 @@
+import type { CredentialAdmissionReason } from "../agent-host/protocol"
 import type { Effect } from "effect"
 import type { ExecutionSelectionError } from "../execution-selection"
 import type { WorkspaceError } from "../workspace/errors"
@@ -6,12 +7,13 @@ export type CliEvent =
   | { readonly type: "turn.started" }
   | { readonly type: "agent_message"; readonly text: string }
   | { readonly type: "turn.completed"; readonly outputTokens: number | null }
-  | { readonly type: "turn.failed"; readonly message: string }
-  | { readonly type: "error"; readonly message: string }
+  | { readonly type: "turn.failed"; readonly message: string; readonly codexErrorInfo?: unknown }
+  | { readonly type: "error"; readonly message: string; readonly codexErrorInfo?: unknown }
   | { readonly type: "other" }
 
 export type CliPreflightError = {
-  readonly kind: "cli_unusable" | "not_authenticated" | "systemd_unavailable"
+  readonly kind:
+    "cli_unusable" | "not_authenticated" | "systemd_unavailable" | CredentialAdmissionReason
   readonly detail: string
 }
 
@@ -35,6 +37,7 @@ export type CliSpawnInput = {
   readonly model: string | null
   readonly provider?: string | null
   readonly effort?: string
+  readonly sandboxBindingFile?: string
 }
 
 type CliCommon = {
@@ -48,6 +51,7 @@ export type CliPort = CliCommon &
   (
     | {
         readonly ownership: "transient-exec"
+        readonly executionId?: (runId: string) => string
         readonly attach: (input: {
           readonly runId: string
         }) => Effect.Effect<CliRunProcess | null, WorkspaceError>

@@ -184,8 +184,11 @@ coordinators need command-stream consumer create/info/fetch/ack permissions for
 No live configuration, credentials, broker permissions or services are changed by
 this implementation.
 
-Migration `0029_agent_directory` is additive after main's `0026` caller mailbox,
-`0027` resident-unit and `0028_agent_run_base_ref` migrations. It adds directory identity, managed
+Migration `0038_agent_directory` is additive after current main's migrations through
+`0037_resident_inbox_delay`, preserving its sandbox, publication, review-trust,
+base-ref and lifecycle schema. Earlier directory migration numbers existed only
+on this unpublished implementation branch; they were never migrations on deployed main.
+It adds directory identity, managed
 bindings, external registrations, owner fences, peer observations/page assemblies
 and runner response cache, plus directory-only lifecycle observation triggers.
 It persists native proof path/timestamps/expiry and changes no existing custody

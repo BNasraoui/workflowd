@@ -1,18 +1,7 @@
 import { createHash, timingSafeEqual } from "node:crypto"
 import { readFile } from "node:fs/promises"
 
-/**
- * The MCP credential for writes and local capability discovery. Store reads stay open on the loopback/tailnet
- * transport; the single write tool is refused unless the caller presents
- * this bearer token. When no source is configured, writes are disabled.
- *
- * Sources follow the systemd LoadCredential pattern used by the other
- * workflowd units: WORKFLOWD_MCP_TOKEN carries the value directly,
- * WORKFLOWD_MCP_TOKEN_FILE names a file (e.g. %d/mcp-token). Setting both
- * is a configuration error. Empty strings count as unset so a drop-in can
- * disable a source it cannot remove. Error messages never include the
- * token material itself.
- */
+/** Ordinary writes and dispatch use independent credentials; store queries stay open. */
 export type McpWriteAuth =
   { readonly mode: "enabled"; readonly token: string } | { readonly mode: "disabled" }
 
@@ -20,12 +9,27 @@ export async function loadMcpWriteAuth(
   env: Record<string, string | undefined>,
   read: (path: string) => Promise<string> = (path) => readFile(path, "utf8"),
 ): Promise<McpWriteAuth> {
-  const direct = env.WORKFLOWD_MCP_TOKEN
-  const file = env.WORKFLOWD_MCP_TOKEN_FILE
+  return loadMcpToken(env, "WORKFLOWD_MCP_TOKEN", read)
+}
+
+export async function loadMcpDispatchAuth(
+  env: Record<string, string | undefined>,
+  read: (path: string) => Promise<string> = (path) => readFile(path, "utf8"),
+): Promise<McpWriteAuth> {
+  return loadMcpToken(env, "WORKFLOWD_MCP_DISPATCH_TOKEN", read)
+}
+
+async function loadMcpToken(
+  env: Record<string, string | undefined>,
+  name: string,
+  read: (path: string) => Promise<string>,
+): Promise<McpWriteAuth> {
+  const direct = env[name]
+  const file = env[`${name}_FILE`]
   const hasDirect = direct !== undefined && direct !== ""
   const hasFile = file !== undefined && file !== ""
   if (hasDirect && hasFile) {
-    throw new Error("Set at most one of WORKFLOWD_MCP_TOKEN or WORKFLOWD_MCP_TOKEN_FILE")
+    throw new Error(`Set at most one of ${name} or ${name}_FILE`)
   }
   if (hasDirect) return { mode: "enabled", token: direct }
   if (!hasFile) return { mode: "disabled" }
@@ -33,10 +37,10 @@ export async function loadMcpWriteAuth(
   try {
     value = await read(file)
   } catch (cause) {
-    throw new Error(`Could not read WORKFLOWD_MCP_TOKEN_FILE at ${file}`, { cause })
+    throw new Error(`Could not read ${name}_FILE at ${file}`, { cause })
   }
   value = value.replace(/\r?\n$/, "")
-  if (value === "") throw new Error("WORKFLOWD_MCP_TOKEN_FILE must not be empty")
+  if (value === "") throw new Error(`${name}_FILE must not be empty`)
   return { mode: "enabled", token: value }
 }
 
@@ -55,13 +59,19 @@ function parseDaemonBaseUrl(env: Record<string, string | undefined>): URL | unde
   let parsed: URL
   try {
     parsed = new URL(baseUrl)
-  } catch (cause) {
-    throw new Error("WORKFLOWD_DAEMON_URL must be an absolute HTTP(S) URL", { cause })
+  } catch {
+    // URL parse errors can include the raw value and any secrets it contains.
+    throw new Error("WORKFLOWD_DAEMON_URL must be an absolute HTTP(S) URL")
   }
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
     throw new Error("WORKFLOWD_DAEMON_URL must be an absolute HTTP(S) URL")
   }
-  if (parsed.username !== "" || parsed.password !== "") {
+  if (
+    parsed.username !== "" ||
+    parsed.password !== "" ||
+    parsed.search !== "" ||
+    parsed.hash !== ""
+  ) {
     throw new Error("WORKFLOWD_DAEMON_URL must not include credentials")
   }
   return parsed

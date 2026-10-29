@@ -1,3 +1,6 @@
+import { makeIdentityCheckDispatcher } from "./github/identity-dispatch"
+import { configuredWebhookInstallations } from "./webhook-installations"
+import { InstallationGuard, startInstallationGuard } from "./installation-guard"
 import { AgentHarness } from "./agent-harness"
 import { GitHub } from "./github"
 import { Workspace } from "./workspace"
@@ -5,6 +8,8 @@ import { CiService } from "./ci/service"
 import { routeCi } from "./ci/http"
 import { Data, Effect, FiberSet, Option, PubSub } from "effect"
 import type { AppConfig } from "./config"
+import { withAvailabilityDeadline } from "./availability-validation"
+import { validateOpenCodeStartup } from "./startup-validation"
 import { normalizeError } from "./errors"
 import { routeRequest, type WebhookHandlerOptions } from "./http"
 import { runKernelJobIteration } from "./kernel/job-runner"
@@ -15,19 +20,25 @@ import { TestJobCanary, type TestJobSubmission } from "./kernel/test-job-canary"
 import { AgentWaitIngress } from "./kernel/agent-wait-ingress"
 import { AgentRunIngress } from "./kernel/agent-run-ingress"
 import { AgentRunWatchdog } from "./kernel/agent-run-watchdog"
+import {
+  AGENT_RUN_WORKTREE_BATCH_PAUSE_MS,
+  AgentRunWorktreeJanitor,
+} from "./kernel/agent-run-worktree-janitor"
 import { DogfoodStore } from "./kernel/dogfood-store"
 import { ClaudeResumeWorker } from "./kernel/claude-resume-worker"
 import { RemoteCoordinator } from "./remote/coordinator"
 import type { RemoteCoordinatorError } from "./remote/coordinator-store"
 import type { RemoteTransportError } from "./remote/transport"
 import { Automation } from "./opencode"
+import { SandboxDispatch } from "./sandbox/dispatch"
+import type { SandboxError } from "./sandbox/store"
 import {
   runCommandIteration,
   runJobIteration,
   runPublicationIteration,
   runReconciliationIteration,
 } from "./worker"
-import { WorkflowStart } from "./qrspi/workflow-start"
+import { WorkflowStart, toWorkflowStartValidationError } from "./qrspi/workflow-start"
 import { WorkSignal, type WorkLane } from "./work-signal"
 import { ExecutionDiscovery } from "./execution-capabilities"
 import { AgentDirectory } from "./directory/service"
@@ -45,7 +56,7 @@ export class HookHttpServerStartError extends Data.TaggedError("HookHttpServerSt
 
 type ScopedHookRouteHandler<R> = (
   request: Request,
-  options: WebhookHandlerOptions,
+  options: Pick<WebhookHandlerOptions, "webhookSecret" | "maxBodyBytes" | "now">,
 ) => Effect.Effect<Response, never, R>
 
 export function superviseWorker<A extends string, E, R>(
@@ -53,6 +64,8 @@ export function superviseWorker<A extends string, E, R>(
   pollIntervalMs: number,
   lane: WorkLane,
   iteration: Effect.Effect<A, E, R>,
+  /** Pause after an iteration that found work, before the next one starts. */
+  pauseAfterWorkMs = 0,
 ) {
   return Effect.gen(function* () {
     const signals = yield* WorkSignal
@@ -63,7 +76,9 @@ export function superviseWorker<A extends string, E, R>(
         Effect.flatMap((result) =>
           result === "idle"
             ? Effect.race(PubSub.take(subscription), Effect.sleep(pollIntervalMs))
-            : Effect.forEach(downstream, signals.wake, { discard: true }),
+            : Effect.forEach(downstream, signals.wake, { discard: true }).pipe(
+                Effect.andThen(pauseAfterWorkMs > 0 ? Effect.sleep(pauseAfterWorkMs) : Effect.void),
+              ),
         ),
         Effect.catchCause((cause) =>
           Effect.logError(`${name} iteration failed`, cause).pipe(
@@ -97,6 +112,9 @@ function serveHookHttpWithHandler<R>(config: HookHttpConfig, handler: ScopedHook
             hostname: config.host,
             port: config.port,
             maxRequestBodySize: config.maxWebhookBytes,
+            // HTTP QRSPI availability checks share an 8s deadline, leaving
+            // 2s to deliver the outcome before the socket idle timeout.
+            idleTimeout: 10,
             fetch: (request) =>
               runRequest(
                 handler(request, {
@@ -187,6 +205,7 @@ export function workDownstreamLanes(lane: WorkLane): ReadonlyArray<WorkLane> {
       return ["kernel-job"]
     case "agent-run":
       return ["agent-completion"]
+    case "agent-run-cleanup":
     case "kernel-job":
     case "session-resume":
       return []
@@ -240,15 +259,21 @@ export function startHookService(
   config: AppConfig,
   observeWorkerIteration: (name: RuntimeWorkerName) => Effect.Effect<void> = () => Effect.void,
 ) {
+  const installationIds = configuredWebhookInstallations(config)
   const observed = <A extends string, E, R>(
     name: RuntimeWorkerName,
     iteration: Effect.Effect<A, E, R>,
   ) => iteration.pipe(Effect.tap(() => observeWorkerIteration(name)))
 
   return Effect.gen(function* () {
+    const installationGuard = yield* Effect.serviceOption(InstallationGuard)
     const ci = yield* Effect.serviceOption(CiService)
     const automation = yield* Effect.serviceOption(Automation)
     const github = yield* Effect.serviceOption(GitHub)
+    const checkAgentGitIdentity = yield* makeIdentityCheckDispatcher(
+      Option.getOrUndefined(github),
+      config.github?.prRepositories ?? [],
+    )
     const harness = yield* Effect.serviceOption(AgentHarness)
     const workspace = yield* Effect.serviceOption(Workspace)
     const signals = yield* WorkSignal
@@ -263,6 +288,8 @@ export function startHookService(
         new Error("ExecutionDiscovery is required when capability discovery is configured"),
       )
     const agentRunWatchdog = yield* Effect.serviceOption(AgentRunWatchdog)
+    const worktreeJanitor = yield* Effect.serviceOption(AgentRunWorktreeJanitor)
+    const sandbox = yield* Effect.serviceOption(SandboxDispatch)
     const dogfood = yield* Effect.serviceOption(DogfoodStore)
     const claudeResumeWorker = yield* Effect.serviceOption(ClaudeResumeWorker)
     const resumeWorker = yield* Effect.serviceOption(OpenCodeResumeWorker)
@@ -286,15 +313,13 @@ export function startHookService(
         .validateAvailability({
           fixWorkEnabled: config.fixWork.enabled,
         })
-        .pipe(
-          Effect.mapError(
-            (error) =>
-              new Error(
-                `OpenCode startup validation failed (${error.operation}): ${String(error.cause)}`,
-                { cause: error },
-              ),
-          ),
-        )
+        .pipe(validateOpenCodeStartup)
+    }
+
+    if (config.mode !== "execution") {
+      if (Option.isNone(installationGuard))
+        return yield* Effect.die(new Error("InstallationGuard service is required"))
+      yield* startInstallationGuard(installationGuard.value)
     }
 
     if (config.remoteCoordinator !== undefined) {
@@ -391,6 +416,38 @@ export function startHookService(
         observed("agent-run", agentRunWatchdog.value.iteration),
       )
     }
+    if (Option.isSome(worktreeJanitor)) {
+      yield* superviseWorker(
+        "Agent-run worktree janitor",
+        5 * 60_000,
+        "agent-run-cleanup",
+        worktreeJanitor.value.iteration,
+        AGENT_RUN_WORKTREE_BATCH_PAUSE_MS,
+      )
+    }
+    if (Option.isSome(sandbox)) {
+      const superviseSandbox = (operation: Effect.Effect<void, SandboxError>) =>
+        operation.pipe(
+          Effect.as("worked" as const),
+          Effect.catch((cause) =>
+            Effect.logError("Sandbox reconciliation failed; saved custody retained", cause).pipe(
+              Effect.as("idle" as const),
+            ),
+          ),
+        )
+      yield* superviseWorker(
+        "Sandbox heartbeat",
+        30_000,
+        "agent-run",
+        superviseSandbox(sandbox.value.heartbeat),
+      )
+      yield* superviseWorker(
+        "Sandbox reconciliation",
+        30_000,
+        "agent-run",
+        superviseSandbox(sandbox.value.iteration),
+      )
+    }
 
     if (Option.isSome(claudeResumeWorker)) {
       yield* superviseWorker(
@@ -483,13 +540,28 @@ export function startHookService(
           return yield* routeRequest(request, {
             ...options,
             prAutomationEnabled: config.mode !== "execution",
+            prRepositories: config.github?.prRepositories ?? [],
+            ...(checkAgentGitIdentity !== undefined ? { checkAgentGitIdentity } : {}),
+            installationIds,
+            ciRepositories: config.ci?.repositories ?? [],
+            ...(Option.isSome(installationGuard)
+              ? { installationGuard: installationGuard.value }
+              : {}),
             ...(Option.isSome(ci) ? { ci: ci.value } : {}),
             ...(config.qrspi === undefined
               ? {}
               : {
                   qrspi: {
                     token: config.qrspi.token,
-                    start: Option.getOrThrow(workflowStart).start,
+                    start: (input: unknown) =>
+                      withAvailabilityDeadline(
+                        Option.getOrThrow(workflowStart).start(input),
+                        8_000,
+                      ).pipe(
+                        Effect.catchTag("WorkflowDefinitionValidationError", (error) =>
+                          Effect.fail(toWorkflowStartValidationError(error)),
+                        ),
+                      ),
                   },
                 }),
             ...(config.testJobCanary === undefined

@@ -95,6 +95,7 @@ describe("transaction policy integration", () => {
           pullRequest: {
             ...samplePullRequestEvent.pullRequest,
             headRepositoryFullName: "contributor/example",
+            authorAssociation: "COLLABORATOR",
           },
         },
         changesRequestedReview,

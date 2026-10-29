@@ -13,6 +13,8 @@ import {
   loadExecutionCapabilitiesDaemon,
   loadAgentWaitDaemon,
   loadMcpWriteAuth,
+  loadMcpDispatchAuth,
+  authorizedForWrites,
   requireDaemonTokenWithUrl,
   type AgentWaitDaemonConfig,
   type McpWriteAuth,
@@ -72,6 +74,16 @@ export const startMcpServer = (
       try: () => loadMcpWriteAuth(env),
       catch: (cause) => new Error(String(cause)),
     })
+    const dispatchAuth = yield* Effect.tryPromise({
+      try: () => loadMcpDispatchAuth(env),
+      catch: (cause) => new Error(String(cause)),
+    })
+    if (
+      dispatchAuth.mode === "enabled" &&
+      authorizedForWrites(auth, `Bearer ${dispatchAuth.token}`)
+    ) {
+      return yield* Effect.fail(new Error("MCP write and dispatch tokens must be distinct"))
+    }
     const agentWaitDaemon: AgentWaitDaemonConfig | undefined = yield* Effect.tryPromise({
       try: () => loadAgentWaitDaemon(env),
       catch: (cause) => new Error(String(cause)),
@@ -119,6 +131,7 @@ export const startMcpServer = (
     const fetchHandler = createMcpFetchHandler({
       runTool,
       auth,
+      dispatchAuth,
       ...(agentWaitDaemon === undefined ? {} : { agentWaitDaemon }),
       ...(agentRunDaemon === undefined ? {} : { agentRunDaemon }),
       ...(executionCapabilitiesDaemon === undefined ? {} : { executionCapabilitiesDaemon }),
@@ -131,7 +144,7 @@ export const startMcpServer = (
       port: server.port ?? port,
       writesEnabled: auth.mode === "enabled",
       agentWaitsEnabled: agentWaitDaemon !== undefined,
-      agentRunsEnabled: agentRunDaemon !== undefined,
+      agentRunsEnabled: dispatchAuth.mode === "enabled" && agentRunDaemon !== undefined,
       stop: async () => {
         await server.stop(true)
         await runtime.dispose()

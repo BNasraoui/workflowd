@@ -1,3 +1,4 @@
+import { agentGitTestEnvironment } from "../helpers/agent-git-config"
 import { expect, test } from "bun:test"
 import { generateKeyPairSync } from "node:crypto"
 import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
@@ -57,10 +58,14 @@ for (const [action, name] of [
       await writeFile(privateKeyPath, key.export({ type: "pkcs8", format: "pem" }))
       const config = await loadConfig(
         {
+          ...agentGitTestEnvironment,
           GITHUB_APP_ID: "123",
+          WORKFLOWD_PR_REPOSITORIES: '[{"repository":"example-owner/example","installationId":91}]',
+          WORKFLOWD_ALLOWED_INSTALLATION_ACCOUNT_IDS: "81005232,319835875",
           GITHUB_PRIVATE_KEY_PATH: privateKeyPath,
           GITHUB_WEBHOOK_SECRET: "fixture",
           OPENCODE_SERVER_PASSWORD: "fixture",
+          WORKFLOWD_REVIEW_OPENCODE_PASSWORD: "review-password",
           WORKFLOWD_OPENCODE_ATTACH_URL: "http://127.0.0.1:1",
           OPENCODE_SERVER_URL: "http://127.0.0.1:1",
           WORKFLOWD_EXECUTION_CAPABILITIES_TOKEN: "fixture-token",

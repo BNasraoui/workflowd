@@ -1,3 +1,4 @@
+import { credentialReason } from "../agent-host/protocol"
 import { Effect } from "effect"
 import type { OpenCodeAdapter } from "../opencode/adapter"
 import type { AgentRunRecord } from "../kernel/agent-run-store"
@@ -33,6 +34,11 @@ export const deliverOpenCode = Effect.fn("Resident.deliverOpenCode")(
   Effect.timeout("15 seconds"),
   Effect.matchEffect({
     onSuccess: Effect.succeed,
-    onFailure: () => Effect.succeed("uncertain" as const),
+    onFailure: (error) =>
+      Effect.succeed(
+        credentialReason(error) === undefined
+          ? ("uncertain" as const)
+          : { reason: credentialReason(error)! },
+      ),
   }),
 )

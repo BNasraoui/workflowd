@@ -37,9 +37,12 @@ const ambient = Layer.merge(
 
 const route = (request: Request, sessions: DogfoodStorePort["sessions"]) =>
   Effect.runPromise(
-    routeRequest(request, { webhookSecret: "unused", now, dogfood: { token, sessions } }).pipe(
-      Effect.provide(ambient),
-    ),
+    routeRequest(request, {
+      installationIds: new Set(),
+      webhookSecret: "unused",
+      now,
+      dogfood: { token, sessions },
+    }).pipe(Effect.provide(ambient)),
   )
 
 describe("GET /workflows/dogfood/sessions", () => {
@@ -73,6 +76,7 @@ describe("GET /workflows/dogfood/sessions", () => {
     const response = await Effect.runPromise(
       routeRequest(get({ authorization: `Bearer ${token}` }), {
         webhookSecret: "unused",
+        installationIds: new Set([91]),
         now,
       }).pipe(Effect.provide(ambient)),
     )

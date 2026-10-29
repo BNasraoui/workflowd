@@ -60,12 +60,34 @@ export type GitHubCommitStatus = {
   readonly targetUrl?: string | null
 }
 
+type OpenPullPages = (input: {
+  readonly owner: string
+  readonly repo: string
+  readonly state: "open"
+  readonly per_page: number
+  readonly request?: { readonly signal?: AbortSignal }
+}) => AsyncIterable<
+  ReadonlyArray<{
+    readonly number: number
+    readonly head: { readonly sha: string; readonly repo?: { readonly full_name: string } }
+    readonly author_association?: string
+    readonly user?: { readonly login: string }
+  }>
+>
+
+type CompareCommits = (
+  input: RestEndpointMethodTypes["repos"]["compareCommitsWithBasehead"]["parameters"],
+) => Promise<unknown>
+
 export type OctokitClientPort = {
+  readonly listOpenPullPages?: OpenPullPages
+  readonly compareCommits?: CompareCommits
   readonly getPullRequest: (
     input: RestEndpointMethodTypes["pulls"]["get"]["parameters"],
   ) => Promise<{
     readonly number: number
     readonly user: { readonly login: string } | null
+    readonly author_association?: string
     readonly base: {
       readonly ref: string
       readonly sha: string
@@ -148,6 +170,8 @@ export type OctokitClientPort = {
 }
 
 export type GitHubInstallationAdapter = {
+  readonly listOpenPullPages?: OpenPullPages
+  readonly compareCommits?: CompareCommits
   readonly getPullRequest: (
     input: RestEndpointMethodTypes["pulls"]["get"]["parameters"],
   ) => Promise<GitHubPullRequestData>
@@ -185,6 +209,18 @@ export type GitHubInstallationAdapter = {
 
 export class OctokitInstallationAdapter implements GitHubInstallationAdapter {
   constructor(private readonly client: OctokitClientPort) {}
+
+  listOpenPullPages(input: Parameters<OpenPullPages>[0]) {
+    const pages = this.client.listOpenPullPages?.(input)
+    if (pages === undefined) throw new Error("Pull request listing unavailable")
+    return pages
+  }
+
+  compareCommits(input: Parameters<CompareCommits>[0]) {
+    return (
+      this.client.compareCommits?.(input) ?? Promise.reject(new Error("Compare API unavailable"))
+    )
+  }
 
   async getPullRequest(input: Parameters<GitHubInstallationAdapter["getPullRequest"]>[0]) {
     return normalizePullRequest(await this.client.getPullRequest(input))
@@ -275,6 +311,9 @@ function normalizePullRequest(
     pullRequest: {
       number: pullRequest.number,
       author: pullRequest.user.login,
+      ...(pullRequest.author_association === undefined
+        ? {}
+        : { authorAssociation: pullRequest.author_association }),
       baseRef: pullRequest.base.ref,
       baseSha: pullRequest.base.sha,
       draft: pullRequest.draft ?? false,
@@ -352,6 +391,23 @@ function normalizeCommitState(state: string): GitHubCommitStatus["state"] {
 
 export function makeOctokitClientPort(client: OctokitClient): OctokitClientPort {
   return {
+    listOpenPullPages: async function* (input) {
+      for await (const response of client.paginate.iterator(client.rest.pulls.list, input)) {
+        yield response.data.map((pull) => ({
+          number: pull.number,
+          head: {
+            sha: pull.head.sha,
+            ...(pull.head.repo == null ? {} : { repo: { full_name: pull.head.repo.full_name } }),
+          },
+          ...(pull.author_association === undefined
+            ? {}
+            : { author_association: pull.author_association }),
+          ...(pull.user == null ? {} : { user: { login: pull.user.login } }),
+        }))
+      }
+    },
+    compareCommits: async (input) =>
+      (await client.rest.repos.compareCommitsWithBasehead(input)).data,
     getPullRequest: async (input) => (await client.rest.pulls.get(input)).data,
     listIssueCommentPages: async function* (input) {
       for await (const response of client.paginate.iterator(

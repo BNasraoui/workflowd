@@ -1,0 +1,70 @@
+name: Ben approval gate
+run-name: "Ben approval: ${{ inputs.action }} ${{ inputs.head_sha }} (PR #${{ inputs.pr_number }})"
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: Approve a PR head or revoke approval for a commit across all PRs
+        required: true
+        type: choice
+        default: approve
+        options: [approve, revoke]
+      pr_number:
+        description: Pull request number targeting main (required for approve only)
+        required: false
+        type: string
+      head_sha:
+        description: Exact 40-character lowercase commit SHA to approve or revoke
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: ben-approval-${{ inputs.head_sha }}
+  cancel-in-progress: false
+
+jobs:
+  approve:
+    if: github.repository == 'BNasraoui/workflowd' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: ben-merge-approval
+    permissions:
+      contents: read
+      pull-requests: read
+      checks: read
+      statuses: read
+      actions: read
+    env:
+      APPROVAL_ACTION: ${{ inputs.action }}
+      BEN_APPROVAL_APP_ID: ${{ vars.BEN_APPROVAL_APP_ID }}
+      PR_NUMBER: ${{ inputs.pr_number }}
+      HEAD_SHA: ${{ inputs.head_sha }}
+    steps:
+      - name: Load gate from the dispatched main commit
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          sparse-checkout: deploy/approval-gate
+      - name: Validate protected decision before minting
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node deploy/approval-gate/check.mjs validate
+      - name: Mint repository-scoped Checks token
+        id: token
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349
+        with:
+          app-id: ${{ vars.BEN_APPROVAL_APP_ID }}
+          private-key: ${{ secrets.BEN_APPROVAL_PRIVATE_KEY }}
+          owner: BNasraoui
+          repositories: workflowd
+          permission-checks: write
+          skip-token-revoke: false
+      - name: Revalidate and post App decision on exact SHA
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          APP_TOKEN: ${{ steps.token.outputs.token }}
+        run: node deploy/approval-gate/check.mjs publish

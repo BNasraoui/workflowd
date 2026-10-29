@@ -23,6 +23,7 @@ export const AgentWaitSubmission = Schema.Struct({
 export type AgentWaitSubmission = typeof AgentWaitSubmission.Type
 
 export const AgentWaitReceipt = Schema.Struct({
+  mailboxId: Schema.optional(Schema.String),
   waitId: Schema.String,
   instanceId: Schema.String,
   status: Schema.Literals(["registered", "duplicate"]),
@@ -33,5 +34,7 @@ export const AgentWaitRefusal = Schema.Struct({
   error: Schema.String,
   reason: Schema.optional(Schema.String),
   detail: Schema.optional(Schema.String),
+  /** The ended child run's caller mailbox, when its worktree was removed. */
+  mailboxId: Schema.optional(Schema.String),
 })
 export type AgentWaitRefusal = typeof AgentWaitRefusal.Type

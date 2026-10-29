@@ -289,3 +289,55 @@ test("resident mode leaves recovery and cancellation to the resident supervisor"
   expect(supervisorCancellations).toBe(1)
   expect(recordedCancellations).toBe(1)
 })
+
+for (const kind of ["codex", "claude"] as const)
+  test(`${kind} recovery refusals keep their recovery diagnostic label`, async () => {
+    let diagnostic = ""
+    const runtime = makeAgentRunCliDispatcher({
+      executor: { kind, sessionCustodyId: (id) => `${kind}-session-${id}` },
+      cli: {
+        ownership: "transient-exec",
+        preflight: Effect.void,
+        spawn: () => Effect.die("recovery must not spawn"),
+        attach: () =>
+          Effect.succeed({
+            executionId: "recovered.service",
+            events: {
+              async *[Symbol.asyncIterator]() {
+                yield {
+                  type: "turn.failed" as const,
+                  message: "Try later",
+                  codexErrorInfo: "serverOverloaded",
+                }
+              },
+            },
+            exited: Effect.succeed({ exitCode: 1, stderr: "" }),
+            cancel: Effect.void,
+          }),
+      },
+      store: {
+        claimSpawn: () => Effect.void,
+        abandonLaunch: () => Effect.void,
+        markSpawned: () => Effect.void,
+        markVerified: () => Effect.void,
+        fail: (input) =>
+          Effect.sync(() => {
+            diagnostic = input.diagnostic
+          }),
+        recordProgress: () => Effect.void,
+        complete: () => Effect.void,
+        cancel: () => Effect.void,
+        operatorRequired: () => Effect.void,
+        listActiveByExecutor: () => Effect.succeed([{ ...record, state: "spawning" as const }]),
+      },
+      worktrees: { create: () => Effect.die("unused") },
+      signals: { subscribe: () => Effect.die("unused"), wake: () => Effect.void },
+      ensureResource: () => Effect.succeed("resource"),
+      ensureSession: () => Effect.succeed("session"),
+      refuse: (reason, detail) => new AgentRunRefusalError({ reason, detail }),
+      verifyTimeoutMs: 50,
+      progressWindowMs: 1000,
+    })
+    expect(await Effect.runPromise(runtime.recover)).toBe(0)
+    expect(diagnostic).toBe(`${kind}_recovery_failed: model_at_capacity: Try later`)
+  })

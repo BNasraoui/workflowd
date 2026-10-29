@@ -43,27 +43,93 @@ Reruns are selected by newest run ID and attempt. Reconciliation can change a
 previous terminal result; callers must wait on the intended SHA after starting
 its workflows, not assume a past result predicts future reruns.
 
-## Agent pattern: push, subscribe, end the turn
+## Agent pattern: bounded required-check polling
 
-Push the intended head, then call the resident workflowd MCP tool
-`subscribe_to_event` with `{"kind":"ci","repository":"owner/repo","sha":"HEAD_SHA"}`.
-For another managed run, use `{"kind":"agent_run","run_id":"RUN_ID"}`.
-Wait only for the registration receipt, then **end the turn**. Continue when the
-single completion message arrives. The equivalent run-bound shell call is
-`bun /path/to/workflowd/src/resident/subscribe.ts --repo owner/repo --sha HEAD_SHA`
-(or `--agent-run RUN_ID`). Registration does not block or emit heartbeats.
-The external cargo shim stops polling: its resident worker pushes and subscribes,
-then workflowd wakes that worker through its mailbox. The shim is not edited here.
+An active skill's end-turn/handoff instructions take precedence: if it requires
+ending at its handoff step (such as rpi-implement's Finish), finish all earlier
+phases first; at that step update the PR, publish the report, and end without
+watching CI.
 
-For Codex, the tool runs in a per-run stdio MCP process configured on workflowd's owned
-app-server child. The daemon verifies the socket peer's ancestry and resolves
-that run's custodied thread; tool arguments cannot supply a subscriber identity.
-CI selectors are restricted to the caller's configured repository; agent-run
-selectors must name another managed run in the same repository. Shared HTTP MCP
-bearers and shared OpenCode process roots do not grant this subscription authority.
-Resident Codex and opt-in resident OpenCode sessions are supported. OpenCode
-uses a separate run-bound capability provisioned into its session environment;
-a shared HTTP MCP bearer or a claimed run ID alone is insufficient.
+After pushing and opening or updating a PR, resident workers use:
+
+```bash
+gh pr checks PR_NUMBER --repo OWNER/NAME
+```
+
+Poll every 60 seconds on draft and ready PRs, without the required-only filter or watch
+mode. Inspect the named `Required checks` aggregate row. The only advisory checks are
+OpenCode Review and AI slop (advisory); ignore those rows and do not infer CI from the
+command's exit code alone. A missing aggregate is pending, never success, even if all
+visible checks pass or `gh` reports "no checks reported". CI is verified only when the
+aggregate is pass/success and every other non-advisory row is pass/success or
+skipping/skipped. SonarCloud Code Analysis and CodeQL PR policy must also be present and
+pass/success, consistent with the required contexts in `src/domain/head-evidence.ts`; a
+missing required context means pending. Any non-advisory pending row means pending; any
+non-advisory fail/failure row means confirmed CI failure, even when the aggregate
+passes. For the aggregate, fail/failure is a confirmed CI failure; a skipped or
+cancelled aggregate is unverified (as is any other non-success terminal state). Any
+other non-advisory terminal state is unverified. Retry missing/pending checks or
+transient observation errors every 60 seconds within the cycle budget. Limit each
+observation cycle to 15 minutes, below the default 20-minute no-event stall window; use
+a shorter budget if the configured stall window is lower. The resident Codex stall
+detector observes app-server notifications, not shell stdout directly
+(`src/resident/service.ts`, `notifyFor`/`lastEventAt`). Full CI takes about 25 minutes.
+Allow a 30-minute total observation budget per pushed head, split into bounded cycles; a
+single 15-minute cycle is not the total wait. Do not assume polling output keeps the
+worker alive.
+
+Missing or pending required checks, observation timeouts, and transient observation
+errors (such as "error connecting to api.github.com") mean CI is still running for
+scheduling purposes. Continue the remaining task, preserve unfinished work, and re-check
+in later bounded cycles. Between cycles return to task work and provide a progress
+update; never run back-to-back blocking waits without returning to task work in between;
+no single cycle may exceed the budget. Address confirmed CI failures; early termination
+is allowed after three unsuccessful repair attempts for the same confirmed failure.
+Missing/pending checks, timeouts, and transient observation errors do not count toward
+that bound.
+
+Any other observation error means CI is unverified: continue remaining work and report
+it at handoff. Observation errors do not count as confirmed failures. The verified
+result must be for the last pushed head SHA; results for earlier SHAs do not verify it.
+At an early stop, provide the same report as at final handoff plus the failing check's
+link, if applicable.
+
+Verify the PR still points to the pushed SHA before reporting CI. If the head changed,
+continue remaining work and report the mismatch at handoff; never attribute the new
+head's checks to the pushed SHA. End only at the final handoff, an active skill's
+explicit end-turn instruction, or the repeated-failure bound. At final handoff report
+the PR URL, pushed SHA, and verified required CI result, or "CI is unverified;
+coordinator/operator follow-up required" with the exact command/error and last observed
+required-check states and links (explicitly say if none were observed). Once remaining
+work is complete, use the remaining total budget in bounded cycles before handing off
+any still-unverified CI. Between cycles, review the final diff and prepare the handoff
+report, and provide a progress update.
+
+An active skill's end-turn/handoff rule takes precedence. In particular, an RPI
+implement worker completes all earlier phases before reaching Finish, updates its
+PR, publishes its report, and ends without watching or subscribing. Resident
+coordinators use the workflowd MCP caller mailbox (`dispatch_agent` / `read_agent_mailbox`) or the RPI coordinator's
+`scripts/wait-mailbox.sh` with the receipt's `mailbox_id` for child runs, following
+that skill's handoff instructions.
+
+The injected Codex subscription MCP is disabled; new OpenCode sessions receive no
+subscription capability or socket environment variable. Do not call
+`subscribe_to_event` or `subscribe.ts` or expect a CI completion event. Existing
+subscriptions still reconcile and deliver, and existing credentials retain their
+run/custody checks during draining.
+
+The quality-sh HTTP 403s were caused by repositories absent from the CI allowlist,
+not a general peer-authentication failure. The workflowd hangs were waits on SHAs
+whose required CI never ran: those stayed pending until the 24-hour deadline.
+No mint configuration or allowlist is changed by this fallback.
+
+## Existing subscription reconciliation
+
+Legacy Codex registrations use Unix peer ancestry and run custody; legacy OpenCode
+registrations use previously provisioned run-bound capabilities. CI selectors are
+restricted to the caller's configured repository. Agent-run selectors must name
+another managed run in the same repository. The shared HTTP MCP bearer grants
+neither registration authority.
 
 Subscription identity is the subscriber plus normalized selector. Repeating it,
 including after delivery, never creates another message. Already-final jobs enqueue
@@ -172,24 +238,12 @@ The socket must differ from the resident Codex socket. These flags take effect
 only at an owner-planned cutover; no running server or unit is reconfigured by
 this change.
 
-Before the first prompt, workflowd provisions a fresh 256-bit capability into
-that OpenCode session's local shell environment using `session.environment`.
-Only its hash is stored in workflowd’s SQLite database. The environment also identifies the calling
-run and subscription socket. The run-bound shell helper shown above works
-without caller-supplied identity arguments; `subscribe_to_event` uses the same
-boundary when its stdio MCP process is launched with that session environment.
-OpenCode dispatch instructions include the shell helper. This does not install
-a shared MCP bearer, write credential files, or expose the capability in prompts.
-The GitHub token broker still requires an owned Codex process tree; enabling it
-does not grant OpenCode GitHub credentials.
-
-Every registration checks the capability against the calling run, its verified
-state, the native session, the configured OpenCode endpoint/server/host, and
-reserved worktree custody. Selectors retain the same repository restrictions as
-Codex. Pending waits and prepared inbox messages keep the managed run from being
-finished by the watchdog. Parent completion observation waits for the resident
-run to finish, so ending an intermediate turn does not wake its parent. The existing kernel waits and inbox transaction provide
-one durable message per subscriber and selector, including late subscriptions.
+New OpenCode sessions retain the worker shell environment but receive no subscription
+capability or socket path. Existing capability hashes and durable subscriptions are
+retained for draining. Legacy registrations still validate run, native session,
+endpoint/server/host and reserved worktree custody. Pending waits and prepared inbox
+messages keep the managed run from finishing, and parent completion waits for the
+resident run to finish.
 
 Delivery uses the asynchronous prompt admission API with queue delivery. On this
 branch's pinned OpenCode v2 client, that is `session.prompt` (the successor to
@@ -230,11 +284,12 @@ an existing managed Codex daemon. Each dispatch gets its own thread, cwd, model,
 worker posture of the existing exec path. The experimental API capability is
 explicitly negotiated. Tested against the installed Codex 0.156 protocol.
 
-Dispatch instructions give the worker the subscription pattern above. A registered
+Dispatch instructions give the worker the bounded polling pattern above, deferring
+to skill handoff rules. The injected subscription MCP is disabled. An existing
 subscription keeps its original turn from finishing the agent run. The daemon
 observes persisted job state and queues one result with `thread/queue/add`; an idle
 thread starts a turn, while an active thread receives it after its current turn.
-There is no agent-side polling. Multiple outstanding subscriptions retain the
+Multiple outstanding legacy subscriptions retain the
 resident worker until every result's turn completes. Prepared or sending durable
 inbox rows block completion. Before Codex teardown, workflowd also checks the
 app-server queue and latest turn, including work whose started notification has
@@ -287,3 +342,14 @@ message saying the CI result did not arrive in time, marks the mailbox/thread an
 verified run `operator_required`, and consumes the subscription. Late CI results
 remain available in the CI store but are ignored by the expired subscription;
 an operator must decide how to resume work.
+
+Existing CI subscriptions also escalate after ten minutes from their original
+registration if no required workflow run has been observed for the SHA. The CI
+store's required-run links distinguish an observed queued/running workflow from
+missing runs or optional-only runs. A missing snapshot also escalates: lack of
+observation is not proof that GitHub ran nothing. The durable message identifies
+the repository/SHA and `ci_wait_no_required_run`, marks the thread and verified
+run `operator_required`, and consumes the wait once. Restart or duplicate
+registration does not reset the grace period. Already-final results take precedence;
+observed required runs retain the completion deadline above. This changes no CI
+result to failure and requires operator follow-up when observation was unavailable.

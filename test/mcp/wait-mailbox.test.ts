@@ -56,6 +56,7 @@ const wait = async (
     sleepLog?: string
     home?: string
     useConfigUrl?: boolean
+    noTimeout?: boolean
   } = {},
 ) => {
   const env: Record<string, string | undefined> = {
@@ -68,7 +69,13 @@ const wait = async (
   }
   if (options.useConfigUrl) delete env.WORKFLOWD_MCP_URL
   const child = Bun.spawn(
-    ["bash", "scripts/wait-mailbox.sh", "mailbox-test", options.timeout ?? "2"],
+    [
+      ...(options.noTimeout ? ["timeout", "5s"] : []),
+      "bash",
+      "scripts/wait-mailbox.sh",
+      "mailbox-test",
+      ...(options.noTimeout ? [] : [options.timeout ?? "2"]),
+    ],
     {
       env,
       stdout: "pipe",
@@ -225,5 +232,59 @@ test("does not retry bad authorization", async () => {
     expect(result.exitCode).not.toBe(0)
     expect(result.stderr).toContain("unauthorized")
     expect(await Bun.file(log).exists()).toBe(false)
+  })
+})
+
+test("stops after five consecutive connection failures even without a timeout", async () => {
+  await withSleepLog(async (path, log) => {
+    const result = await wait("integration-token", {
+      url: "http://127.0.0.1:1/mcp",
+      path,
+      sleepLog: log,
+      noTimeout: true,
+    })
+    expect(result.exitCode).toBe(1)
+    expect(result.stderr).toContain("5 consecutive connection failures")
+    expect(result.stderr).toContain("WORKFLOWD_MCP_URL")
+    expect(result.stdout).toBe("")
+    expect((await readFile(log, "utf8")).trim().split("\n")).toEqual(["1", "2", "4", "8"])
+  })
+})
+
+test("a successful empty response resets consecutive curl failures", async () => {
+  await withSleepLog(async (path, log) => {
+    const curl = join(path.split(":")[0]!, "curl")
+    await writeFile(
+      curl,
+      `#!/bin/sh
+count_file="$SLEEP_LOG.attempts"
+attempt=0
+if [ -f "$count_file" ]; then read -r attempt < "$count_file"; fi
+attempt=$((attempt + 1))
+printf '%s\\n' "$attempt" > "$count_file"
+case "$attempt" in
+  5|10) exec /usr/bin/curl "$@" ;;
+  *) exit 7 ;;
+esac
+`,
+    )
+    await chmod(curl, 0o755)
+    await withProxy(
+      (request, attempt) =>
+        attempt === 1
+          ? Promise.resolve(Response.json({ result: { structuredContent: { messages: [] } } }))
+          : forward(request),
+      async (url) => {
+        const result = await wait("integration-token", {
+          url,
+          path,
+          sleepLog: log,
+          noTimeout: true,
+        })
+        expect(result.exitCode).toBe(0)
+        expect(JSON.parse(result.stdout)).toEqual(message)
+        expect((await readFile(`${log}.attempts`, "utf8")).trim()).toBe("10")
+      },
+    )
   })
 })

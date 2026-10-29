@@ -1,3 +1,8 @@
+import { requireAgentHostSocket } from "./agent-host/config"
+import { loadAgentGitConfig, type AgentGitConfig } from "./agent-git/config"
+import { loadPrRepositories, type PrRepositories } from "./pr-automation-config"
+import { parseSandboxRepositories, type SandboxPolicy } from "./sandbox/config"
+import { parseInstallationAccountIds } from "./installation-policy"
 import {
   loadOpenCodeResidentSocket,
   loadResidentConfig,
@@ -35,6 +40,8 @@ interface HttpConfig {
 }
 
 interface GitHubConfig {
+  readonly prRepositories: PrRepositories
+  readonly allowedInstallationAccountIds: ReadonlyArray<number>
   readonly appId: number
   readonly privateKeyPath: string
   readonly webhookSecret: string
@@ -59,10 +66,12 @@ interface WorkspaceConfig {
 
 interface OpenCodeConfig {
   readonly baseUrl: string
+  readonly reviewUrl: string
   readonly attachUrl: string
   readonly serverId: string
   readonly endpointAlias: string
   readonly username: string
+  readonly reviewPassword: string
   readonly password: string
   readonly model: string
   readonly reviewerAgent: string
@@ -102,6 +111,7 @@ export interface QrspiConfig {
 }
 
 export interface AgentRunConfig {
+  readonly sandboxRepositories?: ReadonlyArray<SandboxPolicy>
   readonly token: string
   readonly claudeBinary: string
   readonly claudeHosts: ReadonlyArray<string>
@@ -117,10 +127,14 @@ export interface AgentRunConfig {
   readonly verifyPollIntervalMs: number
   readonly progressWindowMs: number
   readonly maxAttempts: number
+  /** How long a terminal run's worktree is kept before the janitor removes it. */
+  readonly worktreeRetentionMs: number
 }
 
 interface SharedAppConfig {
   readonly directoryRemote?: DirectoryRemoteConfig
+  readonly agentGit?: AgentGitConfig
+  readonly credentialSocket?: string
   readonly executionCapabilities?: ExecutionCapabilitiesConfig
   readonly residentOpenCodeSocket?: string
   readonly residentCodex?: ResidentConfig
@@ -326,6 +340,7 @@ interface PublicationTiming {
 
 interface ResolvedSecrets {
   readonly webhookSecret: string
+  readonly reviewOpenCodePassword: string
   readonly openCodePassword: string
   readonly testJobToken: string | undefined
   readonly agentWaitToken: string | undefined
@@ -344,6 +359,17 @@ async function loadSecrets(
   const openCodePassword = executionOnly
     ? ""
     : await secret(env, "OPENCODE_SERVER_PASSWORD", "OPENCODE_SERVER_PASSWORD_FILE", read)
+  const reviewOpenCodePassword = executionOnly
+    ? ""
+    : await secret(
+        env,
+        "WORKFLOWD_REVIEW_OPENCODE_PASSWORD",
+        "WORKFLOWD_REVIEW_OPENCODE_PASSWORD_FILE",
+        read,
+      )
+  if (!executionOnly && reviewOpenCodePassword === openCodePassword) {
+    throw new Error("Reviewer and agent-run passwords must differ")
+  }
   const testJobToken = await optionalSecret(
     env,
     "WORKFLOWD_TEST_JOB_TOKEN",
@@ -383,6 +409,7 @@ async function loadSecrets(
   return {
     webhookSecret,
     openCodePassword,
+    reviewOpenCodePassword,
     testJobToken,
     agentWaitToken,
     agentRunToken,
@@ -398,7 +425,8 @@ function loadAgentRunConfig(
     if (
       env.WORKFLOWD_AGENT_RUN_ROUTES !== undefined ||
       env.WORKFLOWD_AGENT_RUN_CODEX_ROUTES !== undefined ||
-      env.WORKFLOWD_AGENT_RUN_CLAUDE_ROUTES !== undefined
+      env.WORKFLOWD_AGENT_RUN_CLAUDE_ROUTES !== undefined ||
+      env.WORKFLOWD_AGENT_RUN_SANDBOX_REPOSITORIES !== undefined
     ) {
       throw new Error("WORKFLOWD_AGENT_RUN_TOKEN is required when agent-run settings are present")
     }
@@ -412,7 +440,16 @@ function loadAgentRunConfig(
   if (remoteTurnTimeoutMs < 10_000 || remoteTurnTimeoutMs > 600_000) {
     throw new Error("WORKFLOWD_AGENT_RUN_REMOTE_TURN_TIMEOUT_MS must be between 10000 and 600000")
   }
+  const repositories = parseAgentRunRepositories(required(env, "WORKFLOWD_AGENT_RUN_REPOSITORIES"))
+  const sandboxRepositories = parseSandboxRepositories(env.WORKFLOWD_AGENT_RUN_SANDBOX_REPOSITORIES)
+  if (
+    sandboxRepositories.some(
+      (policy) => !repositories.some((repository) => repository.name === policy.alias),
+    )
+  )
+    throw new Error("Unknown sandbox alias")
   return {
+    ...(sandboxRepositories.length === 0 ? {} : { sandboxRepositories }),
     token,
     claudeBinary: env.WORKFLOWD_AGENT_RUN_CLAUDE_BIN ?? "claude",
     claudeHosts:
@@ -438,7 +475,7 @@ function loadAgentRunConfig(
       env.WORKFLOWD_AGENT_RUN_CLAUDE_ROUTES === undefined
         ? []
         : parseAgentRunClaudeRoutes(env.WORKFLOWD_AGENT_RUN_CLAUDE_ROUTES),
-    repositories: parseAgentRunRepositories(required(env, "WORKFLOWD_AGENT_RUN_REPOSITORIES")),
+    repositories,
     agent: agentId(env.WORKFLOWD_AGENT_RUN_AGENT ?? "build", "WORKFLOWD_AGENT_RUN_AGENT"),
     verifyTimeoutMs: positiveInteger(
       env.WORKFLOWD_AGENT_RUN_VERIFY_TIMEOUT_MS,
@@ -459,6 +496,11 @@ function loadAgentRunConfig(
       env.WORKFLOWD_AGENT_RUN_MAX_ATTEMPTS,
       3,
       "WORKFLOWD_AGENT_RUN_MAX_ATTEMPTS",
+    ),
+    worktreeRetentionMs: positiveInteger(
+      env.WORKFLOWD_AGENT_RUN_WORKTREE_RETENTION_MS,
+      2 * 24 * 60 * 60_000,
+      "WORKFLOWD_AGENT_RUN_WORKTREE_RETENTION_MS",
     ),
   }
 }
@@ -518,7 +560,10 @@ function fixWorkSigningKey(
 }
 
 function openCodeBaseUrl(env: Record<string, string | undefined>): string {
-  return httpUrl(env.OPENCODE_SERVER_URL ?? "http://127.0.0.1:4096", "OPENCODE_SERVER_URL")
+  return credentialFreeHttpUrl(
+    env.OPENCODE_SERVER_URL ?? "http://127.0.0.1:4096",
+    "OPENCODE_SERVER_URL",
+  )
 }
 
 function workerHostId(env: Record<string, string | undefined>): string {
@@ -551,6 +596,10 @@ function githubSection(
 ): GitHubConfig {
   return {
     appId: positiveInteger(required(env, "GITHUB_APP_ID"), 0, "GITHUB_APP_ID"),
+    prRepositories: loadPrRepositories(env.WORKFLOWD_PR_REPOSITORIES),
+    allowedInstallationAccountIds: parseInstallationAccountIds(
+      env.WORKFLOWD_ALLOWED_INSTALLATION_ACCOUNT_IDS,
+    ),
     privateKeyPath: required(env, "GITHUB_PRIVATE_KEY_PATH"),
     webhookSecret,
   }
@@ -589,9 +638,14 @@ function openCodeSection(
   env: Record<string, string | undefined>,
   baseUrl: string,
   password: string,
+  reviewPassword: string,
 ): OpenCodeConfig {
   return {
     baseUrl,
+    reviewUrl: credentialFreeHttpUrl(
+      env.WORKFLOWD_REVIEW_OPENCODE_URL ?? "http://127.0.0.1:4098",
+      "WORKFLOWD_REVIEW_OPENCODE_URL",
+    ),
     agentWakeAgent: agentId(
       env.WORKFLOWD_AGENT_WAKE_AGENT ?? "build",
       "WORKFLOWD_AGENT_WAKE_AGENT",
@@ -615,6 +669,7 @@ function openCodeSection(
       "OPENCODE_SERVER_USERNAME",
     ),
     password,
+    reviewPassword,
     model: modelId(env.WORKFLOWD_MODEL ?? "openai/gpt-5.6-sol"),
     reviewerAgent: agentId(
       env.WORKFLOWD_REVIEWER_AGENT ?? "pr-reviewer",
@@ -659,6 +714,14 @@ function workerSection(
   }
 }
 
+function agentGitSection(
+  env: Record<string, string | undefined>,
+  required: boolean,
+): Pick<SharedAppConfig, "agentGit"> {
+  const agentGit = loadAgentGitConfig(env, required)
+  return agentGit === undefined ? {} : { agentGit }
+}
+
 type ConfigFor<E> = "WORKFLOWD_MODE" extends keyof E
   ? E extends { readonly WORKFLOWD_MODE: "execution" }
     ? Extract<AppConfig, { mode: "execution" }>
@@ -688,6 +751,8 @@ export async function loadConfig(
       "OPENCODE_SERVER_URL",
       "OPENCODE_SERVER_PASSWORD",
       "OPENCODE_SERVER_PASSWORD_FILE",
+      "WORKFLOWD_REVIEW_OPENCODE_PASSWORD",
+      "WORKFLOWD_REVIEW_OPENCODE_PASSWORD_FILE",
       "WORKFLOWD_QRSPI_TOKEN",
       "WORKFLOWD_CI_ENABLED",
       "WORKFLOWD_WORKER_IDENTITY_ENABLED",
@@ -711,11 +776,17 @@ export async function loadConfig(
   const gitSigningKey = fixWorkSigningKey(env, fixWorkEnabled, configuredTrustedAgentUsers)
   const baseUrl = mode === "execution" ? undefined : openCodeBaseUrl(env)
   const hostId = workerHostId(env)
+  const credentialSocket = env.WORKFLOWD_AGENT_HOST_SOCKET
+  await requireAgentHostSocket(credentialSocket)
   const workerIdentity = loadWorkerIdentityConfig(env)
   const residentCodex = loadResidentConfig(env)
   const residentOpenCodeSocket = loadOpenCodeResidentSocket(env)
   const ci = await loadCiConfig(env, read)
   const agentRuns = loadAgentRunConfig(env, secrets.agentRunToken)
+  const gitIdentity = agentGitSection(
+    env,
+    [agentRuns, residentCodex, residentOpenCodeSocket].some((executor) => executor !== undefined),
+  )
   const executionCapabilities = await loadExecutionCapabilitiesConfig(env, read, {
     ...(secrets.agentRunToken === undefined ? {} : { token: secrets.agentRunToken }),
     codexEnabled: agentRuns !== undefined || residentCodex !== undefined,
@@ -727,6 +798,8 @@ export async function loadConfig(
 
   return {
     ...(directoryRemote === undefined ? {} : { directoryRemote }),
+    ...gitIdentity,
+    ...(credentialSocket === undefined ? {} : { credentialSocket }),
     ...(workerIdentity === undefined ? {} : { workerIdentity }),
     ...(executionCapabilities === undefined ? {} : { executionCapabilities }),
     ...(residentCodex === undefined ? {} : { residentCodex }),
@@ -737,7 +810,12 @@ export async function loadConfig(
       ? { mode: "execution" as const }
       : {
           github: githubSection(env, secrets.webhookSecret),
-          openCode: openCodeSection(env, baseUrl!, secrets.openCodePassword),
+          openCode: openCodeSection(
+            env,
+            baseUrl!,
+            secrets.openCodePassword,
+            secrets.reviewOpenCodePassword,
+          ),
         }),
     storage: storageSection(env, home),
     fixWork: { enabled: fixWorkEnabled },

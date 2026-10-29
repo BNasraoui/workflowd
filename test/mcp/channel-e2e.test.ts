@@ -126,6 +126,7 @@ beforeAll(async () => {
       daemonRuntime.runPromise(
         routeRequest(request, {
           webhookSecret: "",
+          installationIds: new Set(),
           now: new Date(),
           agentRuns: { token: "run-token", ...ingress },
         }),
@@ -136,6 +137,7 @@ beforeAll(async () => {
       WORKFLOWD_MCP_PORT: "0",
       WORKFLOWD_DATABASE_PATH: database,
       WORKFLOWD_MCP_TOKEN: "mcp-token",
+      WORKFLOWD_MCP_DISPATCH_TOKEN: "dispatch-token",
       WORKFLOWD_DAEMON_URL: `http://127.0.0.1:${daemon.port}`,
       WORKFLOWD_AGENT_RUN_TOKEN: "run-token",
     }),
@@ -156,6 +158,7 @@ const connectChannel = async () => {
     env: {
       WORKFLOWD_MCP_URL: `http://127.0.0.1:${mcp.port}/mcp`,
       WORKFLOWD_MCP_TOKEN: "mcp-token",
+      WORKFLOWD_MCP_DISPATCH_TOKEN: "dispatch-token",
       WORKFLOWD_CHANNEL_POLL_MS: "20",
     },
   })

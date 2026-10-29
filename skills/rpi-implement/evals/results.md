@@ -1,5 +1,37 @@
 # RPI Implement Evaluation Results
 
+## 2026-10-14: PR 118 review fixes
+
+No eval script is present in this skill. Manually walked through evals 4 and 5
+against the revised Finish instructions and their fixtures; no fixture commands
+were executed, no gist was published, and no independent model rerun was performed.
+
+- Eval 4 (`no-pr-yet.md`): pull Beads, verify approval, reset the RPI branch,
+  implement and check the named files, commit/push, open the draft PR against main,
+  then enter Finish. Observe CI only after updating the PR, verify its last pushed
+  SHA, publish the report, and record both URLs before syncing Beads. All five
+  expectations are satisfied in this author walkthrough.
+- Eval 5 (`resident-push.md`): push the checked single phase, open the PR against
+  main, then complete Finish's PR update, report, and final handoff without a watch
+  or subscription. All three expectations are satisfied in this author walkthrough.
+- Additional walkthrough: with multiple phases, a phase push does not enter Finish
+  until the earlier phases are complete. In Finish's observation branch, missing or
+  pending checks, timeout, transient/non-transient errors, and a changed head all
+  reach step 3 with unverified CI and then the final report. An earlier SHA's green
+  result cannot verify the final push. Early stops retain the same report fields
+  and include the failing check link when applicable.
+
+## 2026-10-13: Resident handoff regression (eval 5)
+
+Manual walkthrough of `resident-push.md` with both the updated skill and injected
+resident instructions; no fixture commands were executed and nothing was published.
+The expected actions remain: push the checked phase, open/update the PR against main,
+publish the implement report, then end the turn with CI handed to the coordinator.
+No subscription or `gh pr checks --watch` is called. All three eval-5 expectations
+are satisfied (3/3, author assessment; no independent model rerun). The injected
+polling default now explicitly defers to this skill handoff. Other evals were not
+rerun; their scope and approval rules are unchanged.
+
 ## 2026-10-04: Iteration 3
 
 Changes after the first real run: bead sync, a branch reset to `origin/rpi/<id>`, and the PR

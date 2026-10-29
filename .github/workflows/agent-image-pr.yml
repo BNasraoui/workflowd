@@ -1,0 +1,11 @@
+name: Agent base image
+
+on:
+  pull_request:
+
+permissions: {}
+
+jobs:
+  build:
+    permissions: {}
+    uses: ./.github/workflows/agent-image.yml

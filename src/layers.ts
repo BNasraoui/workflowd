@@ -1,66 +1,46 @@
-import { OpenCodeMailboxLive } from "./resident/opencode"
-import { ResidentCodex, ResidentCodexLive } from "./resident/service"
-import { WorkerIdentity, WorkerIdentityLive } from "./worker-identity/service"
-import { CiServiceLive } from "./ci/service"
-import { readFile } from "node:fs/promises"
-import { dirname, join } from "node:path"
 import { App } from "@octokit/app"
 import { Octokit } from "@octokit/rest"
-import { OpenCode } from "@opencode-ai/client/effect"
-import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/unstable/http"
+import { Cause, Effect, Layer, Option } from "effect"
 import { SqlClient } from "effect/unstable/sql"
-import { Cause, Effect, Layer, Option, Schema } from "effect"
-import { AgentHarness, OpenCodeAgentHarness, TrustedAgentHarnessCatalog } from "./agent-harness"
+import { readFile } from "node:fs/promises"
+import { dirname, join } from "node:path"
+import { AgentHarness } from "./agent-harness"
+import { CiServiceLive } from "./ci/service"
 import type { AppConfig } from "./config"
-import { GitHub, GitHubAppAdapter, publicSonarRequest } from "./github"
-import { toJsonSchemaObject } from "./json"
-import { makeOctokitClientPort, OctokitInstallationAdapter } from "./github/adapter"
-import { KernelEventStore, KernelEventStoreLive } from "./kernel/event-store"
-import { AgentHandoffStoreLive } from "./kernel/agent-handoff-store"
-import {
-  AGENT_WAKE_CONTRACT,
-  AGENT_WAKE_MAX_OUTPUT_BYTES,
-  AgentWaitIngressLive,
-  AgentWakeResult,
-} from "./kernel/agent-wait-ingress"
-import { KernelJobStore, KernelJobStoreLive } from "./kernel/job-store"
+import { AgentHandoffStore, AgentHandoffStoreLive } from "./kernel/agent-handoff-store"
 import { AgentRunIngressLive, AgentRunProvider } from "./kernel/agent-run-ingress"
-import { ManagedDirectoryObservationsLive } from "./directory/managed-observations"
-import { AgentRunWorktrees, gitAgentRunWorktrees } from "./kernel/agent-run-worktrees"
 import { AgentRunStoreLive } from "./kernel/agent-run-store"
 import { AgentRunWatchdogLive } from "./kernel/agent-run-watchdog"
-import { DogfoodStoreLive } from "./kernel/dogfood-store"
-import { ClaudeCli, makeClaudeCli } from "./kernel/claude-session"
-import { CodexCli, makeCodexCli } from "./kernel/codex-session"
+import { agentRunWorktreeJanitorLayer } from "./kernel/agent-run-worktree-janitor"
+import { AgentRunWorktrees, agentRunWorktrees } from "./kernel/agent-run-worktrees"
+import { AgentWaitIngressLive } from "./kernel/agent-wait-ingress"
 import { ClaudeDispatchCli, makeClaudeDispatchCli } from "./kernel/claude-dispatch"
 import { ClaudeResumeWorker, runClaudeResumeIteration } from "./kernel/claude-resume-worker"
-import {
-  ClaudeResumeRemoteProducer,
-  ClaudeResumeRemoteProducerLive,
-} from "./remote/claude-resume-producer"
-import { KernelSessionStore, KernelSessionStoreLive } from "./kernel/session-store"
-import {
-  OpenCodeResumeAdapter,
-  OpenCodeResumeProvider,
-  OpenCodeResumeWorker,
-  runOpenCodeResumeIteration,
-} from "./kernel/opencode-resume-worker"
+import { ClaudeCli, makeClaudeCli } from "./kernel/claude-session"
+import { CodexCli, makeCodexCli } from "./kernel/codex-session"
+import { DogfoodStoreLive } from "./kernel/dogfood-store"
+import { KernelEventStore, KernelEventStoreLive } from "./kernel/event-store"
+import { KernelJobStore, KernelJobStoreLive } from "./kernel/job-store"
 import {
   OpenCodeCompletionProvider,
   OpenCodeCompletionSource,
   runOpenCodeCompletionSourceIteration,
 } from "./kernel/opencode-completion-source"
+import {
+  OpenCodeResumeProvider,
+  OpenCodeResumeWorker,
+  runOpenCodeResumeIteration,
+} from "./kernel/opencode-resume-worker"
+import { KernelSessionStore, KernelSessionStoreLive } from "./kernel/session-store"
 import { TestJobCanaryLive } from "./kernel/test-job-canary"
-import { Automation, OpenCodeAutomationAdapter, makeOpenCodeHarnessDefinitions } from "./opencode"
-import { makeOpenCodeSdkClient, SdkOpenCodeAdapter } from "./opencode/adapter"
-import { WorkflowStoreLive } from "./store"
-import { WorkflowStore } from "./store/contracts"
-import { GitWorkspaceAdapter, Workspace } from "./workspace"
+import { Automation, OpenCodeAutomationAdapter } from "./opencode"
 import { BeadsCliTicketSource, GitHubQrspiRepository } from "./qrspi/adapters"
+import { builtInStageContracts } from "./qrspi/contracts"
 import { WorkflowDefinitionValidationError } from "./qrspi/domain"
 import { QrspiRepository, TicketSource } from "./qrspi/ports"
-import { QrspiStoreDataError, QrspiStoreLive } from "./qrspi/store"
 import { makeWorkspaceSourceResolver } from "./qrspi/source-resolver"
+import { StageCatalog, StageCatalogError, TrustedStageCatalog } from "./qrspi/stage-catalog"
+import { QrspiStoreDataError, QrspiStoreLive } from "./qrspi/store"
 import {
   WorkflowStart,
   WorkflowStartLive,
@@ -68,94 +48,34 @@ import {
   closedWorkflowStart,
   toWorkflowStartValidationError,
 } from "./qrspi/workflow-start"
-import { StageCatalog, StageCatalogError, TrustedStageCatalog } from "./qrspi/stage-catalog"
-import { builtInStageContracts } from "./qrspi/contracts"
-import { SessionAccessResolver } from "./session-access"
-import { WorkSignal, WorkSignalLive } from "./work-signal"
+import {
+  ClaudeResumeRemoteProducer,
+  ClaudeResumeRemoteProducerLive,
+} from "./remote/claude-resume-producer"
 import { RemoteCoordinatorLive } from "./remote/coordinator"
 import { RemoteCoordinatorStoreLive } from "./remote/coordinator-store"
 import { RemoteTransportLive } from "./remote/transport"
-import { ExecutionDiscovery, makeExecutionCapabilities } from "./execution-capabilities"
-import { localDiscoverySources } from "./execution/local"
-import { AgentDirectoryLive } from "./directory/service"
+import { OpenCodeMailboxLive } from "./resident/opencode"
+import { ResidentCodex, ResidentCodexLive } from "./resident/service"
+import { reviewServerId } from "./review-harness"
+import { SandboxDispatch, makeSandboxDispatch } from "./sandbox/dispatch"
+import { makeSandboxGithub } from "./sandbox/github"
+import { makeSandboxLeaseService } from "./sandbox/lease"
+import { routeSandboxHandoffs, routeSandboxProvider } from "./sandbox/provider"
+import { WorkflowStoreLive } from "./store"
+import { WorkflowStore } from "./store/contracts"
+import { WorkSignal, WorkSignalLive } from "./work-signal"
+import { loadRunSocketPolicy } from "./worker-identity/peer"
+import { WorkerIdentity, WorkerIdentityLive } from "./worker-identity/service"
+import { GitWorkspaceAdapter, Workspace } from "./workspace"
+
+import { makeGitHubLayer } from "./github/layer"
+import { makeDiscoveryLayer, makeExecutionOnlyLayer } from "./layers-execution"
+import { makeOpenCodeComposition } from "./layers-opencode"
+import { makeDirectoryLayer, makeDirectoryRemoteLayer } from "./directory/layers"
 import { DirectoryStoreLive } from "./directory/store"
 import { DirectoryRemoteStoreLive } from "./directory/remote-store"
-import { DirectoryRemoteLive } from "./directory/remote"
-
-const resumeContract = <A, I>(definition: {
-  readonly ref: { readonly name: string; readonly version: number }
-  readonly outputSchema: Schema.Codec<A, I>
-  readonly model: string
-  readonly agent: string
-  readonly maxOutputBytes: number
-}) => {
-  const separator = definition.model.indexOf("/")
-  return {
-    name: definition.ref.name,
-    version: definition.ref.version,
-    schema: definition.outputSchema,
-    jsonSchema: toJsonSchemaObject(definition.outputSchema),
-    agent: definition.agent,
-    model: {
-      providerID: definition.model.slice(0, separator),
-      modelID: definition.model.slice(separator + 1),
-    },
-    maxOutputBytes: definition.maxOutputBytes,
-  }
-}
-
-const stageResumeContract = <A, I>(
-  contract: {
-    readonly ref: { readonly name: string; readonly contractVersion: number }
-    readonly resultSchema: Schema.Codec<A, I>
-    readonly maxResultBytes: number
-  },
-  harness: ReturnType<typeof makeOpenCodeHarnessDefinitions>["stage"],
-) =>
-  resumeContract({
-    ref: { name: contract.ref.name, version: contract.ref.contractVersion },
-    outputSchema: contract.resultSchema,
-    model: harness.model,
-    agent: harness.agent,
-    maxOutputBytes: contract.maxResultBytes,
-  })
-
-function makeDiscoveryLayer(
-  config: AppConfig,
-  client?: Parameters<typeof localDiscoverySources>[1],
-) {
-  const executionDiscoveryConfig = config.executionCapabilities
-  return executionDiscoveryConfig === undefined
-    ? Layer.empty
-    : Layer.effect(
-        ExecutionDiscovery,
-        Effect.gen(function* () {
-          const discovery = yield* Effect.acquireRelease(
-            Effect.sync(() =>
-              makeExecutionCapabilities({
-                host: config.worker.hostId,
-                sources: localDiscoverySources(config, client),
-                refreshMs: executionDiscoveryConfig.refreshMs,
-                timeoutMs: executionDiscoveryConfig.timeoutMs,
-              }),
-            ),
-            (resource) =>
-              Effect.tryPromise({
-                try: () => resource.close(),
-                catch: () => new Error("Capability discovery cleanup failed"),
-              }).pipe(Effect.orDie),
-          )
-          return ExecutionDiscovery.of({
-            list: Effect.fn("ExecutionDiscovery.list")(() =>
-              Effect.tryPromise({
-                try: () => discovery.list(),
-                catch: () => new Error("Capability discovery unavailable"),
-              }),
-            ),
-          })
-        }),
-      )
-}
+import { ManagedDirectoryObservationsLive } from "./directory/managed-observations"
 
 function makeManagedDirectoryObservationLayer(
   config: Extract<AppConfig, { readonly mode?: "automation" }>,
@@ -171,167 +91,19 @@ function makeManagedDirectoryObservationLayer(
       })
 }
 
-function makeExecutionOnlyLayer(config: AppConfig) {
-  const kernel = Layer.mergeAll(
-    KernelEventStoreLive,
-    KernelJobStoreLive,
-    KernelSessionStoreLive,
-    DogfoodStoreLive,
-    Layer.effect(SqlClient.SqlClient, SqlClient.SqlClient),
-  ).pipe(Layer.provideMerge(WorkflowStoreLive))
-  const signals = WorkSignalLive
-  const codex = Layer.succeed(
-    CodexCli,
-    makeCodexCli({
-      binary: config.agentRuns?.codexBinary ?? "codex",
-      custodyRoot: join(dirname(config.storage.databasePath), "agent-processes"),
-      ...(config.agentRuns?.codexUnitPrefix === undefined
-        ? {}
-        : { unitPrefix: config.agentRuns.codexUnitPrefix }),
-    }),
-  )
-  const claude =
-    (config.agentRuns?.claudeRoutes.length ?? 0) === 0
-      ? Layer.empty
-      : Layer.succeed(
-          ClaudeDispatchCli,
-          makeClaudeDispatchCli({
-            binary: config.agentRuns?.claudeBinary ?? "claude",
-            custodyRoot: join(dirname(config.storage.databasePath), "claude-processes"),
-          }),
-        )
-  const discovery = makeDiscoveryLayer(config)
-  const directoryStores = Layer.merge(DirectoryStoreLive, DirectoryRemoteStoreLive).pipe(
-    Layer.provide(kernel),
-  )
-  const directoryTransport =
-    config.directoryRemote === undefined ? Layer.empty : RemoteTransportLive(config.directoryRemote)
-  const directoryObservations =
-    config.directoryRemote === undefined
-      ? Layer.empty
-      : DirectoryRemoteLive(config.worker.hostId, config.directoryRemote).pipe(
-          Layer.provide(directoryStores),
-          Layer.provide(directoryTransport),
-        )
-  const directory =
-    config.executionCapabilities === undefined
-      ? Layer.empty
-      : AgentDirectoryLive(
-          config.worker.hostId,
-          config.directoryRemote?.leaseMs,
-          config.directoryRemote,
-        ).pipe(Layer.provideMerge(directoryStores), Layer.provide(discovery))
-  const store = AgentRunStoreLive.pipe(Layer.provideMerge(kernel), Layer.provideMerge(directory))
-  const identity = {
-    owningHostId: config.worker.hostId,
-    providerId: "native-local",
-    serverId: config.worker.hostId,
-    endpointAlias: "local",
-    endpointIdentity: `local://${config.worker.hostId}`,
-    providerVersion: 1,
-  }
-  const runs =
-    config.agentRuns === undefined
-      ? Layer.empty
-      : AgentRunIngressLive({
-          ...config.agentRuns,
-          identity,
-          worktreeRoot: config.workspace.worktreeRoot,
-        }).pipe(
-          Layer.provideMerge(store),
-          Layer.provideMerge(codex),
-          Layer.provideMerge(claude),
-          Layer.provideMerge(discovery),
-          Layer.provideMerge(signals),
-          Layer.provide(Layer.succeed(AgentRunWorktrees, gitAgentRunWorktrees)),
-        )
-  return Layer.mergeAll(
-    kernel,
-    store,
-    signals,
-    discovery,
-    directory,
-    directoryObservations,
-    runs,
-    Layer.succeed(WorkflowStart, {
-      preflight: Effect.void,
-      start: () =>
-        Effect.fail(new WorkflowStartUnauthorized({ reason: "QRSPI ingress is disabled" })),
-    }),
-  )
-}
-
 const makeAutomationLayer = (config: Extract<AppConfig, { readonly mode?: "automation" }>) => {
-  const authorization = Buffer.from(
-    `${config.openCode.username}:${config.openCode.password}`,
-  ).toString("base64")
-  const openCodeHttpLayer = Layer.effect(
-    HttpClient.HttpClient,
-    Effect.map(HttpClient.HttpClient, (client) =>
-      HttpClient.mapRequest(
-        client,
-        HttpClientRequest.setHeader("authorization", `Basic ${authorization}`),
-      ),
-    ),
-  ).pipe(Layer.provide(FetchHttpClient.layer))
-  const openCodeClientEffect = Effect.runSync(
-    Effect.cached(
-      OpenCode.make({ baseUrl: config.openCode.baseUrl }).pipe(Effect.provide(openCodeHttpLayer)),
-    ),
-  )
-  const openCodeAdapter = new SdkOpenCodeAdapter(makeOpenCodeSdkClient(openCodeClientEffect))
-  const executionDiscoveryLayer = makeDiscoveryLayer(config, openCodeClientEffect)
-  const definitions = makeOpenCodeHarnessDefinitions({
-    ...config.openCode,
-    timeoutMs: config.worker.jobTimeoutMs,
-  })
-  const resumeProvider = new OpenCodeResumeAdapter(openCodeAdapter)
-  const completionSourceOptions = {
-    owningHostId: config.worker.hostId,
-    providerId: config.openCode.serverId,
-    serverId: config.openCode.serverId,
-    endpointAlias: config.openCode.endpointAlias,
-    endpointIdentity: config.openCode.baseUrl,
-    providerVersion: 1,
-    // Bounds one live-stream observation so a still-running child yields its
-    // completion-source slot to newer watches instead of holding it open.
-    observationTimeoutMs: 30_000,
-    now: () => new Date(),
-  }
-  const resumeContracts = [
-    resumeContract(definitions.review),
-    resumeContract(definitions.fix),
-    // Generic wake contract for agent handoffs registered through the
-    // wait_for_agent tool and POST /workflows/agent-waits. The parent only has
-    // to acknowledge; it is not being asked to produce domain output.
-    resumeContract({
-      ref: AGENT_WAKE_CONTRACT,
-      outputSchema: AgentWakeResult,
-      model: config.openCode.model,
-      agent: config.openCode.agentWakeAgent,
-      maxOutputBytes: AGENT_WAKE_MAX_OUTPUT_BYTES,
-    }),
-    stageResumeContract(builtInStageContracts[0], definitions.stage),
-    stageResumeContract(builtInStageContracts[1], definitions.stage),
-    stageResumeContract(builtInStageContracts[2], definitions.stage),
-    stageResumeContract(builtInStageContracts[3], definitions.stage),
-    stageResumeContract(builtInStageContracts[4], definitions.stage),
-    stageResumeContract(builtInStageContracts[5], definitions.stage),
-  ]
-  const agentHarness = new OpenCodeAgentHarness(
+  const {
     openCodeAdapter,
-    new TrustedAgentHarnessCatalog(Object.values(definitions)),
-    {
-      serverId: config.openCode.serverId,
-      endpointAlias: config.openCode.endpointAlias,
-      pollIntervalMs: config.openCode.pollIntervalMs,
-    },
-  )
-  const sessionAccess = new SessionAccessResolver(openCodeAdapter, {
-    serverId: config.openCode.serverId,
-    endpointAlias: config.openCode.endpointAlias,
-    attachUrl: config.openCode.attachUrl,
-  })
+    openCodeClientEffect,
+    definitions,
+    resumeProvider,
+    completionSourceOptions,
+    resumeContracts,
+    agentHarness,
+    reviewAccess,
+    sessionAccess,
+  } = makeOpenCodeComposition(config)
+  const executionDiscoveryLayer = makeDiscoveryLayer(config, openCodeClientEffect)
   const stageCatalogLayer = Layer.effect(
     StageCatalog,
     Effect.try({
@@ -358,26 +130,12 @@ const makeAutomationLayer = (config: Extract<AppConfig, { readonly mode?: "autom
   const directoryStores = Layer.merge(DirectoryStoreLive, DirectoryRemoteStoreLive).pipe(
     Layer.provide(kernelStoreLayer),
   )
-  const directoryTransport =
-    config.directoryRemote === undefined ? Layer.empty : RemoteTransportLive(config.directoryRemote)
-  const directoryObservations =
-    config.directoryRemote === undefined
-      ? Layer.empty
-      : DirectoryRemoteLive(config.worker.hostId, config.directoryRemote).pipe(
-          Layer.provide(directoryStores),
-          Layer.provide(directoryTransport),
-        )
-  const directoryLayer =
-    config.executionCapabilities === undefined
-      ? Layer.empty
-      : AgentDirectoryLive(
-          config.worker.hostId,
-          config.directoryRemote?.leaseMs,
-          config.directoryRemote,
-        ).pipe(Layer.provideMerge(directoryStores), Layer.provide(executionDiscoveryLayer))
-  const managedDirectoryObservations = makeManagedDirectoryObservationLayer(config).pipe(
+  const directoryLayer = makeDirectoryLayer(config).pipe(
+    Layer.provideMerge(directoryStores),
+    Layer.provide(executionDiscoveryLayer),
+  )
+  const directoryObservations = makeDirectoryRemoteLayer(config).pipe(
     Layer.provide(directoryStores),
-    Layer.provide(Layer.succeed(AgentRunProvider, openCodeAdapter)),
   )
   const providerLayer = Layer.merge(
     Layer.succeed(OpenCodeResumeProvider, resumeProvider),
@@ -436,19 +194,34 @@ const makeAutomationLayer = (config: Extract<AppConfig, { readonly mode?: "autom
   )
   const testJobCanaryLayer = TestJobCanaryLive.pipe(Layer.provideMerge(storeLayer))
   const agentWaitIngressLayer = AgentWaitIngressLive(completionSourceOptions).pipe(
+    Layer.provide(
+      Layer.effect(AgentHandoffStore, routeSandboxHandoffs).pipe(Layer.provide(storeLayer)),
+    ),
     Layer.provideMerge(storeLayer),
     Layer.provideMerge(workSignalLayer),
-  )
-  const claudeCliLayer = Layer.succeed(
-    ClaudeCli,
-    makeClaudeCli({ binary: config.agentRuns?.claudeBinary ?? "claude" }),
   )
   const workerIdentityLayer =
     config.workerIdentity === undefined
       ? Layer.empty
-      : WorkerIdentityLive(config.workerIdentity, config.github).pipe(
+      : WorkerIdentityLive(config.workerIdentity, config.github, undefined, {
+          ...completionSourceOptions,
+          setSessionEnvironment: openCodeAdapter.setSessionEnvironment,
+        }).pipe(
+          Layer.provide(storeLayer),
           Layer.provide(AgentRunStoreLive.pipe(Layer.provide(storeLayer))),
         )
+  const claudeCliLayer = Layer.effect(
+    ClaudeCli,
+    Effect.gen(function* () {
+      const identity = yield* Effect.serviceOption(WorkerIdentity)
+      return makeClaudeCli({
+        credentialSocket: config.credentialSocket,
+        git: config.agentGit,
+        binary: config.agentRuns?.claudeBinary ?? "claude",
+        ...(Option.isSome(identity) ? { identity: identity.value } : {}),
+      })
+    }),
+  ).pipe(Layer.provide(workerIdentityLayer))
   const ciLive =
     config.ci === undefined
       ? undefined
@@ -460,6 +233,8 @@ const makeAutomationLayer = (config: Extract<AppConfig, { readonly mode?: "autom
       : ResidentCodexLive(
           {
             ...config.residentCodex,
+            credentialSocket: config.credentialSocket,
+            git: config.agentGit,
             progressWindowMs: config.agentRuns?.progressWindowMs,
             directoryRefreshMs: config.directoryRemote?.refreshMs ?? 30_000,
             directoryLeaseMs: config.directoryRemote?.leaseMs ?? 90_000,
@@ -484,6 +259,7 @@ const makeAutomationLayer = (config: Extract<AppConfig, { readonly mode?: "autom
           {
             ...completionSourceOptions,
             socket: config.residentOpenCodeSocket,
+            peer: config.workerIdentity?.peer ?? loadRunSocketPolicy(process.env),
             repositories: config.ci.repositories,
           },
           openCodeAdapter,
@@ -493,13 +269,19 @@ const makeAutomationLayer = (config: Extract<AppConfig, { readonly mode?: "autom
           Layer.provide(storeLayer),
         )
   const residentLayer = residentLive ?? Layer.empty
-  const claudeDispatchLayer = Layer.succeed(
+  const claudeDispatchLayer = Layer.effect(
     ClaudeDispatchCli,
-    makeClaudeDispatchCli({
-      binary: config.agentRuns?.claudeBinary ?? "claude",
-      custodyRoot: join(dirname(config.storage.databasePath), "claude-processes"),
+    Effect.gen(function* () {
+      const identity = yield* Effect.serviceOption(WorkerIdentity)
+      return makeClaudeDispatchCli({
+        ...(Option.isSome(identity) ? { identity: identity.value } : {}),
+        credentialSocket: config.credentialSocket,
+        git: config.agentGit,
+        binary: config.agentRuns?.claudeBinary ?? "claude",
+        custodyRoot: join(dirname(config.storage.databasePath), "claude-processes"),
+      })
     }),
-  )
+  ).pipe(Layer.provide(workerIdentityLayer))
   const codexCliLayer =
     residentLive === undefined
       ? Layer.effect(
@@ -507,6 +289,8 @@ const makeAutomationLayer = (config: Extract<AppConfig, { readonly mode?: "autom
           Effect.gen(function* () {
             const identity = yield* Effect.serviceOption(WorkerIdentity)
             return makeCodexCli({
+              credentialSocket: config.credentialSocket,
+              git: config.agentGit,
               binary: config.agentRuns?.codexBinary ?? "codex",
               ...(config.agentRuns?.codexUnitPrefix === undefined
                 ? {}
@@ -565,15 +349,74 @@ const makeAutomationLayer = (config: Extract<AppConfig, { readonly mode?: "autom
           Layer.provideMerge(kernelStoreLayer),
           Layer.provideMerge(claudeCliLayer),
         )
+  const sandboxPolicies = config.agentRuns?.sandboxRepositories ?? []
+  const sandboxLayer =
+    sandboxPolicies.length === 0
+      ? Layer.empty
+      : Layer.effect(
+          SandboxDispatch,
+          Effect.gen(function* () {
+            const github = yield* makeSandboxGithub(config.github)
+            const leases = yield* makeSandboxLeaseService(github)
+            return yield* makeSandboxDispatch({
+              policies: sandboxPolicies,
+              github,
+              leases,
+              executor: openCodeAdapter,
+              client: yield* openCodeClientEffect,
+              executorId: `opencode:${completionSourceOptions.providerId}`,
+              endpointIdentity: completionSourceOptions.endpointIdentity,
+              nativeExecutors: {
+                codex: makeCodexCli({
+                  credentialSocket: config.credentialSocket,
+                  git: config.agentGit,
+                  binary: config.agentRuns?.codexBinary ?? "codex",
+                  custodyRoot: join(
+                    dirname(config.storage.databasePath),
+                    "sandbox-codex-processes",
+                  ),
+                  unitPrefix: "workflowd-sandbox-codex-",
+                }),
+                claude: makeClaudeDispatchCli({
+                  credentialSocket: config.credentialSocket,
+                  git: config.agentGit,
+                  binary: config.agentRuns?.claudeBinary ?? "claude",
+                  custodyRoot: join(
+                    dirname(config.storage.databasePath),
+                    "sandbox-claude-processes",
+                  ),
+                  unitPrefix: "workflowd-sandbox-claude-",
+                }),
+              },
+            })
+          }),
+        ).pipe(Layer.provideMerge(AgentRunStoreLive.pipe(Layer.provideMerge(kernelStoreLayer))))
+  const sandboxProviderLayer =
+    sandboxPolicies.length === 0
+      ? Layer.succeed(AgentRunProvider, openCodeAdapter)
+      : Layer.effect(
+          AgentRunProvider,
+          Effect.gen(function* () {
+            const sandbox = yield* Effect.serviceOption(SandboxDispatch)
+            if (Option.isNone(sandbox))
+              return yield* Effect.fail(new Error("Configured sandbox service is unavailable"))
+            return yield* routeSandboxProvider(openCodeAdapter, sandbox.value)
+          }),
+        ).pipe(Layer.provideMerge(sandboxLayer), Layer.provideMerge(kernelStoreLayer))
+  const managedDirectoryObservations = makeManagedDirectoryObservationLayer(config).pipe(
+    Layer.provide(directoryStores),
+    Layer.provide(sandboxProviderLayer),
+  )
   const agentRunLayer =
     config.agentRuns === undefined
       ? Layer.empty
-      : Layer.merge(
+      : Layer.mergeAll(
           AgentRunIngressLive({
             routes: config.agentRuns.routes,
             codexRoutes: config.agentRuns.codexRoutes,
             claudeRoutes: config.agentRuns.claudeRoutes,
             repositories: config.agentRuns.repositories,
+            sandboxRepositories: config.agentRuns.sandboxRepositories ?? [],
             agent: config.agentRuns.agent,
             worktreeRoot: config.workspace.worktreeRoot,
             verifyTimeoutMs: config.agentRuns.verifyTimeoutMs,
@@ -594,16 +437,21 @@ const makeAutomationLayer = (config: Extract<AppConfig, { readonly mode?: "autom
             unsupervisedExecutorKinds: ["codex", "claude"],
             now: () => new Date(),
           }),
+          agentRunWorktreeJanitorLayer(config, config.agentRuns),
         ).pipe(
-          Layer.provideMerge(
-            AgentRunStoreLive.pipe(
-              Layer.provideMerge(kernelStoreLayer),
-              Layer.provideMerge(directoryLayer),
-            ),
-          ),
+          Layer.provideMerge(directoryLayer),
+          Layer.provideMerge(AgentRunStoreLive.pipe(Layer.provideMerge(kernelStoreLayer))),
           Layer.provideMerge(agentWaitIngressLayer),
-          Layer.provideMerge(Layer.succeed(AgentRunProvider, openCodeAdapter)),
-          Layer.provideMerge(Layer.succeed(AgentRunWorktrees, gitAgentRunWorktrees)),
+          Layer.provideMerge(sandboxProviderLayer),
+          Layer.provideMerge(
+            Layer.succeed(AgentRunWorktrees, {
+              create: (input) =>
+                agentRunWorktrees(config.credentialSocket).create({
+                  ...input,
+                  git: config.agentGit,
+                }),
+            }),
+          ),
           Layer.provideMerge(claudeCliLayer),
           Layer.provideMerge(codexCliLayer),
           Layer.provideMerge(executionDiscoveryLayer),
@@ -709,8 +557,8 @@ const makeAutomationLayer = (config: Extract<AppConfig, { readonly mode?: "autom
   return Layer.mergeAll(
     executionDiscoveryLayer,
     directoryLayer,
-    managedDirectoryObservations,
     directoryObservations,
+    managedDirectoryObservations,
     ciLayer,
     residentLayer,
     workerIdentityLayer,
@@ -718,32 +566,10 @@ const makeAutomationLayer = (config: Extract<AppConfig, { readonly mode?: "autom
     providerLayer,
     resumeWorkerLayer,
     completionSourceLayer,
-    Layer.effect(
-      GitHub,
-      Effect.tryPromise({
-        try: () => readFile(config.github.privateKeyPath, "utf8"),
-        catch: (cause) => new Error(`Could not read GitHub App private key: ${String(cause)}`),
-      }).pipe(
-        Effect.map((privateKey) => {
-          const app = new App({
-            appId: config.github.appId,
-            privateKey,
-            Octokit,
-          })
-          return new GitHubAppAdapter(
-            config.github.appId,
-            async (installationId) =>
-              new OctokitInstallationAdapter(
-                makeOctokitClientPort(await app.getInstallationOctokit(installationId)),
-              ),
-            {
-              resolve: (reference) => sessionAccess.resolve(reference),
-            },
-            publicSonarRequest,
-          )
-        }),
-      ),
-    ),
+    makeGitHubLayer(config, {
+      resolve: (reference) =>
+        (reference.serverId === reviewServerId ? reviewAccess : sessionAccess).resolve(reference),
+    }),
     Layer.succeed(AgentHarness, agentHarness),
     Layer.succeed(Automation, new OpenCodeAutomationAdapter(agentHarness, definitions)),
     Layer.succeed(Workspace, new GitWorkspaceAdapter(config.workspace)),

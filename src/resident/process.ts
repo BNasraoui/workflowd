@@ -1,23 +1,38 @@
+import { hostWorkerIdentity } from "../agent-host/client"
+import {
+  startAgentHost,
+  inspectAgentHost,
+  requestAgentHost,
+  connectAgentHost,
+  listAgentHost,
+} from "../agent-host/client"
+import { agentHostUnitName } from "../agent-host/protocol"
+import { agentGitEnvironment, type AgentGitConfig } from "../agent-git/config"
 import { workerEnvironment } from "./environment"
 import { join } from "node:path"
 import { createInterface } from "node:readline"
 import { Readable } from "node:stream"
 import { createHash, randomUUID } from "node:crypto"
 import { chmod, mkdir, rm } from "node:fs/promises"
+import { mkdirSync } from "node:fs"
 import { RpcClient } from "./rpc"
 
 /** Owns exactly one stdio app-server process. Never connects to a managed daemon. */
 export function startAppServer(
   options: {
+    readonly git?: AgentGitConfig | undefined
     readonly binary: string
     readonly home: string
     readonly env?: Readonly<Record<string, string>>
   },
   notify: (frame: { readonly method: string; readonly params: unknown }) => void,
 ) {
+  // Preflight runs before the first durable launch creates the resident home.
+  mkdirSync(options.home, { recursive: true, mode: 0o700 })
   const env: Record<string, string | undefined> = {
     ...process.env,
     ...options.env,
+    ...agentGitEnvironment(options.git),
     CODEX_HOME: options.home,
     GH_CONFIG_DIR: join(options.home, "worker-gh"),
   }
@@ -25,11 +40,12 @@ export function startAppServer(
   delete env.GITHUB_TOKEN
   delete env.GH_ENTERPRISE_TOKEN
   delete env.GITHUB_ENTERPRISE_TOKEN
-  const subscriptionConfig = `mcp_servers.workflowd_subscriptions={command=${JSON.stringify(process.execPath)},args=[${JSON.stringify(join(import.meta.dir, "mcp.ts"))}],env_vars=["WORKFLOWD_RUN_ID","WORKFLOWD_CODEX_RESIDENT_SOCKET"],required=true}`
+  const subscriptionConfig = `mcp_servers.workflowd_subscriptions={command=${JSON.stringify(process.execPath)},args=[${JSON.stringify(join(import.meta.dir, "mcp.ts"))}],env_vars=["WORKFLOWD_RUN_ID","WORKFLOWD_CODEX_RESIDENT_SOCKET"],enabled=false}`
   const child = Bun.spawn(
     [options.binary, "-c", subscriptionConfig, "app-server", "--listen", "stdio://"],
     {
       env,
+      cwd: options.home,
       detached: true,
       stdin: "pipe",
       stdout: "pipe",
@@ -123,7 +139,23 @@ const command = async (args: string[]) => {
   return stdout
 }
 
-export const inspectAppServerUnit = async (unit: string) => {
+export const inspectAppServerUnit = async (
+  unit: string,
+  hostSocket?: string,
+  hostRunId?: string,
+) => {
+  if (hostSocket !== undefined) {
+    if (!hostRunId || agentHostUnitName(hostRunId) !== unit)
+      throw new Error("resident_unit_mismatch")
+    const process = await inspectAgentHost(hostSocket, hostRunId)
+    return {
+      present: process !== null,
+      active: process?.active ?? false,
+      pid: process?.pid ?? 0,
+      invocation: process?.invocationId ?? "",
+      description: process === null ? "" : `workflowd resident launch ${process.launchId}`,
+    }
+  }
   const output = await command([
     "systemctl",
     "--user",
@@ -165,7 +197,20 @@ const assertUnit = (
     throw new Error("resident_unit_mismatch")
 }
 
-export const stopAppServer = async (unit: string, launchId: string, invocation: string | null) => {
+export const stopAppServer = async (
+  unit: string,
+  launchId: string,
+  invocation: string | null,
+  hostSocket?: string,
+  hostRunId?: string,
+) => {
+  if (hostSocket !== undefined) {
+    const before = await inspectAppServerUnit(unit, hostSocket, hostRunId)
+    assertUnit(before, launchId, invocation)
+    if (before.present)
+      await requestAgentHost(hostSocket, { operation: "stop", runId: hostRunId!, launchId })
+    return { closed: !(await inspectAppServerUnit(unit, hostSocket, hostRunId)).active }
+  }
   const before = await inspectAppServerUnit(unit)
   assertUnit(before, launchId, invocation)
   if (before.active) {
@@ -201,7 +246,26 @@ const stopOrphanUnit = async (unit: string) => {
   return unit
 }
 
-export const sweepOrphanAppServers = async (prefix: string, active: ReadonlySet<string>) => {
+export const sweepOrphanAppServers = async (
+  prefix: string,
+  active: ReadonlySet<string>,
+  hostSocket?: string,
+) => {
+  if (hostSocket !== undefined) {
+    const stopped: string[] = []
+    for (const process of await listAgentHost(hostSocket)) {
+      if (!process.active || active.has(process.unit)) continue
+      await requestAgentHost(hostSocket, {
+        operation: "stop",
+        runId: process.runId,
+        launchId: process.launchId,
+      })
+      if ((await inspectAgentHost(hostSocket, process.runId))?.active)
+        throw new Error("host orphan cancellation unconfirmed")
+      stopped.push(process.unit)
+    }
+    return stopped
+  }
   residentUnitName("agent-run-validation", prefix)
   const output = await command([
     "systemctl",
@@ -244,13 +308,48 @@ export const attachAppServer = async (
     readonly unit: string
     readonly launchId: string
     readonly invocation: string | null
+    readonly hostSocket?: string | undefined
   },
   notify: (frame: { readonly method: string; readonly params: unknown }) => void,
 ) => {
-  const state = await inspectAppServerUnit(options.unit)
+  const state = await inspectAppServerUnit(options.unit, options.hostSocket, options.socket)
   assertUnit(state, options.launchId, options.invocation)
   if (!state.active || !Number.isSafeInteger(state.pid) || state.pid <= 0)
     throw new Error("resident unit inactive")
+  if (options.hostSocket !== undefined) {
+    const process = await inspectAgentHost(options.hostSocket, options.socket)
+    if (!process) throw new Error("resident host custody missing")
+    const rpc = new RpcClient((line) => transport.send(line), notify)
+    const transport = await connectAgentHost(
+      options.hostSocket,
+      process,
+      (line) => rpc.receive(line),
+      () => {
+        rpc.close()
+        notify({ method: "workflowd/disconnected", params: null })
+      },
+    )
+    const detach = () => {
+      rpc.close()
+      transport.close()
+      return Promise.resolve()
+    }
+    return {
+      pid: process.pid,
+      invocation: process.invocationId!,
+      socket: options.socket,
+      rpc,
+      initialize: async () => {
+        await rpc.request("initialize", {
+          clientInfo: { name: "workflowd", version: "1" },
+          capabilities: { experimentalApi: true },
+        })
+        transport.send(JSON.stringify({ method: "initialized" }))
+      },
+      detach,
+      close: detach,
+    }
+  }
   const connected = await connectSocket(options.socket)
   const rpc = new RpcClient((line) => connected.send(line.trimEnd()), notify)
   let detached = false
@@ -291,15 +390,40 @@ export const attachAppServer = async (
 
 export const launchAppServer = async (
   options: {
+    readonly git?: AgentGitConfig | undefined
     readonly binary: string
     readonly home: string
     readonly env?: Readonly<Record<string, string>>
     readonly runId: string
     readonly unitPrefix?: string
     readonly launchId?: string
+    readonly hostSocket?: string | undefined
   },
   notify: (frame: { readonly method: string; readonly params: unknown }) => void,
 ) => {
+  if (options.hostSocket !== undefined) {
+    const launchId = options.launchId ?? randomUUID()
+    const runId = `${options.runId}-${launchId}`
+    const process = await startAgentHost(options.hostSocket, {
+      runId,
+      launchId,
+      profile: "codex-server",
+      ...(options.env ? { worker: hostWorkerIdentity(options.env) } : {}),
+      directory: "",
+      prompt: "",
+      model: null,
+    })
+    return attachAppServer(
+      {
+        socket: runId,
+        unit: process.unit,
+        launchId,
+        invocation: process.invocationId,
+        hostSocket: options.hostSocket,
+      },
+      notify,
+    )
+  }
   const unit = residentUnitName(options.runId, options.unitPrefix)
   const socket = residentSocket(options.home, options.runId)
   const launchId = options.launchId ?? randomUUID()
@@ -312,6 +436,7 @@ export const launchAppServer = async (
   const environment: Record<string, string> = {
     ...workerEnvironment(),
     ...options.env,
+    ...agentGitEnvironment(options.git),
     CODEX_HOME: options.home,
     GH_CONFIG_DIR: join(options.home, "worker-gh"),
   }
@@ -323,12 +448,13 @@ export const launchAppServer = async (
     "WORKFLOWD_NATS_CREDS",
   ])
     delete environment[key]
-  const subscriptionConfig = `mcp_servers.workflowd_subscriptions={command=${JSON.stringify(process.execPath)},args=[${JSON.stringify(join(import.meta.dir, "mcp.ts"))}],env_vars=["WORKFLOWD_RUN_ID","WORKFLOWD_CODEX_RESIDENT_SOCKET"],required=true}`
+  const subscriptionConfig = `mcp_servers.workflowd_subscriptions={command=${JSON.stringify(process.execPath)},args=[${JSON.stringify(join(import.meta.dir, "mcp.ts"))}],env_vars=["WORKFLOWD_RUN_ID","WORKFLOWD_CODEX_RESIDENT_SOCKET"],enabled=false}`
   await command([
     "systemd-run",
     "--user",
     "--quiet",
     "--service-type=exec",
+    `--working-directory=${options.home}`,
     `--unit=${unit}`,
     `--description=workflowd resident launch ${launchId}`,
     "--property=KillMode=control-group",

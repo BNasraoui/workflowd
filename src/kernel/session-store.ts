@@ -156,8 +156,21 @@ export type KernelSessionStorePort = {
     readonly createdAt: Date
   }) => Replay
   readonly claimCleanup: (
-    input: ClaimInput,
+    input: ClaimInput & {
+      /** Restricts the claim, and the recovery of expired leases, to requests
+       * whose cleanup id starts with this prefix, so a worker only ever claims
+       * the cleanup it knows how to execute. */
+      readonly cleanupIdPrefix?: string
+    },
   ) => Effect.Effect<CleanupClaim | null, KernelSessionStoreError>
+  /** Re-opens a cleanup request that ended in `operator_required`, with a
+   * fresh attempt budget, so a worker checks the resource again. */
+  readonly requeueCleanup: (input: {
+    readonly cleanupId: string
+    readonly owningHostId: string
+    readonly maxAttempts: number
+    readonly runAt: Date
+  }) => Effect.Effect<{ readonly status: "requeued" }, KernelSessionStoreError>
   readonly heartbeatCleanup: (
     input: CleanupAuthority & { readonly leaseDurationMs: number },
   ) => Effect.Effect<{ readonly leaseUntil: Date }, KernelSessionStoreError>
@@ -569,7 +582,7 @@ const make = Effect.gen(function* () {
       const leaseUntil = yield* leaseDeadline(input.now, ms)
       const rows =
         yield* sql`UPDATE kernel_resume_attempts SET lease_until = ${leaseUntil.toISOString()},
-      updated_at = ${input.now.toISOString()} WHERE ${resumeWhere(input)} AND state = 'leased' RETURNING request_id`
+      updated_at = ${input.now.toISOString()} WHERE ${resumeWhere(input)} AND state IN ('leased', 'sent') RETURNING request_id`
       if (rows.length === 0) return yield* denied(input.requestId)
       return { leaseUntil }
     }).pipe(sql.withTransaction)
@@ -822,9 +835,12 @@ const make = Effect.gen(function* () {
       yield* validDate(input.now)
       const until = yield* leaseDeadline(input.now, ms)
       const nowText = input.now.toISOString()
+      if (input.cleanupIdPrefix !== undefined) yield* checkText(input.cleanupIdPrefix)
+      const prefix = input.cleanupIdPrefix ?? ""
+      const owned = sql`substr(cleanup_id, 1, ${prefix.length}) = ${prefix}`
       const exhausted = yield* sql`UPDATE kernel_cleanup_requests SET state = 'operator_required',
         updated_at = ${nowText} WHERE owning_host_id = ${input.owningHostId} AND state = 'leased'
-          AND attempt >= max_attempts AND EXISTS (SELECT 1 FROM kernel_cleanup_attempts AS attempt_row
+          AND ${owned} AND attempt >= max_attempts AND EXISTS (SELECT 1 FROM kernel_cleanup_attempts AS attempt_row
             WHERE attempt_row.cleanup_id = kernel_cleanup_requests.cleanup_id
               AND attempt_row.attempt = kernel_cleanup_requests.attempt
               AND attempt_row.state = 'leased' AND attempt_row.lease_until <= ${nowText})
@@ -841,7 +857,7 @@ const make = Effect.gen(function* () {
       const token = randomUUID()
       const malformed = yield* sql<Record<string, unknown>>`SELECT * FROM kernel_cleanup_requests
         WHERE owning_host_id = ${input.owningHostId} AND state IN ('pending', 'retry_scheduled')
-          AND run_at <= ${nowText} ORDER BY run_at, cleanup_id`
+          AND ${owned} AND run_at <= ${nowText} ORDER BY run_at, cleanup_id`
       for (const candidate of malformed) {
         const decoded = yield* Schema.decodeUnknownEffect(CleanupReadRow)(candidate).pipe(
           Effect.result,
@@ -857,7 +873,7 @@ const make = Effect.gen(function* () {
       const rows =
         yield* sql`UPDATE kernel_cleanup_requests SET state = 'leased', attempt = attempt + 1,
       updated_at = ${nowText} WHERE cleanup_id = (SELECT cleanup_id FROM kernel_cleanup_requests
-      WHERE owning_host_id = ${input.owningHostId} AND (
+      WHERE owning_host_id = ${input.owningHostId} AND ${owned} AND (
         (state IN ('pending', 'retry_scheduled') AND run_at <= ${nowText}) OR
         (state = 'leased' AND EXISTS (SELECT 1 FROM kernel_cleanup_attempts AS attempt_row
           WHERE attempt_row.cleanup_id = kernel_cleanup_requests.cleanup_id
@@ -883,6 +899,24 @@ const make = Effect.gen(function* () {
         claimToken: token,
         leaseUntil: until,
       }
+    }).pipe(sql.withTransaction)
+  const requeueCleanup: KernelSessionStorePort["requeueCleanup"] = (input) =>
+    Effect.gen(function* () {
+      yield* checkText(input.cleanupId)
+      yield* checkText(input.owningHostId)
+      const budget = yield* positive(input.maxAttempts)
+      yield* validDate(input.runAt)
+      const runAt = input.runAt.toISOString()
+      const rows = yield* sql`UPDATE kernel_cleanup_requests SET state = 'pending',
+        max_attempts = attempt + ${budget}, run_at = ${runAt}, updated_at = ${runAt}
+        WHERE cleanup_id = ${input.cleanupId} AND owning_host_id = ${input.owningHostId}
+          AND state = 'operator_required' RETURNING resource_id`
+      if (rows.length === 0) return yield* conflict("cleanup_request", input.cleanupId)
+      yield* sql`UPDATE kernel_working_resources SET state = 'cleanup_required', cleanup_error = NULL,
+        updated_at = ${runAt} WHERE resource_id = ${rows[0]!.resource_id} AND state = 'operator_required'`
+      yield* sql`UPDATE kernel_sessions SET state = 'cleanup_required', revision = revision + 1,
+        updated_at = ${runAt} WHERE resource_id = ${rows[0]!.resource_id} AND state = 'operator_required'`
+      return { status: "requeued" as const }
     }).pipe(sql.withTransaction)
   const cleanupWhere = (input: CleanupAuthority) => sql`cleanup_id = ${input.cleanupId}
     AND attempt = ${input.attempt} AND owning_host_id = ${input.owningHostId}
@@ -992,6 +1026,7 @@ const make = Effect.gen(function* () {
     observeResume,
     requestCleanup,
     claimCleanup,
+    requeueCleanup,
     heartbeatCleanup,
     completeCleanup,
     readResource: (id) =>

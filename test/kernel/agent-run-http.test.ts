@@ -45,6 +45,7 @@ const route = (
   Effect.runPromise(
     routeRequest(request, {
       webhookSecret: "unused",
+      installationIds: new Set([91]),
       now,
       agentRuns: { token, register, cancel: cancelRun },
     }).pipe(Effect.provide(ambient)),
@@ -87,9 +88,11 @@ describe("POST /workflows/agent-runs", () => {
 
   test("returns 404 when the endpoint is not enabled", async () => {
     const response = await Effect.runPromise(
-      routeRequest(post(body, authorization), { webhookSecret: "unused", now }).pipe(
-        Effect.provide(ambient),
-      ),
+      routeRequest(post(body, authorization), {
+        installationIds: new Set(),
+        webhookSecret: "unused",
+        now,
+      }).pipe(Effect.provide(ambient)),
     )
 
     expect(response.status).toBe(404)

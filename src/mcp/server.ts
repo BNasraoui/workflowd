@@ -19,6 +19,7 @@ export type RunTool = (name: string, args: unknown, context: ToolCallContext) =>
 export type McpHttpHandlerOptions = {
   readonly runTool: RunTool
   readonly auth: McpWriteAuth
+  readonly dispatchAuth?: McpWriteAuth
   readonly agentWaitDaemon?: AgentWaitDaemonConfig
   readonly agentRunDaemon?: AgentWaitDaemonConfig
   readonly executionCapabilitiesDaemon?: AgentWaitDaemonConfig
@@ -44,6 +45,11 @@ export const createMcpFetchHandler = (options: McpHttpHandlerOptions) => {
     const context: ToolCallContext = {
       writesConfigured: options.auth.mode === "enabled",
       writesAuthorized: authorizedForWrites(options.auth, request.headers.get("authorization")),
+      dispatchConfigured: options.dispatchAuth?.mode === "enabled",
+      dispatchAuthorized: authorizedForWrites(
+        options.dispatchAuth ?? { mode: "disabled" },
+        request.headers.get("authorization"),
+      ),
       now,
       ...(options.agentWaitDaemon === undefined
         ? {}

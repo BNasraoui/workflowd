@@ -2,7 +2,7 @@ import { RequestedSelection } from "../execution-selection"
 import { Effect, Schema } from "effect"
 import { RemoteProbeProducer } from "../remote/probe-producer"
 import { RemoteHostId } from "../remote/contract"
-import { McpQueries, MAX_RECENT_JOBS } from "./queries"
+import { McpQueries, MAX_RECENT_JOBS, ListAgentRunsArguments, MAX_AGENT_RUNS } from "./queries"
 import { listExecutionCapabilities } from "./execution-capabilities"
 import { queryDirectory } from "./directory"
 import {
@@ -45,6 +45,8 @@ export type AgentWaitDaemon = {
 export type ToolCallContext = {
   readonly writesAuthorized: boolean
   readonly writesConfigured: boolean
+  readonly dispatchAuthorized?: boolean
+  readonly dispatchConfigured?: boolean
   readonly now: () => Date
   readonly agentWaitDaemon?: AgentWaitDaemon
   readonly agentRunDaemon?: AgentWaitDaemon
@@ -96,10 +98,11 @@ export const DispatchAgentArguments = Schema.Struct({
 
 /**
  * Dispatch holds the HTTP request open through the daemon's bounded
- * first-token verification (up to ~2 minutes), so its timeout is far larger
+ * sandbox acquisition (up to five minutes) and first-token verification
+ * (up to two minutes), so its timeout is far larger
  * than the agent-wait proxy's.
  */
-const DISPATCH_AGENT_TIMEOUT_MS = 180_000
+const DISPATCH_AGENT_TIMEOUT_MS = 480_000
 
 const structured = (value: Record<string, unknown>, rendering?: string): ToolResult => ({
   content: [{ type: "text", text: rendering ?? JSON.stringify(value, null, 2) }],
@@ -153,6 +156,18 @@ export const callTool = (name: string, args: unknown, context: ToolCallContext) 
         const queries = yield* McpQueries
         const messages = yield* queries.readAgentMailbox(input.success.mailbox_id)
         return json({ mailbox_id: input.success.mailbox_id, messages })
+      }
+      case "list_agent_runs": {
+        if (!context.writesConfigured || !context.writesAuthorized)
+          return failure("unauthorized: list_agent_runs requires a valid bearer token")
+        const input = yield* decodeArguments(ListAgentRunsArguments, args).pipe(Effect.result)
+        if (input._tag === "Failure")
+          return failure(
+            `invalid arguments: status must be an agent run state, repository a non-empty string, and limit an integer 1-${MAX_AGENT_RUNS}`,
+          )
+        const queries = yield* McpQueries
+        const runs = yield* queries.listAgentRuns(input.success)
+        return json({ runs })
       }
       case "list_recent_jobs": {
         const queries = yield* McpQueries
@@ -351,6 +366,7 @@ const waitForAgent = (args: unknown, context: ToolCallContext) =>
           `${input.success.parent_session_id} as wait ${receipt.success.waitId}.`
     return structured(
       {
+        mailbox_id: receipt.success.mailboxId,
         wait_id: receipt.success.waitId,
         instance_id: receipt.success.instanceId,
         status: receipt.success.status,
@@ -363,14 +379,14 @@ const waitForAgent = (args: unknown, context: ToolCallContext) =>
 
 const dispatchAgent = (args: unknown, context: ToolCallContext) =>
   Effect.gen(function* () {
-    if (!context.writesConfigured) {
+    if (context.dispatchConfigured !== true) {
       return failure(
-        "writes are disabled: no WORKFLOWD_MCP_TOKEN or WORKFLOWD_MCP_TOKEN_FILE is " +
+        "dispatch is disabled: no WORKFLOWD_MCP_DISPATCH_TOKEN or WORKFLOWD_MCP_DISPATCH_TOKEN_FILE is " +
           "configured on the server, so dispatch_agent refuses all calls",
       )
     }
-    if (!context.writesAuthorized) {
-      return failure("unauthorized: dispatch_agent requires a valid bearer token")
+    if (context.dispatchAuthorized !== true) {
+      return failure("unauthorized: dispatch_agent requires a valid dispatch bearer token")
     }
     const daemon = context.agentRunDaemon
     if (daemon === undefined) {

@@ -158,16 +158,20 @@ test("resident directory proof requires matching native/runtime cwd and explicit
                   Effect.retry({ schedule: Schedule.spaced("10 millis"), times: 300 }),
                 )
               yield* Effect.promise(() => writeFile(modeFile, "not_loaded"))
-              expect(yield* awaitProof(false)).toMatchObject({
+              const unavailable = yield* awaitProof(false)
+              expect(unavailable).toMatchObject({
                 recipientId: initial?.recipientId,
                 status: "unavailable",
-                observedAt: initial?.observedAt,
               })
+              // A valid startup read may finish after the initial snapshot.
+              expect(Date.parse(unavailable?.observedAt ?? "")).toBeGreaterThanOrEqual(
+                Date.parse(initial?.observedAt ?? ""),
+              )
               yield* Effect.promise(() => writeFile(modeFile, "good"))
               const refreshed = yield* awaitProof(true)
               expect(refreshed?.recipientId).toBe("managed:host-a:resident-proof")
               expect(Date.parse(refreshed?.observedAt ?? "")).toBeGreaterThan(
-                Date.parse(initial?.observedAt ?? ""),
+                Date.parse(unavailable?.observedAt ?? ""),
               )
             }
             expect(yield* (yield* AgentRunStore).read("resident-proof")).toMatchObject({

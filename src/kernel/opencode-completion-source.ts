@@ -118,7 +118,7 @@ const sourceError = (operation: string) => (cause: unknown) =>
 const providerCall = <A>(operation: string, run: (signal: AbortSignal) => Promise<A>) =>
   Effect.tryPromise({ try: run, catch: sourceError(operation) })
 
-const isTerminalAnswer = (message: CompletionMessage) =>
+const isCompletedMessage = (message: CompletionMessage) =>
   message.time.completed !== undefined && message.error === undefined
 
 const completionSourceName = (watch: typeof WatchRow.Type) =>
@@ -163,12 +163,35 @@ type ObservedCompletion = {
   readonly completedTimestamp: number
 }
 
+type CompletionObservation =
+  | ({ readonly _tag: "Completed" } & ObservedCompletion)
+  | { readonly _tag: "OperatorRequired"; readonly reason: string }
+
+const latestCompletion = (
+  messages: ReadonlyArray<CompletionMessage>,
+  registeredAt: Date,
+): ObservedCompletion | undefined =>
+  messages.reduce<ObservedCompletion | undefined>((latest, message) => {
+    const completed = message.time.completed
+    if (
+      !isCompletedMessage(message) ||
+      completed === undefined ||
+      completed < registeredAt.getTime()
+    ) {
+      return latest
+    }
+    return latest === undefined || completed >= latest.completedTimestamp
+      ? { message, completedTimestamp: completed }
+      : latest
+  }, undefined)
+
 const firstTerminalEvent = async (
   iterator: AsyncIterator<OpenCodeSessionEvent>,
-  nativeSessionId: string,
+  provider: OpenCodeCompletionProviderPort,
+  reference: { readonly sessionID: string; readonly directory: string },
   registeredAt: Date,
   signal: AbortSignal,
-): Promise<ObservedCompletion> => {
+): Promise<CompletionObservation> => {
   const aborted = new Promise<never>((_, reject) => {
     signal.addEventListener(
       "abort",
@@ -182,15 +205,32 @@ const firstTerminalEvent = async (
     const next = await Promise.race([iterator.next(), aborted])
     if (next.done) throw new Error("OpenCode completion event stream disconnected")
     const event = next.value
-    if (event.type !== "message.updated" || event.sessionID !== nativeSessionId) continue
-    const completed = event.message.time.completed
-    if (
-      isTerminalAnswer(event.message) &&
-      completed !== undefined &&
-      completed >= registeredAt.getTime()
-    ) {
-      return { message: event.message, completedTimestamp: completed }
+    if (event.sessionID !== reference.sessionID) continue
+    if (event.type === "message.updated") {
+      if (
+        !isCompletedMessage(event.message) ||
+        event.message.time.completed === undefined ||
+        event.message.time.completed < registeredAt.getTime()
+      )
+        continue
+    } else if (event.type !== "session.status" || event.status.type !== "idle") {
+      continue
     }
+    // Live messages can be completed tool steps too. Only attribute an answer
+    // once the session is idle with an outcome, including when idle follows
+    // the last message without another message update.
+    if (!(await provider.sessionFinished(reference, signal))) continue
+    const history = await provider.listMessages(reference, signal)
+    if (history.length > MAX_AGENT_COMPLETION_CATCHUP_MESSAGES) {
+      return { _tag: "OperatorRequired", reason: "history_exceeds_bound" }
+    }
+    // A buffered step event may arrive after the run ends. Prefer the latest
+    // completed message in history, retaining the event if history lags it.
+    const fresh = latestCompletion(
+      event.type === "message.updated" ? [event.message, ...history] : history,
+      registeredAt,
+    )
+    if (fresh !== undefined) return { _tag: "Completed", ...fresh }
   }
 }
 
@@ -207,7 +247,7 @@ const observeCompletion = (
       const interrupt = () => controller.abort(effectSignal.reason)
       effectSignal.addEventListener("abort", interrupt, { once: true })
       let iterator: AsyncIterator<OpenCodeSessionEvent> | undefined
-      let live: Promise<ObservedCompletion> | undefined
+      let live: Promise<CompletionObservation> | undefined
       try {
         const stream = await provider.subscribeEvents(
           { directory: watch.absolute_path },
@@ -216,12 +256,7 @@ const observeCompletion = (
         iterator = stream[Symbol.asyncIterator]()
         // Async iterables are lazy. Starting this pull opens the provider subscription
         // before history catch-up, closing the registration/history race.
-        live = firstTerminalEvent(
-          iterator,
-          watch.native_session_id,
-          registeredAt,
-          controller.signal,
-        )
+        live = firstTerminalEvent(iterator, provider, reference, registeredAt, controller.signal)
         void live.catch(() => undefined)
         // History is only meaningful once the run has ended: OpenCode 2
         // completes an assistant message per tool step, so a still-running
@@ -231,28 +266,14 @@ const observeCompletion = (
         // stream's execution-succeeded event.
         const finished = await provider.sessionFinished(reference, controller.signal)
         if (!finished) {
-          return { _tag: "Completed" as const, ...(await live) }
+          return await live
         }
         const history = await provider.listMessages(reference, controller.signal)
         if (history.length > MAX_AGENT_COMPLETION_CATCHUP_MESSAGES) {
           return { _tag: "OperatorRequired" as const, reason: "history_exceeds_bound" }
         }
-        const terminal = history.filter(isTerminalAnswer)
-        const candidates = terminal.flatMap((message) =>
-          message.time.completed !== undefined && message.time.completed >= registeredAt.getTime()
-            ? [{ message, completedTimestamp: message.time.completed }]
-            : [],
-        )
-        // A finished multi-step run leaves several completed messages; the
-        // final one is the answer. Freshness still fences replays of runs
-        // that ended before this watch existed.
-        const fresh = candidates.reduce<ObservedCompletion | undefined>(
-          (latest, candidate) =>
-            latest === undefined || candidate.completedTimestamp >= latest.completedTimestamp
-              ? candidate
-              : latest,
-          undefined,
-        )
+        const terminal = history.filter(isCompletedMessage)
+        const fresh = latestCompletion(terminal, registeredAt)
         if (fresh !== undefined) {
           return { _tag: "Completed" as const, ...fresh }
         }
@@ -264,7 +285,7 @@ const observeCompletion = (
         if (terminal.some((message) => !isConsumed(message))) {
           return { _tag: "OperatorRequired" as const, reason: "stale_completion" }
         }
-        return { _tag: "Completed" as const, ...(await live) }
+        return await live
       } finally {
         controller.abort()
         effectSignal.removeEventListener("abort", interrupt)
@@ -299,7 +320,9 @@ export const runOpenCodeCompletionSourceIteration = (options: OpenCodeCompletion
       JOIN kernel_sessions AS session ON session.session_id = watch.child_session_id
       JOIN kernel_agent_runs AS run ON run.session_id = watch.child_session_id
       JOIN resident_inbox AS inbox ON inbox.id = 'agent-run-end-' || run.run_id
-      WHERE watch.provider_kind IN ('codex', 'claude')
+      WHERE (watch.provider_kind IN ('codex', 'claude') OR EXISTS (
+        SELECT 1 FROM sandbox_leases lease WHERE lease.session_id = watch.native_session_id AND lease.state = 'released'
+      ))
         AND watch.owning_host_id = ${options.owningHostId}
         AND watch.state = 'watching'
         AND watch.child_session_generation = session.revision
@@ -346,6 +369,7 @@ export const runOpenCodeCompletionSourceIteration = (options: OpenCodeCompletion
       JOIN kernel_working_resources AS resource ON resource.resource_id = watch.resource_id
       WHERE watch.provider_kind = 'opencode' AND watch.owning_host_id = ${options.owningHostId}
         AND watch.state = 'watching'
+        AND NOT EXISTS (SELECT 1 FROM sandbox_leases lease WHERE lease.session_id = watch.native_session_id)
         AND NOT EXISTS (
           SELECT 1 FROM resident_threads t JOIN kernel_agent_runs a ON a.run_id = t.run_id
           WHERE t.provider_kind = 'opencode' AND t.thread_id = watch.native_session_id

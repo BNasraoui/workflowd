@@ -1,0 +1,86 @@
+name: Disposable agent runner
+
+on:
+  workflow_call:
+    inputs:
+      agent-image:
+        type: string
+        required: true
+      tooling-sha:
+        type: string
+        required: false
+      repository-id:
+        type: string
+        required: true
+      app-actor-id:
+        type: string
+        required: true
+      tailscale-client-id:
+        type: string
+        required: true
+      tailscale-audience:
+        type: string
+        required: true
+
+permissions: {}
+
+jobs:
+  runner:
+    if: >-
+      github.event_name == 'push' &&
+      startsWith(github.ref, 'refs/heads/workflowd/leases/') &&
+      github.repository_id == inputs.repository-id &&
+      github.actor_id == inputs.app-actor-id &&
+      github.event.repository.fork == false
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Check out pinned tooling
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: BNasraoui/workflowd
+          ref: ${{ inputs.tooling-sha || github.sha }}
+          persist-credentials: false
+          sparse-checkout: deploy/sandbox
+      - name: Join the restricted tailnet
+        env:
+          SANDBOX_TAILSCALE_CLIENT_ID: ${{ inputs.tailscale-client-id }}
+          SANDBOX_AUDIENCE: ${{ inputs.tailscale-audience }}
+        run: bash deploy/sandbox/tailscale.sh
+      - name: Prepare the disposable tooling
+        env:
+          SANDBOX_AGENT_IMAGE: ${{ inputs.agent-image }}
+          SANDBOX_TOOLING_SHA: ${{ inputs.tooling-sha || github.sha }}
+          SANDBOX_AUDIENCE: ${{ inputs.tailscale-audience }}
+        run: bash deploy/sandbox/runner.sh prepare
+      - name: Publish fixed readiness metadata
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: sandbox-ready-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /run/workflowd-sandbox/ready.json
+          if-no-files-found: error
+          retention-days: 1
+      - name: Hold the lease while mint sends heartbeats
+        # The runner injects OIDC variables after step env overrides. Strip them
+        # in the shell launcher, before either the shell or hold process starts.
+        shell: /usr/bin/env -u ACTIONS_ID_TOKEN_REQUEST_TOKEN -u ACTIONS_ID_TOKEN_REQUEST_URL /bin/bash --noprofile --norc -e -o pipefail {0}
+        run: exec /usr/local/bin/container-use hold
+      - name: Upload sealed result
+        if: success()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: sandbox-result-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /run/workflowd-sandbox/result/
+          if-no-files-found: error
+          retention-days: 1
+      - name: Release disposable containers
+        if: always()
+        run: |
+          status=0
+          bash deploy/sandbox/runner.sh stop || status=$?
+          sudo tailscale logout || status=$?
+          sudo systemctl stop workflowd-tailscaled || status=$?
+          exit "$status"

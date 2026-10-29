@@ -17,6 +17,7 @@ test("OctokitInstallationAdapter normalizes authoritative pull request data", as
     getPullRequest: async () => ({
       number: 7,
       user: { login: "author" },
+      author_association: "COLLABORATOR",
       base: {
         ref: "main",
         sha: "d".repeat(40),
@@ -63,6 +64,7 @@ test("OctokitInstallationAdapter normalizes authoritative pull request data", as
     pullRequest: {
       number: 7,
       author: "author",
+      authorAssociation: "COLLABORATOR",
       baseRef: "main",
       baseSha: "d".repeat(40),
       draft: false,

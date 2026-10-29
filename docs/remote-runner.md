@@ -1,5 +1,7 @@
 # Remote Probe Runner
 
+For mint deployment and updates, use the [verified deployment runbook](../deploy/verified-deploy.md). It covers the independent clone, review/CI admission, protected skill copies and agent Unix-user boundary.
+
 This plane transports two command kinds: the built-in harmless probe, and `claude_resume` — a request to wake a Claude Code session that lives on the runner's host. SQLite on the coordinator is the workflow authority. JetStream provides bounded, durable, at-least-once transport; runner inbox/outbox tables fence duplicate execution and coordinator result acceptance.
 
 Opted-in runners also handle bounded, authenticated [directory observations](agent-directory.md)
@@ -18,6 +20,28 @@ A `claude_resume` command is no longer harmless: it makes the runner execute `cl
 - **Unchanged broker grants.** `claude_resume` rides the same `workflowd.v1.commands.<host>` / `workflowd.v1.results` subjects as the probe; no new per-identity grants are needed, so a compromised runner's blast radius is exactly what it was for probes. The permissions integration test exercises a `claude_resume` command under the existing grants.
 
 Compared to reaching the host over SSH — which would hand the daemon an arbitrary remote shell authenticated by the daemon's key — the trust boundary here is "the host will run one fixed, argv-vector command shape for a directory it opted into, when its own broker identity receives a well-formed command," with the daemon holding no credential on the host at all.
+
+## Claude wake ownership and failures
+
+`kernel_resume_requests.owning_host_id` identifies the coordinator that owns the
+request lifecycle. For a Claude parent, `kernel_sessions.server_id` and its
+`claude-cli://<host>` endpoint identify the execution host and must agree.
+A parent on ben-arch therefore keeps coordinator custody on mint while its
+`claude_resume` job targets ben-arch. Conflicting saved custody is refused;
+a remote wake never falls back to the coordinator's local CLI.
+
+Wait consumption, resume-request creation, and handoff-job creation commit in
+one transaction. If parent custody becomes unavailable, the wait remains
+unconsumed and can proceed after custody is repaired. An `agent_wake_failed`
+message records the failure in the parent's mailbox and, for a dispatched
+child, its caller mailbox. `wait_for_agent` returns that parent `mailbox_id`;
+use `read_agent_mailbox` to read notices. Delivery failure notices include a
+bounded reason such as `cli_failed`, without prompts or raw CLI diagnostics.
+These notices do not retry an uncertain CLI delivery or repair older failed jobs.
+
+Resume-based wakes start a separate `claude --resume` process. They cannot
+reach an already live interactive session; live sessions should use the
+workflowd channel.
 
 ## NATS over Tailscale
 
@@ -103,3 +127,60 @@ bun run remote:enqueue --probe smoke-1 --host this-host
 The enqueue command creates a versioned kernel job through workflow instance, wait, event, and delivery state. The coordinator claims that job under the normal kernel lease, stores the exact attempt/worker/token/lease authority in a dispatch row, and republishes prepared rows after restart. Once prepared, ordinary kernel reclamation excludes the uncertain external effect. This post-lease custody is deliberate but finite: the dispatch expiry is the authority bound, after which coordinator reconciliation advances the generation, publishes a cancellation fence for externally uncertain work, and either creates a fresh kernel attempt or terminally fails an exhausted job. Result acceptance checks the published command, host, generation, attempt, observation time, and stored claim authority in the same transaction that completes the kernel job result.
 
 A runner commits every receipt or rejection before confirmed acknowledgement, applies per-job generation fences before queued commands, and recovers received work and result outbox rows after restart. Broker messages may still be duplicated or redelivered; operational guarantees are at-least-once transport plus durable fencing, not a single-delivery guarantee.
+
+## Agent sandbox base image
+
+The separate container-use sandbox plane has an `x86_64-linux` base image built
+with Nix. `flake.lock` pins all general tools through nixpkgs; repositories select
+their own Rust toolchain through rustup and `rust-toolchain.toml`. The image runs
+as `agent` (UID/GID 1000) with a writable `/home/agent`, UTF-8 locale,
+and a CA bundle. Nix builds the image on the host; Nix is not needed inside it.
+Archive tools (tar, gzip, xz, unzip), which, procps, the OpenSSH client, less,
+and Python 3 with pip are included. The conventional ELF loader uses nix-ld for
+downloaded binaries, with `NIX_LD` and `NIX_LD_LIBRARY_PATH`; no image-wide
+`LD_LIBRARY_PATH` overrides the libraries used by Nix-packaged tools.
+
+On Linux with Nix (flakes enabled) and Docker:
+
+```sh
+nix build .#agent-image --no-update-lock-file
+./result > /tmp/agent-image.tar
+docker load -i /tmp/agent-image.tar
+timeout 900 bash test/agent-image/e2e.sh
+```
+
+The `Agent base image` PR workflow (`agent-image-pr.yml`) calls the reusable
+`agent-image.yml` build and container-use E2E with only `contents: read`.
+Every PR job runs; publication has no job in that workflow. The separate
+`agent-image-publish.yml` workflow runs only on pushes to main, calls the same
+reusable build, and then loads its tested artifact to publish to
+`ghcr.io/bnasraoui/workflowd-agent-base:<full-commit-sha>` and `:main`, using
+`GITHUB_TOKEN` with `packages: write` confined to the publish job. It reports the
+image and compressed archive sizes in its build summary. The owner must make
+the initially private GHCR package public for anonymous sandbox pulls. If a
+package with this name already exists, link it to this repository and grant
+the repository Actions access before publishing.
+
+In a target repository, container-use v0.4.2 selects the image with:
+
+```sh
+container-use config base-image set ghcr.io/bnasraoui/workflowd-agent-base:<full-commit-sha>
+git add .container-use/environment.json
+```
+
+This writes `base_image` in `.container-use/environment.json`, read when creating
+a new environment ([v0.4.2 configuration source](https://github.com/dagger/container-use/blob/v0.4.2/environment/config.go#L13-L31),
+[CLI setter](https://github.com/dagger/container-use/blob/v0.4.2/cmd/container-use/config.go#L204-L216)).
+The E2E uses that CLI against a disposable fixture repository and a loopback-only
+registry containing the locally built image, then runs real MCP calls through
+container-use and Dagger, waiting for the registry's `/v2/` endpoint before
+pushing, with a bounded timeout. It checks every listed tool as UID 1000 in
+writable HOME, installs a local Python wheel with pip, and compiles C and a
+dependency-free Cargo crate with repository-selected Rust. Rust 1.85.0 is only a
+test fixture downloaded at runtime; no Rust toolchain is baked into the image. Runner
+lease integration remains a follow-up to PR #76.
+
+container-use v0.4.2 preserves the image user but copies imported `/workdir` as
+root, overriding the image directory's ownership ([source copy](https://github.com/dagger/container-use/blob/v0.4.2/environment/environment.go#L210)).
+The later runner integration must address workspace permissions for non-root
+shell edits and in-repository build output; tool installation in HOME works today.

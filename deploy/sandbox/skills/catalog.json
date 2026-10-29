@@ -1,0 +1,123 @@
+{
+  "root": "/opt/workflowd/skills",
+  "sources": {
+    "obra": {
+      "repository": "obra/superpowers",
+      "rev": "bb92a77741419a4ab5f06e711a283343f1ada0c3",
+      "hash": "sha256-UCVI+T7j1Xh1LDkrvnJduis7eHFqrizCyGTWAGW5d6U="
+    },
+    "mattpocock": {
+      "repository": "mattpocock/skills",
+      "rev": "49dd158d1076134a641b33efb035946536778336",
+      "hash": "sha256-NljCSZNI3sZ+vbCw7pRdrwR7try4BxOFp4gdjuWYtzs="
+    },
+    "cursor": {
+      "repository": "cursor/plugins",
+      "rev": "e5a02f8fb0409c2db7eb06eae9078b235a2b5009",
+      "hash": "sha256-2aTLeNUAu8/GEQSOnzmFpgUAINVDRgO4gkjnh6v4KwY="
+    },
+    "kitlangton": {
+      "repository": "kitlangton/skills",
+      "rev": "71195e36024ebd2e66c5beac946e81eafd5abc43",
+      "hash": "sha256-OAG3JMZjB5NVnuEn9McboxhqQ7sWbuT+9m0YjFIm/WU="
+    },
+    "dmmulroy": {
+      "repository": "dmmulroy/skills",
+      "rev": "8603380821fee6a77c82639f364ce8fe4f5a92be",
+      "hash": "sha256-NNMxSfBtNDiwNimMNlk9fbDQa7bxsCwweHNzFsI3JTc="
+    },
+    "anthropics": {
+      "repository": "anthropics/skills",
+      "rev": "dbd4588f9e1033efb41dad4bef2f7947c8993d44",
+      "hash": "sha256-+UIqBnzyeIOvJSKYaDaE3GYPEpLw7qQqyUw5S971AfU="
+    },
+    "humanlayer": {
+      "repository": "humanlayer/skills",
+      "rev": "653b6411c1f70c275a18e37673b042ff99f67ceb",
+      "hash": "sha256-W3dFEdIi4sz4CAZvaj1xjtN7xTRebF/WHOTQYCIe2Xo="
+    }
+  },
+  "skills": [
+    {
+      "name": "test-driven-development",
+      "source": "obra",
+      "directory": "skills/test-driven-development",
+      "license": "LICENSE",
+      "licenseId": "MIT",
+      "description": "Use when implementing any feature or bugfix, before writing implementation code"
+    },
+    {
+      "name": "code-review",
+      "source": "mattpocock",
+      "directory": "skills/engineering/code-review",
+      "license": "LICENSE",
+      "licenseId": "MIT",
+      "description": "Review the changes since a fixed point (commit, branch, tag, or merge-base) along two axes: Standards (does the code follow this repo's documented coding standards?) and Spec (does the code match what the originating issue/spec asked for?). Runs both reviews in parallel sub-agents and reports them side by side. Use when the user wants to review a branch, a PR, work-in-progress changes, or asks to \"review since X\"."
+    },
+    {
+      "name": "codebase-design",
+      "source": "mattpocock",
+      "directory": "skills/engineering/codebase-design",
+      "license": "LICENSE",
+      "licenseId": "MIT",
+      "description": "Shared vocabulary for designing deep modules. Use when the user wants to design or improve a module's interface, find deepening opportunities, decide where a seam goes, make code more testable or AI-navigable, or when another skill needs the deep-module vocabulary."
+    },
+    {
+      "name": "domain-modeling",
+      "source": "mattpocock",
+      "directory": "skills/engineering/domain-modeling",
+      "license": "LICENSE",
+      "licenseId": "MIT",
+      "description": "Build and sharpen a project's domain model. Use when discussing codebase terminology, writing or editing a GLOSSARY.md, or recording or editing an ADR."
+    },
+    {
+      "name": "improve-codebase-architecture",
+      "source": "mattpocock",
+      "directory": "skills/engineering/improve-codebase-architecture",
+      "license": "LICENSE",
+      "licenseId": "MIT",
+      "description": "Scan a codebase for deepening opportunities, present them as a visual HTML report, then grill through whichever one you pick."
+    },
+    {
+      "name": "deslop",
+      "source": "cursor",
+      "directory": "cursor-team-kit/skills/deslop",
+      "license": "cursor-team-kit/LICENSE",
+      "licenseId": "MIT",
+      "description": "Remove AI-generated code slop and clean up code style"
+    },
+    {
+      "name": "effect",
+      "source": "kitlangton",
+      "directory": "skills/effect",
+      "license": "LICENSE",
+      "licenseId": "MIT",
+      "description": "Opinionated guide for building production TypeScript applications with Effect v4. Use when implementing Effect workflows, services, layers, schemas, configuration, schedules, caches, streams, HTTP clients, or tests."
+    },
+    {
+      "name": "effect-service-design",
+      "source": "dmmulroy",
+      "directory": "effect-service-design",
+      "license": "LICENSE",
+      "licenseId": "MIT",
+      "description": "Design Effect services. Use when designing a new Effect service module or auditing an existing codebase for service, Layer, and composition improvements."
+    },
+    {
+      "name": "frontend-design",
+      "source": "anthropics",
+      "directory": "skills/frontend-design",
+      "license": "skills/frontend-design/LICENSE.txt",
+      "licenseId": "Apache-2.0",
+      "description": "Guidance for distinctive, intentional visual design when building new UI or reshaping an existing one. Helps with aesthetic direction, typography, and making choices that don't read as templated defaults."
+    },
+    {
+      "name": "visual-pr",
+      "source": "humanlayer",
+      "directory": "plugins/visual-pr/skills/visual-pr",
+      "license": "LICENSE",
+      "licenseId": "MIT",
+      "description": "Write the sandbox PR description using the visual review template, then pass it as body to submit_result.",
+      "vendored": "visual-pr"
+    }
+  ]
+}

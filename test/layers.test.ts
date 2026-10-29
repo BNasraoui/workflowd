@@ -1,13 +1,18 @@
+import { agentGitTestEnvironment } from "./helpers/agent-git-config"
+import { InstallationGuard } from "../src/installation-guard"
 import { expect, test } from "bun:test"
 import { generateKeyPairSync } from "node:crypto"
 import { mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
-import { Cause, Effect, Layer, Option } from "effect"
+import { Cause, Duration, Effect, Fiber, Layer, Option, Queue } from "effect"
+import { TestClock } from "effect/testing"
+import { timed } from "./helpers/installation-guard"
 import { loadConfig } from "../src/config"
 import { AgentHarness } from "../src/agent-harness"
 import { GitHub } from "../src/github"
+import { SandboxDispatch } from "../src/sandbox/dispatch"
 import { AgentRunIngress } from "../src/kernel/agent-run-ingress"
 import { AgentRunWatchdog } from "../src/kernel/agent-run-watchdog"
 import { ClaudeResumeWorker } from "../src/kernel/claude-resume-worker"
@@ -83,98 +88,147 @@ const sixStageDefinition = {
   })),
 }
 
-test("starts and restarts the full live layer with both kernel stores", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "workflowd-layers-kernel-stores-"))
-  try {
-    const privateKeyPath = join(directory, "github.pem")
-    const databasePath = join(directory, "workflowd.db")
-    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 })
-    await writeFile(privateKeyPath, privateKey.export({ type: "pkcs8", format: "pem" }))
-    const config = await loadConfig(
-      {
-        GITHUB_APP_ID: "123",
-        GITHUB_PRIVATE_KEY_PATH: privateKeyPath,
-        GITHUB_WEBHOOK_SECRET: "secret",
-        OPENCODE_SERVER_PASSWORD: "password",
+function qrspiEnvironment(directory: string) {
+  return {
+    WORKFLOWD_QRSPI_TOKEN: "kickoff-secret",
+    WORKFLOWD_QRSPI_INSTALLATION_ID: "91",
+    WORKFLOWD_QRSPI_REPOSITORY_ID: "42",
+    WORKFLOWD_QRSPI_REPOSITORY: "example-owner/example",
+    WORKFLOWD_QRSPI_BEADS_WORKSPACE_ID: "workspace-42",
+    WORKFLOWD_QRSPI_BEADS_WORKSPACE: directory,
+  }
+}
+
+function loadLayerConfig(directory: string, overrides: Record<string, string> = {}) {
+  return loadConfig(
+    {
+      ...agentGitTestEnvironment,
+      GITHUB_APP_ID: "123",
+      WORKFLOWD_AGENT_GIT_NAME: "Agent",
+      WORKFLOWD_AGENT_GIT_EMAIL: "agent@example.test",
+      WORKFLOWD_ALLOWED_INSTALLATION_ACCOUNT_IDS: "81005232,319835875",
+      WORKFLOWD_PR_REPOSITORIES: '[{"repository":"example-owner/example","installationId":91}]',
+      GITHUB_PRIVATE_KEY_PATH: join(directory, "github.pem"),
+      GITHUB_WEBHOOK_SECRET: "secret",
+      OPENCODE_SERVER_PASSWORD: "password",
+      WORKFLOWD_REVIEW_OPENCODE_PASSWORD: "review-password",
+      WORKFLOWD_OPENCODE_ATTACH_URL: "https://mint.example-tailnet.ts.net:4096",
+      ...overrides,
+    },
+    { home: directory },
+  )
+}
+
+function runWithAvailabilityDeadline<A, E>(effect: Effect.Effect<A, E>) {
+  return Effect.runPromise(
+    timed((sleeps) =>
+      Effect.gen(function* () {
+        const fiber = yield* effect.pipe(Effect.forkChild)
+        let sleep = yield* Queue.take(sleeps)
+        while (Duration.toMillis(sleep) !== 30_000) sleep = yield* Queue.take(sleeps)
+        yield* TestClock.adjust("30 seconds")
+        return yield* Fiber.join(fiber)
+      }),
+    ),
+  )
+}
+
+test.each([false, true])(
+  "starts and restarts the full live layer with both kernel stores (sandbox %s)",
+  async (sandbox) => {
+    const directory = await mkdtemp(join(tmpdir(), "workflowd-layers-kernel-stores-"))
+    try {
+      const privateKeyPath = join(directory, "github.pem")
+      const databasePath = join(directory, "workflowd.db")
+      const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 })
+      await writeFile(privateKeyPath, privateKey.export({ type: "pkcs8", format: "pem" }))
+      const config = await loadLayerConfig(directory, {
         WORKFLOWD_DATABASE_PATH: databasePath,
-        WORKFLOWD_OPENCODE_ATTACH_URL: "https://mint.example-tailnet.ts.net:4096",
-        WORKFLOWD_QRSPI_TOKEN: "kickoff-secret",
-        WORKFLOWD_QRSPI_INSTALLATION_ID: "91",
-        WORKFLOWD_QRSPI_REPOSITORY_ID: "42",
-        WORKFLOWD_QRSPI_REPOSITORY: "example-owner/example",
-        WORKFLOWD_QRSPI_BEADS_WORKSPACE_ID: "workspace-42",
-        WORKFLOWD_QRSPI_BEADS_WORKSPACE: directory,
+        ...qrspiEnvironment(directory),
         WORKFLOWD_QRSPI_DEFINITION_JSON: JSON.stringify(qrspiDefinition),
         WORKFLOWD_AGENT_RUN_TOKEN: "agent-run-secret",
         WORKFLOWD_AGENT_RUN_ROUTES: "implement=zai-coding-plan/glm-5.3-flash",
         WORKFLOWD_AGENT_RUN_REPOSITORIES: `workflowd=${directory}`,
+        ...(sandbox
+          ? {
+              WORKFLOWD_AGENT_RUN_SANDBOX_REPOSITORIES: JSON.stringify([
+                {
+                  alias: "workflowd",
+                  repository: "BNasraoui/workflowd",
+                  repositoryId: 1306107007,
+                  installationId: 147573449,
+                  workflowSha: "a".repeat(40),
+                  appActorId: 306741873,
+                  agentImage: "ghcr.io/bnasraoui/workflowd-agent-base@sha256:" + "f".repeat(64),
+                  tailscaleClientId: "fixture",
+                  tailscaleAudience: "fixture",
+                },
+              ]),
+            }
+          : {}),
         WORKFLOWD_EXECUTION_CAPABILITIES_CODEX_ENABLED: "false",
         WORKFLOWD_EXECUTION_CAPABILITIES_TIMEOUT_MS: "5",
         OPENCODE_SERVER_URL: "http://127.0.0.1:1",
-      },
-      { home: directory },
-    )
+      })
 
-    const start = () =>
-      Effect.runPromise(
-        Effect.gen(function* () {
-          const events = yield* KernelEventStore
-          const jobs = yield* KernelJobStore
-          yield* WorkflowStore
-          yield* WorkflowStart
-          const testJobs = yield* TestJobCanary
-          const agentRuns = yield* AgentRunIngress
-          const watchdog = yield* AgentRunWatchdog
-          const claudeResume = yield* ClaudeResumeWorker
-          const dogfood = yield* DogfoodStore
-          const discovery = yield* Effect.serviceOption(ExecutionDiscovery)
-          if (Option.isNone(discovery))
-            return yield* Effect.die(new Error("expected configured discovery module"))
-          const catalog = yield* discovery.value.list()
-          if (
-            catalog.sources.length !== 1 ||
-            catalog.sources[0]?.kind !== "opencode" ||
-            catalog.sources[0]?.status !== "unavailable"
-          ) {
-            return yield* Effect.die(
-              new Error("expected only the enabled, unavailable OpenCode discovery source"),
-            )
-          }
-          // Both supervised iterations run once against the empty store so
-          // the composed worker pipelines execute, not just resolve.
-          const watchdogStatus = yield* watchdog.iteration
-          const claudeStatus = yield* claudeResume.iteration
-          if (watchdogStatus !== "idle" || claudeStatus !== "idle") {
-            return yield* Effect.die(new Error("expected idle iterations on an empty store"))
-          }
-          const dogfoodContract = (yield* dogfood.sessions()).contract
-          return {
-            methods: [
-              events.readReadyDeliveries,
-              jobs.readRecoverable,
-              testJobs.submit,
-              agentRuns.register,
-              dogfood.sessions,
-            ],
-            dogfoodContract,
-          }
-        }).pipe(
-          Effect.provide(
-            makeLiveLayer(config).pipe(
-              Layer.provide(SqliteClient.layer({ filename: databasePath })),
+      const start = () =>
+        runWithAvailabilityDeadline(
+          Effect.gen(function* () {
+            const events = yield* KernelEventStore
+            const jobs = yield* KernelJobStore
+            yield* InstallationGuard
+            yield* WorkflowStore
+            yield* WorkflowStart
+            const testJobs = yield* TestJobCanary
+            const agentRuns = yield* AgentRunIngress
+            expect(Option.isSome(yield* Effect.serviceOption(SandboxDispatch))).toBe(sandbox)
+            const watchdog = yield* AgentRunWatchdog
+            const claudeResume = yield* ClaudeResumeWorker
+            const dogfood = yield* DogfoodStore
+            const discovery = yield* Effect.serviceOption(ExecutionDiscovery)
+            if (Option.isNone(discovery))
+              return yield* Effect.die(new Error("expected configured discovery module"))
+            const catalog = yield* discovery.value.list()
+            expect(catalog.sources.map(({ kind, status }) => ({ kind, status }))).toEqual([
+              { kind: "opencode", status: "unavailable" },
+              { kind: "claude", status: "unsupported" },
+            ])
+            // Both supervised iterations run once against the empty store so
+            // the composed worker pipelines execute, not just resolve.
+            const watchdogStatus = yield* watchdog.iteration
+            const claudeStatus = yield* claudeResume.iteration
+            if (watchdogStatus !== "idle" || claudeStatus !== "idle") {
+              return yield* Effect.die(new Error("expected idle iterations on an empty store"))
+            }
+            const dogfoodContract = (yield* dogfood.sessions()).contract
+            return {
+              methods: [
+                events.readReadyDeliveries,
+                jobs.readRecoverable,
+                testJobs.submit,
+                agentRuns.register,
+                dogfood.sessions,
+              ],
+              dogfoodContract,
+            }
+          }).pipe(
+            Effect.provide(
+              makeLiveLayer(config).pipe(
+                Layer.provide(SqliteClient.layer({ filename: databasePath })),
+              ),
             ),
           ),
-        ),
-      )
+        )
 
-    const first = await start()
-    expect(first.methods.every((method) => typeof method === "function")).toBe(true)
-    expect(first.dogfoodContract).toBe(DOGFOOD_ENRICHMENT_CONTRACT)
-    expect((await start()).methods.every((method) => typeof method === "function")).toBe(true)
-  } finally {
-    await rm(directory, { recursive: true, force: true })
-  }
-})
+      const first = await start()
+      expect(first.methods.every((method) => typeof method === "function")).toBe(true)
+      expect(first.dogfoodContract).toBe(DOGFOOD_ENRICHMENT_CONTRACT)
+      expect((await start()).methods.every((method) => typeof method === "function")).toBe(true)
+    } finally {
+      await rm(directory, { recursive: true, force: true })
+    }
+  },
+)
 
 test("composes the reusable agent harness with the live ports", async () => {
   const directory = await mkdtemp(join(tmpdir(), "workflowd-layers-"))
@@ -182,28 +236,15 @@ test("composes the reusable agent harness with the live ports", async () => {
     const privateKeyPath = join(directory, "github.pem")
     const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 })
     await writeFile(privateKeyPath, privateKey.export({ type: "pkcs8", format: "pem" }))
-    const config = await loadConfig(
-      {
-        GITHUB_APP_ID: "123",
-        GITHUB_PRIVATE_KEY_PATH: privateKeyPath,
-        GITHUB_WEBHOOK_SECRET: "secret",
-        OPENCODE_SERVER_PASSWORD: "password",
-        WORKFLOWD_OPENCODE_ATTACH_URL: "https://mint.example-tailnet.ts.net:4096",
-        WORKFLOWD_QRSPI_TOKEN: "kickoff-secret",
-        WORKFLOWD_QRSPI_INSTALLATION_ID: "91",
-        WORKFLOWD_QRSPI_REPOSITORY_ID: "42",
-        WORKFLOWD_QRSPI_REPOSITORY: "example-owner/example",
-        WORKFLOWD_QRSPI_BEADS_WORKSPACE_ID: "workspace-42",
-        WORKFLOWD_QRSPI_BEADS_WORKSPACE: directory,
-        WORKFLOWD_QRSPI_DEFINITION_JSON: JSON.stringify(qrspiDefinition),
-      },
-      { home: directory },
-    )
+    const config = await loadLayerConfig(directory, {
+      ...qrspiEnvironment(directory),
+      WORKFLOWD_QRSPI_DEFINITION_JSON: JSON.stringify(qrspiDefinition),
+    })
     const Live = makeLiveLayer(config).pipe(
       Layer.provide(SqliteClient.layer({ filename: ":memory:" })),
     )
 
-    const methods = await Effect.runPromise(
+    const methods = await runWithAvailabilityDeadline(
       Effect.gen(function* () {
         const store = yield* WorkflowStore
         const github = yield* GitHub
@@ -234,27 +275,14 @@ test("composes the explicit six-contract catalog by default", async () => {
     const privateKeyPath = join(directory, "github.pem")
     const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 })
     await writeFile(privateKeyPath, privateKey.export({ type: "pkcs8", format: "pem" }))
-    const config = await loadConfig(
-      {
-        GITHUB_APP_ID: "123",
-        GITHUB_PRIVATE_KEY_PATH: privateKeyPath,
-        GITHUB_WEBHOOK_SECRET: "secret",
-        OPENCODE_SERVER_PASSWORD: "password",
-        WORKFLOWD_OPENCODE_ATTACH_URL: "https://mint.example-tailnet.ts.net:4096",
-        WORKFLOWD_QRSPI_TOKEN: "kickoff-secret",
-        WORKFLOWD_QRSPI_INSTALLATION_ID: "91",
-        WORKFLOWD_QRSPI_REPOSITORY_ID: "42",
-        WORKFLOWD_QRSPI_REPOSITORY: "example-owner/example",
-        WORKFLOWD_QRSPI_BEADS_WORKSPACE_ID: "workspace-42",
-        WORKFLOWD_QRSPI_BEADS_WORKSPACE: directory,
-        WORKFLOWD_QRSPI_DEFINITION_JSON: JSON.stringify(sixStageDefinition),
-      },
-      { home: directory },
-    )
+    const config = await loadLayerConfig(directory, {
+      ...qrspiEnvironment(directory),
+      WORKFLOWD_QRSPI_DEFINITION_JSON: JSON.stringify(sixStageDefinition),
+    })
     const Live = makeLiveLayer(config).pipe(
       Layer.provide(SqliteClient.layer({ filename: ":memory:" })),
     )
-    const preflight = await Effect.runPromise(
+    const preflight = await runWithAvailabilityDeadline(
       Effect.gen(function* () {
         const workflowStart = yield* WorkflowStart
         return yield* workflowStart.preflight.pipe(Effect.result)
@@ -275,16 +303,7 @@ test("composes disabled QRSPI ingress as an unauthorized service", async () => {
     const privateKeyPath = join(directory, "github.pem")
     const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 })
     await writeFile(privateKeyPath, privateKey.export({ type: "pkcs8", format: "pem" }))
-    const config = await loadConfig(
-      {
-        GITHUB_APP_ID: "123",
-        GITHUB_PRIVATE_KEY_PATH: privateKeyPath,
-        GITHUB_WEBHOOK_SECRET: "secret",
-        OPENCODE_SERVER_PASSWORD: "password",
-        WORKFLOWD_OPENCODE_ATTACH_URL: "https://mint.example-tailnet.ts.net:4096",
-      },
-      { home: directory },
-    )
+    const config = await loadLayerConfig(directory)
     const Live = makeLiveLayer(config).pipe(
       Layer.provide(SqliteClient.layer({ filename: ":memory:" })),
     )
@@ -311,31 +330,18 @@ test("keeps unrelated services available when configured QRSPI is closed", async
     const privateKeyPath = join(directory, "github.pem")
     const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 })
     await writeFile(privateKeyPath, privateKey.export({ type: "pkcs8", format: "pem" }))
-    const config = await loadConfig(
-      {
-        GITHUB_APP_ID: "123",
-        GITHUB_PRIVATE_KEY_PATH: privateKeyPath,
-        GITHUB_WEBHOOK_SECRET: "secret",
-        OPENCODE_SERVER_PASSWORD: "password",
-        WORKFLOWD_OPENCODE_ATTACH_URL: "https://mint.example-tailnet.ts.net:4096",
-        WORKFLOWD_QRSPI_TOKEN: "kickoff-secret",
-        WORKFLOWD_QRSPI_INSTALLATION_ID: "91",
-        WORKFLOWD_QRSPI_REPOSITORY_ID: "42",
-        WORKFLOWD_QRSPI_REPOSITORY: "example-owner/example",
-        WORKFLOWD_QRSPI_BEADS_WORKSPACE_ID: "workspace-42",
-        WORKFLOWD_QRSPI_BEADS_WORKSPACE: directory,
-        WORKFLOWD_QRSPI_DEFINITION_JSON: JSON.stringify({
-          ...qrspiDefinition,
-          stages: [
-            {
-              ...qrspiDefinition.stages[0],
-              contract: { name: "qrspi.missing", contractVersion: 1 },
-            },
-          ],
-        }),
-      },
-      { home: directory },
-    )
+    const config = await loadLayerConfig(directory, {
+      ...qrspiEnvironment(directory),
+      WORKFLOWD_QRSPI_DEFINITION_JSON: JSON.stringify({
+        ...qrspiDefinition,
+        stages: [
+          {
+            ...qrspiDefinition.stages[0],
+            contract: { name: "qrspi.missing", contractVersion: 1 },
+          },
+        ],
+      }),
+    })
     const Live = makeLiveLayer(config).pipe(
       Layer.provide(SqliteClient.layer({ filename: ":memory:" })),
     )
@@ -378,23 +384,11 @@ test("keeps unrelated services available when configured QRSPI is closed", async
 test("fails live composition when the configured GitHub key cannot be read", async () => {
   const directory = await mkdtemp(join(tmpdir(), "workflowd-layers-missing-key-"))
   try {
-    const config = await loadConfig(
-      {
-        GITHUB_APP_ID: "123",
-        GITHUB_PRIVATE_KEY_PATH: join(directory, "missing.pem"),
-        GITHUB_WEBHOOK_SECRET: "secret",
-        OPENCODE_SERVER_PASSWORD: "password",
-        WORKFLOWD_OPENCODE_ATTACH_URL: "https://mint.example-tailnet.ts.net:4096",
-        WORKFLOWD_QRSPI_TOKEN: "kickoff-secret",
-        WORKFLOWD_QRSPI_INSTALLATION_ID: "91",
-        WORKFLOWD_QRSPI_REPOSITORY_ID: "42",
-        WORKFLOWD_QRSPI_REPOSITORY: "example-owner/example",
-        WORKFLOWD_QRSPI_BEADS_WORKSPACE_ID: "workspace-42",
-        WORKFLOWD_QRSPI_BEADS_WORKSPACE: directory,
-        WORKFLOWD_QRSPI_DEFINITION_JSON: JSON.stringify(qrspiDefinition),
-      },
-      { home: directory },
-    )
+    const config = await loadLayerConfig(directory, {
+      GITHUB_PRIVATE_KEY_PATH: join(directory, "missing.pem"),
+      ...qrspiEnvironment(directory),
+      WORKFLOWD_QRSPI_DEFINITION_JSON: JSON.stringify(qrspiDefinition),
+    })
     const Live = makeLiveLayer(config).pipe(
       Layer.provide(SqliteClient.layer({ filename: ":memory:" })),
     )

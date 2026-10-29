@@ -165,7 +165,12 @@ const call = (method: "POST" | "DELETE", runId?: string) =>
         headers: { authorization: "Bearer secret" },
         ...(method === "POST" ? { body: JSON.stringify(input) } : {}),
       }),
-      { webhookSecret: "", now: at, agentRuns: { token: "secret", ...ingress } },
+      {
+        installationIds: new Set(),
+        webhookSecret: "",
+        now: at,
+        agentRuns: { token: "secret", ...ingress },
+      },
     )
   })
 const refused = (response: Response) =>

@@ -112,6 +112,25 @@ describe("wait_for_agent", () => {
     expect(calls[0]!.authorization).toBe("Bearer daemon-token")
   })
 
+  test("exposes a schema-valid mailbox for wake failures", async () => {
+    const result = await run(
+      callTool(
+        "wait_for_agent",
+        args,
+        daemon(() =>
+          json({
+            waitId: "agent-wait-abc",
+            instanceId: "agent-wait-instance-abc",
+            status: "registered",
+            mailboxId: "agent-wake-mailbox-parent-stable",
+          }),
+        ),
+      ),
+    )
+    expect(result.structuredContent?.mailbox_id).toBe("agent-wake-mailbox-parent-stable")
+    expect(clientValidator("wait_for_agent")(result.structuredContent).valid).toBe(true)
+  })
+
   test("forwards an idempotency key and reports a duplicate as already registered", async () => {
     const calls: Array<Call> = []
     const result = await run(
@@ -203,6 +222,38 @@ describe("wait_for_agent", () => {
     // The client-side check that a schema-foreign refusal would fail as -32602.
     const validation = clientValidator("wait_for_agent")(result.structuredContent)
     expect(validation.valid).toBe(true)
+  })
+
+  test("relays a removed worktree refusal with the ended run's mailbox", async () => {
+    const detail =
+      "child session child-stable belonged to agent run run-1, which ended; its worktree was removed"
+    const result = await run(
+      callTool(
+        "wait_for_agent",
+        args,
+        daemon(() =>
+          json(
+            {
+              error: "custody",
+              reason: "worktree_removed_after_retention",
+              detail,
+              mailboxId: "agent-mailbox-run-1",
+            },
+            409,
+          ),
+        ),
+      ),
+    )
+
+    expect(result.isError).toBe(true)
+    expect(result.structuredContent).toEqual({
+      status: "refused",
+      reason: "worktree_removed_after_retention",
+      detail,
+      error: "custody",
+      mailbox_id: "agent-mailbox-run-1",
+    })
+    expect(clientValidator("wait_for_agent")(result.structuredContent).valid).toBe(true)
   })
 
   test("relays idempotency conflicts as a structured refusal", async () => {

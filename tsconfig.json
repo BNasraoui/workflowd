@@ -40,5 +40,12 @@
     ],
     "noEmit": true
   },
-  "include": ["src/**/*.ts", "test/**/*.ts", "scripts/**/*.ts", "skills/**/*.ts"]
+  "include": [
+    "src/**/*.ts",
+    "test/**/*.ts",
+    "scripts/**/*.ts",
+    "skills/**/*.ts",
+    "deploy/agent-user/relink.ts",
+    "deploy/agent-user/migrate-opencode.ts"
+  ]
 }

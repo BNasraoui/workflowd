@@ -10,6 +10,9 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 import { Agent, Model } from "@opencode-ai/client/effect"
+import { agentGitTestEnvironment } from "./helpers/agent-git-config"
+import { fixture as installationFixture } from "./helpers/installation-guard"
+import { InstallationGuard } from "../src/installation-guard"
 
 test("execution-only directory automatically exposes accepted runs under authenticated stable recipients", async () => {
   const config = await loadConfig({
@@ -17,6 +20,8 @@ test("execution-only directory automatically exposes accepted runs under authent
     WORKFLOWD_HOST_ID: "host-a",
     WORKFLOWD_AGENT_RUN_TOKEN: "directory-secret",
     WORKFLOWD_AGENT_RUN_REPOSITORIES: "fixture=/tmp/fixture",
+    WORKFLOWD_AGENT_GIT_NAME: "Directory Fixture",
+    WORKFLOWD_AGENT_GIT_EMAIL: "directory@example.invalid",
     WORKFLOWD_EXECUTION_CAPABILITIES_CODEX_ENABLED: "false",
   })
   await Effect.runPromise(
@@ -116,11 +121,16 @@ test("automation composition serves the same authenticated directory with unavai
     )
     const config = await loadConfig(
       {
+        ...agentGitTestEnvironment,
         GITHUB_APP_ID: "123",
+        WORKFLOWD_PR_REPOSITORIES: '[{"repository":"fixture/repo","installationId":91}]',
+        WORKFLOWD_ALLOWED_INSTALLATION_ACCOUNT_IDS: "81005232",
         GITHUB_PRIVATE_KEY_PATH: keyPath,
         GITHUB_WEBHOOK_SECRET: "fixture",
         OPENCODE_SERVER_PASSWORD: "private-fixture-password",
+        WORKFLOWD_REVIEW_OPENCODE_PASSWORD: "private-review-fixture-password",
         OPENCODE_SERVER_URL: openCode.url.toString(),
+        WORKFLOWD_REVIEW_OPENCODE_URL: openCode.url.toString(),
         WORKFLOWD_OPENCODE_ATTACH_URL: openCode.url.toString(),
         WORKFLOWD_HOST_ID: "host-a",
         WORKFLOWD_MODEL: "fixture/native-model",
@@ -129,9 +139,13 @@ test("automation composition serves the same authenticated directory with unavai
       },
       { home: root },
     )
+    const installationGuard = installationFixture(() => Response.json([])).guard
     await Effect.runPromise(
       Effect.gen(function* () {
-        const server = yield* startHookService({ ...config, http: { ...config.http, port: 0 } })
+        const server = yield* startHookService({
+          ...config,
+          http: { ...config.http, port: 0 },
+        }).pipe(Effect.provideService(InstallationGuard, installationGuard))
         healthy = false
         const response = yield* Effect.tryPromise(() =>
           fetch(new URL("/directory", server.url), {
