@@ -23,6 +23,7 @@ export const AgentDirectoryLive = (
   hostId: string,
   leaseMs = 90_000,
   remote?: DirectoryRemoteConfig,
+  messagingEnabled = false,
 ) =>
   Layer.effect(
     AgentDirectory,
@@ -61,6 +62,7 @@ export const AgentDirectoryLive = (
             ],
             runners: [
               {
+                ...(messagingEnabled ? { messageProtocol: 1 as const } : {}),
                 runnerId: runnerIdForHost(hostId),
                 hostId,
                 status: "active" as const,

@@ -1,5 +1,7 @@
+import { ExternalRegistration } from "../../src/directory/contract"
+import { relay } from "./relay"
 import { expect, test } from "bun:test"
-import { Effect } from "effect"
+import { Effect, Schema } from "effect"
 import { DirectoryStore } from "../../src/directory/store"
 import { makeMessageStore } from "../../src/messaging/store"
 import { makeMessageDelivery } from "../../src/messaging/delivery"
@@ -126,3 +128,41 @@ test.each(["codex", "opencode"] as const)(
       }).pipe(Effect.provide(managedStores())),
     ),
 )
+
+test("a rebound external endpoint cannot receive a message accepted for its previous revision", () =>
+  Effect.runPromise(
+    Effect.gen(function* () {
+      const directory = yield* DirectoryStore
+      const store = yield* makeMessageStore
+      const agent = yield* Effect.acquireRelease(
+        Effect.sync(() => relay()),
+        (agent) => Effect.promise(() => agent.server.stop(true)),
+      )
+      const first = Schema.decodeUnknownSync(ExternalRegistration)(agent.registration)
+      yield* directory.registerExternal(first, new Date(), 90000)
+      const target = (yield* directory.external(new Date()))[0]!
+      const message = {
+        id: crypto.randomUUID(),
+        sender: "host:host-a",
+        recipient: target.recipientId,
+        correlation: "c",
+        replyTo: null,
+        payload: { type: "note", version: 1, data: "old binding" },
+      }
+      yield* store.accept(message, target, "host-a")
+      const { signature: _signature, ...old } = first
+      const document = {
+        ...old,
+        revision: 2,
+        endpoint: { ...old.endpoint, nativeSessionId: "replacement" },
+      }
+      yield* directory.registerExternal(
+        { ...document, signature: agent.signature(document) },
+        new Date(),
+        90000,
+      )
+      yield* (yield* makeMessageDelivery("host-a")).pass()
+      expect((yield* store.read(message.id))?.delivery).toBe("stale_binding")
+      expect(agent.received).toEqual([])
+    }).pipe(Effect.scoped, Effect.provide(managedStores())),
+  ))

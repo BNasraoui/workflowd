@@ -62,7 +62,7 @@ export async function loadRemoteProcessConfig(
   }
   const agentGit = loadAgentGitConfig(env, claudeDirectories.length > 0)
   return {
-    messagingEnabled: enableMessaging,
+    ...(enableMessaging ? { messagingEnabled: true } : {}),
     ...(directory === undefined ? {} : { directory }),
     ...(agentGit === undefined ? {} : { agentGit }),
     servers,

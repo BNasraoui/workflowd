@@ -11,6 +11,7 @@ export const makeDirectoryLayer = (config: AppConfig) =>
         config.worker.hostId,
         config.directoryRemote?.leaseMs,
         config.directoryRemote,
+        config.messagingEnabled,
       )
 
 export const makeDirectoryRemoteLayer = (config: AppConfig) =>

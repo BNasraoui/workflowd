@@ -276,8 +276,11 @@ const make = (config: RemoteTransportConfig) =>
       Effect.gen(function* () {
         const connection = yield* getConnection()
         const consumer = yield* ensureConsumer(connection, stream, durable, subject)
-        const messages = yield* tryPromise("consume", () =>
-          consumer.fetch({ max_messages: maxMessages, expires: expiresMs }),
+        const messages = yield* Effect.acquireRelease(
+          tryPromise("consume", () =>
+            consumer.fetch({ max_messages: maxMessages, expires: expiresMs }),
+          ),
+          closeMessages,
         )
         const deliveries: Array<RemoteDelivery> = []
         yield* Effect.tryPromise({
@@ -289,7 +292,7 @@ const make = (config: RemoteTransportConfig) =>
           catch: transportError("consume"),
         })
         return deliveries
-      })
+      }).pipe(Effect.scoped)
 
     const consumeHost = <E>(
       hostId: string,

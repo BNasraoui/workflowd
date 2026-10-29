@@ -59,18 +59,18 @@ export const makeMessageStore = Effect.gen(function* () {
     },
     (effect) => effect.pipe(sql.withTransaction, Effect.mapError(messagingError)),
   )
-  const pending = Effect.fn("MessageStore.pending")(
-    function* (afterId?: string, hostId?: string, remote = false) {
-      const rows =
-        yield* sql`SELECT * FROM agent_messages WHERE delivery IN ('pending','queued','uncertain')
+  const pending = Effect.fn("MessageStore.pending")(function* (
+    afterId?: string,
+    hostId?: string,
+    remote = false,
+  ) {
+    const rows =
+      yield* sql`SELECT * FROM agent_messages WHERE delivery IN ('pending','queued','uncertain')
           AND rowid > COALESCE((SELECT rowid FROM agent_messages WHERE id=${afterId ?? null}),0)
           AND (${hostId ?? null} IS NULL OR (json_extract(target_json,'$.hostId')=${hostId ?? null}) <> ${remote ? 1 : 0})
-          ORDER BY rowid LIMIT 100`
-      return yield* Effect.forEach(rows, decode)
-    },
-    (effect, _afterId?: string, _hostId?: string, _remote?: boolean) =>
-      effect.pipe(Effect.mapError(messagingError)),
-  )
+          ORDER BY rowid LIMIT 100`.pipe(Effect.mapError(messagingError))
+    return yield* Effect.forEach(rows, decode).pipe(Effect.mapError(messagingError))
+  })
   // Compare-and-set before crossing a non-idempotent native/relay seam. A crash
   // after this write leaves a queryable intent; it never grants a second send.
   const begin = Effect.fn("MessageStore.begin")(

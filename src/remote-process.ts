@@ -48,7 +48,7 @@ export const runRemoteRunnerProcess = (options: RemoteRunnerProcessOptions = {})
     const directory =
       config.directory === undefined
         ? Layer.empty
-        : DirectoryResponderLive(config.hostId, config.directory).pipe(
+        : DirectoryResponderLive(config.hostId, config.directory, config.messagingEnabled).pipe(
             Layer.provide(
               DirectoryStoreLive.pipe(
                 Layer.provide(WorkflowStoreLive.pipe(Layer.provideMerge(database))),

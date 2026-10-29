@@ -230,6 +230,7 @@ describe("strict initial store schema", () => {
       { migration_id: 36, name: "automatic_review_trust" },
       { migration_id: 37, name: "resident_inbox_delay" },
       { migration_id: 38, name: "agent_directory" },
+      { migration_id: 39, name: "agent_messages" },
     ])
     expect(result.tables).toHaveLength(36)
     expect(result.tables.every((table) => table.strict === 1)).toBe(true)

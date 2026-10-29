@@ -106,3 +106,15 @@ A registered host execution authority with its own durable identity, liveness ob
 
 **Capability Advertisement**:
 A runner's bounded observation of its local model and thinking catalogs, including source freshness and access uncertainty. An advertisement is not proof of entitlement or future execution success.
+
+**Agent Message**:
+A durably accepted typed communication from an authenticated sender to one Agent Recipient, with a stable identity, correlation and optional reply reference.
+
+**Message Acceptance**:
+Transfer of delivery custody to workflowd. Acceptance is distinct from native input admission and from completion of the recipient's task.
+
+**Delivery Acknowledgement**:
+Evidence that the bound consumer accepted an Agent Message as native input. A transport acknowledgement or directory proof alone is not this evidence.
+
+**Event Subscription**:
+A durable one-shot request to send an Agent Message to a recipient when an event matches its exact type, version, key and correlation.

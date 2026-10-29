@@ -119,6 +119,18 @@ export const AgentMessagingLive = (hostId: string) =>
             const target = snapshot.agents.find(
               (agent) => agent.recipientId === decoded.message.recipient,
             )
+            if (
+              target?.endpoint?.transport === "cli-session" ||
+              (target !== undefined &&
+                target.hostId !== hostId &&
+                !snapshot.runners.some(
+                  (runner) =>
+                    runner.hostId === target.hostId &&
+                    runner.status === "active" &&
+                    runner.messageProtocol === 1,
+                ))
+            )
+              return yield* Effect.fail(new MessagingError({ reason: "unsupported" }))
             if (target === undefined || !target.deliverable || target.endpoint === null)
               return yield* Effect.fail(new MessagingError({ reason: "unavailable" }))
             if (decoded.message.replyTo !== null) {

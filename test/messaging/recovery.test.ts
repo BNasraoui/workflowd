@@ -110,3 +110,51 @@ test("an external relay's registration proof is not a delivery receipt", async (
     await agent.server.stop(true)
   }
 })
+
+test.each(["unknown", "bad-signature", "unsupported", "unavailable"] as const)(
+  "relay %s is explicit and never authorizes another delivery attempt",
+  async (mode) => {
+    const agent = relay(
+      "host-a",
+      false,
+      mode === "bad-signature" ? { invalidSignature: true } : { status: mode },
+    )
+    const daemon = await startDirectoryDaemon("host-a", ":memory:")
+    try {
+      await daemon.request("/directory/registrations", {
+        method: "POST",
+        body: JSON.stringify(agent.registration),
+      })
+      const message = {
+        id: crypto.randomUUID(),
+        sender: "host:host-a",
+        recipient: agent.id,
+        correlation: "c",
+        replyTo: null,
+        payload: { type: "note", version: 1, data: "hello" },
+      }
+      expect(
+        (
+          await daemon.request("/messaging/send", {
+            method: "POST",
+            body: JSON.stringify({ message }),
+          })
+        ).status,
+      ).toBe(202)
+      const expected = mode === "bad-signature" || mode === "unknown" ? "uncertain" : mode
+      await Effect.runPromise(
+        Effect.tryPromise(async () => {
+          const row = Schema.decodeUnknownSync(MessageRecord)(
+            await (await daemon.request(`/messaging/messages/${message.id}`)).json(),
+          )
+          if (row.delivery !== expected || (expected === "uncertain" && agent.queries.length < 2))
+            throw new Error("receipt pending")
+        }).pipe(Effect.retry({ schedule: Schedule.spaced("20 millis"), times: 100 })),
+      )
+      expect(agent.received).toHaveLength(1)
+    } finally {
+      await daemon.stop()
+      await agent.server.stop(true)
+    }
+  },
+)

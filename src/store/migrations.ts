@@ -1480,24 +1480,28 @@ export const runStoreMigrationsThrough0029 = Migrator.make({})({
   loader: Migrator.fromRecord(migrationsThrough0029),
 })
 
-export const runStoreMigrations = Migrator.make({})({
-  loader: Migrator.fromRecord({
-    ...migrationsThrough0029,
-    "0030_sandbox_cleanup_runs": sandboxCleanupMigration,
-    "0031_sandbox_lease_operations": sandboxOperationMigration,
-    "0032_sandbox_ref_creation": sandboxCreationMigration,
-    "0033_sandbox_publications": sandboxPublishMigration,
-    "0034_sandbox_publication_receipts": sandboxPublicationReceiptMigration,
-    "0035_agent_run_idempotency_key": Effect.gen(function* () {
-      const sql = yield* SqlClient.SqlClient
-      yield* sql`ALTER TABLE kernel_agent_runs ADD COLUMN idempotency_key TEXT`
-    }),
-    "0036_automatic_review_trust": automaticReviewTrustMigration,
-    "0037_resident_inbox_delay": Effect.gen(function* () {
-      const sql = yield* SqlClient.SqlClient
-      yield* sql`ALTER TABLE resident_inbox ADD COLUMN not_before INTEGER NOT NULL DEFAULT 0`
-    }),
-    "0038_agent_directory": agentDirectory,
-    "0039_agent_messages": agentMessages,
+const migrationsThrough0038 = {
+  ...migrationsThrough0029,
+  "0030_sandbox_cleanup_runs": sandboxCleanupMigration,
+  "0031_sandbox_lease_operations": sandboxOperationMigration,
+  "0032_sandbox_ref_creation": sandboxCreationMigration,
+  "0033_sandbox_publications": sandboxPublishMigration,
+  "0034_sandbox_publication_receipts": sandboxPublicationReceiptMigration,
+  "0035_agent_run_idempotency_key": Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient
+    yield* sql`ALTER TABLE kernel_agent_runs ADD COLUMN idempotency_key TEXT`
   }),
+  "0036_automatic_review_trust": automaticReviewTrustMigration,
+  "0037_resident_inbox_delay": Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient
+    yield* sql`ALTER TABLE resident_inbox ADD COLUMN not_before INTEGER NOT NULL DEFAULT 0`
+  }),
+  "0038_agent_directory": agentDirectory,
+}
+
+export const runStoreMigrationsThrough0038 = Migrator.make({})({
+  loader: Migrator.fromRecord(migrationsThrough0038),
+})
+export const runStoreMigrations = Migrator.make({})({
+  loader: Migrator.fromRecord({ ...migrationsThrough0038, "0039_agent_messages": agentMessages }),
 })

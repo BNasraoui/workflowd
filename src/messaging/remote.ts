@@ -142,7 +142,12 @@ export const makeMessageRemote = (hostId: string, peers: ReadonlyArray<Directory
     })
     const take = Effect.fn("Messaging.takeFrames")(function* () {
       for (const delivery of yield* receive(hostId, 1000)) {
-        yield* handle(delivery.data)
+        yield* handle(delivery.data).pipe(
+          Effect.catchIf(
+            (error) => error.reason === "conflict",
+            () => Effect.logWarning("Conflicting message identity refused"),
+          ),
+        )
         yield* delivery.acknowledge
       }
     })

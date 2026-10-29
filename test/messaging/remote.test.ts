@@ -4,6 +4,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { Effect, Schedule, Schema } from "effect"
 import { connect } from "@nats-io/transport-node"
+import { jetstream } from "@nats-io/jetstream"
 import { startDirectoryDaemon } from "./harness"
 import { DirectorySnapshot } from "../../src/directory/contract"
 import { MessageRecord, type AgentMessage } from "../../src/messaging/contract"
@@ -54,15 +55,16 @@ test("two registered hosts deliver signed agent messages and replies over authen
     })
     const key = join(root, "peer.key")
     await writeFile(key, "isolated-message-peer-key-".repeat(3), { mode: 0o600 })
-    hostA = await startDirectoryDaemon("host-a", join(root, "a.db"), {
+    const coordinatorEnv = {
       WORKFLOWD_DIRECTORY_PEERS: JSON.stringify({ "host-b": key }),
       WORKFLOWD_NATS_SERVERS: server,
       WORKFLOWD_NATS_TOKEN: "message-fixture-token",
       WORKFLOWD_DIRECTORY_REFRESH_MS: "200",
       WORKFLOWD_DIRECTORY_LEASE_MS: "4000",
-    })
+    }
+    hostA = await startDirectoryDaemon("host-a", join(root, "a.db"), coordinatorEnv)
     hostB = await startDirectoryDaemon("host-b", join(root, "b.db"))
-    const launch = () => {
+    const launch = (messagingEnabled = true) => {
       const child = Bun.spawn([process.execPath, "src/remote-runner.ts"], {
         cwd: join(import.meta.dir, "../.."),
         env: {
@@ -70,7 +72,7 @@ test("two registered hosts deliver signed agent messages and replies over authen
           WORKFLOWD_NATS_SERVERS: server,
           WORKFLOWD_NATS_TOKEN: "message-fixture-token",
           WORKFLOWD_REMOTE_HOST_ID: "host-b",
-          WORKFLOWD_MESSAGING_ENABLED: "true",
+          WORKFLOWD_MESSAGING_ENABLED: String(messagingEnabled),
           WORKFLOWD_REMOTE_DATABASE_PATH: join(root, "b.db"),
           WORKFLOWD_DIRECTORY_COORDINATOR_HOST: "host-a",
           WORKFLOWD_DIRECTORY_CREDENTIAL_FILE: key,
@@ -85,7 +87,7 @@ test("two registered hosts deliver signed agent messages and replies over authen
       ]).then((x) => x.join("\n"))
       runner = child
     }
-    launch()
+    launch(false)
     for (const [host, agent] of [
       [hostA, a],
       [hostB, b],
@@ -98,13 +100,75 @@ test("two registered hosts deliver signed agent messages and replies over authen
           })
         ).status,
       ).toBe(202)
-    await eventually(async () => {
+    const remoteRecipient = await eventually(async () => {
       const snap = Schema.decodeUnknownSync(DirectorySnapshot)(
         await (await hostA!.request("/directory")).json(),
       )
-      if (!snap.agents.some((x) => x.recipientId === b.id && x.deliverable))
-        throw new Error("remote not observed")
+      const target = snap.agents.find((x) => x.recipientId === b.id && x.deliverable)
+      if (target === undefined) throw new Error("remote not observed")
+      return target
     })
+    const unsupported = {
+      id: crypto.randomUUID(),
+      sender: a.id,
+      recipient: b.id,
+      correlation: "unsupported",
+      replyTo: null,
+      payload: { type: "note", version: 1, data: "no handler" },
+    }
+    expect(
+      (
+        await hostA.request("/messaging/send", {
+          method: "POST",
+          body: JSON.stringify({
+            message: unsupported,
+            proof: { publicKey: a.publicKey, signature: a.signature(unsupported) },
+          }),
+        })
+      ).status,
+    ).toBe(409)
+    runner!.kill()
+    await runner!.exited
+    await runnerLogs
+    launch()
+    await eventually(async () => {
+      const snapshot = Schema.decodeUnknownSync(DirectorySnapshot)(
+        await (await hostA!.request("/directory")).json(),
+      )
+      if (!snapshot.runners.some((r) => r.hostId === "host-b" && r.messageProtocol === 1))
+        throw new Error("messaging protocol unavailable")
+    })
+    await hostA.request("/directory/registrations", {
+      method: "POST",
+      body: JSON.stringify(a.registration),
+    })
+    const forgedId = crypto.randomUUID()
+    const attacker = await connect({ servers: server, token: "message-fixture-token" })
+    try {
+      await jetstream(attacker).publish(
+        "workflowd.v1.commands.messages-host-b",
+        new TextEncoder().encode(
+          JSON.stringify({
+            version: 1,
+            kind: "agent_message",
+            fromHost: "host-a",
+            toHost: "host-b",
+            signature: "0".repeat(64),
+            target: remoteRecipient,
+            message: {
+              id: forgedId,
+              sender: a.id,
+              recipient: b.id,
+              correlation: "forged",
+              replyTo: null,
+              payload: { type: "note", version: 1, data: "forged" },
+            },
+          }),
+        ),
+      )
+    } finally {
+      await attacker.drain()
+    }
     runner!.kill()
     await runner!.exited
     await runnerLogs
@@ -127,6 +191,8 @@ test("two registered hosts deliver signed agent messages and replies over authen
       })
     expect((await send(first, a)).status).toBe(202)
     expect(b.received).toHaveLength(0)
+    await hostA.stop()
+    hostA = await startDirectoryDaemon("host-a", join(root, "a.db"), coordinatorEnv)
     launch()
     await eventually(async () => {
       const row = Schema.decodeUnknownSync(MessageRecord)(
@@ -170,6 +236,44 @@ test("two registered hosts deliver signed agent messages and replies over authen
     })
     expect((await send(first, a)).status).toBe(202)
     expect(b.received).toHaveLength(1)
+    const subscription = {
+      id: crypto.randomUUID(),
+      recipient: b.id,
+      condition: {
+        type: "external.finished",
+        version: 1,
+        key: "build",
+        correlation: "conversation",
+      },
+    }
+    expect(
+      (
+        await hostA.request("/messaging/subscribe", {
+          method: "POST",
+          body: JSON.stringify(subscription),
+        })
+      ).status,
+    ).toBe(202)
+    await hostA.stop()
+    hostA = await startDirectoryDaemon("host-a", join(root, "a.db"), coordinatorEnv)
+    const event = {
+      id: crypto.randomUUID(),
+      event: { ...subscription.condition, payload: { result: "success" } },
+    }
+    expect(
+      (await hostA.request("/messaging/publish", { method: "POST", body: JSON.stringify(event) }))
+        .status,
+    ).toBe(202)
+    await eventually(async () => {
+      if (b.received.length !== 2) throw new Error("recovered subscription missing")
+    })
+    expect((await hostA.request(`/messaging/subscriptions/${subscription.id}`)).status).toBe(200)
+    expect(
+      (await hostA.request("/messaging/publish", { method: "POST", body: JSON.stringify(event) }))
+        .status,
+    ).toBe(202)
+    expect(b.received).toHaveLength(2)
+    expect((await hostB.request(`/messaging/messages/${forgedId}`)).status).toBe(404)
   } finally {
     if (runner !== undefined) {
       runner.kill()

@@ -4,7 +4,14 @@ import { externalRecipientId } from "../../src/directory/proof"
 import { JsonValueSchema } from "../../src/json"
 import { Schema } from "effect"
 
-export function relay(hostId = "host-a", loseReceipt = false) {
+export function relay(
+  hostId = "host-a",
+  loseReceipt = false,
+  receipt: {
+    readonly status?: "delivered" | "unsupported" | "unavailable" | "unknown"
+    readonly invalidSignature?: boolean
+  } = {},
+) {
   const owner = generateKeyPairSync("ed25519")
   const publicKey = owner.publicKey.export({ type: "spki", format: "der" }).toString("base64")
   const signature = (value: unknown) =>
@@ -14,6 +21,7 @@ export function relay(hostId = "host-a", loseReceipt = false) {
       owner.privateKey,
     ).toString("base64")
   const received: unknown[] = []
+  const queries: unknown[] = []
   const server = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
@@ -27,9 +35,11 @@ export function relay(hostId = "host-a", loseReceipt = false) {
         received.push(body)
         if (loseReceipt) return new Response(null, { status: 503 })
       }
+      if (body.protocol === "workflowd-message-query-v1") queries.push(body)
+      const status = receipt.status ?? "delivered"
       return Response.json({
-        status: "delivered",
-        signature: signature({ delivery: body, status: "delivered" }),
+        status,
+        signature: signature(receipt.invalidSignature ? body : { delivery: body, status }),
       })
     },
   })
@@ -48,6 +58,7 @@ export function relay(hostId = "host-a", loseReceipt = false) {
   return {
     server,
     received,
+    queries,
     signature,
     publicKey,
     id: externalRecipientId(publicKey),

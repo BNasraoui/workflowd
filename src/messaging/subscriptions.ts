@@ -1,12 +1,21 @@
 import { createHash } from "node:crypto"
 import { Effect, Schema } from "effect"
 import { SqlClient } from "effect/unstable/sql"
+import { TypedEventEnvelope, type EventCondition } from "../kernel/event-store-model"
 import { KernelEventStore, KernelStoreConflictError } from "../kernel/event-store"
 import { AgentDirectory } from "../directory/service"
 import { canonicalJson } from "../kernel/session-store-support"
 import { makeMessageStore } from "./store"
 import { MessagingError, messagingError, SubscribeEvent, PublishEvent } from "./contract"
 
+// Public producers cannot forge existing custody/completion events. Both sides
+// normalize the application condition into this module's kernel namespace.
+const kernelCondition = (condition: EventCondition) => ({
+  type: "agent_message.event",
+  version: 1,
+  key: createHash("sha256").update(canonicalJson(condition)).digest("hex"),
+  correlation: condition.correlation,
+})
 const instanceId = (id: string) => `message-subscription:${id}`
 const Row = Schema.Struct({
   instance_id: Schema.String,
@@ -52,7 +61,7 @@ export const makeMessageSubscriptions = (
             yield* events.registerWait({
               instanceId: id,
               waitId: id,
-              condition: input.condition,
+              condition: kernelCondition(input.condition),
               registeredAt: new Date(),
             })
             const current = yield* read(input.id)
@@ -94,7 +103,15 @@ export const makeMessageSubscriptions = (
         const result = yield* events.recordEvent({
           source: `host:${hostId}`,
           sourceEventId: input.id,
-          event: input.event,
+          event: {
+            ...kernelCondition({
+              type: input.event.type,
+              version: input.event.version,
+              key: input.event.key,
+              correlation: input.event.correlation,
+            }),
+            payload: input.event,
+          },
           recordedAt: new Date(),
         })
         return { id: input.id, status: result.status }
@@ -127,6 +144,9 @@ export const makeMessageSubscriptions = (
                   .update(`${row.instance_id}:${delivery.eventSequence}`)
                   .digest("hex")
                 const id = `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`
+                const applicationEvent = yield* Schema.decodeUnknownEffect(TypedEventEnvelope)(
+                  delivery.event.payload,
+                )
                 yield* messages.accept(
                   {
                     id,
@@ -135,9 +155,9 @@ export const makeMessageSubscriptions = (
                     correlation: delivery.event.correlation,
                     replyTo: null,
                     payload: {
-                      type: delivery.event.type,
-                      version: delivery.event.version,
-                      data: delivery.event.payload,
+                      type: applicationEvent.type,
+                      version: applicationEvent.version,
+                      data: applicationEvent.payload,
                     },
                   },
                   target,

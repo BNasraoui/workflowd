@@ -2,6 +2,58 @@ import { expect, test } from "bun:test"
 import { Effect, Schedule } from "effect"
 import { startDirectoryDaemon } from "./harness"
 import { relay } from "./relay"
+import { KernelEventStore } from "../../src/kernel/event-store"
+
+test("public events cannot impersonate protected kernel completion events", async () => {
+  const daemon = await startDirectoryDaemon("host-a", ":memory:")
+  try {
+    const condition = {
+      type: "mailbox.result",
+      version: 1,
+      key: "protected",
+      correlation: "protected",
+    }
+    await daemon.runtime.runPromise(
+      Effect.gen(function* () {
+        const events = yield* KernelEventStore
+        yield* events.createInstance({
+          instanceId: "protected",
+          workflowType: "mailbox_subscription",
+          workflowVersion: 1,
+          workflowKey: "protected",
+          payload: null,
+          createdAt: new Date(),
+        })
+        yield* events.registerWait({
+          instanceId: "protected",
+          waitId: "protected",
+          condition,
+          registeredAt: new Date(),
+        })
+      }),
+    )
+    expect(
+      (
+        await daemon.request("/messaging/publish", {
+          method: "POST",
+          body: JSON.stringify({
+            id: crypto.randomUUID(),
+            event: { ...condition, payload: { pretend: "completed" } },
+          }),
+        })
+      ).status,
+    ).toBe(202)
+    expect(
+      await daemon.runtime.runPromise(
+        Effect.gen(function* () {
+          return yield* (yield* KernelEventStore).readReadyDeliveries("protected")
+        }),
+      ),
+    ).toEqual([])
+  } finally {
+    await daemon.stop()
+  }
+})
 
 test("one-shot correlated event subscriptions atomically route a stable message and support cancellation", async () => {
   const agent = relay()

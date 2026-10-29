@@ -11,12 +11,14 @@ const RelayReceipt = Schema.Struct({
  * authorize replay of an operation that may already have entered a native queue. */
 export const deliverRelay = Effect.fn("Messaging.deliverRelay")(
   function* (record: MessageRecord, owner: ExternalRegistration, query: boolean) {
+    const endpoint = record.target.endpoint
+    if (endpoint === null) return "uncertain" as const
     const delivery = {
       protocol: query ? "workflowd-message-query-v1" : "workflowd-message-deliver-v1",
       nonce: crypto.randomUUID(),
       message: record.message,
       bindingVersion: record.target.bindingVersion,
-      nativeSessionId: record.target.endpoint!.nativeSessionId,
+      nativeSessionId: endpoint.nativeSessionId,
     }
     const reply = yield* Effect.tryPromise({
       try: async (signal) => {

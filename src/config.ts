@@ -802,7 +802,7 @@ export async function loadConfig(
     throw new Error("Directory peers require authenticated execution discovery")
 
   return {
-    messagingEnabled: enableMessaging,
+    ...(enableMessaging ? { messagingEnabled: true } : {}),
     ...(directoryRemote === undefined ? {} : { directoryRemote }),
     ...gitIdentity,
     ...(credentialSocket === undefined ? {} : { credentialSocket }),
