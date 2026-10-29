@@ -34,5 +34,7 @@ export const AgentWaitRefusal = Schema.Struct({
   error: Schema.String,
   reason: Schema.optional(Schema.String),
   detail: Schema.optional(Schema.String),
+  /** The ended child run's caller mailbox, when its worktree was removed. */
+  mailboxId: Schema.optional(Schema.String),
 })
 export type AgentWaitRefusal = typeof AgentWaitRefusal.Type

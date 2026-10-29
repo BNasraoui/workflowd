@@ -61,6 +61,8 @@ test("lists safe run summaries newest first, defaults to 20, and filters before 
         end_reason: "cancelled",
         started_at: "2026-10-13T00:00:22.000Z",
         ended_at: "2026-10-13T00:00:30.000Z",
+        worktree: null,
+        worktree_detail: null,
       })
       expect(runs[1]).toMatchObject({
         run_id: "run-21",

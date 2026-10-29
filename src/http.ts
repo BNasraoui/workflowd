@@ -420,7 +420,12 @@ function agentRunFailure(error: AgentRunIngressError): Response {
   }
   if (error instanceof AgentWaitCustodyError) {
     return Response.json(
-      { error: "custody", reason: error.reason, detail: error.explanation },
+      {
+        error: "custody",
+        reason: error.reason,
+        detail: error.explanation,
+        ...(error.mailboxId === undefined ? {} : { mailboxId: error.mailboxId }),
+      },
       { status: 409 },
     )
   }
@@ -435,7 +440,12 @@ function agentRunFailure(error: AgentRunIngressError): Response {
 function agentWaitFailure(error: AgentWaitIngressError): Response {
   if (error instanceof AgentWaitCustodyError) {
     return Response.json(
-      { error: "custody", reason: error.reason, detail: error.explanation },
+      {
+        error: "custody",
+        reason: error.reason,
+        detail: error.explanation,
+        ...(error.mailboxId === undefined ? {} : { mailboxId: error.mailboxId }),
+      },
       { status: 409 },
     )
   }

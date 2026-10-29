@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto"
+import { lstat, realpath } from "node:fs/promises"
+import { basename, dirname, join } from "node:path"
 import { startAgentHost, readAgentHostOutput } from "../agent-host/client"
 import { normalizeError } from "../errors"
 import type { AgentGitConfig } from "../agent-git/config"
@@ -6,7 +8,7 @@ import { installAgentGitGuard } from "../agent-git/guard"
 import { Context, Data, Effect } from "effect"
 import { runWorkspaceCommand } from "../workspace/command"
 import { WorkspaceError } from "../workspace/errors"
-import { pathExists } from "../workspace/filesystem"
+import { filesystemEffect, pathExists } from "../workspace/filesystem"
 import { ScopedKeyedLock } from "../workspace/locks"
 
 const repositoryLocks = new ScopedKeyedLock()
@@ -157,3 +159,106 @@ export const agentRunWorktrees = (socket: string | undefined): AgentRunWorktrees
               }),
           }),
       }
+
+export type AgentRunWorktreeRemoval =
+  | { readonly outcome: "removed" }
+  | { readonly outcome: "missing" }
+  | { readonly outcome: "retained"; readonly detail: string }
+
+const retained = (detail: string): AgentRunWorktreeRemoval => ({ outcome: "retained", detail })
+
+/** `git worktree list --porcelain` reports a locked entry with a `locked [reason]` line. */
+const isLocked = (list: string, directories: ReadonlyArray<string>) =>
+  list.split("\n\n").some((entry) => {
+    const lines = entry.split("\n")
+    const path = lines[0]?.startsWith("worktree ") ? lines[0].slice("worktree ".length) : null
+    return (
+      path !== null &&
+      directories.includes(path) &&
+      lines.some((line) => line === "locked" || line.startsWith("locked "))
+    )
+  })
+
+/**
+ * Removes a finished run's linked worktree without force, then prunes the
+ * repository's worktree records. The directory must be a linked worktree of
+ * `repository`, never its main checkout, and must not be or resolve through
+ * a symbolic link; a locked worktree or one with uncommitted or untracked
+ * changes is retained with the reason. Ignored files (build output such as
+ * `target/`) are deleted with the worktree. The run's branch is left alone.
+ */
+export const removeAgentRunWorktree = (input: {
+  readonly repository: string
+  readonly directory: string
+}) =>
+  Effect.gen(function* () {
+    const prune = remoteCommand("prune agent-run worktrees", input.repository, [
+      "worktree",
+      "prune",
+    ])
+    const entry = yield* Effect.promise(() =>
+      lstat(input.directory).then(
+        (stats) => (stats.isSymbolicLink() ? ("symlink" as const) : ("present" as const)),
+        () => "missing" as const,
+      ),
+    )
+    if (entry === "missing") {
+      yield* prune
+      return { outcome: "missing" } as const
+    }
+    // `git worktree remove` follows a symlink and removes its target, which
+    // may be another run's worktree.
+    if (entry === "symlink") return retained("directory is a symbolic link")
+    const expected = join(
+      yield* filesystemEffect("resolve agent-run worktree root", () =>
+        realpath(dirname(input.directory)),
+      ),
+      basename(input.directory),
+    )
+    const repositoryCommonDir = yield* remoteCommand(
+      "locate agent-run repository",
+      input.repository,
+      ["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    )
+    const located = yield* remoteCommand("locate agent-run worktree", input.directory, [
+      "rev-parse",
+      "--path-format=absolute",
+      "--git-dir",
+      "--git-common-dir",
+      "--show-toplevel",
+    ]).pipe(Effect.result)
+    if (located._tag === "Failure") return retained("directory is not a Git worktree")
+    const [gitDir, commonDir, topLevel] = located.success.split("\n")
+    const directory = yield* filesystemEffect("resolve agent-run worktree", () =>
+      realpath(input.directory),
+    )
+    if (directory !== expected) return retained("directory resolves outside the agent-run root")
+    if (topLevel !== directory) return retained("directory is not the top of a Git worktree")
+    if (gitDir === commonDir) return retained("directory is a main checkout, not a linked worktree")
+    if (commonDir !== repositoryCommonDir)
+      return retained("worktree belongs to a different repository")
+    const worktrees = yield* remoteCommand("list agent-run worktrees", input.repository, [
+      "worktree",
+      "list",
+      "--porcelain",
+    ])
+    if (isLocked(worktrees, [input.directory, directory])) return retained("worktree is locked")
+    const status = yield* remoteCommand("inspect agent-run worktree", input.directory, [
+      "--no-optional-locks",
+      "status",
+      "--porcelain",
+    ])
+    if (status !== "") {
+      const paths = status.split("\n").length
+      return retained(
+        `worktree has ${paths} uncommitted or untracked path${paths === 1 ? "" : "s"}`,
+      )
+    }
+    yield* remoteCommand("remove agent-run worktree", input.repository, [
+      "worktree",
+      "remove",
+      input.directory,
+    ])
+    yield* prune
+    return { outcome: "removed" } as const
+  })

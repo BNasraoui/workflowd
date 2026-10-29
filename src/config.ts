@@ -126,6 +126,8 @@ export interface AgentRunConfig {
   readonly verifyPollIntervalMs: number
   readonly progressWindowMs: number
   readonly maxAttempts: number
+  /** How long a terminal run's worktree is kept before the janitor removes it. */
+  readonly worktreeRetentionMs: number
 }
 
 interface SharedAppConfig {
@@ -492,6 +494,11 @@ function loadAgentRunConfig(
       env.WORKFLOWD_AGENT_RUN_MAX_ATTEMPTS,
       3,
       "WORKFLOWD_AGENT_RUN_MAX_ATTEMPTS",
+    ),
+    worktreeRetentionMs: positiveInteger(
+      env.WORKFLOWD_AGENT_RUN_WORKTREE_RETENTION_MS,
+      2 * 24 * 60 * 60_000,
+      "WORKFLOWD_AGENT_RUN_WORKTREE_RETENTION_MS",
     ),
   }
 }

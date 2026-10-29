@@ -8,6 +8,7 @@ import {
   type AgentWaitSubmission as AgentWaitSubmissionType,
 } from "../agent-wait-contract"
 import { agentWakeMailboxId } from "./agent-wake-failure"
+import { AGENT_RUN_WORKTREE_CLEANUP_PREFIX } from "./agent-run-worktree-janitor"
 import { WorkSignal } from "../work-signal"
 import {
   AgentHandoffStore,
@@ -45,6 +46,7 @@ export type AgentWaitCustodyReason =
   | "session_not_ready"
   | "unsupported_provider"
   | "working_resource_not_reserved"
+  | "worktree_removed_after_retention"
 
 /**
  * Raised when a supplied session is not in kernel custody, or is in custody
@@ -56,6 +58,8 @@ export class AgentWaitCustodyError extends Data.TaggedError("AgentWaitCustodyErr
   readonly sessionId: string
   readonly reason: AgentWaitCustodyReason
   readonly observed: string | null
+  /** The ended agent run's caller mailbox, for `worktree_removed_after_retention`. */
+  readonly mailboxId?: string | undefined
 }> {
   get explanation(): string {
     const subject = `${this.role} session ${this.sessionId}`
@@ -77,6 +81,14 @@ export class AgentWaitCustodyError extends Data.TaggedError("AgentWaitCustodyErr
         return (
           `${subject} has a working resource in state '${this.observed}', not reserved, ` +
           "so its working directory is not held for this session"
+        )
+      case "worktree_removed_after_retention":
+        return (
+          `${subject} belonged to agent run ${this.observed}, which ended; its worktree was ` +
+          "removed after the worktree retention period, so the session can no longer be " +
+          "watched or woken. Read the run's result from its caller mailbox" +
+          (this.mailboxId === undefined ? "" : ` ${this.mailboxId}`) +
+          " with read_agent_mailbox, or find the run with list_agent_runs."
         )
       default:
         return `${subject} cannot be watched or woken (reason: ${String(this.reason)}, observed: ${this.observed ?? "unknown"})`
@@ -110,6 +122,7 @@ const CustodyRow = Schema.Struct({
   revision: Schema.Int.pipe(Schema.check(Schema.isGreaterThan(0))),
   provider_kind: Schema.String,
   resource_state: Schema.String,
+  cleanup_id: Schema.NullOr(Schema.String),
 })
 
 /**
@@ -155,7 +168,9 @@ const readCustody = (role: "parent" | "child", sessionId: string) =>
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient
     const rows = yield* sql`SELECT session.session_id, session.state, session.revision,
-        session.provider_kind, resource.state AS resource_state
+        session.provider_kind, resource.state AS resource_state,
+        (SELECT cleanup_id FROM kernel_cleanup_requests AS cleanup
+          WHERE cleanup.resource_id = resource.resource_id) AS cleanup_id
       FROM kernel_sessions AS session
       JOIN kernel_working_resources AS resource ON resource.resource_id = session.resource_id
       WHERE session.session_id = ${sessionId}`
@@ -175,6 +190,24 @@ const readCustody = (role: "parent" | "child", sessionId: string) =>
         sessionId,
         reason: "unsupported_provider",
         observed: custody.provider_kind,
+      })
+    }
+    if (
+      custody.state !== "ready" &&
+      custody.state !== "active" &&
+      custody.cleanup_id?.startsWith(AGENT_RUN_WORKTREE_CLEANUP_PREFIX) === true &&
+      ["cleanup_required", "cleanup_leased", "cleaned", "missing"].includes(custody.resource_state)
+    ) {
+      const runs = yield* sql<{ readonly run_id: string; readonly caller_mailbox_id: string }>`
+        SELECT run_id, caller_mailbox_id FROM kernel_agent_runs WHERE session_id = ${sessionId}
+        ORDER BY created_at DESC, run_id DESC LIMIT 1`
+      return yield* new AgentWaitCustodyError({
+        role,
+        sessionId,
+        reason: "worktree_removed_after_retention",
+        observed:
+          runs[0]?.run_id ?? custody.cleanup_id.slice(AGENT_RUN_WORKTREE_CLEANUP_PREFIX.length),
+        mailboxId: runs[0]?.caller_mailbox_id,
       })
     }
     if (custody.state !== "ready" && custody.state !== "active") {

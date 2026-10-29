@@ -42,7 +42,9 @@ const REFUSED_OUTPUT = {
     error: { type: "string" as const, description: "The daemon's refusal category." },
     mailbox_id: {
       type: "string" as const,
-      description: "Mailbox for a child that spawned before refusal.",
+      description:
+        "Mailbox for a child that spawned before refusal, or for an ended run " +
+        "whose worktree was removed after retention.",
     },
   },
   required: ["status", "reason"],
@@ -403,7 +405,9 @@ export const TOOL_DEFINITIONS = [
       "List dispatch_agent runs newest first by acceptance time. Requires the MCP bearer token. " +
       `Optional status and repository filters; limit 1-${MAX_AGENT_RUNS}, default 20. ` +
       "started_at is acceptance time; ended_at and end_reason are null for active runs. " +
-      "idempotency_key is null for older runs or dispatches without an explicit key.",
+      "idempotency_key is null for older runs or dispatches without an explicit key. " +
+      "worktree is present, removing, removed, missing or retained (kept for an operator, " +
+      "with worktree_detail saying why); it is null when the run has no worktree custody.",
     inputSchema: { ...toJsonSchemaObject(ListAgentRunsArguments), type: "object" as const },
     outputSchema: objectSchema(
       { runs: { type: "array", items: toJsonSchemaObject(AgentRunSummary) } },

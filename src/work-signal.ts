@@ -4,6 +4,7 @@ export type WorkLane =
   | "job"
   | "agent-completion"
   | "agent-run"
+  | "agent-run-cleanup"
   | "kernel-job"
   | "session-resume"
   | "publication"
@@ -26,6 +27,7 @@ export const WorkSignalLive = Layer.effect(
       job: yield* PubSub.sliding<void>(1),
       "agent-completion": yield* PubSub.sliding<void>(1),
       "agent-run": yield* PubSub.sliding<void>(1),
+      "agent-run-cleanup": yield* PubSub.sliding<void>(1),
       "kernel-job": yield* PubSub.sliding<void>(1),
       "session-resume": yield* PubSub.sliding<void>(1),
       publication: yield* PubSub.sliding<void>(1),
