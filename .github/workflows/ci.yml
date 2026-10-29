@@ -10,7 +10,7 @@ permissions: {}
 jobs:
   quality:
     name: ${{ matrix.name }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions: {}
     strategy:
@@ -58,7 +58,7 @@ jobs:
 
   repository-validation:
     name: Repository integrity
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions: {}
     steps:
@@ -92,7 +92,7 @@ jobs:
 
   deployment-validation:
     name: Deployment (systemd)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions: {}
     steps:
@@ -126,7 +126,7 @@ jobs:
 
   tests:
     name: Tests and changed-line coverage
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions: {}
     steps:
@@ -381,7 +381,7 @@ jobs:
 
   aislop:
     name: AI slop (advisory)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     continue-on-error: true
     permissions: {}
@@ -418,7 +418,7 @@ jobs:
       - repository-validation
       - deployment-validation
       - tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 1
     permissions: {}
     steps:
