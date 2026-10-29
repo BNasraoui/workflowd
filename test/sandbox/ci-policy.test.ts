@@ -95,7 +95,7 @@ for (const [label, before, after] of [
   ["ambient token grant", "permissions: {}", "permissions: { id-token: write }"],
   ["target trigger", "  pull_request:", "  pull_request_target:"],
   ["privileged downstream", "  pull_request:", "  workflow_run:"],
-  ["self-hosted runner", "runs-on: ubuntu-latest", "runs-on: self-hosted"],
+  ["self-hosted runner", "runs-on: ubuntu-24.04", "runs-on: self-hosted"],
   ["environment secrets", "    steps:", "    environment: production\n    steps:"],
   [
     "reusable inherited secrets",
