@@ -166,3 +166,106 @@ test("workflowd main still requires its policy contexts the ruleset omits", asyn
     reason: "Missing required exact-head contexts: CodeQL PR policy.",
   })
 })
+
+const ownerRepo: FakeRepository = {
+  baseRef: "main",
+  baseSha,
+  headRef: "feature",
+  headSha,
+  rules: [{ context: "Required checks", integrationId: providerAppId }],
+  checkRuns: [],
+}
+
+test("a ruleset context is still required when the base lacks its workflow file", async () => {
+  const { evidence, gated } = await headEvidence("owner/repo", ownerRepo)
+
+  expect(evidence.ci).toMatchObject({
+    state: "unavailable",
+    reason: "Missing required exact-head contexts: Required checks.",
+  })
+  expect(gated).toMatchObject({ _tag: "Ready", review: { verdict: "changes_requested" } })
+})
+
+test("a ruleset context with its base workflow approves from the trusted app", async () => {
+  const { evidence, gated } = await headEvidence("owner/repo", {
+    ...ownerRepo,
+    checkRuns: [workflowd.checkRuns[0]!],
+    workflows: { ".github/workflows/ci.yml": 41 },
+    contents: {
+      [`.github/workflows/ci.yml@${baseSha}`]: "ci-blob",
+      [`.github/workflows/ci.yml@${headSha}`]: "ci-blob",
+    },
+    workflowRuns: [workflowd.workflowRuns![0]!],
+  })
+
+  expect(evidence.ci.state).toBe("available")
+  expect(gated).toMatchObject({ _tag: "Ready", review: { verdict: "pass" } })
+})
+
+test("workflowd main still exempts a policy context whose base workflow is absent", async () => {
+  const { evidence, gated } = await headEvidence("BNasraoui/workflowd", {
+    ...workflowd,
+    checkRuns: workflowd.checkRuns.filter((check) => check.name !== "CodeQL PR policy"),
+    workflows: { ".github/workflows/ci.yml": 41 },
+    contents: {
+      [`.github/workflows/ci.yml@${baseSha}`]: ".github/workflows/ci.yml-blob",
+      [`.github/workflows/ci.yml@${headSha}`]: ".github/workflows/ci.yml-blob",
+    },
+  })
+
+  expect(evidence.ci.state).toBe("available")
+  expect(gated).toMatchObject({ _tag: "Ready", review: { verdict: "pass" } })
+})
+
+const sonarCheck = workflowd.checkRuns[1]!
+
+test("a workflowd-named ruleset context must come from the ruleset's app", async () => {
+  const { evidence, gated } = await headEvidence("owner/repo", {
+    ...ownerRepo,
+    rules: [{ context: "SonarCloud Code Analysis", integrationId: 999 }],
+    checkRuns: [sonarCheck],
+  })
+
+  expect(evidence.ci).toMatchObject({
+    state: "unavailable",
+    reason: "Missing required exact-head contexts: SonarCloud Code Analysis.",
+  })
+  expect(gated).toMatchObject({ _tag: "Ready", review: { verdict: "changes_requested" } })
+})
+
+test("a workflowd-named ruleset context approves from the ruleset's app", async () => {
+  const { evidence, gated } = await headEvidence("owner/repo", {
+    ...ownerRepo,
+    rules: [{ context: "SonarCloud Code Analysis", integrationId: sonarCheck.appId }],
+    checkRuns: [sonarCheck],
+  })
+
+  expect(evidence.ci.state).toBe("available")
+  expect(gated).toMatchObject({ _tag: "Ready", review: { verdict: "pass" } })
+})
+
+test("a workflowd-named ruleset context still needs workflowd's app slug", async () => {
+  const { evidence } = await headEvidence("owner/repo", {
+    ...ownerRepo,
+    rules: [{ context: "SonarCloud Code Analysis", integrationId: sonarCheck.appId }],
+    checkRuns: [{ ...sonarCheck, appSlug: "impostor" }],
+  })
+
+  expect(evidence.ci).toMatchObject({
+    state: "unavailable",
+    reason: "Missing required exact-head contexts: SonarCloud Code Analysis.",
+  })
+})
+
+test("workflowd main approves when its ruleset names each context's app", async () => {
+  const { evidence, gated } = await headEvidence("BNasraoui/workflowd", {
+    ...workflowd,
+    rules: [
+      { context: "Required checks", integrationId: providerAppId },
+      { context: "SonarCloud Code Analysis", integrationId: sonarCheck.appId },
+    ],
+  })
+
+  expect(evidence.ci.state).toBe("available")
+  expect(gated).toMatchObject({ _tag: "Ready", review: { verdict: "pass" } })
+})

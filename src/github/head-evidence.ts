@@ -135,8 +135,11 @@ function collectChecks(
         signal,
         requirements.contexts,
       )
+      // A context the base branch's rules require is never exempted by an absent workflow file.
       for (const context of trustedActions.contextsAbsentFromBase) {
-        collected.contextsAbsentFromBase.add(context)
+        if (!requirements.rulesetIntegrations.has(context)) {
+          collected.contextsAbsentFromBase.add(context)
+        }
       }
       await appendCheckRuns(
         input,
@@ -189,7 +192,7 @@ const requiredContextAppSlugs: Readonly<Record<string, string>> = {
 
 type RequiredContexts = {
   readonly contexts: ReadonlyArray<string>
-  /** Ruleset-only contexts, each with the app IDs its rules name (empty: any app). */
+  /** Ruleset contexts, each with the app IDs its rules name (empty: any app). */
   readonly rulesetIntegrations: ReadonlyMap<string, ReadonlySet<number>>
 }
 
@@ -212,19 +215,16 @@ function requiredContexts(
   policyContexts: ReadonlyArray<string>,
   rulesetChecks: ReadonlyArray<GitHubRequiredStatusCheck>,
 ): RequiredContexts {
-  const strict = new Set(policyContexts)
   const rulesetIntegrations = new Map<string, Set<number>>()
   for (const check of rulesetChecks) {
-    // Workflowd's own context names keep their stricter app and workflow trust.
-    if (Object.hasOwn(requiredContextAppSlugs, check.context)) {
-      strict.add(check.context)
-      continue
-    }
     const integrations = rulesetIntegrations.get(check.context) ?? new Set<number>()
     if (check.integrationId !== undefined) integrations.add(check.integrationId)
     rulesetIntegrations.set(check.context, integrations)
   }
-  return { contexts: [...strict, ...rulesetIntegrations.keys()], rulesetIntegrations }
+  return {
+    contexts: [...new Set([...policyContexts, ...rulesetIntegrations.keys()])],
+    rulesetIntegrations,
+  }
 }
 
 function isTrustedRulesetContext(
@@ -259,10 +259,15 @@ async function appendCheckRuns(
       const normalized = normalizeCheckRun(check)
       if (normalized === undefined) continue
       if (isOwnedWorkflowdCheck(check, input.workflowdAppId)) continue
-      if (
-        isTrustedRequiredContext(check, normalized.name, trustedActionsCheckSuites) ||
+      // Workflowd's own context names keep their app and workflow trust, and a ruleset
+      // context must also come from every app its rules name.
+      const meetsPolicy =
+        !Object.hasOwn(requiredContextAppSlugs, normalized.name) ||
+        isTrustedRequiredContext(check, normalized.name, trustedActionsCheckSuites)
+      const meetsRuleset =
+        !rulesetIntegrations.has(normalized.name) ||
         isTrustedRulesetContext(check, normalized.name, rulesetIntegrations)
-      ) {
+      if (meetsPolicy && meetsRuleset) {
         collected.trustedRequiredContexts.add(normalized.name)
       }
       // The trusted CodeQL workflow intentionally skips main-only analysis on PRs.
