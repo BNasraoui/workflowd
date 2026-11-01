@@ -143,15 +143,22 @@ export async function serveCredentialHost(
       void operation.finally(() => pending.delete(operation))
     })
   })
+  // A path that exists must already accept the controller. Binding the published path
+  // directly would expose it before listen() and while it is still root-only.
+  const staging = join(dirname(path), `.${randomUUID()}.sock`)
+  let published: Awaited<ReturnType<typeof lstat>>
   try {
     await new Promise<void>((resolve, reject) => {
       server.once("error", reject)
-      server.listen(path, resolve)
+      server.listen(staging, resolve)
     })
-    await chmod(path, 0o600)
-    await chown(path, policy.controllerUid, policy.groupGid)
+    await chmod(staging, 0o600)
+    await chown(staging, policy.controllerUid, policy.groupGid)
+    await rename(staging, path)
+    published = await lstat(path)
   } catch (error) {
     server.close()
+    await rm(staging, { force: true })
     libc.close()
     throw error
   }
@@ -159,6 +166,9 @@ export async function serveCredentialHost(
     close: async () => {
       for (const socket of sockets) socket.destroy()
       await new Promise<void>((resolve) => server.close(() => resolve()))
+      // The server unlinks only the name it bound; remove the published name if still ours.
+      const current = await lstat(path).catch(() => null)
+      if (current?.ino === published.ino && current.dev === published.dev) await unlink(path)
       await Promise.all(pending)
       await native.close()
       libc.close()
