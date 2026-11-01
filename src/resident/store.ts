@@ -143,10 +143,13 @@ export const makeResidentStore = Effect.gen(function* () {
   })
   const pending = Effect.fn("Resident.pending")(function* (
     providerKind: "codex" | "opencode" = "codex",
+    afterId?: string,
   ) {
     const now = yield* Clock.currentTimeMillis
     const rows =
-      yield* sql`SELECT i.* FROM resident_inbox i JOIN resident_threads t ON t.thread_id = i.thread_id WHERE t.provider_kind = ${providerKind} AND i.state IN ('prepared','sending') AND i.not_before <= ${now} ORDER BY i.rowid LIMIT 100`
+      yield* sql`SELECT i.* FROM resident_inbox i JOIN resident_threads t ON t.thread_id = i.thread_id WHERE t.provider_kind = ${providerKind} AND i.state IN ('prepared','sending') AND i.not_before <= ${now}
+        AND i.rowid > COALESCE((SELECT rowid FROM resident_inbox WHERE id=${afterId ?? null}),0)
+        ORDER BY i.rowid LIMIT 100`
     return yield* Effect.forEach(rows, (row) => Schema.decodeUnknownEffect(Inbox)(row))
   })
   const deliveryState = Effect.fn("Resident.deliveryState")(function* (id: string) {

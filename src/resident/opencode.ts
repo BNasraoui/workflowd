@@ -84,8 +84,11 @@ export const makeOpenCodeMailbox = (options: Options, provider: OpenCodeMailboxP
           now: new Date(),
         })
     })
+    let inboxCursor: string | undefined
     const flush = Effect.gen(function* () {
-      for (const message of yield* inbox.pending("opencode")) {
+      const page = yield* inbox.pending("opencode", inboxCursor)
+      inboxCursor = page.at(-1)?.id
+      for (const message of page) {
         const row = yield* inbox.read(message.thread_id)
         if (row === null) continue
         const run = yield* runs.read(row.run_id)

@@ -687,8 +687,11 @@ export const ResidentCodexLive = (
           sweepOrphanAppServers(unitPrefix, active, config.credentialSocket),
         )
       }
+      let inboxCursor: string | undefined
       const flushUnlocked = Effect.fn("Resident.flush")(function* () {
-        for (const message of yield* store.pending()) {
+        const page = yield* store.pending("codex", inboxCursor)
+        inboxCursor = page.at(-1)?.id
+        for (const message of page) {
           const row = yield* store.read(message.thread_id)
           if (row === null || row.state === "operator_required" || row.state === "finished") {
             yield* store.uncertain(message.id, message.thread_id)
