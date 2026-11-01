@@ -20,15 +20,34 @@ export const makeMessageDelivery = (hostId: string) =>
     const directory = yield* DirectoryStore
     const messages = yield* makeMessageStore
     const inbox = yield* makeResidentStore
+    const refuseUnsent = Effect.fn("Messaging.refuseUnsent")(
+      function* (id: string, refusal: "stale_binding" | "unsupported") {
+        const inboxId = `message:${id}`
+        // Fence prepared input before sampling native facts. This write serializes
+        // with sending(), so a native claim either wins or cannot start afterwards.
+        const fenced =
+          yield* sql`UPDATE resident_inbox SET state='operator_required' WHERE id=${inboxId} AND state='prepared' RETURNING id`
+        const native = yield* inbox.deliveryState(inboxId)
+        const current = yield* messages.read(id)
+        const uncertain =
+          native === "sending" ||
+          (native === "operator_required" && fenced.length === 0) ||
+          current?.relayIntent ||
+          current?.delivery === "uncertain"
+        yield* messages.update(
+          id,
+          native === "delivered" ? "delivered" : uncertain ? "uncertain" : refusal,
+        )
+      },
+      (effect) => effect.pipe(sql.withTransaction),
+    )
     const deliver = Effect.fn("Messaging.deliver")(
       function* (record: MessageRecord) {
         if (!["pending", "queued", "uncertain"].includes(record.delivery)) return
         if (record.target.hostId !== hostId) return
         const inboxId = `message:${record.message.id}`
-        let nativeStarted = false
         if (record.delivery === "queued" || record.delivery === "uncertain") {
           const nativeState = yield* inbox.deliveryState(inboxId)
-          nativeStarted = nativeState === "sending"
           if (nativeState === "delivered") {
             yield* messages.update(record.message.id, "delivered")
             return
@@ -50,12 +69,7 @@ export const makeMessageDelivery = (hostId: string) =>
           current.bindingVersion !== record.target.bindingVersion ||
           (current.endpoint !== null && !sameBinding(record.target, current))
         ) {
-          yield* messages.update(
-            record.message.id,
-            record.relayIntent || nativeStarted || record.delivery === "uncertain"
-              ? "uncertain"
-              : "stale_binding",
-          )
+          yield* refuseUnsent(record.message.id, "stale_binding")
           return
         }
         if (!current.deliverable) return
@@ -78,7 +92,7 @@ export const makeMessageDelivery = (hostId: string) =>
           current.endpoint === null ||
           !["codex-app-server", "opencode-http"].includes(current.endpoint.transport)
         ) {
-          yield* messages.update(record.message.id, "unsupported")
+          yield* refuseUnsent(record.message.id, "unsupported")
           return
         }
         const thread = yield* inbox.read(current.endpoint.nativeSessionId)
@@ -88,7 +102,7 @@ export const makeMessageDelivery = (hostId: string) =>
           !["active", "waiting"].includes(thread.state) ||
           thread.closure_confirmed !== 0
         ) {
-          yield* messages.update(record.message.id, "unsupported")
+          yield* refuseUnsent(record.message.id, "unsupported")
           return
         }
         const id = `message:${record.message.id}`
