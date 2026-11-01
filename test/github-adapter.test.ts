@@ -309,3 +309,99 @@ test("makeOctokitClientPort collects Actions runs, jobs, and failed-job logs", a
   expect(jobs[0]?.[0]).toMatchObject({ id: 12, name: "Tests", conclusion: "failure" })
   expect(log).toBe("failed assertion")
 })
+
+test("makeOctokitClientPort reads every page of a branch's required status checks", async () => {
+  const requests: Array<string> = []
+  const pages: Record<string, { readonly body: unknown; readonly next?: string }> = {
+    "/repos/owner/repo/rules/branches/main": {
+      body: [
+        { type: "deletion", ruleset_id: 1 },
+        {
+          type: "required_status_checks",
+          ruleset_id: 2,
+          parameters: {
+            strict_required_status_checks_policy: false,
+            required_status_checks: [
+              { context: "CI OK", integration_id: 15368 },
+              { context: "Lint" },
+            ],
+          },
+        },
+      ],
+      next: "https://api.github.test/repos/owner/repo/rules/branches/main?page=2",
+    },
+    "/repos/owner/repo/rules/branches/main?page=2": {
+      body: [
+        {
+          type: "required_status_checks",
+          ruleset_id: 3,
+          parameters: {
+            strict_required_status_checks_policy: true,
+            required_status_checks: [{ context: "Docs", integration_id: 7 }],
+          },
+        },
+      ],
+    },
+  }
+  const client = new Octokit({
+    baseUrl: "https://api.github.test",
+    request: {
+      fetch: async (request: string | URL | Request) => {
+        const url = new URL(
+          typeof request === "string"
+            ? request
+            : request instanceof URL
+              ? request.href
+              : request.url,
+        )
+        requests.push(`${url.pathname}?${url.searchParams.toString()}`)
+        const page =
+          pages[
+            `${url.pathname}${url.searchParams.has("page") ? `?page=${url.searchParams.get("page")}` : ""}`
+          ]
+        const response = new Response(JSON.stringify(page?.body ?? []), {
+          status: page === undefined ? 404 : 200,
+          headers: {
+            "content-type": "application/json",
+            ...(page?.next === undefined ? {} : { link: `<${page.next}>; rel="next"` }),
+          },
+        })
+        Object.defineProperty(response, "url", { value: url.href })
+        return response
+      },
+    },
+  })
+  const adapter = new OctokitInstallationAdapter(makeOctokitClientPort(client))
+
+  const checks = await adapter.listBranchRequiredStatusChecks({
+    owner: "owner",
+    repo: "repo",
+    branch: "main",
+  })
+
+  expect(checks).toEqual([
+    { context: "CI OK", integrationId: 15368 },
+    { context: "Lint" },
+    { context: "Docs", integrationId: 7 },
+  ])
+  expect(requests[0]).toBe("/repos/owner/repo/rules/branches/main?per_page=100")
+  expect(requests).toHaveLength(2)
+})
+
+test("OctokitInstallationAdapter rejects branch rule reads when the client has none", async () => {
+  const adapter = new OctokitInstallationAdapter({
+    getPullRequest: async () => {
+      throw new Error("unused")
+    },
+    listIssueCommentPages: () => (async function* () {})(),
+    createIssueComment: async () => 1,
+    updateIssueComment: async () => 1,
+    listCheckRunPages: () => (async function* () {})(),
+    createCheckRun: async () => 1,
+    updateCheckRun: async () => 1,
+  })
+
+  await expect(
+    adapter.listBranchRequiredStatusChecks({ owner: "owner", repo: "repo", branch: "main" }),
+  ).rejects.toThrow("Branch rules API unavailable")
+})

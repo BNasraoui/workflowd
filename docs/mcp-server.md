@@ -559,19 +559,21 @@ ending at its handoff step (such as rpi-implement's Finish), finish all earlier
 phases first; at that step update the PR, publish the report, and end without
 watching CI.
 
-After pushing and opening/updating a PR, use `gh pr checks PR_NUMBER --repo OWNER/NAME`
-every 60 seconds on draft and ready PRs, without the required-only filter or watch mode.
-Inspect the named `Required checks` aggregate row. The only advisory checks are OpenCode
+After pushing and opening/updating a PR, list the base branch's required contexts with
+`gh api repos/OWNER/NAME/rules/branches/BASE --jq '[.[] | select(.type=="required_status_checks") | .parameters.required_status_checks[].context]'`;
+a failed read means CI is unverified, so report the exact error. Then use
+`gh pr checks PR_NUMBER --repo OWNER/NAME` every 60 seconds on draft and ready PRs,
+without the required-only filter or watch mode. The only advisory checks are OpenCode
 Review and AI slop (advisory); ignore those rows and do not infer CI from the command's
-exit code alone. A missing aggregate is pending, never success, even if all visible
-checks pass or `gh` reports "no checks reported". CI is verified only when the aggregate
-is pass/success and every other non-advisory row is pass/success or skipping/skipped.
-SonarCloud Code Analysis and CodeQL PR policy must also be present and pass/success,
-consistent with the required contexts in `src/domain/head-evidence.ts`; a missing
-required context means pending. Any non-advisory pending row means pending; any
-non-advisory fail/failure row means confirmed CI failure, even when the aggregate
-passes. For the aggregate, fail/failure is a confirmed CI failure; a skipped or
-cancelled aggregate is unverified (as is any other non-success terminal state). Any
+exit code alone. Each listed required context must be present and pass/success; a missing
+required context is pending, never success, even if all visible checks pass or `gh`
+reports "no checks reported". An empty list leaves the non-advisory rows as the gate;
+with no non-advisory rows, CI is pending. CI is verified only when every required context
+is pass/success and every other non-advisory row is pass/success or skipping/skipped. Any
+non-advisory pending row means pending; any non-advisory fail/failure row means confirmed
+CI failure, even when every required context passes. For a required context,
+fail/failure is a confirmed CI failure; a skipped or cancelled required context is
+unverified (as is any other non-success terminal state). Any
 other non-advisory terminal state is unverified. Retry missing/pending checks or
 transient observation errors every 60 seconds within the cycle budget. Cap each
 observation cycle at 15 minutes, below the default 20-minute stall window (shorten it

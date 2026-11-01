@@ -67,25 +67,31 @@ for (const { source, content } of [
     }),
   ),
 ]) {
-  test(`${source} confirms the aggregate on drafts and tolerates check creation`, () => {
+  test(`${source} confirms the repository's required contexts on drafts and tolerates check creation`, () => {
     const text = content.replace(/\s+/g, " ")
     expect(text).toMatch(/gh pr checks (PR_NUMBER|<pr>) --repo (OWNER\/NAME|<owner\/repo>)/)
     expect(text).not.toMatch(/gh pr checks[^.\n`]*--(?:required|watch)/)
     expect(text).toContain("every 60 seconds")
     expect(text).toContain("draft and ready PRs")
+    expect(text).toMatch(
+      /gh api repos\/(OWNER\/NAME|<owner\/repo>)\/rules\/branches\/(BASE|<base>) --jq '\[\.\[\] \| select\(\.type==\\?"required_status_checks\\?"\) \| \.parameters\.required_status_checks\[\]\.context\]'/,
+    )
     for (const context of repositoryRequiredCheckContexts) {
-      expect(text).toContain(context)
+      expect(text).not.toContain(context)
     }
-    expect(text).toContain("missing aggregate is pending, never success")
+    expect(text).not.toContain("head-evidence.ts")
+    expect(text).toMatch(/failed (rules )?read means CI is unverified/i)
+    expect(text).toContain("missing required context is pending, never success")
+    expect(text).toContain("An empty list leaves the non-advisory rows as the gate")
     expect(text).toContain(
-      "CI is verified only when the aggregate is pass/success and every other non-advisory row is pass/success or skipping/skipped",
+      "CI is verified only when every required context is pass/success and every other non-advisory row is pass/success or skipping/skipped",
     )
     expect(text).toContain("The only advisory checks are OpenCode Review and AI slop (advisory)")
     expect(text).toContain("Any non-advisory pending row means pending")
     expect(text).toContain("any non-advisory fail/failure row means confirmed CI failure")
-    expect(text).toContain("must also be present and pass/success")
+    expect(text).toContain("Each listed required context must be present and pass/success")
     expect(text).toContain("fail/failure is a confirmed CI failure")
-    expect(text).toContain("skipped or cancelled aggregate is unverified")
+    expect(text).toContain("skipped or cancelled required context is unverified")
     expect(text).toContain("OpenCode Review")
     expect(text).toContain("exit code alone")
     expect(text).toContain("15 minutes")
