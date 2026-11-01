@@ -401,6 +401,22 @@ async function nativeBoundary(simulatedManager: boolean) {
       new Response(child.stdout).text(),
       new Response(child.stderr).text(),
     ])
+    // The host reports manager failures without their cause; keep systemd's account.
+    if (status !== 0 && !simulatedManager && stderr.includes("host manager command failed")) {
+      const journal = Bun.spawn(
+        [
+          "journalctl",
+          "--no-pager",
+          "--output=short-precise",
+          "--since=-120s",
+          "_PID=1",
+          "+",
+          "_SYSTEMD_UNIT=workflowd-agent-host.service",
+        ],
+        { stdout: "pipe", stderr: "ignore" },
+      )
+      throw new Error(`${stderr}\n${await new Response(journal.stdout).text()}`)
+    }
     if (status !== 0) throw new Error(stderr)
     return JSON.parse(stdout)
   }
