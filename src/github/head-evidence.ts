@@ -12,6 +12,7 @@ import type {
   GitHubCheckRun,
   GitHubCommitStatus,
   GitHubInstallationAdapter,
+  GitHubRequiredStatusCheck,
   GitHubWorkflowJob,
 } from "./adapter"
 
@@ -36,7 +37,6 @@ export type CollectHeadEvidenceInput = {
   }
   readonly sonarRequest: SonarRequest
   readonly workflowdAppId: number
-  readonly requiredCheckContexts?: ReadonlyArray<string>
 }
 
 const SonarPullRequests = Schema.Struct({
@@ -112,6 +112,17 @@ function collectChecks(
   policyRequiredContexts: ReadonlyArray<string>,
 ) {
   return Effect.gen(function* () {
+    const rulesetChecks = yield* readBaseRequiredStatusChecks(input).pipe(
+      Effect.catch(() => Effect.succeed(undefined)),
+    )
+    if (rulesetChecks === undefined) {
+      return {
+        state: "unavailable" as const,
+        reason: `Could not read required checks for base ${input.target.baseRef}.`,
+        checks: [] as ReadonlyArray<CheckEvidence>,
+      }
+    }
+    const requirements = requiredContexts(policyRequiredContexts, rulesetChecks)
     const checks = yield* attempt("list exact-head check runs", async (signal) => {
       const collected: CollectedChecks = {
         checks: [],
@@ -122,18 +133,22 @@ function collectChecks(
       const trustedActions = await collectTrustedActionsCheckSuites(
         input,
         signal,
-        input.requiredCheckContexts ?? policyRequiredContexts,
+        requirements.contexts,
       )
       for (const context of trustedActions.contextsAbsentFromBase) {
         collected.contextsAbsentFromBase.add(context)
       }
-      await appendCheckRuns(input, signal, collected, trustedActions.checkSuites)
+      await appendCheckRuns(
+        input,
+        signal,
+        collected,
+        trustedActions.checkSuites,
+        requirements.rulesetIntegrations,
+      )
       await appendCommitStatuses(input, signal, collected)
       return collected
     }).pipe(
-      Effect.map((collected) =>
-        classifyChecks(collected, input.requiredCheckContexts ?? policyRequiredContexts),
-      ),
+      Effect.map((collected) => classifyChecks(collected, requirements.contexts)),
       Effect.catch((error) =>
         Effect.succeed({
           state: "unavailable" as const,
@@ -172,6 +187,56 @@ const requiredContextAppSlugs: Readonly<Record<string, string>> = {
   "CodeQL PR policy": "github-actions",
 }
 
+type RequiredContexts = {
+  readonly contexts: ReadonlyArray<string>
+  /** Ruleset-only contexts, each with the app IDs its rules name (empty: any app). */
+  readonly rulesetIntegrations: ReadonlyMap<string, ReadonlySet<number>>
+}
+
+function readBaseRequiredStatusChecks(
+  input: CollectHeadEvidenceInput,
+): Effect.Effect<ReadonlyArray<GitHubRequiredStatusCheck>, HeadEvidenceError> {
+  return attempt(`read required checks for base ${input.target.baseRef}`, async (signal) => {
+    const list = input.client.listBranchRequiredStatusChecks?.bind(input.client)
+    if (list === undefined) return []
+    try {
+      return await list({ ...input.repository, branch: input.target.baseRef, request: { signal } })
+    } catch (cause) {
+      if (isNotFound(cause)) return []
+      throw cause
+    }
+  })
+}
+
+function requiredContexts(
+  policyContexts: ReadonlyArray<string>,
+  rulesetChecks: ReadonlyArray<GitHubRequiredStatusCheck>,
+): RequiredContexts {
+  const strict = new Set(policyContexts)
+  const rulesetIntegrations = new Map<string, Set<number>>()
+  for (const check of rulesetChecks) {
+    // Workflowd's own context names keep their stricter app and workflow trust.
+    if (Object.hasOwn(requiredContextAppSlugs, check.context)) {
+      strict.add(check.context)
+      continue
+    }
+    const integrations = rulesetIntegrations.get(check.context) ?? new Set<number>()
+    if (check.integrationId !== undefined) integrations.add(check.integrationId)
+    rulesetIntegrations.set(check.context, integrations)
+  }
+  return { contexts: [...strict, ...rulesetIntegrations.keys()], rulesetIntegrations }
+}
+
+function isTrustedRulesetContext(
+  check: GitHubCheckRun,
+  name: string,
+  rulesetIntegrations: RequiredContexts["rulesetIntegrations"],
+): boolean {
+  const integrations = rulesetIntegrations.get(name)
+  if (integrations === undefined || check.appId === undefined) return false
+  return [...integrations].every((integrationId) => integrationId === check.appId)
+}
+
 const requiredContextWorkflowPaths: Readonly<Record<string, string>> = {
   "Required checks": ".github/workflows/ci.yml",
   "CodeQL PR policy": ".github/workflows/codeql.yml",
@@ -182,6 +247,7 @@ async function appendCheckRuns(
   signal: AbortSignal,
   collected: CollectedChecks,
   trustedActionsCheckSuites: ReadonlyMap<number, string>,
+  rulesetIntegrations: RequiredContexts["rulesetIntegrations"],
 ): Promise<void> {
   for await (const page of input.client.listCheckRunPages({
     ...input.repository,
@@ -193,7 +259,10 @@ async function appendCheckRuns(
       const normalized = normalizeCheckRun(check)
       if (normalized === undefined) continue
       if (isOwnedWorkflowdCheck(check, input.workflowdAppId)) continue
-      if (isTrustedRequiredContext(check, normalized.name, trustedActionsCheckSuites)) {
+      if (
+        isTrustedRequiredContext(check, normalized.name, trustedActionsCheckSuites) ||
+        isTrustedRulesetContext(check, normalized.name, rulesetIntegrations)
+      ) {
         collected.trustedRequiredContexts.add(normalized.name)
       }
       // The trusted CodeQL workflow intentionally skips main-only analysis on PRs.
@@ -303,7 +372,7 @@ function isTrustedRequiredContext(
   trustedActionsCheckSuites: ReadonlyMap<number, string>,
 ): boolean {
   const appSlug = requiredContextAppSlugs[name]
-  if (appSlug !== check.appSlug) return false
+  if (appSlug === undefined || appSlug !== check.appSlug) return false
   const workflowPath = requiredContextWorkflowPaths[name]
   if (workflowPath === undefined) return true
   return (

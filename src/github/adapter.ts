@@ -7,6 +7,8 @@ type CheckRunResponse =
   RestEndpointMethodTypes["checks"]["listForRef"]["response"]["data"]["check_runs"][number]
 type CommitStatusResponse =
   RestEndpointMethodTypes["repos"]["listCommitStatusesForRef"]["response"]["data"][number]
+type BranchRuleResponse =
+  RestEndpointMethodTypes["repos"]["getBranchRules"]["response"]["data"][number]
 
 export type GitHubPullRequestData = typeof PullRequestData.Encoded & {
   readonly mergeable?: boolean | null
@@ -52,6 +54,18 @@ export type GitHubWorkflowJob = {
   readonly status: string
   readonly conclusion?: string | null
 }
+
+export type GitHubRequiredStatusCheck = {
+  readonly context: string
+  readonly integrationId?: number
+}
+
+type ListBranchRequiredStatusChecks = (input: {
+  readonly owner: string
+  readonly repo: string
+  readonly branch: string
+  readonly request?: { readonly signal?: AbortSignal }
+}) => Promise<ReadonlyArray<GitHubRequiredStatusCheck>>
 
 export type GitHubCommitStatus = {
   readonly context: string
@@ -141,6 +155,7 @@ export type OctokitClientPort = {
     readonly workflow_id: string
     readonly request?: { readonly signal?: AbortSignal }
   }) => Promise<GitHubWorkflow>
+  readonly listBranchRequiredStatusChecks?: ListBranchRequiredStatusChecks
   readonly getRepositoryContentSha?: (input: {
     readonly owner: string
     readonly repo: string
@@ -196,6 +211,7 @@ export type GitHubInstallationAdapter = {
   }) => AsyncIterable<ReadonlyArray<GitHubCommitStatus>>
   readonly listWorkflowRunPages?: NonNullable<OctokitClientPort["listWorkflowRunPages"]>
   readonly getWorkflow?: NonNullable<OctokitClientPort["getWorkflow"]>
+  readonly listBranchRequiredStatusChecks?: ListBranchRequiredStatusChecks
   readonly getRepositoryContentSha?: NonNullable<OctokitClientPort["getRepositoryContentSha"]>
   readonly listWorkflowJobPages?: NonNullable<OctokitClientPort["listWorkflowJobPages"]>
   readonly downloadWorkflowJobLog?: NonNullable<OctokitClientPort["downloadWorkflowJobLog"]>
@@ -259,6 +275,13 @@ export class OctokitInstallationAdapter implements GitHubInstallationAdapter {
 
   getWorkflow(input: Parameters<NonNullable<GitHubInstallationAdapter["getWorkflow"]>>[0]) {
     return this.client.getWorkflow?.(input) ?? Promise.reject(new Error("Actions API unavailable"))
+  }
+
+  listBranchRequiredStatusChecks(input: Parameters<ListBranchRequiredStatusChecks>[0]) {
+    return (
+      this.client.listBranchRequiredStatusChecks?.(input) ??
+      Promise.reject(new Error("Branch rules API unavailable"))
+    )
   }
 
   getRepositoryContentSha(
@@ -455,6 +478,16 @@ export function makeOctokitClientPort(client: OctokitClient): OctokitClientPort 
       const workflow = (await client.rest.actions.getWorkflow(input)).data
       return { id: workflow.id, path: workflow.path }
     },
+    listBranchRequiredStatusChecks: async (input) => {
+      const checks: Array<GitHubRequiredStatusCheck> = []
+      for await (const response of client.paginate.iterator(client.rest.repos.getBranchRules, {
+        ...input,
+        per_page: 100,
+      })) {
+        checks.push(...response.data.flatMap(requiredStatusChecks))
+      }
+      return checks
+    },
     getRepositoryContentSha: async (input) => {
       const content = (await client.rest.repos.getContent(input)).data
       if (Array.isArray(content) || content.type !== "file") {
@@ -482,6 +515,14 @@ export function makeOctokitClientPort(client: OctokitClient): OctokitClientPort 
     createCheckRun: async (input) => (await client.rest.checks.create(input)).data.id,
     updateCheckRun: async (input) => (await client.rest.checks.update(input)).data.id,
   }
+}
+
+function requiredStatusChecks(rule: BranchRuleResponse): ReadonlyArray<GitHubRequiredStatusCheck> {
+  if (rule.type !== "required_status_checks") return []
+  return (rule.parameters?.required_status_checks ?? []).map((check) => ({
+    context: check.context,
+    ...(check.integration_id === undefined ? {} : { integrationId: check.integration_id }),
+  }))
 }
 
 async function* emptyPages<A>(): AsyncIterable<ReadonlyArray<A>> {
