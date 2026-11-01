@@ -180,7 +180,8 @@ Subscriptions use existing kernel instances, exact type/version/key/correlation
 waits and event cursors. Application conditions are hashed into a dedicated kernel
 event namespace, preserving legacy completion and custody event authority. They observe matching events after registration, route one
 stable message and consume the wait in the same SQLite transaction. Subscriptions
-and accepted event messages survive coordinator restart. Host-authorized agent or
+use bounded sweeps that advance past unavailable recipients and wrap to retry them;
+accepted event messages and waits survive coordinator restart. Host-authorized agent or
 external producers publish into that event store; there is no second event broker.
 Normalizing all legacy completion/GitHub producers and the full public lifecycle
 migration remain `.6`/`.7` integration work.

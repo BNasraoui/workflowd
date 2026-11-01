@@ -125,14 +125,18 @@ export const makeMessageSubscriptions = (
           ),
         ),
     )
+    let cursor: string | undefined
     const reconcile = Effect.fn("Messaging.routeEvents")(
       function* () {
         const rows =
-          yield* sql`SELECT i.instance_id,i.payload_json,i.event_cursor,w.state FROM kernel_workflow_instances i JOIN kernel_waits w ON w.instance_id=i.instance_id AND w.wait_id=i.instance_id WHERE i.workflow_type='agent_message_subscription' AND w.state='matched' LIMIT 100`
+          yield* sql`SELECT i.instance_id,i.payload_json,i.event_cursor,w.state FROM kernel_workflow_instances i JOIN kernel_waits w ON w.instance_id=i.instance_id AND w.wait_id=i.instance_id WHERE i.workflow_type='agent_message_subscription' AND w.state='matched' AND (${cursor ?? null} IS NULL OR i.instance_id>${cursor ?? null}) ORDER BY i.instance_id LIMIT 100`.pipe(
+            Effect.flatMap(Schema.decodeUnknownEffect(Schema.Array(Row))),
+          )
+        // Advance past unavailable recipients, then wrap to retry them next sweep.
+        cursor = rows.at(-1)?.instance_id
         if (rows.length === 0) return
         const snapshot = yield* directory.inventory()
-        for (const raw of rows) {
-          const row = yield* Schema.decodeUnknownEffect(Row)(raw)
+        for (const row of rows) {
           const target = snapshot.agents.find(
             (agent) => agent.recipientId === row.payload_json.recipient,
           )
