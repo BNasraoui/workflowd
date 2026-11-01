@@ -15,7 +15,7 @@ import {
   rm,
 } from "node:fs/promises"
 import { createHash, randomUUID } from "node:crypto"
-import { constants } from "node:fs"
+import { constants, type Stats } from "node:fs"
 import { dirname, join, resolve } from "node:path"
 import { createServer } from "node:net"
 import type { Socket } from "node:net"
@@ -146,7 +146,7 @@ export async function serveCredentialHost(
   // A path that exists must already accept the controller. Binding the published path
   // directly would expose it before listen() and while it is still root-only.
   const staging = join(dirname(path), `.${randomUUID()}.sock`)
-  let published: Awaited<ReturnType<typeof lstat>>
+  let published: Stats
   try {
     await new Promise<void>((resolve, reject) => {
       server.once("error", reject)
@@ -168,7 +168,11 @@ export async function serveCredentialHost(
       await new Promise<void>((resolve) => server.close(() => resolve()))
       // The server unlinks only the name it bound; remove the published name if still ours.
       const current = await lstat(path).catch(() => null)
-      if (current?.ino === published.ino && current.dev === published.dev) await unlink(path)
+      if (current?.ino === published.ino && current.dev === published.dev)
+        // A path removed since lstat() is already gone; it must not skip releasing the host.
+        await unlink(path).catch((error: unknown) => {
+          if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error
+        })
       await Promise.all(pending)
       await native.close()
       libc.close()

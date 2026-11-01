@@ -401,22 +401,6 @@ async function nativeBoundary(simulatedManager: boolean) {
       new Response(child.stdout).text(),
       new Response(child.stderr).text(),
     ])
-    // The host reports manager failures without their cause; keep systemd's account.
-    if (status !== 0 && !simulatedManager && stderr.includes("host manager command failed")) {
-      const journal = Bun.spawn(
-        [
-          "journalctl",
-          "--no-pager",
-          "--output=short-precise",
-          "--since=-120s",
-          "_PID=1",
-          "+",
-          "_SYSTEMD_UNIT=workflowd-agent-host.service",
-        ],
-        { stdout: "pipe", stderr: "ignore" },
-      )
-      throw new Error(`${stderr}\n${await new Response(journal.stdout).text()}`)
-    }
     if (status !== 0) throw new Error(stderr)
     return JSON.parse(stdout)
   }
@@ -1248,11 +1232,15 @@ test("native CI requires both real fixture identities and the deployed service g
 })
 
 if (process.env.WORKFLOWD_AGENT_TEST_BEN_UID) {
-  test(
-    "two-UID native services retain custody across controller restart and refuse forged launches",
-    () => nativeBoundary(false),
-    150000,
-  )
+  test("two-UID native services retain custody across controller restart and refuse forged launches", async () => {
+    try {
+      await nativeBoundary(false)
+    } catch (error) {
+      // The deployed host reports failures without their cause; keep systemd's account.
+      console.error(await hostJournal())
+      throw error
+    }
+  }, 150000)
   test(
     "the host native protocol uses bounded custody with a simulated manager and real UID children",
     () => nativeBoundary(true),
@@ -1743,6 +1731,32 @@ test("the host persists terminal status before unloading the cgroup and inspects
   }
 })
 
+/** systemd's and the deployed agent host's journal for the last two minutes. */
+async function hostJournal() {
+  try {
+    const journal = Bun.spawn(
+      [
+        "journalctl",
+        "--no-pager",
+        "--output=short-precise",
+        "--since=-120s",
+        "_PID=1",
+        "+",
+        "_SYSTEMD_UNIT=workflowd-agent-host.service",
+      ],
+      { stdout: "pipe", stderr: "pipe" },
+    )
+    const [status, stdout, stderr] = await Promise.all([
+      journal.exited,
+      new Response(journal.stdout).text(),
+      new Response(journal.stderr).text(),
+    ])
+    return status === 0 ? stdout : `journalctl exited ${status}: ${stderr}`
+  } catch (error) {
+    return `journalctl unavailable: ${error instanceof Error ? error.message : String(error)}`
+  }
+}
+
 async function deployedHost(
   root: string,
   policy: import("../../src/agent-host/config").CredentialPolicy,
@@ -1809,17 +1823,7 @@ async function deployedHost(
   await command(["systemctl", "restart", "workflowd-agent-host.service"])
   const deadline = Date.now() + 10000
   while (!(await stat("/run/workflowd-agent-host/control.sock").catch(() => null))) {
-    if (Date.now() > deadline)
-      throw new Error(
-        await command([
-          "journalctl",
-          "-u",
-          "workflowd-agent-host.service",
-          "--no-pager",
-          "-n",
-          "40",
-        ]),
-      )
+    if (Date.now() > deadline) throw new Error(`host socket not published\n${await hostJournal()}`)
     await Bun.sleep(50)
   }
   return {

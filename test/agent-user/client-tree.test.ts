@@ -1,9 +1,14 @@
 import { expect, test } from "bun:test"
 import { join } from "node:path"
+import { clientTimeLimitSeconds, privatePidNamespace } from "./harness"
 
 // Bun is PID 1 of the namespace, as in the administrative coverage step and every
 // isolated credential probe. It never reaps an orphan it did not spawn.
-async function remainingAfter(mode: "spawn" | "tree", shell: string, timeoutSeconds = 20) {
+async function remainingAfter(
+  mode: "spawn" | "tree",
+  shell: string,
+  timeoutSeconds = clientTimeLimitSeconds,
+) {
   const harness = JSON.stringify(join(import.meta.dir, "harness.ts"))
   const program = `
 import { readdirSync } from "node:fs"
@@ -18,17 +23,7 @@ if (${JSON.stringify(mode)} === "tree") {
 const others = readdirSync("/proc").filter((entry) => /^\\d+$/.test(entry) && Number(entry) !== process.pid)
 console.log(JSON.stringify(others.length))`
   const child = Bun.spawn(
-    [
-      "unshare",
-      "--user",
-      "--map-root-user",
-      "--pid",
-      "--fork",
-      "--mount-proc",
-      process.execPath,
-      "--eval",
-      program,
-    ],
+    [...privatePidNamespace({ mapRootUser: true }), process.execPath, "--eval", program],
     { stdout: "pipe", stderr: "pipe" },
   )
   const [status, stdout, stderr] = await Promise.all([
