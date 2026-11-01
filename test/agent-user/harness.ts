@@ -328,6 +328,36 @@ export async function probeInstalledRefresh(): Promise<typeof RefreshEvidence.Ty
   }
 }
 
+/**
+ * Runs an installed client and returns only after every process it started is gone.
+ *
+ * Clients start helpers (Codex snapshots the login shell and runs lsb_release) that
+ * can outlive them. Where Bun is PID 1 of the test's PID namespace, nothing reaps
+ * those orphans, and relink correctly refuses while an agent-UID process or zombie
+ * remains. The client therefore runs under its own PID namespace: when its init
+ * exits, the kernel kills and reaps every descendant before unshare returns. The
+ * time limit is applied inside that namespace so a timed-out client leaves nothing.
+ */
+export async function runClientTree(
+  command: readonly string[],
+  options: { cwd: string; env: Record<string, string>; timeoutSeconds?: number },
+) {
+  const child = Bun.spawn(
+    [
+      "/usr/bin/unshare",
+      "--pid",
+      "--fork",
+      "--kill-child",
+      "/usr/bin/timeout",
+      "--signal=KILL",
+      String(options.timeoutSeconds ?? 20),
+      ...command,
+    ],
+    { cwd: options.cwd, env: options.env, stdout: "ignore", stderr: "ignore" },
+  )
+  return child.exited
+}
+
 async function installedRefresh(identifier: string) {
   if (!/^[a-zA-Z0-9]{6}$/.test(identifier)) throw new Error("fixture_root_invalid")
   const root = join(tmpdir(), `workflowd-oauth-refresh-${identifier}`)
@@ -607,7 +637,7 @@ async function installedRefresh(identifier: string) {
                 "--tools",
                 "",
               ]
-        const child = Bun.spawn(
+        await runClientTree(
           uidCount === 2
             ? [
                 "/usr/bin/setpriv",
@@ -619,14 +649,8 @@ async function installedRefresh(identifier: string) {
                 ...command,
               ]
             : command,
-          { cwd: root, env, stdout: "ignore", stderr: "ignore" },
+          { cwd: root, env },
         )
-        const timer = setTimeout(() => child.kill("SIGKILL"), 20000)
-        try {
-          await child.exited
-        } finally {
-          clearTimeout(timer)
-        }
         const refreshed = (await readFile(paths[index]!, "utf8")).includes(
           "synthetic-rotated-refresh",
         )
