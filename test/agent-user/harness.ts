@@ -18,6 +18,25 @@ import {
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 
+const unshare = "/usr/bin/unshare"
+
+/** Installed clients get this long before they and every helper they started are killed. */
+export const clientTimeLimitSeconds = 20
+
+/**
+ * The `unshare` arguments that run the next command as PID 1 of a new PID namespace
+ * with its own /proc, mapped to root of a new user namespace when not already root.
+ */
+export function privatePidNamespace(options: { mapRootUser: boolean }) {
+  return [
+    unshare,
+    ...(options.mapRootUser ? ["--user", "--map-root-user"] : []),
+    "--pid",
+    "--fork",
+    "--mount-proc",
+  ]
+}
+
 const CodexSharingEvidence = Schema.Struct({
   refusal: Schema.optionalKey(Schema.String),
   repaired: Schema.Boolean,
@@ -112,12 +131,7 @@ export async function probeClientVersions() {
 async function isolatedCredentialProbe(kind: "--codex-sharing" | "--refresh-probe") {
   const child = Bun.spawn(
     [
-      "unshare",
-      "--user",
-      "--map-root-user",
-      "--pid",
-      "--fork",
-      "--mount-proc",
+      ...privatePidNamespace({ mapRootUser: true }),
       "--net",
       "/bin/sh",
       "-c",
@@ -326,6 +340,36 @@ export async function probeInstalledRefresh(): Promise<typeof RefreshEvidence.Ty
   } finally {
     await rm(root, { recursive: true, force: true })
   }
+}
+
+/**
+ * Runs an installed client and returns only after every process it started is gone.
+ *
+ * Clients start helpers (Codex snapshots the login shell and runs lsb_release) that
+ * can outlive them. Where Bun is PID 1 of the test's PID namespace, nothing reaps
+ * those orphans, and relink correctly refuses while an agent-UID process or zombie
+ * remains. The client therefore runs under its own PID namespace: when its init
+ * exits, the kernel kills and reaps every descendant before unshare returns. The
+ * time limit is applied inside that namespace so a timed-out client leaves nothing.
+ */
+export async function runClientTree(
+  command: readonly string[],
+  options: { cwd: string; env: Record<string, string>; timeoutSeconds?: number },
+) {
+  const child = Bun.spawn(
+    [
+      unshare,
+      "--pid",
+      "--fork",
+      "--kill-child",
+      "/usr/bin/timeout",
+      "--signal=KILL",
+      String(options.timeoutSeconds ?? clientTimeLimitSeconds),
+      ...command,
+    ],
+    { cwd: options.cwd, env: options.env, stdout: "ignore", stderr: "ignore" },
+  )
+  return child.exited
 }
 
 async function installedRefresh(identifier: string) {
@@ -607,7 +651,7 @@ async function installedRefresh(identifier: string) {
                 "--tools",
                 "",
               ]
-        const child = Bun.spawn(
+        await runClientTree(
           uidCount === 2
             ? [
                 "/usr/bin/setpriv",
@@ -619,14 +663,8 @@ async function installedRefresh(identifier: string) {
                 ...command,
               ]
             : command,
-          { cwd: root, env, stdout: "ignore", stderr: "ignore" },
+          { cwd: root, env },
         )
-        const timer = setTimeout(() => child.kill("SIGKILL"), 20000)
-        try {
-          await child.exited
-        } finally {
-          clearTimeout(timer)
-        }
         const refreshed = (await readFile(paths[index]!, "utf8")).includes(
           "synthetic-rotated-refresh",
         )

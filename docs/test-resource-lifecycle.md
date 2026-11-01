@@ -39,8 +39,11 @@ when teardown starts. A live or uninspectable owner is never swept by another su
 
 The offline migration and administrative credential fixtures run as PID 1 in a
 private PID namespace. They use resource-denying Docker/systemd executables
-instead of a guardian, preserving process-count checks and orphan reaping. Their
-simulated managers do not create host resources.
+instead of a guardian, preserving process-count checks. Bun as PID 1 does not
+reap orphans it did not spawn, so fixtures that run installed clients start each
+one through `runClientTree`, as init of its own PID namespace; the kernel kills
+and reaps the client's descendants when it exits. Their simulated managers do
+not create host resources.
 
 The disposable two-UID CI fixture labels its installed host service and native
 transient units through a private `systemd-run` wrapper mounted only inside the

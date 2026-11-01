@@ -15,7 +15,7 @@ import {
   rm,
 } from "node:fs/promises"
 import { createHash, randomUUID } from "node:crypto"
-import { constants } from "node:fs"
+import { constants, type Stats } from "node:fs"
 import { dirname, join, resolve } from "node:path"
 import { createServer } from "node:net"
 import type { Socket } from "node:net"
@@ -143,15 +143,22 @@ export async function serveCredentialHost(
       void operation.finally(() => pending.delete(operation))
     })
   })
+  // A path that exists must already accept the controller. Binding the published path
+  // directly would expose it before listen() and while it is still root-only.
+  const staging = join(dirname(path), `.${randomUUID()}.sock`)
+  let published: Stats
   try {
     await new Promise<void>((resolve, reject) => {
       server.once("error", reject)
-      server.listen(path, resolve)
+      server.listen(staging, resolve)
     })
-    await chmod(path, 0o600)
-    await chown(path, policy.controllerUid, policy.groupGid)
+    await chmod(staging, 0o600)
+    await chown(staging, policy.controllerUid, policy.groupGid)
+    await rename(staging, path)
+    published = await lstat(path)
   } catch (error) {
     server.close()
+    await rm(staging, { force: true })
     libc.close()
     throw error
   }
@@ -159,6 +166,13 @@ export async function serveCredentialHost(
     close: async () => {
       for (const socket of sockets) socket.destroy()
       await new Promise<void>((resolve) => server.close(() => resolve()))
+      // The server unlinks only the name it bound; remove the published name if still ours.
+      const current = await lstat(path).catch(() => null)
+      if (current?.ino === published.ino && current.dev === published.dev)
+        // A path removed since lstat() is already gone; it must not skip releasing the host.
+        await unlink(path).catch((error: unknown) => {
+          if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error
+        })
       await Promise.all(pending)
       await native.close()
       libc.close()
