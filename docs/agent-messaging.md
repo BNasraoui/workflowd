@@ -112,6 +112,11 @@ Native delivery reuses `resident_inbox`, its stable client IDs and existing
 closure/custody safeguards. An additional transaction checks recipient host,
 binding version, native identity and current proof before claiming a prepared
 message. Temporary proof loss leaves it prepared. A changed binding fences it.
+A terminal unsent refusal fences prepared input and samples durable native facts
+in one transaction, serialized with native admission. A winning native claim
+retains uncertainty or its acknowledgement across rebinding. Native consumers
+advance bounded inbox pages and wrap to retry proof-blocked input, so one
+unavailable recipient cannot starve later healthy recipients.
 A process crash after `sending` leaves an uncertain intent. Codex queries queue
 and history; OpenCode retains its existing conservative uncertain outcome.
 Neither transport acknowledgement nor absent history authorizes another prompt.
@@ -183,6 +188,10 @@ stable message and consume the wait in the same SQLite transaction. Subscription
 use bounded sweeps that advance past unavailable recipients and wrap to retry them;
 accepted event messages and waits survive coordinator restart. Host-authorized agent or
 external producers publish into that event store; there is no second event broker.
+Routing uses the same endpoint and active-runner `messageProtocol: 1` check as
+direct send. A matched subscription retains its wait while that route is
+unavailable or unsupported; it accepts no message and consumes no event until
+compatibility returns. Cancellation remains effective while the wait is held.
 Normalizing all legacy completion/GitHub producers and the full public lifecycle
 migration remain `.6`/`.7` integration work.
 

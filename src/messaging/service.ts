@@ -6,6 +6,7 @@ import { makeMessageStore } from "./store"
 import { SendMessage, MessageRecord, MessagingError, messagingError } from "./contract"
 import { SubscribeEvent, PublishEvent, SubscriptionReceipt } from "./contract"
 import { makeMessageSubscriptions } from "./subscriptions"
+import { resolveMessageTarget } from "./routing"
 
 export const AgentMessaging = Context.Service<{
   readonly send: (
@@ -116,23 +117,7 @@ export const AgentMessagingLive = (hostId: string) =>
               }
             }
             const snapshot = yield* directory.inventory().pipe(Effect.mapError(messagingError))
-            const target = snapshot.agents.find(
-              (agent) => agent.recipientId === decoded.message.recipient,
-            )
-            if (
-              target?.endpoint?.transport === "cli-session" ||
-              (target !== undefined &&
-                target.hostId !== hostId &&
-                !snapshot.runners.some(
-                  (runner) =>
-                    runner.hostId === target.hostId &&
-                    runner.status === "active" &&
-                    runner.messageProtocol === 1,
-                ))
-            )
-              return yield* Effect.fail(new MessagingError({ reason: "unsupported" }))
-            if (target === undefined || !target.deliverable || target.endpoint === null)
-              return yield* Effect.fail(new MessagingError({ reason: "unavailable" }))
+            const target = yield* resolveMessageTarget(hostId, snapshot, decoded.message.recipient)
             if (decoded.message.replyTo !== null) {
               const reply = yield* store.read(decoded.message.replyTo)
               if (

@@ -6,6 +6,7 @@ import { KernelEventStore, KernelStoreConflictError } from "../kernel/event-stor
 import { AgentDirectory } from "../directory/service"
 import { canonicalJson } from "../kernel/session-store-support"
 import { makeMessageStore } from "./store"
+import { resolveMessageTarget } from "./routing"
 import { MessagingError, messagingError, SubscribeEvent, PublishEvent } from "./contract"
 
 // Public producers cannot forge existing custody/completion events. Both sides
@@ -137,10 +138,13 @@ export const makeMessageSubscriptions = (
         if (rows.length === 0) return
         const snapshot = yield* directory.inventory()
         for (const row of rows) {
-          const target = snapshot.agents.find(
-            (agent) => agent.recipientId === row.payload_json.recipient,
-          )
-          if (target === undefined || !target.deliverable) continue
+          const route = yield* resolveMessageTarget(
+            hostId,
+            snapshot,
+            row.payload_json.recipient,
+          ).pipe(Effect.result)
+          if (route._tag === "Failure") continue
+          const target = route.success
           yield* sql.withTransaction(
             Effect.gen(function* () {
               for (const delivery of yield* events.readReadyDeliveries(row.instance_id)) {
