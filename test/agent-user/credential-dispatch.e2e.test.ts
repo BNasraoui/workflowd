@@ -15,6 +15,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { checkCredentialAdmission } from "../../src/agent-host/credentials"
 import { relinkCredentials } from "../../src/agent-host/credential-relink"
+import { privatePidNamespace } from "./harness"
 
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), "credential-dispatch-"))
@@ -56,12 +57,7 @@ if (process.getuid!() !== 0 && !process.env.WORKFLOWD_AGENT_TEST_BEN_UID) {
   test("credential administration in a private user and PID namespace", async () => {
     const child = Bun.spawn(
       [
-        "unshare",
-        "--user",
-        "--map-root-user",
-        "--pid",
-        "--fork",
-        "--mount-proc",
+        ...privatePidNamespace({ mapRootUser: true }),
         "/bin/sh",
         "-c",
         'mount -t tmpfs -o mode=1777 tmpfs /tmp && exec "$@"',

@@ -24,15 +24,12 @@ import {
   checkOpenCodeMigration,
   migrateOpenCodeGrants,
 } from "../../src/agent-host/opencode-credentials"
+import { privatePidNamespace } from "./harness"
 
 async function runIsolated(pattern: string) {
   const child = Bun.spawn(
     [
-      "unshare",
-      ...(process.getuid?.() === 0 ? [] : ["--user", "--map-root-user"]),
-      "--pid",
-      "--fork",
-      "--mount-proc",
+      ...privatePidNamespace({ mapRootUser: process.getuid?.() !== 0 }),
       "--net",
       "/bin/sh",
       "-c",

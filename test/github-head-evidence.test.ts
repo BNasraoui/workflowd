@@ -707,3 +707,160 @@ test("head evidence preserves adapter receivers for workflow trust and failed lo
     "real failure log",
   )
 })
+
+describe("collectHeadEvidence base ruleset contexts", () => {
+  const providerAppId = 15368
+  const ciOk = {
+    id: 501,
+    name: "CI OK",
+    status: "completed",
+    conclusion: "success",
+    appId: providerAppId,
+    appSlug: "github-actions",
+    checkSuiteId: 601,
+  }
+  const { appId: _appId, appSlug: _appSlug, ...ciOkWithoutApp } = ciOk
+  const rules = async () => [{ context: "CI OK", integrationId: providerAppId }]
+
+  function collect(
+    overrides: Partial<GitHubInstallationAdapter>,
+    repository = { owner: "owner", repo: "repo" },
+  ) {
+    return Effect.runPromise(
+      collectHeadEvidence({
+        client: github({ listBranchRequiredStatusChecks: rules, ...overrides }),
+        repository,
+        pullRequestNumber: 7,
+        target,
+        workflowdAppId,
+        sonarRequest: sonar(),
+      }),
+    )
+  }
+
+  function httpError(status: number) {
+    return Object.assign(new Error(`HTTP ${status}`), { status })
+  }
+
+  test("accepts a ruleset context from the app its rule names", async () => {
+    const reads: Array<unknown> = []
+    const evidence = await collect({
+      listCheckRunPages: () => onePage([ciOk]),
+      listBranchRequiredStatusChecks: async (input) => {
+        reads.push({ owner: input.owner, repo: input.repo, branch: input.branch })
+        return rules()
+      },
+    })
+
+    expect(evidence.ci.state).toBe("available")
+    expect(reads).toEqual([{ owner: "owner", repo: "repo", branch: "main" }])
+  })
+
+  test("accepts a ruleset context from any app when its rule names none", async () => {
+    const evidence = await collect({
+      listCheckRunPages: () => onePage([{ ...ciOk, appId: 999 }]),
+      listBranchRequiredStatusChecks: async () => [{ context: "CI OK" }],
+    })
+
+    expect(evidence.ci.state).toBe("available")
+  })
+
+  test("rejects a ruleset context without an app even when its rule names none", async () => {
+    const evidence = await collect({
+      listCheckRunPages: () => onePage([ciOkWithoutApp]),
+      listBranchRequiredStatusChecks: async () => [{ context: "CI OK" }],
+    })
+
+    expect(evidence.ci).toMatchObject({
+      state: "unavailable",
+      reason: "Missing required exact-head contexts: CI OK.",
+    })
+  })
+
+  test.each([
+    ["missing", { listCheckRunPages: () => onePage([]) }],
+    ["from another app", { listCheckRunPages: () => onePage([{ ...ciOk, appId: 999 }]) }],
+    ["without an app", { listCheckRunPages: () => onePage([ciOkWithoutApp]) }],
+    [
+      "a commit status only",
+      {
+        listCheckRunPages: () => onePage([]),
+        listCommitStatusPages: () => onePage([{ context: "CI OK", state: "success" as const }]),
+      },
+    ],
+  ] as const)("fails closed when the ruleset context is %s", async (_, overrides) => {
+    const evidence = await collect(overrides)
+
+    expect(evidence.ci).toMatchObject({
+      state: "unavailable",
+      reason: "Missing required exact-head contexts: CI OK.",
+    })
+  })
+
+  test("requires every app named by duplicate rules for one context", async () => {
+    const evidence = await collect({
+      listCheckRunPages: () => onePage([ciOk]),
+      listBranchRequiredStatusChecks: async () => [
+        { context: "CI OK", integrationId: providerAppId },
+        { context: "CI OK", integrationId: 999 },
+      ],
+    })
+
+    expect(evidence.ci.state).toBe("unavailable")
+  })
+
+  test("treats a base without readable rules (404) as having no ruleset contexts", async () => {
+    const evidence = await collect({
+      listCheckRunPages: () => onePage([]),
+      listBranchRequiredStatusChecks: async () => {
+        throw httpError(404)
+      },
+    })
+
+    expect(evidence.ci).toEqual({ state: "available", checks: [] })
+  })
+
+  test.each([403, 500])(
+    "makes CI unavailable when the rules read fails with %s",
+    async (status) => {
+      const evidence = await collect({
+        listCheckRunPages: () => onePage([ciOk]),
+        listBranchRequiredStatusChecks: async () => {
+          throw httpError(status)
+        },
+      })
+
+      expect(evidence.ci).toEqual({
+        state: "unavailable",
+        reason: "Could not read required checks for base main.",
+        checks: [],
+      })
+    },
+  )
+
+  test("keeps workflowd's stricter trust for its own context names", async () => {
+    const workflowdRules = async () => [{ context: "Required checks", integrationId: 20 }]
+    const trusted = await collect(
+      { listBranchRequiredStatusChecks: workflowdRules },
+      workflowdRepository,
+    )
+    const forged = await collect(
+      {
+        listBranchRequiredStatusChecks: workflowdRules,
+        listCheckRunPages: () =>
+          onePage(
+            requiredCheckRuns.map((check) =>
+              check.name === "Required checks" ? { ...check, checkSuiteId: 999 } : check,
+            ),
+          ),
+      },
+      workflowdRepository,
+    )
+
+    expect(trusted.ci.state).toBe("available")
+    expect(forged.ci).toMatchObject({
+      state: "unavailable",
+      reason: "Missing required exact-head contexts: Required checks.",
+    })
+  })
+})
