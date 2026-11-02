@@ -74,6 +74,14 @@ export class MessagingError extends Schema.TaggedError<MessagingError>()("Messag
     "unsupported",
     "not_found",
   ]),
-}) {}
+}) {
+  // Keep construction visible to Bun coverage; its implicit constructor is uncounted.
+  constructor(
+    props: Schema.Struct.MakeIn<typeof MessagingError.fields>,
+    options?: Schema.MakeOptions,
+  ) {
+    super(props, options)
+  }
+}
 export const messagingError = (error: unknown) =>
   error instanceof MessagingError ? error : new MessagingError({ reason: "unavailable" })

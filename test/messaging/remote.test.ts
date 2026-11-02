@@ -2,13 +2,14 @@ import { expect, test } from "bun:test"
 import { mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { Effect, Schedule, Schema } from "effect"
+import { Cause, Effect, Exit, Schedule, Schema } from "effect"
 import { connect } from "@nats-io/transport-node"
 import { jetstream } from "@nats-io/jetstream"
 import { startDirectoryDaemon } from "./harness"
 import { DirectorySnapshot } from "../../src/directory/contract"
 import { MessageRecord, type AgentMessage } from "../../src/messaging/contract"
 import { relay } from "./relay"
+import { runRemoteRunnerProcess } from "../../src/remote-runner"
 
 const docker = async (...args: string[]) => {
   const child = Bun.spawn(["docker", ...args], { stdout: "pipe", stderr: "pipe" })
@@ -32,8 +33,9 @@ test("two registered hosts deliver signed agent messages and replies over authen
   const b = relay("host-b", true)
   let hostA: Awaited<ReturnType<typeof startDirectoryDaemon>> | undefined
   let hostB: Awaited<ReturnType<typeof startDirectoryDaemon>> | undefined
-  let runner: ReturnType<typeof Bun.spawn> | undefined
+  let runner: { kill: () => void; exited: Promise<unknown> } | undefined
   let runnerLogs: Promise<string> | undefined
+  let failed = false
   try {
     await docker(
       "run",
@@ -64,20 +66,35 @@ test("two registered hosts deliver signed agent messages and replies over authen
     }
     hostA = await startDirectoryDaemon("host-a", join(root, "a.db"), coordinatorEnv)
     hostB = await startDirectoryDaemon("host-b", join(root, "b.db"))
-    const launch = (messagingEnabled = true) => {
+    const launch = (messagingEnabled = true, inProcess = false) => {
+      const env = {
+        PATH: process.env.PATH,
+        WORKFLOWD_NATS_SERVERS: server,
+        WORKFLOWD_NATS_TOKEN: "message-fixture-token",
+        WORKFLOWD_REMOTE_HOST_ID: "host-b",
+        WORKFLOWD_MESSAGING_ENABLED: String(messagingEnabled),
+        WORKFLOWD_REMOTE_DATABASE_PATH: join(root, "b.db"),
+        WORKFLOWD_DIRECTORY_COORDINATOR_HOST: "host-a",
+        WORKFLOWD_DIRECTORY_CREDENTIAL_FILE: key,
+        WORKFLOWD_EXECUTION_CAPABILITIES_CODEX_ENABLED: "false",
+      }
+      if (inProcess) {
+        const controller = new AbortController()
+        runRemoteRunnerProcess({
+          env,
+          runMain: (program) => {
+            const exited = Effect.runPromiseExit(program, { signal: controller.signal })
+            runner = { kill: () => controller.abort(), exited }
+            runnerLogs = exited.then((exit) =>
+              Exit.isFailure(exit) ? Cause.pretty(exit.cause) : "",
+            )
+          },
+        })
+        return
+      }
       const child = Bun.spawn([process.execPath, "src/remote-runner.ts"], {
         cwd: join(import.meta.dir, "../.."),
-        env: {
-          PATH: process.env.PATH,
-          WORKFLOWD_NATS_SERVERS: server,
-          WORKFLOWD_NATS_TOKEN: "message-fixture-token",
-          WORKFLOWD_REMOTE_HOST_ID: "host-b",
-          WORKFLOWD_MESSAGING_ENABLED: String(messagingEnabled),
-          WORKFLOWD_REMOTE_DATABASE_PATH: join(root, "b.db"),
-          WORKFLOWD_DIRECTORY_COORDINATOR_HOST: "host-a",
-          WORKFLOWD_DIRECTORY_CREDENTIAL_FILE: key,
-          WORKFLOWD_EXECUTION_CAPABILITIES_CODEX_ENABLED: "false",
-        },
+        env,
         stdout: "pipe",
         stderr: "pipe",
       })
@@ -193,7 +210,9 @@ test("two registered hosts deliver signed agent messages and replies over authen
     expect(b.received).toHaveLength(0)
     await hostA.stop()
     hostA = await startDirectoryDaemon("host-a", join(root, "a.db"), coordinatorEnv)
-    launch()
+    // Restart the exported bootstrap in this scope: real configured layers and
+    // SQLite/NATS recovery, with interruption awaited by the same teardown.
+    launch(true, true)
     await eventually(async () => {
       const row = Schema.decodeUnknownSync(MessageRecord)(
         await (await hostA!.request(`/messaging/messages/${first.id}`)).json(),
@@ -274,11 +293,15 @@ test("two registered hosts deliver signed agent messages and replies over authen
     ).toBe(202)
     expect(b.received).toHaveLength(2)
     expect((await hostB.request(`/messaging/messages/${forgedId}`)).status).toBe(404)
+  } catch (error) {
+    failed = true
+    throw error
   } finally {
     if (runner !== undefined) {
       runner.kill()
       await runner.exited
-      await runnerLogs
+      const logs = await runnerLogs
+      if (failed && logs) console.error(logs)
     }
     await hostA?.stop()
     await hostB?.stop()
