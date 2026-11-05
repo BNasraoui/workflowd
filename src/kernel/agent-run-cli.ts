@@ -2,13 +2,17 @@ import { credentialReason, type CredentialAdmissionReason } from "../agent-host/
 import { providerFailure, type ProviderFailure } from "../provider-failure"
 import { sandboxDiagnostic, retainSandboxFailure, diagnosticMessage } from "../sandbox/diagnostics"
 import {
+  observationUnavailable,
+  sameLaunch,
   type CliPort,
   type CliEvent,
   type CliExit,
+  type CliLaunch,
   type CliRunProcess,
 } from "./cli-process-contract"
 import { ExecutionSelectionError } from "../execution-selection"
-import { Effect, Exit, Fiber, Option } from "effect"
+import { normalizeError } from "../errors"
+import { Cause, Effect, Exit, Fiber, Option, Scope } from "effect"
 import type { AgentRunCliRoute } from "../agent-run-contract"
 import { WorkspaceError } from "../workspace/errors"
 import type { SandboxDispatchPort } from "../sandbox/dispatch"
@@ -43,11 +47,44 @@ export type AgentRunCliStore = Partial<Pick<AgentRunStorePort, "recordResolvedSe
     | "listActiveByExecutor"
   >
 
-const pullEvent = (iterator: AsyncIterator<CliEvent>) =>
+/** A failed read is "lost": it says nothing about the process by itself. */
+const pullObservedEvent = (iterator: AsyncIterator<CliEvent>) =>
   Effect.promise(() =>
     iterator.next().then(
       (next) => (next.done ? ("closed" as const) : next.value),
-      () => "closed" as const,
+      (cause: unknown) => ({ lost: cause }) as const,
+    ),
+  )
+
+const MAX_OBSERVATION_RETRY_MS = 60_000
+const DEFAULT_OBSERVATION_RETRY_LIMIT = 20
+const DEFAULT_OBSERVATION_HEALTHY_MS = 5 * 60_000
+
+type Attach = (input: {
+  readonly runId: string
+}) => Effect.Effect<CliRunProcess | null, WorkspaceError>
+
+const squashed = (failure: unknown) => (Cause.isCause(failure) ? Cause.squash(failure) : failure)
+
+/** Only known evidence is final; any other manager, bus or host failure is retried. */
+const retriable = (failure: unknown) => observationUnavailable(squashed(failure))
+
+const failureDetail = (failure: unknown): string => {
+  const error = squashed(failure)
+  return error instanceof WorkspaceError ? cliFailureDetail(error) : normalizeError(error).message
+}
+
+/** Re-attaches to the same launch, or says why it cannot. */
+const reattachOnce = (attach: Attach, runId: string, launch: CliLaunch | undefined) =>
+  attach({ runId }).pipe(
+    Effect.map((process) =>
+      process === null
+        ? ({ lost: "durable process custody is missing" } as const)
+        : sameLaunch(launch, process.launch)
+          ? ({ process } as const)
+          : ({
+              lost: `process custody changed: expected launch ${launch?.launchId}, found ${process.launch?.launchId ?? "an unidentified launch"}`,
+            } as const),
     ),
   )
 
@@ -95,20 +132,78 @@ type Observation = {
 
 const cliFailureDetail = (error: WorkspaceError) => `${error.operation}: ${String(error.cause)}`
 
-const observeFirstToken = (process: CliRunProcess, timeoutMs: number, cliName: string) =>
+const observeFirstToken = (
+  initial: CliRunProcess,
+  timeoutMs: number,
+  cliName: string,
+  /** Absent for resident threads, which have no durable custody to re-attach. */
+  reattach:
+    { readonly attach: Attach; readonly runId: string; readonly retryMs: number } | undefined,
+  /** Owns the exit observer, so shutdown stops it with the supervisors. */
+  supervision: Scope.Scope,
+) =>
   Effect.gen(function* () {
-    const iterator = process.events[Symbol.asyncIterator]()
-    const exited = yield* Effect.forkDetach(process.exited)
+    let process = initial
+    let iterator = process.events[Symbol.asyncIterator]()
+    let exited = yield* Effect.forkIn(process.exited, supervision)
     let threadId: string | null = null
     let firstMessage: string | null = null
     let nativeModel: string | undefined
     const errors: string[] = []
     let provider: ProviderFailure | undefined
+    // Bounded by the first-token deadline below; the backoff never resets per attach.
+    let delay = reattach?.retryMs ?? 0
+    /**
+     * A manager or host that did not answer says nothing about the worker, so
+     * re-attach and replay rather than refuse and kill a live process. Returns
+     * why observation is lost for good, or null once re-attached.
+     */
+    const regain = (
+      cause: unknown,
+      custody: { readonly attach: Attach; readonly runId: string; readonly retryMs: number },
+    ) =>
+      Effect.gen(function* () {
+        let reason = cause
+        for (;;) {
+          if (!retriable(reason)) return `${cliName} observation lost: ${failureDetail(reason)}`
+          yield* Effect.logWarning(`${cliName} first-token observation lost; re-attaching`, {
+            runId: custody.runId,
+            cause: reason,
+          })
+          yield* Effect.sleep(delay)
+          delay = Math.min(delay * 2, MAX_OBSERVATION_RETRY_MS)
+          const again = yield* reattachOnce(custody.attach, custody.runId, initial.launch).pipe(
+            Effect.result,
+          )
+          if (again._tag === "Failure") reason = again.failure
+          else if ("lost" in again.success)
+            return `${cliName} observation lost: ${again.success.lost}`
+          else {
+            // The replaced exit observer may still be healthy; stop it before it
+            // polls, or times out and cancels, alongside its replacement.
+            yield* Fiber.interrupt(exited)
+            process = again.success.process
+            iterator = process.events[Symbol.asyncIterator]()
+            exited = yield* Effect.forkIn(process.exited, supervision)
+            threadId = null
+            firstMessage = null
+            nativeModel = undefined
+            errors.length = 0
+            provider = undefined
+            return null
+          }
+        }
+      })
     const streamed: Effect.Effect<FirstToken> = Effect.gen(function* () {
-      const pull = pullEvent(iterator)
       for (;;) {
-        const step = yield* pull
-        if (step === "closed") {
+        const step = yield* pullObservedEvent(iterator)
+        if (step !== "closed" && "lost" in step && reattach !== undefined) {
+          const lost = yield* regain(step.lost, reattach)
+          if (lost === null) continue
+          return { outcome: "refused" as const, reason: "no_first_token" as const, detail: lost }
+        }
+        // A resident thread's failed read just ends its stream.
+        if (step === "closed" || "lost" in step) {
           return {
             outcome: "refused" as const,
             reason: "no_first_token" as const,
@@ -224,6 +319,12 @@ export const makeAgentRunCliDispatcher = (dependencies: {
   readonly refuse: (reason: RefusalReason, detail: string) => AgentRunRefusalError
   readonly verifyTimeoutMs: number
   readonly progressWindowMs: number
+  /** First delay before re-attaching a process whose observation failed. */
+  readonly observationRetryMs?: number
+  /** Re-attach attempts in one observation outage before a run needs an operator. */
+  readonly observationRetryLimit?: number
+  /** How long a re-attach must keep observing before a later loss is a new outage. */
+  readonly observationHealthyMs?: number
   readonly workerPrompt?: (run: AgentRunRecord) => Effect.Effect<string, WorkspaceError>
   readonly sandbox?: SandboxDispatchPort
 }) => {
@@ -263,46 +364,171 @@ export const makeAgentRunCliDispatcher = (dependencies: {
           selection: { ...run.resolvedSelection, model, evidence: "runtime" },
         })
 
+  type Observed = {
+    readonly iterator: AsyncIterator<CliEvent>
+    readonly exited: Fiber.Fiber<CliExit, WorkspaceError>
+    readonly cancel: Effect.Effect<void, WorkspaceError>
+  }
+
+  const retryMs = dependencies.observationRetryMs ?? 1000
+  const retryLimit = dependencies.observationRetryLimit ?? DEFAULT_OBSERVATION_RETRY_LIMIT
+  const healthyMs = dependencies.observationHealthyMs ?? DEFAULT_OBSERVATION_HEALTHY_MS
+  // Supervisors run past the dispatch that started them, but not past shutdown:
+  // closing this scope interrupts them before they can write a terminal state, so
+  // the run stays active and the next startup's recover() re-attaches it. Sandbox
+  // runs are the exception: recover() skips them (workflowd-tzee), so one
+  // interrupted here stays active until an operator settles it.
+  const supervision = Scope.makeUnsafe()
+  const supervise = <E>(effect: Effect.Effect<void, E>) =>
+    Effect.forkIn(effect, supervision).pipe(Effect.asVoid)
+
+  /**
+   * One supervision's re-attach budget. It is bounded per outage: a re-attach that
+   * keeps observing for `healthyMs` ends the outage, so the next loss starts a fresh
+   * backoff and budget. A flapping observation never stays healthy that long.
+   */
+  type Outage = { delay: number; attempts: number; observingSince: number | null }
+  const outage = (): Outage => ({ delay: retryMs, attempts: 0, observingSince: null })
+
+  /** Re-attaches within the outage's budget, or says why observation is lost for good. */
+  const reattachWithin = (
+    budget: Outage,
+    attach: Attach,
+    runId: string,
+    launch: CliLaunch | undefined,
+    cause: unknown,
+  ) =>
+    Effect.gen(function* () {
+      if (budget.observingSince !== null && Date.now() - budget.observingSince >= healthyMs) {
+        budget.delay = retryMs
+        budget.attempts = 0
+      }
+      budget.observingSince = null
+      let reason = cause
+      for (;;) {
+        if (!retriable(reason)) return { lost: failureDetail(reason) } as const
+        if (budget.attempts >= retryLimit)
+          return {
+            lost: `observation unavailable after ${budget.attempts} re-attach attempts: ${failureDetail(reason)}`,
+          } as const
+        budget.attempts += 1
+        yield* Effect.logWarning(`${kind} process observation lost; re-attaching`, {
+          runId,
+          attempt: budget.attempts,
+          cause: reason,
+        })
+        yield* Effect.sleep(budget.delay)
+        budget.delay = Math.min(budget.delay * 2, MAX_OBSERVATION_RETRY_MS)
+        const attached = yield* reattachOnce(attach, runId, launch).pipe(Effect.result)
+        if (attached._tag === "Failure") {
+          reason = attached.failure
+          continue
+        }
+        if ("process" in attached.success) budget.observingSince = Date.now()
+        return attached.success
+      }
+    })
+
   const complete = (input: {
     readonly runId: string
     readonly iterator: AsyncIterator<CliEvent>
     readonly exited: Fiber.Fiber<CliExit, WorkspaceError>
     readonly cancel: Effect.Effect<void, WorkspaceError>
+    readonly launch: CliLaunch | undefined
     readonly initialFinalMessage: string | null
     readonly stallWindowMs: number
     readonly sandboxRun?: AgentRunRecord
+    readonly attach: Attach
+    /** An outage that recover() began while attaching this run. */
+    readonly budget?: Outage
   }) =>
     Effect.gen(function* () {
+      let observed: Observed = input
       let finalMessage: string | null = input.initialFinalMessage
       let outputTokens: number | null = null
       let turnFailed: string | null = null
       let codexErrorInfo: unknown
       let stalled = false
-      for (;;) {
-        const next = yield* pullEvent(input.iterator).pipe(
-          Effect.timeoutOption(input.stallWindowMs),
-        )
-        if (Option.isNone(next)) {
-          stalled = true
-          break
-        }
-        if (next.value === "closed") break
-        const event = next.value
-        if (event.type === "turn.started") {
-          turnFailed = null
-          codexErrorInfo = undefined
-          finalMessage = null
-          outputTokens = null
-        }
-        if (event.type === "agent_message") finalMessage = event.text
-        else if (event.type === "turn.completed") outputTokens = event.outputTokens
-        else if (event.type === "turn.failed" || (event.type === "error" && turnFailed === null)) {
-          turnFailed = event.message
-          codexErrorInfo = event.codexErrorInfo
-        }
+      let exit: Exit.Exit<CliExit, WorkspaceError>
+      const budget = input.budget ?? outage()
+      const observationLost = (detail: string) => {
+        const lostDiagnostic = `${kind}_observation_lost: ${detail}`
+        return input.sandboxRun !== undefined
+          ? finishSandbox(input.sandboxRun, {
+              state: "operator_required",
+              finalMessage,
+              diagnostic: sandboxDiagnostic(
+                "native.exit",
+                { name: "Error", message: lostDiagnostic },
+                input.sandboxRun.createdAt.getTime(),
+              ).message,
+            })
+          : store
+              .operatorRequired({
+                runId: input.runId,
+                diagnostic: lostDiagnostic,
+                now: new Date(),
+                finalMessage,
+              })
+              .pipe(Effect.catchTag("AgentRunStoreConflictError", () => Effect.void))
       }
-      if (stalled) yield* input.cancel.pipe(Effect.ignore)
-      const exit: Exit.Exit<CliExit, WorkspaceError> = yield* Effect.exit(Fiber.join(input.exited))
+      for (;;) {
+        let lost: { readonly cause: unknown } | null = null
+        for (;;) {
+          const next = yield* pullObservedEvent(observed.iterator).pipe(
+            Effect.timeoutOption(input.stallWindowMs),
+          )
+          if (Option.isNone(next)) {
+            stalled = true
+            break
+          }
+          if (next.value === "closed") break
+          if ("lost" in next.value) {
+            lost = { cause: next.value.lost }
+            break
+          }
+          const event = next.value
+          if (event.type === "turn.started") {
+            turnFailed = null
+            codexErrorInfo = undefined
+            finalMessage = null
+            outputTokens = null
+          }
+          if (event.type === "agent_message") finalMessage = event.text
+          else if (event.type === "turn.completed") outputTokens = event.outputTokens
+          else if (
+            event.type === "turn.failed" ||
+            (event.type === "error" && turnFailed === null)
+          ) {
+            turnFailed = event.message
+            codexErrorInfo = event.codexErrorInfo
+          }
+        }
+        if (stalled) yield* observed.cancel.pipe(Effect.ignore)
+        exit = yield* Effect.exit(Fiber.join(observed.exited))
+        if (!stalled && lost === null && Exit.isFailure(exit)) lost = { cause: exit.cause }
+        if (lost === null) break
+        // Known evidence (custody or identity changed, a record that fails to
+        // decode) is final; any other lost observation is re-attached.
+        const again = yield* reattachWithin(
+          budget,
+          input.attach,
+          input.runId,
+          input.launch,
+          lost.cause,
+        )
+        if ("lost" in again) return yield* observationLost(again.lost)
+        // The replay starts from the first event, so event-derived state restarts too.
+        observed = {
+          iterator: again.process.events[Symbol.asyncIterator](),
+          exited: yield* Effect.forkIn(again.process.exited, supervision),
+          cancel: again.process.cancel,
+        }
+        finalMessage = null
+        outputTokens = null
+        turnFailed = null
+        codexErrorInfo = undefined
+      }
       finalMessage = providerFailure(turnFailed, codexErrorInfo)?.message ?? finalMessage
       if (input.sandboxRun !== undefined) {
         yield* finishSandbox(input.sandboxRun, {
@@ -450,7 +676,15 @@ export const makeAgentRunCliDispatcher = (dependencies: {
                     : error,
               ),
             )
-          const observed = yield* observeFirstToken(process, dependencies.verifyTimeoutMs, kind)
+          const observed = yield* observeFirstToken(
+            process,
+            dependencies.verifyTimeoutMs,
+            kind,
+            execution.ownership === "transient-exec"
+              ? { attach: execution.attach, runId: run.runId, retryMs }
+              : undefined,
+            supervision,
+          )
           if (observed.result.outcome === "refused") {
             if (isolated)
               yield* finishSandbox(run, {
@@ -484,7 +718,7 @@ export const makeAgentRunCliDispatcher = (dependencies: {
           })
           yield* store.markVerified({ runId: run.runId, outputTokens: 1, now })
           if (execution.ownership === "transient-exec")
-            yield* Effect.forkDetach(
+            yield* supervise(
               complete({
                 runId: run.runId,
                 iterator: observed.iterator,
@@ -492,6 +726,8 @@ export const makeAgentRunCliDispatcher = (dependencies: {
                 cancel: observed.cancel,
                 initialFinalMessage: observed.result.firstMessage,
                 stallWindowMs: dependencies.progressWindowMs,
+                attach: execution.attach,
+                launch: process.launch,
                 ...(isolated ? { sandboxRun: run } : {}),
               }).pipe(
                 Effect.catchCause((cause) =>
@@ -531,36 +767,21 @@ export const makeAgentRunCliDispatcher = (dependencies: {
       )
     })
 
-  const recover = Effect.gen(function* () {
-    if (cli.ownership === "resident-thread") return 0
-    const runs = yield* store.listActiveByExecutor(kind, true)
-    yield* cli.cleanup?.(runs.map((run) => run.runId)) ?? Effect.succeed(0)
-    let attached = 0
-    for (const run of runs) {
-      if (run.agent === "sandbox") continue
-      const attachment = yield* cli.attach({ runId: run.runId }).pipe(Effect.result)
-      if (attachment._tag === "Failure") {
-        yield* store.operatorRequired({
-          runId: run.runId,
-          diagnostic: `${kind}_recovery_failed: ${String(attachment.failure.cause)}`,
-          now: new Date(),
-        })
-        continue
-      }
-      const process = attachment.success
-      if (process === null) {
-        yield* store.operatorRequired({
-          runId: run.runId,
-          diagnostic: `${kind}_recovery_failed: durable process custody is missing`,
-          now: new Date(),
-        })
-        continue
-      }
+  /** Takes over one recovered run's process; false when the run was settled instead. */
+  const resume = (run: AgentRunRecord, process: CliRunProcess, budget: Outage) =>
+    Effect.gen(function* () {
+      if (cli.ownership === "resident-thread") return false
       let iterator = process.events[Symbol.asyncIterator]()
       let exited: Fiber.Fiber<CliExit, WorkspaceError>
       let initialFinalMessage: string | null = null
       if (run.state === "spawning") {
-        const observed = yield* observeFirstToken(process, dependencies.verifyTimeoutMs, kind)
+        const observed = yield* observeFirstToken(
+          process,
+          dependencies.verifyTimeoutMs,
+          kind,
+          { attach: cli.attach, runId: run.runId, retryMs },
+          supervision,
+        )
         if (observed.result.outcome === "refused") {
           yield* (observed.terminationConfirmed ? store.fail : store.operatorRequired)({
             runId: run.runId,
@@ -568,7 +789,7 @@ export const makeAgentRunCliDispatcher = (dependencies: {
             finalMessage: observed.result.finalMessage ?? null,
             now: new Date(),
           }).pipe(Effect.catchTag("AgentRunStoreConflictError", () => Effect.void))
-          continue
+          return false
         }
         yield* recordModelEvidence(run, observed.result.model, new Date())
         const resourceId = yield* ensureResource({
@@ -595,7 +816,7 @@ export const makeAgentRunCliDispatcher = (dependencies: {
         exited = observed.exited
         initialFinalMessage = observed.result.firstMessage
       } else {
-        exited = yield* Effect.forkDetach(process.exited)
+        exited = yield* Effect.forkIn(process.exited, supervision)
         if (run.state === "spawned") {
           yield* store.markVerified({
             runId: run.runId,
@@ -604,7 +825,7 @@ export const makeAgentRunCliDispatcher = (dependencies: {
           })
         }
       }
-      yield* Effect.forkDetach(
+      yield* supervise(
         complete({
           runId: run.runId,
           iterator,
@@ -612,13 +833,63 @@ export const makeAgentRunCliDispatcher = (dependencies: {
           cancel: process.cancel,
           initialFinalMessage,
           stallWindowMs: dependencies.progressWindowMs,
+          attach: cli.attach,
+          launch: process.launch,
+          budget,
         }).pipe(
           Effect.catchCause((cause) =>
             Effect.logError(`recovered ${kind} completion failed`, { runId: run.runId, cause }),
           ),
         ),
       )
-      attached += 1
+      return true
+    })
+
+  const recoveryFailed = (run: AgentRunRecord, detail: string) =>
+    store
+      .operatorRequired({
+        runId: run.runId,
+        diagnostic: `${kind}_recovery_failed: ${detail}`,
+        now: new Date(),
+      })
+      .pipe(Effect.catchTag("AgentRunStoreConflictError", () => Effect.void))
+
+  const recover = Effect.gen(function* () {
+    if (cli.ownership === "resident-thread") return 0
+    const runs = yield* store.listActiveByExecutor(kind, true)
+    yield* cli.cleanup?.(runs.map((run) => run.runId)) ?? Effect.succeed(0)
+    let attached = 0
+    for (const run of runs) {
+      if (run.agent === "sandbox") continue
+      const attachment = yield* cli.attach({ runId: run.runId }).pipe(Effect.result)
+      if (attachment._tag === "Failure") {
+        if (!retriable(attachment.failure)) {
+          yield* recoveryFailed(run, String(attachment.failure.cause))
+          continue
+        }
+        // A manager that did not answer at startup says nothing about the worker.
+        // Re-attach within the same bounded backoff, off the startup path.
+        const budget = outage()
+        yield* supervise(
+          reattachWithin(budget, cli.attach, run.runId, undefined, attachment.failure).pipe(
+            Effect.flatMap((again) =>
+              "lost" in again
+                ? recoveryFailed(run, again.lost)
+                : resume(run, again.process, budget),
+            ),
+            Effect.catchCause((cause) =>
+              Effect.logError(`recovered ${kind} completion failed`, { runId: run.runId, cause }),
+            ),
+          ),
+        )
+        continue
+      }
+      const process = attachment.success
+      if (process === null) {
+        yield* recoveryFailed(run, "durable process custody is missing")
+        continue
+      }
+      if (yield* resume(run, process, outage())) attached += 1
     }
     return attached
   })
@@ -665,5 +936,8 @@ export const makeAgentRunCliDispatcher = (dependencies: {
       yield* store.cancel({ runId: run.runId, now })
     })
 
-  return { dispatch, recover, cancel }
+  /** Interrupts every supervisor without settling its run; recover() takes them next start. */
+  const shutdown = Scope.close(supervision, Exit.void)
+
+  return { dispatch, recover, cancel, shutdown }
 }

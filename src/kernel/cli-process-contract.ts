@@ -1,4 +1,5 @@
 import type { CredentialAdmissionReason } from "../agent-host/protocol"
+import { OBSERVATION_EVIDENCE } from "../errors"
 import type { Effect } from "effect"
 import type { ExecutionSelectionError } from "../execution-selection"
 import type { WorkspaceError } from "../workspace/errors"
@@ -19,8 +20,33 @@ export type CliPreflightError = {
 
 export type CliExit = { readonly exitCode: number; readonly stderr: string }
 
+/**
+ * Whether an observation failure may be retried. Only known evidence is final;
+ * any other manager, bus or host failure says nothing about the process.
+ */
+export const observationUnavailable = (failure: unknown): boolean => {
+  let current = failure
+  for (let depth = 0; depth < 8 && typeof current === "object" && current !== null; depth++) {
+    if (current instanceof Error && current.name === OBSERVATION_EVIDENCE) return false
+    current = (current as { readonly cause?: unknown }).cause
+  }
+  return true
+}
+
+/** One launch of a run. A re-attach that finds another launch has lost custody. */
+export type CliLaunch = { readonly launchId: string; readonly invocationId: string | null }
+
+export const sameLaunch = (expected: CliLaunch | undefined, actual: CliLaunch | undefined) =>
+  expected === undefined ||
+  (actual !== undefined &&
+    actual.launchId === expected.launchId &&
+    (expected.invocationId === null ||
+      actual.invocationId === null ||
+      actual.invocationId === expected.invocationId))
+
 export type CliRunProcess = {
   readonly executionId: string
+  readonly launch?: CliLaunch
   readonly events: AsyncIterable<CliEvent>
   readonly exited: Effect.Effect<CliExit, WorkspaceError>
   readonly cancel: Effect.Effect<void, WorkspaceError>

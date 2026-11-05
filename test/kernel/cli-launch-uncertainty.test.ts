@@ -209,11 +209,12 @@ for (const kind of ["codex", "claude"] as const)
                 boundary === "launch_delayed" ? "operator_required" : "verified",
               )
               yield* ingress.cancel(id, at)
+              // The recovered supervisor lives as long as the ingress that started it.
+              if (boundary !== "launch_delayed") yield* Effect.promise(() => completion.promise)
             }).pipe(
               Effect.provide(AgentRunIngressLive(options)),
               Effect.provideService(AgentRunStore, observedStore),
             )
-            if (boundary !== "launch_delayed") yield* Effect.promise(() => completion.promise)
             expect((yield* store.read(id))?.state).toBe("cancelled")
             expect(launchCount).toBe(1)
             expect(child?.signalCode).toBe("SIGKILL")

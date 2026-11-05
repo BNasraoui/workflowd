@@ -6,7 +6,7 @@ import { chmod, mkdir, readFile, rename, stat, writeFile } from "node:fs/promise
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { Context, Effect, Schedule, Schema } from "effect"
-import { normalizeError } from "../errors"
+import { normalizeError, OBSERVATION_EVIDENCE } from "../errors"
 import { runWorkspaceCommand } from "../workspace/command"
 import { WorkspaceError } from "../workspace/errors"
 import type { CodexCliPort, CodexExit, CodexPreflightError } from "./codex-cli-port"
@@ -214,8 +214,19 @@ const writeJsonAtomic = async (path: string, value: unknown) => {
   await rename(temporary, path)
 }
 
-const readJson = async <S extends Schema.ConstraintDecoder<unknown>>(path: string, schema: S) =>
-  Schema.decodeUnknownSync(schema)(JSON.parse(await readFile(path, "utf8")))
+/** An observation failure that is evidence, so its observer does not re-attach. */
+const evidence = (message: string, options?: ErrorOptions) =>
+  Object.assign(new Error(message, options), { name: OBSERVATION_EVIDENCE })
+
+/** A custody record that fails to decode is evidence, not a lost observation. */
+const readJson = async <S extends Schema.ConstraintDecoder<unknown>>(path: string, schema: S) => {
+  const text = await readFile(path, "utf8")
+  try {
+    return Schema.decodeUnknownSync(schema)(JSON.parse(text))
+  } catch (cause) {
+    throw evidence(`${path} failed to decode: ${normalizeError(cause).message}`, { cause })
+  }
+}
 
 const boundedText = async (path: string) => {
   try {
@@ -256,6 +267,9 @@ export const makeDurableCliProcess = (
   const cliName = options.driver.name
   const manifestPath = (runId: string) =>
     join(options.custodyRoot, safeRunId(runId), "manifest.json")
+  // A re-attach after a lost observation keeps the first attach's deadline, so a
+  // flapping observation cannot keep a hung worker alive past the timeout.
+  const observingSince = new Map<string, { readonly launchId: string; readonly at: number }>()
 
   const runBoundedCommand = async (arguments_: ReadonlyArray<string>) => {
     let timer: ReturnType<typeof setTimeout> | undefined
@@ -326,15 +340,15 @@ export const makeDurableCliProcess = (
         !(await fileExists(manifest.resultPath)) &&
         !(await fileExists(manifest.cancelledPath))
       )
-        throw new Error(`${cliName} launch remains unconfirmed; process custody retained`)
+        throw evidence(`${cliName} launch remains unconfirmed; process custody retained`)
       return { manifest, unit }
     }
     const expectedDescription = `workflowd ${cliName} launch ${manifest.launchId}`
     if (unit.description !== expectedDescription || unit.invocationId === "") {
-      throw new Error("codex transient unit invocation identity mismatch")
+      throw evidence(`${cliName} transient unit invocation identity mismatch`)
     }
     if (manifest.invocationId !== null && manifest.invocationId !== unit.invocationId) {
-      throw new Error("codex transient unit invocation identity mismatch")
+      throw evidence(`${cliName} transient unit invocation identity mismatch`)
     }
     if (manifest.invocationId === null) {
       const adopted = { ...manifest, invocationId: unit.invocationId }
@@ -350,12 +364,14 @@ export const makeDurableCliProcess = (
         const path = manifestPath(input.runId)
         if (!(await fileExists(path))) return null
         let manifest = await readJson(path, Manifest)
-        if (manifest.runId !== input.runId) throw new Error("codex custody run id mismatch")
+        if (manifest.runId !== input.runId) throw evidence(`${cliName} custody run id mismatch`)
         const initial = await reconcile(path, manifest)
         manifest = initial.manifest
         if (initial.unit.active && Number.isSafeInteger(initial.unit.pid) && initial.unit.pid > 0)
           options.identity?.register(input.runId, initial.unit.pid)
-        const attachedAt = Date.now()
+        const since = observingSince.get(input.runId)
+        const attachedAt = since?.launchId === manifest.launchId ? since.at : Date.now()
+        observingSince.set(input.runId, { launchId: manifest.launchId, at: attachedAt })
 
         const terminal = async (): Promise<CodexExit | null> => {
           // The wrapper publishes its result before exiting. Inspect the unit
@@ -370,12 +386,12 @@ export const makeDurableCliProcess = (
             return { exitCode: -1, stderr: await boundedText(manifest.stderrPath) }
           }
           if (!reconciled.unit.present) {
-            return { exitCode: -1, stderr: "codex transient unit is absent and has no result" }
+            return { exitCode: -1, stderr: `${cliName} transient unit is absent and has no result` }
           }
           if (!reconciled.unit.active) {
             return {
               exitCode: -1,
-              stderr: `codex transient unit exited without a result (${reconciled.unit.result || "unknown result"})`,
+              stderr: `${cliName} transient unit exited without a result (${reconciled.unit.result || "unknown result"})`,
             }
           }
           return null
@@ -449,11 +465,15 @@ export const makeDurableCliProcess = (
               }),
             ),
           )
-          if (exit !== null) return exit
+          if (exit !== null) {
+            observingSince.delete(input.runId)
+            return exit
+          }
           await cancelUnit()
+          observingSince.delete(input.runId)
           return {
             exitCode: -1,
-            stderr: `codex observation timed out after ${observationTimeoutMs}ms`,
+            stderr: `${cliName} observation timed out after ${observationTimeoutMs}ms`,
           }
         }
         const exited = Effect.tryPromise({
@@ -476,7 +496,13 @@ export const makeDurableCliProcess = (
                 }),
         })
 
-        return { executionId: manifest.executionId, events, exited, cancel }
+        return {
+          executionId: manifest.executionId,
+          launch: { launchId: manifest.launchId, invocationId: manifest.invocationId },
+          events,
+          exited,
+          cancel,
+        }
       },
       catch: (cause) =>
         new WorkspaceError({
@@ -625,7 +651,7 @@ export const makeDurableCliProcess = (
           const launched = await runBoundedCommand(command)
           if (launched.exitCode !== 0) throw commandFailure("launch codex transient unit", launched)
           const process_ = await Effect.runPromise(attach({ runId: input.runId }))
-          if (process_ === null) throw new Error("codex custody vanished after launch")
+          if (process_ === null) throw new Error(`${cliName} custody vanished after launch`)
           return process_
         },
         catch: (cause) =>
