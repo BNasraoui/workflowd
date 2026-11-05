@@ -1,12 +1,17 @@
 import { guardCliCredentials, makeHostCli } from "../agent-host/client"
 import { agentGitEnvironment, type AgentGitConfig } from "../agent-git/config"
-import type { CliPort, CliEvent, CliPreflightError } from "./cli-process-contract"
+import {
+  observationUnavailableError,
+  type CliPort,
+  type CliEvent,
+  type CliPreflightError,
+} from "./cli-process-contract"
 import { createHash } from "node:crypto"
 import { chmod, mkdir, readFile, rename, stat, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { Context, Effect, Schedule, Schema } from "effect"
-import { normalizeError, ObservationUnavailableError } from "../errors"
+import { normalizeError } from "../errors"
 import { runWorkspaceCommand } from "../workspace/command"
 import { WorkspaceError } from "../workspace/errors"
 import type { CodexCliPort, CodexExit, CodexPreflightError } from "./codex-cli-port"
@@ -275,9 +280,7 @@ export const makeDurableCliProcess = (
         new Promise<never>((_, reject) => {
           timer = setTimeout(
             () =>
-              reject(
-                new ObservationUnavailableError(`command timed out after ${commandTimeoutMs}ms`),
-              ),
+              reject(observationUnavailableError(`command timed out after ${commandTimeoutMs}ms`)),
             commandTimeoutMs,
           )
         }),
@@ -320,7 +323,7 @@ export const makeDurableCliProcess = (
     if (result.exitCode !== 0 && fields.get("LoadState") !== "not-found") {
       const failure = commandFailure("inspect transient unit", result)
       throw managerUnavailable(result)
-        ? new ObservationUnavailableError(failure.cause.message, { cause: failure })
+        ? observationUnavailableError(failure.cause.message, { cause: failure })
         : failure
     }
     return {

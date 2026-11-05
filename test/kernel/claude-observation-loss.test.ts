@@ -9,8 +9,11 @@ import { makeClaudeDispatchCli } from "../../src/kernel/claude-dispatch"
 import { makeCodexCli, parseCodexExecEvent } from "../../src/kernel/codex-session"
 import { makeHostCli } from "../../src/agent-host/client"
 import { agentHostUnitName, HostRequest } from "../../src/agent-host/protocol"
-import type { CliPort, CliRunProcess } from "../../src/kernel/cli-process-contract"
-import { ObservationUnavailableError } from "../../src/errors"
+import {
+  observationUnavailableError,
+  type CliPort,
+  type CliRunProcess,
+} from "../../src/kernel/cli-process-contract"
 import { AgentRunRefusalError } from "../../src/kernel/agent-run-ingress"
 import type { AgentRunRecord } from "../../src/kernel/agent-run-store"
 
@@ -482,7 +485,7 @@ test("a reader that loses observation while the exit is seen still records the r
             if (!armed) return iterator.next()
             armed = false
             await workerExited()
-            throw new ObservationUnavailableError("command timed out after 5000ms")
+            throw observationUnavailableError("command timed out after 5000ms")
           },
         }),
       },
