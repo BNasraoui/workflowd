@@ -197,7 +197,11 @@ function requestAgentHostResponse(path: string, request: import("./protocol").Ho
 }
 
 import { HostResponse, type OwnedProcess, type HostStart } from "./protocol"
-import type { CliEvent, CliRunProcess } from "../kernel/cli-process-contract"
+import {
+  ObservationUnavailableError,
+  type CliEvent,
+  type CliRunProcess,
+} from "../kernel/cli-process-contract"
 import { normalizeError } from "../errors"
 
 export async function inspectAgentHost(socket: string, runId: string) {
@@ -229,13 +233,26 @@ export async function startAgentHost(socket: string, input: Omit<HostStart, "ope
   return response
 }
 
+/** An unreachable or timed-out host socket says nothing about the process it owns. */
+const observing = <A>(request: Promise<A>) =>
+  request.catch((error: unknown) => {
+    throw credentialReason(error) === "credential_host_unreachable_or_timed_out"
+      ? new ObservationUnavailableError(
+          `agent host unreachable: ${normalizeError(error).message}`,
+          {
+            cause: error,
+          },
+        )
+      : error
+  })
+
 export function observeAgentHost(
   socket: string,
   process: OwnedProcess,
   parse: (line: string) => CliEvent,
 ): CliRunProcess {
   const observe = async () => {
-    const current = await inspectAgentHost(socket, process.runId)
+    const current = await observing(inspectAgentHost(socket, process.runId))
     if (
       !current ||
       current.launchId !== process.launchId ||
@@ -244,10 +261,13 @@ export function observeAgentHost(
       throw new Error("host custody changed")
     return current
   }
+  const bytesOf = (file: "events" | "stderr", offset: number) =>
+    observing(hostBytes(socket, process, file, offset))
   const failure = (cause: unknown) =>
     new WorkspaceError({ operation: "native host process", cause: normalizeError(cause) })
   return {
     executionId: process.unit,
+    launch: { launchId: process.launchId, invocationId: process.invocationId },
     events: {
       async *[Symbol.asyncIterator]() {
         let offset = 0
@@ -255,7 +275,7 @@ export function observeAgentHost(
         const decoder = new TextDecoder()
         for (;;) {
           const current = await observe()
-          const bytes = await hostBytes(socket, process, "events", offset)
+          const bytes = await bytesOf("events", offset)
           offset += bytes.length
           buffered += decoder.decode(bytes, { stream: true })
           let end: number
@@ -280,7 +300,7 @@ export function observeAgentHost(
           if (!current.active)
             return {
               exitCode: current.exitCode ?? -1,
-              stderr: (await hostBytes(socket, process, "stderr", 0)).toString(),
+              stderr: (await bytesOf("stderr", 0)).toString(),
             }
           await new Promise((resolve) => setTimeout(resolve, 100))
         }
@@ -371,7 +391,7 @@ export function makeHostCli(
     attach: (input) =>
       Effect.tryPromise({
         try: async () => {
-          const process = await inspectAgentHost(socket, input.runId)
+          const process = await observing(inspectAgentHost(socket, input.runId))
           if (process && process.pid > 0) identity?.register(input.runId, process.pid)
           return process === null ? null : observeAgentHost(socket, process, parse)
         },

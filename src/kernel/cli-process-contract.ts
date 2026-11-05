@@ -19,8 +19,39 @@ export type CliPreflightError = {
 
 export type CliExit = { readonly exitCode: number; readonly stderr: string }
 
+/**
+ * A manager query or host request that got no answer: a killed or timed-out
+ * `systemctl`, or an unreachable host socket. It says nothing about the
+ * process, so its observer may re-attach. Every other observation failure is
+ * evidence (custody or identity changed, a record failed to decode).
+ */
+export class ObservationUnavailableError extends Error {
+  override readonly name = "ObservationUnavailableError"
+}
+
+export const observationUnavailable = (failure: unknown): boolean => {
+  let current = failure
+  for (let depth = 0; depth < 8 && typeof current === "object" && current !== null; depth++) {
+    if (current instanceof ObservationUnavailableError) return true
+    current = (current as { readonly cause?: unknown }).cause
+  }
+  return false
+}
+
+/** One launch of a run. A re-attach that finds another launch has lost custody. */
+export type CliLaunch = { readonly launchId: string; readonly invocationId: string | null }
+
+export const sameLaunch = (expected: CliLaunch | undefined, actual: CliLaunch | undefined) =>
+  expected === undefined ||
+  (actual !== undefined &&
+    actual.launchId === expected.launchId &&
+    (expected.invocationId === null ||
+      actual.invocationId === null ||
+      actual.invocationId === expected.invocationId))
+
 export type CliRunProcess = {
   readonly executionId: string
+  readonly launch?: CliLaunch
   readonly events: AsyncIterable<CliEvent>
   readonly exited: Effect.Effect<CliExit, WorkspaceError>
   readonly cancel: Effect.Effect<void, WorkspaceError>

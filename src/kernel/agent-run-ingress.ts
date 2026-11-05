@@ -529,6 +529,9 @@ const make = (options: AgentRunIngressOptions) =>
       progressWindowMs: options.progressWindowMs,
       workerPrompt,
     })
+    // Stopping the controller interrupts its supervisors before they write anything,
+    // so the runs stay active for the next start's recover().
+    yield* Effect.addFinalizer(() => codexRuns.shutdown)
     yield* codexRuns.recover
     const claudeRuns =
       claudeDispatch === undefined
@@ -549,7 +552,10 @@ const make = (options: AgentRunIngressOptions) =>
             verifyTimeoutMs: options.verifyTimeoutMs,
             progressWindowMs: options.progressWindowMs,
           })
-    if (claudeRuns !== undefined) yield* claudeRuns.recover
+    if (claudeRuns !== undefined) {
+      yield* Effect.addFinalizer(() => claudeRuns.shutdown)
+      yield* claudeRuns.recover
+    }
 
     const registerWaitIfPaired = (input: {
       readonly submission: AgentRunSubmissionType
