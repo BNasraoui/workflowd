@@ -1,17 +1,12 @@
 import { guardCliCredentials, makeHostCli } from "../agent-host/client"
 import { agentGitEnvironment, type AgentGitConfig } from "../agent-git/config"
-import {
-  ObservationUnavailableError,
-  type CliPort,
-  type CliEvent,
-  type CliPreflightError,
-} from "./cli-process-contract"
+import type { CliPort, CliEvent, CliPreflightError } from "./cli-process-contract"
 import { createHash } from "node:crypto"
 import { chmod, mkdir, readFile, rename, stat, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { Context, Effect, Schedule, Schema } from "effect"
-import { normalizeError } from "../errors"
+import { normalizeError, ObservationUnavailableError } from "../errors"
 import { runWorkspaceCommand } from "../workspace/command"
 import { WorkspaceError } from "../workspace/errors"
 import type { CodexCliPort, CodexExit, CodexPreflightError } from "./codex-cli-port"

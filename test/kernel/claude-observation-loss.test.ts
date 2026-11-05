@@ -9,11 +9,8 @@ import { makeClaudeDispatchCli } from "../../src/kernel/claude-dispatch"
 import { makeCodexCli, parseCodexExecEvent } from "../../src/kernel/codex-session"
 import { makeHostCli } from "../../src/agent-host/client"
 import { agentHostUnitName, HostRequest } from "../../src/agent-host/protocol"
-import {
-  ObservationUnavailableError,
-  type CliPort,
-  type CliRunProcess,
-} from "../../src/kernel/cli-process-contract"
+import type { CliPort, CliRunProcess } from "../../src/kernel/cli-process-contract"
+import { ObservationUnavailableError } from "../../src/errors"
 import { AgentRunRefusalError } from "../../src/kernel/agent-run-ingress"
 import type { AgentRunRecord } from "../../src/kernel/agent-run-store"
 

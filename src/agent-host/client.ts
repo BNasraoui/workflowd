@@ -197,12 +197,8 @@ function requestAgentHostResponse(path: string, request: import("./protocol").Ho
 }
 
 import { HostResponse, type OwnedProcess, type HostStart } from "./protocol"
-import {
-  ObservationUnavailableError,
-  type CliEvent,
-  type CliRunProcess,
-} from "../kernel/cli-process-contract"
-import { normalizeError } from "../errors"
+import type { CliEvent, CliRunProcess } from "../kernel/cli-process-contract"
+import { normalizeError, ObservationUnavailableError } from "../errors"
 
 export async function inspectAgentHost(socket: string, runId: string) {
   const response = await requestAgentHost(socket, { operation: "inspect", runId })
