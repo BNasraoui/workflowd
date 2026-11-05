@@ -562,7 +562,7 @@ test("a re-attach keeps the first attach's observation deadline", async () => {
   }
 }, 20_000)
 
-/** A scripted agent host: one owned launch per run, reachable or not. */
+/** A scripted agent host: one owned launch per run. An unreachable host is not listening. */
 const fakeHost = async (root: string) => {
   const socket = join(root, "host.sock")
   type Launch = { launchId: string; active: boolean; exitCode: number | null; events: string }
@@ -576,8 +576,6 @@ const fakeHost = async (root: string) => {
       JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "working" } }) +
       "\n",
   }
-  let reachable = true
-  let refused = 0
   let lastRequestAt = Date.now()
   const owned = (runId: string) => ({
     runId,
@@ -595,11 +593,6 @@ const fakeHost = async (root: string) => {
     connections.add(connection)
     connection.on("close", () => connections.delete(connection))
     lastRequestAt = Date.now()
-    if (!reachable) {
-      refused += 1
-      connection.destroy()
-      return
-    }
     let data = ""
     connection.on("data", (chunk) => {
       data += chunk.toString()
@@ -623,14 +616,20 @@ const fakeHost = async (root: string) => {
       return reply({ admitted: false, reason: "unsupported" })
     })
   })
-  await new Promise<void>((resolve) => server.listen(socket, resolve))
+  const listen = async () => {
+    await rm(socket, { force: true })
+    await new Promise<void>((resolve) => server.listen(socket, resolve))
+  }
+  await listen()
   return {
     socket,
-    refused: () => refused,
     lastRequestAt: () => lastRequestAt,
-    setReachable: (value: boolean) => {
-      reachable = value
-    },
+    /** Requests already accepted finish; new ones find no listener. */
+    stop: () =>
+      new Promise<void>((resolve) => {
+        server.close(() => resolve())
+      }).then(() => rm(socket, { force: true })),
+    listen,
     finish: (text: string) => {
       launch.events +=
         JSON.stringify({ type: "item.completed", item: { type: "agent_message", text } }) + "\n"
@@ -655,7 +654,8 @@ const fakeHost = async (root: string) => {
     close: () =>
       new Promise<void>((resolve) => {
         for (const connection of connections) connection.destroy()
-        server.close(() => resolve())
+        if (server.listening) server.close(() => resolve())
+        else resolve()
       }),
   }
 }
@@ -663,11 +663,16 @@ const fakeHost = async (root: string) => {
 const hostHarness = async () => {
   const root = await mkdtemp(join(tmpdir(), "workflowd-8wo4-host-"))
   const host = await fakeHost(root)
-  const supervised = supervisor(
-    "codex",
-    root,
-    makeHostCli(host.socket, "codex", parseCodexExecEvent),
-  )
+  const cli = makeHostCli(host.socket, "codex", parseCodexExecEvent)
+  let attaches = 0
+  const supervised = supervisor("codex", root, {
+    ...cli,
+    attach: (input) =>
+      Effect.suspend(() => {
+        attaches += 1
+        return cli.attach(input)
+      }),
+  })
   const settle = async () => {
     await supervised.firstTerminal()
     await waitFor(() => Date.now() - host.lastRequestAt() > 250, "the supervisor to settle")
@@ -676,6 +681,7 @@ const hostHarness = async () => {
   return {
     ...supervised,
     host,
+    attaches: () => attaches,
     settle,
     cleanup: async () => {
       await host.close()
@@ -688,11 +694,12 @@ test("an unreachable agent host is a lost observation, not a failed run", async 
   const h = await hostHarness()
   try {
     await h.dispatch()
-    h.host.setReachable(false)
-    await waitFor(() => h.host.refused() >= 3, "the refused host requests")
+    await h.host.stop()
+    // Both observers lost the host, and re-attaching failed too.
+    await waitFor(() => h.attaches() >= 2, "re-attaches to an unreachable host")
     expect(h.terminals).toEqual([])
-    h.host.setReachable(true)
     h.host.finish("final answer")
+    await h.host.listen()
     expect(await h.settle()).toEqual([{ kind: "complete", finalMessage: "final answer" }])
   } finally {
     await h.cleanup()
@@ -703,11 +710,11 @@ test("a host re-attach that finds another launch does not adopt its result", asy
   const h = await hostHarness()
   try {
     await h.dispatch()
-    h.host.setReachable(false)
-    await waitFor(() => h.host.refused() >= 3, "the refused host requests")
+    await h.host.stop()
+    await waitFor(() => h.attaches() >= 2, "re-attaches to an unreachable host")
     // While unreachable the host replaced the launch; the new one already finished.
     h.host.relaunch()
-    h.host.setReachable(true)
+    await h.host.listen()
     const terminals = await h.settle()
     expect(terminals).toHaveLength(1)
     expect(terminals[0]).toMatchObject({
