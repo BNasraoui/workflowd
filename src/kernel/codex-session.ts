@@ -1,17 +1,12 @@
 import { guardCliCredentials, makeHostCli } from "../agent-host/client"
 import { agentGitEnvironment, type AgentGitConfig } from "../agent-git/config"
-import {
-  observationUnavailableError,
-  type CliPort,
-  type CliEvent,
-  type CliPreflightError,
-} from "./cli-process-contract"
+import type { CliPort, CliEvent, CliPreflightError } from "./cli-process-contract"
 import { createHash } from "node:crypto"
 import { chmod, mkdir, readFile, rename, stat, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { Context, Effect, Schedule, Schema } from "effect"
-import { normalizeError } from "../errors"
+import { normalizeError, ObservationEvidenceError } from "../errors"
 import { runWorkspaceCommand } from "../workspace/command"
 import { WorkspaceError } from "../workspace/errors"
 import type { CodexCliPort, CodexExit, CodexPreflightError } from "./codex-cli-port"
@@ -219,8 +214,18 @@ const writeJsonAtomic = async (path: string, value: unknown) => {
   await rename(temporary, path)
 }
 
-const readJson = async <S extends Schema.ConstraintDecoder<unknown>>(path: string, schema: S) =>
-  Schema.decodeUnknownSync(schema)(JSON.parse(await readFile(path, "utf8")))
+/** A custody record that fails to decode is evidence, not a lost observation. */
+const readJson = async <S extends Schema.ConstraintDecoder<unknown>>(path: string, schema: S) => {
+  const text = await readFile(path, "utf8")
+  try {
+    return Schema.decodeUnknownSync(schema)(JSON.parse(text))
+  } catch (cause) {
+    throw new ObservationEvidenceError(
+      `${path} failed to decode: ${normalizeError(cause).message}`,
+      { cause },
+    )
+  }
+}
 
 const boundedText = async (path: string) => {
   try {
@@ -236,13 +241,6 @@ const commandFailure = (operation: string, result: CommandResult) =>
     operation,
     cause: new Error(`${operation} exited ${result.exitCode}: ${result.stderr.trim()}`),
   })
-
-// systemctl died on a signal (the controller's own stop kills its children with
-// SIGTERM), or could not reach the manager. Neither says anything about the unit.
-const MANAGER_UNREACHABLE =
-  /failed to connect to bus|connection timed out|connection refused|connection reset|transport endpoint is not connected|resource temporarily unavailable/i
-const managerUnavailable = (result: CommandResult) =>
-  result.exitCode < 0 || result.exitCode > 128 || MANAGER_UNREACHABLE.test(result.stderr)
 
 export const makeDurableCliProcess = (
   options: CliProcessOptions,
@@ -279,8 +277,7 @@ export const makeDurableCliProcess = (
         runCommand(arguments_),
         new Promise<never>((_, reject) => {
           timer = setTimeout(
-            () =>
-              reject(observationUnavailableError(`command timed out after ${commandTimeoutMs}ms`)),
+            () => reject(new Error(`command timed out after ${commandTimeoutMs}ms`)),
             commandTimeoutMs,
           )
         }),
@@ -320,12 +317,8 @@ export const makeDurableCliProcess = (
         .map((line) => [line.slice(0, line.indexOf("=")), line.slice(line.indexOf("=") + 1)]),
     )
     // A failed manager query is not evidence that the unit is absent.
-    if (result.exitCode !== 0 && fields.get("LoadState") !== "not-found") {
-      const failure = commandFailure("inspect transient unit", result)
-      throw managerUnavailable(result)
-        ? observationUnavailableError(failure.cause.message, { cause: failure })
-        : failure
-    }
+    if (result.exitCode !== 0 && fields.get("LoadState") !== "not-found")
+      throw commandFailure("inspect transient unit", result)
     return {
       pid: Number(fields.get("MainPID") ?? 0),
       present: fields.get("LoadState") !== "not-found",
@@ -346,15 +339,17 @@ export const makeDurableCliProcess = (
         !(await fileExists(manifest.resultPath)) &&
         !(await fileExists(manifest.cancelledPath))
       )
-        throw new Error(`${cliName} launch remains unconfirmed; process custody retained`)
+        throw new ObservationEvidenceError(
+          `${cliName} launch remains unconfirmed; process custody retained`,
+        )
       return { manifest, unit }
     }
     const expectedDescription = `workflowd ${cliName} launch ${manifest.launchId}`
     if (unit.description !== expectedDescription || unit.invocationId === "") {
-      throw new Error(`${cliName} transient unit invocation identity mismatch`)
+      throw new ObservationEvidenceError(`${cliName} transient unit invocation identity mismatch`)
     }
     if (manifest.invocationId !== null && manifest.invocationId !== unit.invocationId) {
-      throw new Error(`${cliName} transient unit invocation identity mismatch`)
+      throw new ObservationEvidenceError(`${cliName} transient unit invocation identity mismatch`)
     }
     if (manifest.invocationId === null) {
       const adopted = { ...manifest, invocationId: unit.invocationId }
@@ -370,7 +365,8 @@ export const makeDurableCliProcess = (
         const path = manifestPath(input.runId)
         if (!(await fileExists(path))) return null
         let manifest = await readJson(path, Manifest)
-        if (manifest.runId !== input.runId) throw new Error(`${cliName} custody run id mismatch`)
+        if (manifest.runId !== input.runId)
+          throw new ObservationEvidenceError(`${cliName} custody run id mismatch`)
         const initial = await reconcile(path, manifest)
         manifest = initial.manifest
         if (initial.unit.active && Number.isSafeInteger(initial.unit.pid) && initial.unit.pid > 0)

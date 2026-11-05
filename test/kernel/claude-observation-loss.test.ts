@@ -9,11 +9,7 @@ import { makeClaudeDispatchCli } from "../../src/kernel/claude-dispatch"
 import { makeCodexCli, parseCodexExecEvent } from "../../src/kernel/codex-session"
 import { makeHostCli } from "../../src/agent-host/client"
 import { agentHostUnitName, HostRequest } from "../../src/agent-host/protocol"
-import {
-  observationUnavailableError,
-  type CliPort,
-  type CliRunProcess,
-} from "../../src/kernel/cli-process-contract"
+import type { CliPort, CliRunProcess } from "../../src/kernel/cli-process-contract"
 import { AgentRunRefusalError } from "../../src/kernel/agent-run-ingress"
 import type { AgentRunRecord } from "../../src/kernel/agent-run-store"
 
@@ -65,6 +61,8 @@ const simulatedManager = (workerPath: string) => {
   let shows = 0
   let failedShows = 0
   let failing: (show: number) => boolean = () => false
+  // A systemctl child killed by SIGTERM: no properties, status 143.
+  let failure = { exitCode: 143, stdout: "", stderr: "" }
   let lastCommandAt = Date.now()
   const alive = () => child !== undefined && child.exitCode === null && child.signalCode === null
   return {
@@ -75,6 +73,10 @@ const simulatedManager = (workerPath: string) => {
     failNextShows: (count: number) => {
       const until = shows + count
       failing = (show) => show <= until
+    },
+    /** How a failed show answers from now on. */
+    failWith: (result: { readonly exitCode: number; readonly stderr: string }) => {
+      failure = { ...result, stdout: "" }
     },
     shows: () => shows,
     failedShows: () => failedShows,
@@ -103,8 +105,7 @@ const simulatedManager = (workerPath: string) => {
         shows += 1
         if (failing(shows)) {
           failedShows += 1
-          // A systemctl child killed by SIGTERM: no properties, status 143.
-          return { exitCode: 143, stdout: "", stderr: "" }
+          return failure
         }
         const running = alive()
         return {
@@ -171,7 +172,13 @@ const supervisor = (
   kind: Kind,
   root: string,
   cli: CliPort,
-  options: { readonly retryLimit?: number; readonly active?: ReadonlyArray<AgentRunRecord> } = {},
+  options: {
+    readonly retryLimit?: number
+    readonly retryMs?: number
+    readonly healthyMs?: number
+    readonly verifyTimeoutMs?: number
+    readonly active?: ReadonlyArray<AgentRunRecord>
+  } = {},
 ) => {
   const terminals: Terminal[] = []
   let first = Promise.withResolvers<void>()
@@ -202,10 +209,11 @@ const supervisor = (
     ensureResource: () => Effect.succeed("resource-8wo4"),
     ensureSession: () => Effect.succeed(`${kind}-session-native-session`),
     refuse: (reason, detail) => new AgentRunRefusalError({ reason, detail }),
-    verifyTimeoutMs: 10_000,
+    verifyTimeoutMs: options.verifyTimeoutMs ?? 10_000,
     progressWindowMs: 60_000,
-    observationRetryMs: 5,
+    observationRetryMs: options.retryMs ?? 5,
     ...(options.retryLimit === undefined ? {} : { observationRetryLimit: options.retryLimit }),
+    ...(options.healthyMs === undefined ? {} : { observationHealthyMs: options.healthyMs }),
   })
   return {
     runtime,
@@ -231,6 +239,9 @@ const harness = async (
   options: {
     readonly gated?: boolean
     readonly retryLimit?: number
+    readonly retryMs?: number
+    readonly healthyMs?: number
+    readonly verifyTimeoutMs?: number
     readonly observationTimeoutMs?: number
     readonly wrap?: (cli: Transient) => Transient
   } = {},
@@ -253,12 +264,12 @@ const harness = async (
     }),
   )
   const cli = options.wrap?.(native) ?? native
-  const supervised = supervisor(
-    kind,
-    root,
-    cli,
-    options.retryLimit === undefined ? {} : { retryLimit: options.retryLimit },
-  )
+  const supervised = supervisor(kind, root, cli, {
+    ...(options.retryLimit === undefined ? {} : { retryLimit: options.retryLimit }),
+    ...(options.retryMs === undefined ? {} : { retryMs: options.retryMs }),
+    ...(options.healthyMs === undefined ? {} : { healthyMs: options.healthyMs }),
+    ...(options.verifyTimeoutMs === undefined ? {} : { verifyTimeoutMs: options.verifyTimeoutMs }),
+  })
   /** The first terminal write, then no manager traffic: the supervisor has settled. */
   const settle = async () => {
     await supervised.firstTerminal()
@@ -431,12 +442,47 @@ test("an observation that never answers stops after the retry budget", async () 
   }
 }, 20_000)
 
+/** Wraps the port's attach and spawn to record re-attaches and live exit observers. */
+const instrumented = () => {
+  const attachedAt: number[] = []
+  const outcomes: Array<"failed" | "answered"> = []
+  let observing = 0
+  const counted = (process: CliRunProcess): CliRunProcess => ({
+    ...process,
+    exited: Effect.suspend(() => {
+      observing += 1
+      return process.exited.pipe(Effect.ensuring(Effect.sync(() => (observing -= 1))))
+    }),
+  })
+  return {
+    attachedAt,
+    /** How each re-attach ended, in order. */
+    outcomes,
+    observing: () => observing,
+    wrap:
+      (wrapProcess: (process: CliRunProcess) => CliRunProcess = (process) => process) =>
+      (cli: Transient): Transient => ({
+        ...cli,
+        spawn: (input) => cli.spawn(input).pipe(Effect.map((p) => wrapProcess(counted(p)))),
+        attach: (input) =>
+          Effect.suspend(() => {
+            attachedAt.push(Date.now())
+            return cli.attach(input).pipe(
+              Effect.map((p) => (p === null ? null : counted(p))),
+              Effect.tapError(() => Effect.sync(() => outcomes.push("failed"))),
+              Effect.tap(() => Effect.sync(() => outcomes.push("answered"))),
+            )
+          }),
+      }),
+  }
+}
+
 test("a re-attach that answers does not reset the backoff or the retry budget", async () => {
-  const h = await harness("claude", { retryLimit: 4 })
+  const probe = instrumented()
+  const h = await harness("claude", { retryLimit: 4, retryMs: 100, wrap: probe.wrap() })
   try {
     await h.dispatch()
     // Every other show fails: each re-attach can succeed, then observation is lost again.
-    const started = Date.now()
     h.manager.failShows((show) => show % 2 === 0)
     const terminals = await h.settle()
     expect(terminals).toEqual([
@@ -447,8 +493,123 @@ test("a re-attach that answers does not reset the backoff or the retry budget", 
         ),
       },
     ])
-    // 5 + 10 + 20 + 40 ms: the delay kept doubling across re-attaches.
-    expect(Date.now() - started).toBeGreaterThanOrEqual(75)
+    // Each re-attach waited at least double the one before: 100, 200, 400 ms after
+    // its predecessor. A reset backoff would put one of them about 100 ms after.
+    expect(probe.attachedAt).toHaveLength(4)
+    for (let index = 1; index < probe.attachedAt.length; index++)
+      expect(probe.attachedAt[index]! - probe.attachedAt[index - 1]!).toBeGreaterThanOrEqual(
+        100 * 2 ** index - 5,
+      )
+  } finally {
+    await h.cleanup()
+  }
+}, 20_000)
+
+test("a re-attach that keeps observing for the healthy period starts a fresh retry budget", async () => {
+  const probe = instrumented()
+  const h = await harness("claude", { retryLimit: 3, healthyMs: 300, wrap: probe.wrap() })
+  /** One outage: two re-attaches fail, the third (the last in the budget) answers. */
+  const outage = async () => {
+    const before = probe.outcomes.length
+    h.manager.failShows(() => true)
+    await waitFor(() => probe.outcomes.length === before + 2, "two failed re-attaches")
+    h.manager.failShows(() => false)
+    await waitFor(() => probe.outcomes.length === before + 3, "the answering re-attach")
+    expect(probe.outcomes.slice(before)).toEqual(["failed", "failed", "answered"])
+  }
+  try {
+    await h.dispatch()
+    await outage()
+    // Healthy for longer than the healthy period, then the manager stops answering again.
+    await Bun.sleep(500)
+    await outage()
+    await Bun.sleep(100)
+    expect(h.terminals).toEqual([])
+    await h.release(0)
+    expect(await h.settle()).toEqual([{ kind: "complete", finalMessage: "final answer" }])
+  } finally {
+    await h.cleanup()
+  }
+}, 20_000)
+
+test("a manager or bus error that is not known evidence is retried", async () => {
+  const h = await harness()
+  try {
+    await h.dispatch()
+    h.manager.failWith({
+      exitCode: 1,
+      stderr:
+        "Failed to get properties: Message recipient disconnected from message bus without replying",
+    })
+    h.manager.failNextShows(6)
+    await waitFor(() => h.manager.failedShows() === 6, "the failed observations")
+    await Bun.sleep(50)
+    expect(h.terminals).toEqual([])
+    await h.release(0)
+    expect(await h.settle()).toEqual([{ kind: "complete", finalMessage: "final answer" }])
+  } finally {
+    await h.cleanup()
+  }
+}, 20_000)
+
+test("a first-token re-attach stops the exit observer it replaces", async () => {
+  const probe = instrumented()
+  let armed = true
+  // Only the event reader loses a query; the first exit observer stays healthy.
+  const loseFirstRead = (process: CliRunProcess): CliRunProcess => {
+    const iterator = process.events[Symbol.asyncIterator]()
+    return {
+      ...process,
+      events: {
+        [Symbol.asyncIterator]: () => ({
+          next: async () => {
+            if (!armed) return iterator.next()
+            armed = false
+            throw new Error("inspect transient unit exited 1: Connection timed out")
+          },
+        }),
+      },
+    }
+  }
+  const h = await harness("claude", { gated: true, wrap: probe.wrap(loseFirstRead) })
+  try {
+    const dispatched = h.dispatch()
+    await waitFor(() => probe.attachedAt.length === 1, "the first-token re-attach")
+    await h.go()
+    await dispatched
+    await Bun.sleep(50)
+    // The supervisor's one exit observer, not that one plus the replaced one.
+    expect(probe.observing()).toBe(1)
+    await h.release(0)
+    expect(await h.settle()).toEqual([{ kind: "complete", finalMessage: "final answer" }])
+  } finally {
+    await h.cleanup()
+  }
+}, 20_000)
+
+test("a worker that never produces a token is refused at the verify deadline though observation keeps failing", async () => {
+  const h = await harness("claude", { gated: true, verifyTimeoutMs: 500 })
+  try {
+    // Show 1 is the launch's own attach; every first-token observation after it fails.
+    h.manager.failShows((show) => show >= 2)
+    const started = Date.now()
+    const refused = await h.dispatch().then(
+      () => null,
+      (error: unknown) => error,
+    )
+    expect(refused).toBeInstanceOf(AgentRunRefusalError)
+    expect(refused).toMatchObject({
+      reason: "no_first_token",
+      detail: expect.stringContaining("produced no model output within 500ms of spawn"),
+    })
+    // The verify deadline plus the bounded cleanup, not a re-attach per backoff forever.
+    expect(Date.now() - started).toBeLessThan(3_000)
+    expect(h.terminals).toEqual([
+      {
+        kind: "operator_required",
+        diagnostic: expect.stringMatching(/^no_first_token: .*native termination unconfirmed/),
+      },
+    ])
   } finally {
     await h.cleanup()
   }
@@ -485,7 +646,7 @@ test("a reader that loses observation while the exit is seen still records the r
             if (!armed) return iterator.next()
             armed = false
             await workerExited()
-            throw observationUnavailableError("command timed out after 5000ms")
+            throw new Error("command timed out after 5000ms")
           },
         }),
       },
@@ -539,6 +700,58 @@ test("a controller stopped during a failed show leaves the run for recover()", a
     await waitFor(() => Date.now() - h.manager.lastCommandAt() > 250, "the supervisor to settle")
     expect(next.terminals).toEqual([{ kind: "complete", finalMessage: "final answer" }])
     expect(h.terminals).toEqual([])
+  } finally {
+    await h.cleanup()
+  }
+}, 20_000)
+
+test("recover() retries a first attach the manager did not answer", async () => {
+  const h = await harness()
+  try {
+    await h.dispatch()
+    await Effect.runPromise(h.runtime.shutdown)
+    // The next start finds the manager not answering yet.
+    h.manager.failShows(() => true)
+    const failed = h.manager.failedShows()
+    const next = supervisor("claude", h.root, h.cli, {
+      active: [run("claude", h.root, "verified")],
+    })
+    await Effect.runPromise(next.runtime.recover)
+    await waitFor(() => h.manager.failedShows() >= failed + 3, "retried first attaches")
+    expect(next.terminals).toEqual([])
+    expect(h.manager.alive()).toBe(true)
+    h.manager.failShows(() => false)
+    await h.release(0)
+    await next.firstTerminal()
+    await waitFor(() => Date.now() - h.manager.lastCommandAt() > 250, "the supervisor to settle")
+    expect(next.terminals).toEqual([{ kind: "complete", finalMessage: "final answer" }])
+  } finally {
+    await h.cleanup()
+  }
+}, 20_000)
+
+test("recover() gives up on a first attach after the retry budget", async () => {
+  const h = await harness()
+  try {
+    await h.dispatch()
+    await Effect.runPromise(h.runtime.shutdown)
+    h.manager.failShows(() => true)
+    const next = supervisor("claude", h.root, h.cli, {
+      retryLimit: 3,
+      active: [run("claude", h.root, "verified")],
+    })
+    await Effect.runPromise(next.runtime.recover)
+    await next.firstTerminal()
+    await waitFor(() => Date.now() - h.manager.lastCommandAt() > 250, "the supervisor to settle")
+    expect(next.terminals).toEqual([
+      {
+        kind: "operator_required",
+        diagnostic: expect.stringMatching(
+          /^claude_recovery_failed: observation unavailable after 3 re-attach attempts: /,
+        ),
+      },
+    ])
+    expect(h.manager.alive()).toBe(true)
   } finally {
     await h.cleanup()
   }

@@ -174,7 +174,15 @@ function requestAgentHostResponse(path: string, request: import("./protocol").Ho
       }
       if (!data.includes("\n")) return
       try {
-        const response = Schema.decodeUnknownSync(HostResponse)(JSON.parse(data))
+        let response: typeof HostResponse.Type
+        try {
+          response = Schema.decodeUnknownSync(HostResponse)(JSON.parse(data))
+        } catch (cause) {
+          throw new ObservationEvidenceError(
+            `host response failed to decode: ${normalizeError(cause).message}`,
+            { cause },
+          )
+        }
         if (!response.admitted) {
           const reason = credentialReason({ reason: response.reason })
           throw reason
@@ -198,7 +206,7 @@ function requestAgentHostResponse(path: string, request: import("./protocol").Ho
 
 import { HostResponse, type OwnedProcess, type HostStart } from "./protocol"
 import type { CliEvent, CliRunProcess } from "../kernel/cli-process-contract"
-import { normalizeError } from "../errors"
+import { normalizeError, ObservationEvidenceError } from "../errors"
 
 export async function inspectAgentHost(socket: string, runId: string) {
   const response = await requestAgentHost(socket, { operation: "inspect", runId })
@@ -241,14 +249,14 @@ export function observeAgentHost(
       current.launchId !== process.launchId ||
       (process.invocationId !== null && current.invocationId !== process.invocationId)
     )
-      throw new Error("host custody changed")
+      throw new ObservationEvidenceError("host custody changed")
     return current
   }
   const failure = (cause: unknown) =>
     new WorkspaceError({ operation: "native host process", cause: normalizeError(cause) })
   return {
     executionId: process.unit,
-    // An unreachable host is retried by the observer (see observationUnavailable);
+    // A failed host request is retried by the observer (see observationUnavailable);
     // this identity keeps a re-attach from adopting a different launch.
     launch: { launchId: process.launchId, invocationId: process.invocationId },
     events: {
@@ -397,7 +405,7 @@ export async function readAgentHostOutput(
       current.launchId !== process.launchId ||
       current.invocationId !== process.invocationId
     )
-      throw new Error("host custody changed")
+      throw new ObservationEvidenceError("host custody changed")
     if (!current.active) {
       if (current.exitCode !== 0)
         throw new Error(

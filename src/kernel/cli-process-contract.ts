@@ -1,4 +1,5 @@
 import type { CredentialAdmissionReason } from "../agent-host/protocol"
+import { ObservationEvidenceError } from "../errors"
 import type { Effect } from "effect"
 import type { ExecutionSelectionError } from "../execution-selection"
 import type { WorkspaceError } from "../workspace/errors"
@@ -19,31 +20,17 @@ export type CliPreflightError = {
 
 export type CliExit = { readonly exitCode: number; readonly stderr: string }
 
-const OBSERVATION_UNAVAILABLE = "ObservationUnavailableError"
-
 /**
- * A manager query that got no answer: a killed or timed-out `systemctl`, or a
- * manager it could not reach. It says nothing about the process, so its
- * observer may re-attach.
- */
-export const observationUnavailableError = (message: string, options?: ErrorOptions) =>
-  Object.assign(new Error(message, options), { name: OBSERVATION_UNAVAILABLE })
-
-const HOST_UNREACHABLE: CredentialAdmissionReason = "credential_host_unreachable_or_timed_out"
-
-/**
- * Whether an observation failure may be retried: an unanswered manager query, or
- * an agent host socket that was unreachable or timed out. Every other failure is
- * evidence (custody or identity changed, a record failed to decode).
+ * Whether an observation failure may be retried. Only known evidence is final;
+ * any other manager, bus or host failure says nothing about the process.
  */
 export const observationUnavailable = (failure: unknown): boolean => {
   let current = failure
   for (let depth = 0; depth < 8 && typeof current === "object" && current !== null; depth++) {
-    if (current instanceof Error && current.name === OBSERVATION_UNAVAILABLE) return true
-    if ("reason" in current && current.reason === HOST_UNREACHABLE) return true
+    if (current instanceof ObservationEvidenceError) return false
     current = (current as { readonly cause?: unknown }).cause
   }
-  return false
+  return true
 }
 
 /** One launch of a run. A re-attach that finds another launch has lost custody. */

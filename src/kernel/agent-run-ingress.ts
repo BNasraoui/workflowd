@@ -530,7 +530,8 @@ const make = (options: AgentRunIngressOptions) =>
       workerPrompt,
     })
     // Stopping the controller interrupts its supervisors before they write anything,
-    // so the runs stay active for the next start's recover().
+    // so the runs stay active for the next start's recover(). Sandbox runs are not
+    // recovered yet (workflowd-tzee) and stay active until an operator settles them.
     yield* Effect.addFinalizer(() => codexRuns.shutdown)
     yield* codexRuns.recover
     const claudeRuns =
