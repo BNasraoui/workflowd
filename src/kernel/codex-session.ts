@@ -6,7 +6,7 @@ import { chmod, mkdir, readFile, rename, stat, writeFile } from "node:fs/promise
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { Context, Effect, Schedule, Schema } from "effect"
-import { normalizeError, ObservationEvidenceError } from "../errors"
+import { normalizeError, OBSERVATION_EVIDENCE } from "../errors"
 import { runWorkspaceCommand } from "../workspace/command"
 import { WorkspaceError } from "../workspace/errors"
 import type { CodexCliPort, CodexExit, CodexPreflightError } from "./codex-cli-port"
@@ -214,16 +214,17 @@ const writeJsonAtomic = async (path: string, value: unknown) => {
   await rename(temporary, path)
 }
 
+/** An observation failure that is evidence, so its observer does not re-attach. */
+const evidence = (message: string, options?: ErrorOptions) =>
+  Object.assign(new Error(message, options), { name: OBSERVATION_EVIDENCE })
+
 /** A custody record that fails to decode is evidence, not a lost observation. */
 const readJson = async <S extends Schema.ConstraintDecoder<unknown>>(path: string, schema: S) => {
   const text = await readFile(path, "utf8")
   try {
     return Schema.decodeUnknownSync(schema)(JSON.parse(text))
   } catch (cause) {
-    throw new ObservationEvidenceError(
-      `${path} failed to decode: ${normalizeError(cause).message}`,
-      { cause },
-    )
+    throw evidence(`${path} failed to decode: ${normalizeError(cause).message}`, { cause })
   }
 }
 
@@ -339,17 +340,15 @@ export const makeDurableCliProcess = (
         !(await fileExists(manifest.resultPath)) &&
         !(await fileExists(manifest.cancelledPath))
       )
-        throw new ObservationEvidenceError(
-          `${cliName} launch remains unconfirmed; process custody retained`,
-        )
+        throw evidence(`${cliName} launch remains unconfirmed; process custody retained`)
       return { manifest, unit }
     }
     const expectedDescription = `workflowd ${cliName} launch ${manifest.launchId}`
     if (unit.description !== expectedDescription || unit.invocationId === "") {
-      throw new ObservationEvidenceError(`${cliName} transient unit invocation identity mismatch`)
+      throw evidence(`${cliName} transient unit invocation identity mismatch`)
     }
     if (manifest.invocationId !== null && manifest.invocationId !== unit.invocationId) {
-      throw new ObservationEvidenceError(`${cliName} transient unit invocation identity mismatch`)
+      throw evidence(`${cliName} transient unit invocation identity mismatch`)
     }
     if (manifest.invocationId === null) {
       const adopted = { ...manifest, invocationId: unit.invocationId }
@@ -365,8 +364,7 @@ export const makeDurableCliProcess = (
         const path = manifestPath(input.runId)
         if (!(await fileExists(path))) return null
         let manifest = await readJson(path, Manifest)
-        if (manifest.runId !== input.runId)
-          throw new ObservationEvidenceError(`${cliName} custody run id mismatch`)
+        if (manifest.runId !== input.runId) throw evidence(`${cliName} custody run id mismatch`)
         const initial = await reconcile(path, manifest)
         manifest = initial.manifest
         if (initial.unit.active && Number.isSafeInteger(initial.unit.pid) && initial.unit.pid > 0)

@@ -1,5 +1,5 @@
 import type { CredentialAdmissionReason } from "../agent-host/protocol"
-import { ObservationEvidenceError } from "../errors"
+import { OBSERVATION_EVIDENCE } from "../errors"
 import type { Effect } from "effect"
 import type { ExecutionSelectionError } from "../execution-selection"
 import type { WorkspaceError } from "../workspace/errors"
@@ -27,7 +27,7 @@ export type CliExit = { readonly exitCode: number; readonly stderr: string }
 export const observationUnavailable = (failure: unknown): boolean => {
   let current = failure
   for (let depth = 0; depth < 8 && typeof current === "object" && current !== null; depth++) {
-    if (current instanceof ObservationEvidenceError) return false
+    if (current instanceof Error && current.name === OBSERVATION_EVIDENCE) return false
     current = (current as { readonly cause?: unknown }).cause
   }
   return true

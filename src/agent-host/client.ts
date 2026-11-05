@@ -178,10 +178,9 @@ function requestAgentHostResponse(path: string, request: import("./protocol").Ho
         try {
           response = Schema.decodeUnknownSync(HostResponse)(JSON.parse(data))
         } catch (cause) {
-          throw new ObservationEvidenceError(
-            `host response failed to decode: ${normalizeError(cause).message}`,
-            { cause },
-          )
+          throw evidence(`host response failed to decode: ${normalizeError(cause).message}`, {
+            cause,
+          })
         }
         if (!response.admitted) {
           const reason = credentialReason({ reason: response.reason })
@@ -206,7 +205,11 @@ function requestAgentHostResponse(path: string, request: import("./protocol").Ho
 
 import { HostResponse, type OwnedProcess, type HostStart } from "./protocol"
 import type { CliEvent, CliRunProcess } from "../kernel/cli-process-contract"
-import { normalizeError, ObservationEvidenceError } from "../errors"
+import { normalizeError, OBSERVATION_EVIDENCE } from "../errors"
+
+/** An observation failure that is evidence, so its observer does not re-attach. */
+const evidence = (message: string, options?: ErrorOptions) =>
+  Object.assign(new Error(message, options), { name: OBSERVATION_EVIDENCE })
 
 export async function inspectAgentHost(socket: string, runId: string) {
   const response = await requestAgentHost(socket, { operation: "inspect", runId })
@@ -249,7 +252,7 @@ export function observeAgentHost(
       current.launchId !== process.launchId ||
       (process.invocationId !== null && current.invocationId !== process.invocationId)
     )
-      throw new ObservationEvidenceError("host custody changed")
+      throw evidence("host custody changed")
     return current
   }
   const failure = (cause: unknown) =>
@@ -405,7 +408,7 @@ export async function readAgentHostOutput(
       current.launchId !== process.launchId ||
       current.invocationId !== process.invocationId
     )
-      throw new ObservationEvidenceError("host custody changed")
+      throw evidence("host custody changed")
     if (!current.active) {
       if (current.exitCode !== 0)
         throw new Error(
