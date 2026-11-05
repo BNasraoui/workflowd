@@ -51,6 +51,17 @@ const pullEvent = (iterator: AsyncIterator<CliEvent>) =>
     ),
   )
 
+/** Unlike pullEvent, a failed read is "lost": it says nothing about the process. */
+const pullObservedEvent = (iterator: AsyncIterator<CliEvent>) =>
+  Effect.promise(() =>
+    iterator.next().then(
+      (next) => (next.done ? ("closed" as const) : next.value),
+      (cause: unknown) => ({ lost: cause }) as const,
+    ),
+  )
+
+const MAX_OBSERVATION_RETRY_MS = 60_000
+
 const diagnostic = (
   stalled: boolean,
   stallWindowMs: number,
@@ -224,6 +235,8 @@ export const makeAgentRunCliDispatcher = (dependencies: {
   readonly refuse: (reason: RefusalReason, detail: string) => AgentRunRefusalError
   readonly verifyTimeoutMs: number
   readonly progressWindowMs: number
+  /** First delay before re-attaching a process whose observation failed. */
+  readonly observationRetryMs?: number
   readonly workerPrompt?: (run: AgentRunRecord) => Effect.Effect<string, WorkspaceError>
   readonly sandbox?: SandboxDispatchPort
 }) => {
@@ -263,6 +276,48 @@ export const makeAgentRunCliDispatcher = (dependencies: {
           selection: { ...run.resolvedSelection, model, evidence: "runtime" },
         })
 
+  type Observed = {
+    readonly iterator: AsyncIterator<CliEvent>
+    readonly exited: Fiber.Fiber<CliExit, WorkspaceError>
+    readonly cancel: Effect.Effect<void, WorkspaceError>
+  }
+
+  /**
+   * A failed manager query or host request is a lost observation, not a process
+   * exit. Re-attach to the durable custody until it answers, then replay the
+   * events from the start so the real end and final message are recorded.
+   */
+  const reattach = (
+    runId: string,
+    attach: (input: {
+      readonly runId: string
+    }) => Effect.Effect<CliRunProcess | null, WorkspaceError>,
+    cause: unknown,
+  ) =>
+    Effect.gen(function* () {
+      let delay = dependencies.observationRetryMs ?? 1000
+      let reason = cause
+      for (;;) {
+        yield* Effect.logWarning(`${kind} process observation lost; re-attaching`, {
+          runId,
+          cause: reason,
+        })
+        yield* Effect.sleep(delay)
+        delay = Math.min(delay * 2, MAX_OBSERVATION_RETRY_MS)
+        const attached = yield* attach({ runId }).pipe(Effect.result)
+        if (attached._tag === "Success") {
+          const process = attached.success
+          if (process === null) return null
+          return {
+            iterator: process.events[Symbol.asyncIterator](),
+            exited: yield* Effect.forkDetach(process.exited),
+            cancel: process.cancel,
+          } satisfies Observed
+        }
+        reason = attached.failure
+      }
+    })
+
   const complete = (input: {
     readonly runId: string
     readonly iterator: AsyncIterator<CliEvent>
@@ -271,38 +326,73 @@ export const makeAgentRunCliDispatcher = (dependencies: {
     readonly initialFinalMessage: string | null
     readonly stallWindowMs: number
     readonly sandboxRun?: AgentRunRecord
+    readonly attach?: (input: {
+      readonly runId: string
+    }) => Effect.Effect<CliRunProcess | null, WorkspaceError>
   }) =>
     Effect.gen(function* () {
+      let observed: Observed = input
       let finalMessage: string | null = input.initialFinalMessage
       let outputTokens: number | null = null
       let turnFailed: string | null = null
       let codexErrorInfo: unknown
       let stalled = false
+      let exit: Exit.Exit<CliExit, WorkspaceError>
       for (;;) {
-        const next = yield* pullEvent(input.iterator).pipe(
-          Effect.timeoutOption(input.stallWindowMs),
-        )
-        if (Option.isNone(next)) {
-          stalled = true
-          break
+        let lost: { readonly cause: unknown } | null = null
+        for (;;) {
+          const next = yield* pullObservedEvent(observed.iterator).pipe(
+            Effect.timeoutOption(input.stallWindowMs),
+          )
+          if (Option.isNone(next)) {
+            stalled = true
+            break
+          }
+          if (next.value === "closed") break
+          if ("lost" in next.value) {
+            lost = { cause: next.value.lost }
+            break
+          }
+          const event = next.value
+          if (event.type === "turn.started") {
+            turnFailed = null
+            codexErrorInfo = undefined
+            finalMessage = null
+            outputTokens = null
+          }
+          if (event.type === "agent_message") finalMessage = event.text
+          else if (event.type === "turn.completed") outputTokens = event.outputTokens
+          else if (
+            event.type === "turn.failed" ||
+            (event.type === "error" && turnFailed === null)
+          ) {
+            turnFailed = event.message
+            codexErrorInfo = event.codexErrorInfo
+          }
         }
-        if (next.value === "closed") break
-        const event = next.value
-        if (event.type === "turn.started") {
-          turnFailed = null
-          codexErrorInfo = undefined
-          finalMessage = null
-          outputTokens = null
+        if (stalled) yield* observed.cancel.pipe(Effect.ignore)
+        exit = yield* Effect.exit(Fiber.join(observed.exited))
+        if (!stalled && lost === null && Exit.isFailure(exit)) lost = { cause: exit.cause }
+        if (lost === null || input.attach === undefined) break
+        const again = yield* reattach(input.runId, input.attach, lost.cause)
+        if (again === null) {
+          yield* store
+            .operatorRequired({
+              runId: input.runId,
+              diagnostic: `${kind}_observation_lost: durable process custody is missing`,
+              now: new Date(),
+              finalMessage,
+            })
+            .pipe(Effect.catchTag("AgentRunStoreConflictError", () => Effect.void))
+          return
         }
-        if (event.type === "agent_message") finalMessage = event.text
-        else if (event.type === "turn.completed") outputTokens = event.outputTokens
-        else if (event.type === "turn.failed" || (event.type === "error" && turnFailed === null)) {
-          turnFailed = event.message
-          codexErrorInfo = event.codexErrorInfo
-        }
+        // The replay starts from the first event, so event-derived state restarts too.
+        observed = again
+        finalMessage = null
+        outputTokens = null
+        turnFailed = null
+        codexErrorInfo = undefined
       }
-      if (stalled) yield* input.cancel.pipe(Effect.ignore)
-      const exit: Exit.Exit<CliExit, WorkspaceError> = yield* Effect.exit(Fiber.join(input.exited))
       finalMessage = providerFailure(turnFailed, codexErrorInfo)?.message ?? finalMessage
       if (input.sandboxRun !== undefined) {
         yield* finishSandbox(input.sandboxRun, {
@@ -492,6 +582,7 @@ export const makeAgentRunCliDispatcher = (dependencies: {
                 cancel: observed.cancel,
                 initialFinalMessage: observed.result.firstMessage,
                 stallWindowMs: dependencies.progressWindowMs,
+                attach: execution.attach,
                 ...(isolated ? { sandboxRun: run } : {}),
               }).pipe(
                 Effect.catchCause((cause) =>
@@ -612,6 +703,7 @@ export const makeAgentRunCliDispatcher = (dependencies: {
           cancel: process.cancel,
           initialFinalMessage,
           stallWindowMs: dependencies.progressWindowMs,
+          attach: cli.attach,
         }).pipe(
           Effect.catchCause((cause) =>
             Effect.logError(`recovered ${kind} completion failed`, { runId: run.runId, cause }),
