@@ -108,7 +108,8 @@ under the old plan.
    results, end-to-end tests run, anything stopped and why. Re-read it, then publish it with
    `gh gist create --desc "RPI implement <id>" /tmp/rpi/<id>/implement.md` (secret). It can
    exit non-zero after printing the URL; check the output for a gist URL before you retry.
-   With `.provenance/`, record it as a Source as research did.
+   With `.provenance/`, get the revision URL as research did, then record it as a Source:
+   `provenance <id>-rpi-implement create --type source --name "RPI implement for <id>" --source-type project_artifact --url <revision url>`.
 4. `printf '%s\n' "implement: <gist url>" "pr: <pr url>" | bd note <id> --stdin`, then
    `bd dolt push`.
 5. Your final message starts with the gist URL on its own line, then the PR URL and CI

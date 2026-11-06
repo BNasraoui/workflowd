@@ -36,10 +36,12 @@ command. Do this after a stopped review too; separate shell commands do not shar
    real components the plan says, and ran in CI or locally. Use `gh pr checks <pr>` and the
    implement report for local or manual-only checks; run a check if evidence is missing.
    A renamed, skipped, stub-only, or missing test is a finding.
-6. **Graph (only with .provenance/).** Run `provenance check --bindings` on the PR
-   branch. Each Rule the plan names has the expected implementation and
-   verification bindings; no approved Rule was weakened or removed; Rule changes are
-   proposals.
+6. **Graph (only with .provenance/).** At the PR head, run `mkdir -p /tmp/rpi/<id>`, then
+   `provenance check --bindings --scope <scope> --output /tmp/rpi/<id>/bindings.md --output-format markdown`.
+   Use the scope of the Rules that the plan names. The command output lists only findings.
+   The output file lists each binding and its location. Read the binding locations from
+   that file. Each Rule the plan names has the expected implementation and verification
+   bindings; no approved Rule was weakened or removed; Rule changes are proposals.
 
 ## Output
 
@@ -52,8 +54,10 @@ major findings; otherwise `Verdict: changes requested`.
 
 1. Re-read the findings, then `gh gist create --desc "RPI review <id>" /tmp/rpi/<id>/review.md`
    (secret). It can exit non-zero after printing the URL; check the output for a gist URL
-   before you retry. With
-   `.provenance/`, record it as a Source on `rpi/<id>` as research did. A commit message
+   before you retry. With `.provenance/`, get the revision URL as research did, then
+   record it as a Source on `rpi/<id>`:
+   `provenance <id>-rpi-review create --type source --name "RPI review for <id>" --source-type project_artifact --url <revision url>`.
+   A commit message
    has no `Co-Authored-By`, "Generated with", or other model or tool attribution line.
    Commit only the `.provenance/` changes and push.
 2. `bd note <id> "review: <gist url>"`
