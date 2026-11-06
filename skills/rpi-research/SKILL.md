@@ -39,10 +39,13 @@ check only its exit code. Stop if a command fails; do not inspect its output.
 4. If the repository has `.provenance/`, read the graph with the CLI and report what governs
    the area. Check exact flags with `--help` first.
    - `provenance search --text <term>` for Requirements, Rules, and Topics near the area
-   - `provenance rules resolve-symbol --file <path>` for Rules bound to each file
-   - `provenance coverage scan --path <dir>` for bindings and gaps
-   - `provenance traceability <rule-id>` for each Rule that governs the area
-   - `provenance topics list` for open Topics
+   - `provenance search --file <path>` for Rules bound to each file
+   - `provenance check --bindings --path <dir> --scope <scope> --output /tmp/rpi/<id>/bindings.md --output-format markdown`
+     for bindings (in the output file) and gaps (in the findings)
+   - `provenance <rule-id> trace` and `provenance api rules/<rule-id>/evidence` for each
+     Rule that governs the area: the trace gives the records above the Rule, and the
+     evidence gives its implementation and verification bindings
+   - `provenance search --kind topic` for Topics; report the open ones
    Report what you found, including "no Rule binds this file".
 5. Runtime evidence (installed units, journals, databases on a host) is allowed, read-only,
    in its own **Runtime evidence** section that names the host and command. Never change

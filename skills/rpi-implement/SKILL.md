@@ -44,7 +44,7 @@ For each phase, in order:
 You may add Rule changes only as proposals (`--status review`). If an approved Rule turns
 out wrong while you implement, stop and report it with evidence. Never weaken, delete, or
 re-scope an approved Rule to make code pass. Bind code to the Rules the plan names and run
-`provenance coverage scan --path . --validate-rules`.
+`provenance check --bindings`.
 
 ## Stopping early
 

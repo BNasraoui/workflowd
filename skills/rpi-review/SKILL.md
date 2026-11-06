@@ -36,8 +36,8 @@ command. Do this after a stopped review too; separate shell commands do not shar
    real components the plan says, and ran in CI or locally. Use `gh pr checks <pr>` and the
    implement report for local or manual-only checks; run a check if evidence is missing.
    A renamed, skipped, stub-only, or missing test is a finding.
-6. **Graph (only with .provenance/).** Run `provenance coverage scan --path . --validate-rules`
-   on the PR branch. Each Rule the plan names has the expected implementation and
+6. **Graph (only with .provenance/).** Run `provenance check --bindings` on the PR
+   branch. Each Rule the plan names has the expected implementation and
    verification bindings; no approved Rule was weakened or removed; Rule changes are
    proposals.
 

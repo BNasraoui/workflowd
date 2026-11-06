@@ -61,32 +61,67 @@ RULE-9  rule         An accepted message is persisted before enqueue returns 202
 TOPIC-3 topic        Backpressure for slow consumers (open, under REQ-4)
 ```
 
-`provenance rules resolve-symbol --file crates/api/src/enqueue.rs`:
+`provenance search --file crates/api/src/enqueue.rs`:
 
 ```text
-RULE-9  implementation  crates/api/src/enqueue.rs:21 enqueue_handler
+search: 1 returned for crates/api/src/enqueue.rs
+- rule RULE-9 · active
+  An accepted message is persisted before enqueue returns 202
+  · implementation line 21 enqueue_handler (file match)
+bounds: limit=50 has_more=false continuation=none
 ```
 
-`provenance rules resolve-symbol --file crates/api/src/router.rs`:
+`provenance search --file crates/api/src/router.rs`:
 
 ```text
-(no rules)
+search: 0 returned for crates/api/src/router.rs
+bounds: limit=50 has_more=false continuation=none
 ```
 
-`provenance coverage scan --path crates/api`:
+`provenance check --bindings --path crates/api --scope default --output /tmp/rpi/kiln-77/bindings.md --output-format markdown`:
 
 ```text
-RULE-9  implemented  verified (crates/api/tests/enqueue.rs::persists_before_ack)
+bindings: passed
 ```
 
-`provenance traceability RULE-9`:
+`/tmp/rpi/kiln-77/bindings.md`:
+
+```markdown
+# Coverage Scan
+
+- Files scanned: 6
+- Total annotations: 0
+- Warnings: 0
+
+- `RULE-9` is implemented at `crates/api/src/enqueue.rs`:21 (enqueue_handler) (new)
+- `RULE-9` verified by examples at `crates/api/tests/enqueue.rs`:12 (persists_before_ack) (new)
+```
+
+`provenance RULE-9 trace`:
+
+```text
+rule RULE-9
+
+view: trace
+
+record:
+{"id":"RULE-9","statement":"An accepted message is persisted before enqueue returns 202","status":"active","requirement_ids":["REQ-4"]}
+
+related:
+- requirement REQ-4: {"id":"REQ-4","statement":"Producers get a durable acknowledgement for each accepted message","status":"active"}
+```
+
+`provenance api rules/RULE-9/evidence`:
 
 ```json
-{"rule":"RULE-9","refines":["REQ-4"],"implementations":["crates/api/src/enqueue.rs:21"],"verifications":["crates/api/tests/enqueue.rs::persists_before_ack"]}
+{"data":{"rule_id":"RULE-9","implementation_bindings":[{"file_path":"crates/api/src/enqueue.rs","line":21,"item_name":"enqueue_handler"}],"verification_bindings":[{"file_path":"crates/api/tests/enqueue.rs","line":12,"item_name":"persists_before_ack"}],"verification_runs":[],"stale":null}}
 ```
 
-`provenance topics list`:
+`provenance search --kind topic`:
 
 ```text
-TOPIC-3  open  Backpressure for slow consumers  REQ-4
+search: 1 returned
+- topic TOPIC-3 · open
+  Backpressure for slow consumers (under REQ-4)
+bounds: limit=50 has_more=false continuation=none
 ```
