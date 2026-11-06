@@ -6,6 +6,7 @@ import { ExecutionCapabilities } from "../execution-capability-contract"
 import { toJsonSchemaObject } from "../json"
 import { DirectorySnapshot } from "../directory/contract"
 import { DirectoryQuery } from "./directory"
+import { messagingToolDefinitions } from "./messaging"
 
 const objectSchema = (properties: Record<string, object>, required: ReadonlyArray<string>) => ({
   type: "object" as const,
@@ -59,6 +60,7 @@ type SuccessOutput = ReturnType<typeof objectSchema>
 const withRefusal = (success: SuccessOutput) => ({ anyOf: [success, REFUSED_OUTPUT] })
 
 export const TOOL_DEFINITIONS = [
+  ...messagingToolDefinitions,
   {
     name: "agent_directory",
     description:

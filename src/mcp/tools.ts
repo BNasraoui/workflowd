@@ -5,6 +5,7 @@ import { RemoteHostId } from "../remote/contract"
 import { McpQueries, MAX_RECENT_JOBS, ListAgentRunsArguments, MAX_AGENT_RUNS } from "./queries"
 import { listExecutionCapabilities } from "./execution-capabilities"
 import { queryDirectory } from "./directory"
+import { callMessagingTool } from "./messaging"
 import {
   AgentWaitReceipt,
   AgentWaitRefusal,
@@ -132,6 +133,13 @@ const decodeArguments = <A, I>(schema: Schema.Codec<A, I>, value: unknown) =>
 export const callTool = (name: string, args: unknown, context: ToolCallContext) =>
   Effect.gen(function* () {
     switch (name) {
+      case "send_message":
+      case "message_status":
+      case "subscribe_to_event":
+      case "event_subscription_status":
+      case "cancel_event_subscription":
+      case "publish_agent_event":
+        return yield* callMessagingTool(name, args, context)
       case "agent_directory":
         return yield* queryDirectory(args, context)
       case "list_execution_capabilities":

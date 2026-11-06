@@ -221,3 +221,7 @@ native-model/catalog-model separation and thinking/access evidence; advertisemen
 are observations, not remote launch authorization. Managed recipients remain tied to
 their accepted run's initial owner host; this slice provides no managed-run host
 migration or custody transfer operation. `.6` owns unified run/job completion inventory.
+
+The opted-in messaging interface is documented in [Durable agent messages](agent-messaging.md).
+It consumes these identities and bindings without changing directory registration
+or granting external native-process/cleanup custody.

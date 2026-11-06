@@ -1,3 +1,4 @@
+import { makeMessagingLayer } from "./messaging/layers"
 import { App } from "@octokit/app"
 import { Octokit } from "@octokit/rest"
 import { Cause, Effect, Layer, Option } from "effect"
@@ -137,6 +138,11 @@ const makeAutomationLayer = (config: Extract<AppConfig, { readonly mode?: "autom
   const directoryObservations = makeDirectoryRemoteLayer(config).pipe(
     Layer.provide(directoryStores),
   )
+  const messaging = makeMessagingLayer(config).pipe(
+    Layer.provide(directoryLayer),
+    Layer.provide(directoryStores),
+    Layer.provide(kernelStoreLayer),
+  )
   const providerLayer = Layer.merge(
     Layer.succeed(OpenCodeResumeProvider, resumeProvider),
     Layer.succeed(OpenCodeCompletionProvider, resumeProvider),
@@ -247,6 +253,7 @@ const makeAutomationLayer = (config: Extract<AppConfig, { readonly mode?: "autom
           config.ci,
         ).pipe(
           Layer.provide(ciLive),
+          Layer.provide(messaging),
           Layer.provide(workerIdentityLayer),
           Layer.provide(directoryLayer),
           Layer.provide(AgentRunStoreLive.pipe(Layer.provide(storeLayer))),
@@ -265,6 +272,7 @@ const makeAutomationLayer = (config: Extract<AppConfig, { readonly mode?: "autom
           openCodeAdapter,
         ).pipe(
           Layer.provide(ciLive),
+          Layer.provide(messaging),
           Layer.provide(AgentRunStoreLive.pipe(Layer.provide(storeLayer))),
           Layer.provide(storeLayer),
         )
@@ -558,6 +566,7 @@ const makeAutomationLayer = (config: Extract<AppConfig, { readonly mode?: "autom
     executionDiscoveryLayer,
     directoryLayer,
     directoryObservations,
+    messaging,
     managedDirectoryObservations,
     ciLayer,
     residentLayer,

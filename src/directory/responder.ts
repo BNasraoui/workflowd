@@ -21,7 +21,11 @@ export const DirectoryResponder = Context.Service<{
   ) => Effect.Effect<boolean, DirectoryError | RemoteTransportError>
 }>("workflowd/DirectoryResponder")
 
-export const DirectoryResponderLive = (hostId: string, config: DirectoryRunnerConfig) =>
+export const DirectoryResponderLive = (
+  hostId: string,
+  config: DirectoryRunnerConfig,
+  messagingEnabled = false,
+) =>
   Layer.effect(
     DirectoryResponder,
     Effect.gen(function* () {
@@ -58,6 +62,7 @@ export const DirectoryResponderLive = (hostId: string, config: DirectoryRunnerCo
             agents: [...(yield* store.managed(at, 90_000)), ...(yield* store.external(at))],
             runners: [
               {
+                ...(messagingEnabled ? { messageProtocol: 1 as const } : {}),
                 runnerId: runnerIdForHost(hostId),
                 hostId,
                 status: "active" as const,

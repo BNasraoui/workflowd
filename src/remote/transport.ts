@@ -71,6 +71,10 @@ export type RemoteTransportPort = {
     hostId: string,
     expiresMs?: number,
   ) => Effect.Effect<ReadonlyArray<RemoteDelivery>, RemoteTransportError>
+  readonly takeAgentMessages?: (
+    hostId: string,
+    expiresMs?: number,
+  ) => Effect.Effect<ReadonlyArray<RemoteDelivery>, RemoteTransportError>
 }
 
 export const RemoteTransport = Context.Service<RemoteTransportPort>(
@@ -272,8 +276,11 @@ const make = (config: RemoteTransportConfig) =>
       Effect.gen(function* () {
         const connection = yield* getConnection()
         const consumer = yield* ensureConsumer(connection, stream, durable, subject)
-        const messages = yield* tryPromise("consume", () =>
-          consumer.fetch({ max_messages: maxMessages, expires: expiresMs }),
+        const messages = yield* Effect.acquireRelease(
+          tryPromise("consume", () =>
+            consumer.fetch({ max_messages: maxMessages, expires: expiresMs }),
+          ),
+          closeMessages,
         )
         const deliveries: Array<RemoteDelivery> = []
         yield* Effect.tryPromise({
@@ -285,7 +292,7 @@ const make = (config: RemoteTransportConfig) =>
           catch: transportError("consume"),
         })
         return deliveries
-      })
+      }).pipe(Effect.scoped)
 
     const consumeHost = <E>(
       hostId: string,
@@ -337,6 +344,14 @@ const make = (config: RemoteTransportConfig) =>
           COMMAND_STREAM,
           `directory-${hostId}`,
           commandSubject(`directory-${hostId}`),
+          expiresMs,
+          100,
+        ),
+      takeAgentMessages: (hostId, expiresMs = 1000) =>
+        collect(
+          COMMAND_STREAM,
+          `messages-${hostId}`,
+          commandSubject(`messages-${hostId}`),
           expiresMs,
           100,
         ),

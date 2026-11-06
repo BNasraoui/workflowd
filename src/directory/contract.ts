@@ -66,6 +66,7 @@ export const AgentRecipient = Schema.Struct({
 export type AgentRecipient = typeof AgentRecipient.Type
 
 export const DirectoryRunner = Schema.Struct({
+  messageProtocol: Schema.optionalKey(Schema.Literal(1)),
   runnerId: Identifier,
   hostId: RemoteHostId,
   status: Schema.Literals(["active", "expired", "unavailable"]),
