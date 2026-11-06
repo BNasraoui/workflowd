@@ -38,9 +38,9 @@ plan approved: https://gist.github.com/example/p88
 
 ## Repository facts found while working
 
-- `provenance traceability RULE-9` shows approved, active RULE-9 "Each acknowledgement
-  commits in its own transaction before the next is read", refining REQ-4, verified by
-  `crates/consumer/tests/ack.rs::one_tx_per_ack`.
+- `provenance RULE-9 trace` and `provenance api rules/RULE-9/evidence` show approved,
+  active RULE-9 "Each acknowledgement commits in its own transaction before the next is
+  read", refining REQ-4, verified by `crates/consumer/tests/ack.rs::one_tx_per_ack`.
 - Batching 100 acknowledgements in one transaction, as Phase 1 and RULE-21 require, breaks
   RULE-9 and fails `one_tx_per_ack`.
 - Editing RULE-9 to say "each acknowledgement batch" would make the test change and the code

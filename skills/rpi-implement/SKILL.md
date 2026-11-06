@@ -44,7 +44,7 @@ For each phase, in order:
 You may add Rule changes only as proposals (`--status review`). If an approved Rule turns
 out wrong while you implement, stop and report it with evidence. Never weaken, delete, or
 re-scope an approved Rule to make code pass. Bind code to the Rules the plan names and run
-`provenance coverage scan --path . --validate-rules`.
+`provenance check --bindings`.
 
 ## Stopping early
 
@@ -108,7 +108,8 @@ under the old plan.
    results, end-to-end tests run, anything stopped and why. Re-read it, then publish it with
    `gh gist create --desc "RPI implement <id>" /tmp/rpi/<id>/implement.md` (secret). It can
    exit non-zero after printing the URL; check the output for a gist URL before you retry.
-   With `.provenance/`, record it as a Source as research did.
+   With `.provenance/`, get the revision URL as research did, then record it as a Source:
+   `provenance <id>-rpi-implement create --type source --name "RPI implement for <id>" --source-type project_artifact --url <revision url>`.
 4. `printf '%s\n' "implement: <gist url>" "pr: <pr url>" | bd note <id> --stdin`, then
    `bd dolt push`.
 5. Your final message starts with the gist URL on its own line, then the PR URL and CI

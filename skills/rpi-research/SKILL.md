@@ -39,10 +39,21 @@ check only its exit code. Stop if a command fails; do not inspect its output.
 4. If the repository has `.provenance/`, read the graph with the CLI and report what governs
    the area. Check exact flags with `--help` first.
    - `provenance search --text <term>` for Requirements, Rules, and Topics near the area
-   - `provenance rules resolve-symbol --file <path>` for Rules bound to each file
-   - `provenance coverage scan --path <dir>` for bindings and gaps
-   - `provenance traceability <rule-id>` for each Rule that governs the area
-   - `provenance topics list` for open Topics
+   - `provenance search --file <path>` for Rules bound to each file
+   - `mkdir -p /tmp/rpi/<id>`, then
+     `provenance check --bindings --path <dir> --scope <scope> --output /tmp/rpi/<id>/bindings.md --output-format markdown`.
+     The output file lists the bindings. The findings show the gaps.
+   - `provenance <rule-id> trace` for each Rule that governs the area. The trace gives the
+     Requirements that the Rule refines and the Resolutions that produced the Rule.
+   - `provenance api rules/<rule-id>/evidence` for each of these Rules. The evidence gives
+     the implementation bindings, the verification bindings, and the verification runs.
+   - `provenance search --kind topic` for Topics. Report the open Topics.
+
+   A search returns at most 50 results by default. Read the `bounds:` line at the end of
+   the output. If it shows `has_more=true`, run the same search again with
+   `--cursor <continuation>`. Continue until `has_more` is false. With `--format json`,
+   the fields are `has_more` and `next_cursor`.
+
    Report what you found, including "no Rule binds this file".
 5. Runtime evidence (installed units, journals, databases on a host) is allowed, read-only,
    in its own **Runtime evidence** section that names the host and command. Never change
@@ -90,7 +101,7 @@ attribution line. A PR body or comment has none either.
    `--allow-empty`. Without `.provenance/`, the draft PR holds only that empty commit; this
    is expected.
 3. If `.provenance/` exists, record the questions and research gists as Sources on
-   `rpi/<id>`: `provenance sources create --id <id>-rpi-questions --name "RPI questions for <id>" --source-type project_artifact --url <revision url>`,
+   `rpi/<id>`: `provenance <id>-rpi-questions create --type source --name "RPI questions for <id>" --source-type project_artifact --url <revision url>`,
    then the same for research. Commit only the `.provenance/` changes and push.
 4. Record both URLs, one per line with
    `bd update <id> --append-notes $'research: <gist url>\npr: <pr url>' --json >/dev/null 2>&1`.
