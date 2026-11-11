@@ -66,6 +66,10 @@ test("capability authentication defaults to the existing agent-run token and sup
     (source) => source.kind === "claude",
   )
   expect(await claude?.discover(new AbortController().signal)).toEqual({ status: "unsupported" })
+  expect(claude?.explicitModels).toEqual({
+    accepted: "claude-*",
+    efforts: ["low", "medium", "high", "xhigh", "max"].map((id) => ({ id })),
+  })
   const dedicated = await loadConfig(
     { ...env, WORKFLOWD_EXECUTION_CAPABILITIES_TOKEN_FILE: "/fixture/token" },
     { readFile: async () => "dedicated-secret\n" },

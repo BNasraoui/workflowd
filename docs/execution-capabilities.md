@@ -58,9 +58,25 @@ An account requiring OpenAI authentication with no account returns an
 `unauthenticated` source and no capabilities. An unsupported RPC method or an
 incompatible native response returns `unsupported`, without a fallback catalog.
 
-An enabled local Claude resume executor is reported as an `unsupported` source;
-this slice has no supported Claude discovery protocol. `workflowd-5si` owns its
-direct launch implementation.
+An enabled local Claude executor is reported as an `unsupported` source: the
+`claude` CLI has no model-listing protocol, so it advertises no capabilities. The
+source instead carries `explicitModels`:
+
+```json
+{
+  "executor": "claude:local",
+  "kind": "claude",
+  "status": "unsupported",
+  "explicitModels": {
+    "accepted": "claude-*",
+    "efforts": [{ "id": "low" }, { "id": "medium" }, { "id": "high" }, { "id": "xhigh" }, { "id": "max" }]
+  }
+}
+```
+
+`accepted` says any `claude-` model id is dispatched to that executor as given;
+`efforts` are the `claude --effort` levels it takes. See
+[capability-based dispatch](execution-dispatch.md#thinking-inputs).
 
 ## Freshness and failure
 

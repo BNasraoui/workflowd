@@ -1,4 +1,5 @@
 import { withCredentialAdmissionPromise } from "../agent-host/client"
+import { CLAUDE_EFFORTS } from "../agent-run-contract"
 import type { OpenCodeClient } from "@opencode-ai/client/effect"
 import type { Effect } from "effect"
 import type { AppConfig } from "../config"
@@ -28,6 +29,11 @@ export function localDiscoverySources(
       executor: "claude:local",
       kind: "claude",
       protocol: "unsupported",
+      // The CLI cannot list models; dispatch passes any claude- id to it as given.
+      explicitModels: {
+        accepted: "claude-*",
+        efforts: CLAUDE_EFFORTS.map((id) => ({ id })),
+      },
       discover: () => Promise.resolve({ status: "unsupported" }),
     })
   return sources.map((source) => ({

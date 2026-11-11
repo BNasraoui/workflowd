@@ -504,6 +504,14 @@ enables it, the routes and repositories are then required):
   `WORKFLOWD_AGENT_RUN_CLAUDE_BIN` (default `claude`); `claude auth status`
   must report a logged-in session on the daemon host. Route/model collisions
   across all three harnesses are refused as `ambiguous_route`.
+  These routes are conveniences, not a model list: `dispatch_agent` also runs
+  any unconfigured `claude-` model id given as `model` or `route` (for example
+  `claude-fable-5-2`) on the Claude CLI as given, while a configured name still
+  wins for itself. `thinking: {"effort": "xhigh"}` passes `--effort` to the CLI;
+  the levels are `low`, `medium`, `high`, `xhigh` and `max`, and anything else is
+  refused `unsupported_thinking`. A new Claude model needs no edit here.
+  `list_execution_capabilities` reports this on the `claude:local` source as
+  `explicitModels`. See [capability-based dispatch](execution-dispatch.md#claude-models).
   `WORKFLOWD_AGENT_RUN_ROUTES` can be omitted for CLI-only deployments.
   Like transient Codex runs, Claude runs use independent systemd user units
   and durable output capture, reattach after a daemon restart, and support

@@ -260,7 +260,10 @@ export const TOOL_DEFINITIONS = [
       "same repository is refused with reason repository_busy. " +
       "Claude CLI and Codex CLI routes launch the respective local CLI directly, " +
       "using its own credentials and model selection; Claude CLI routes never " +
-      "use an OpenCode provider. CLI runs have durable process custody and " +
+      "use an OpenCode provider. Any claude- model id (as model or route) runs on " +
+      "the Claude CLI as given when no configured route or catalog claims it; Claude " +
+      "takes thinking.effort low, medium, high, xhigh or max. " +
+      "CLI runs have durable process custody and " +
       "inline completion supervision. " +
       "PARENT WAKES: optionally pass parent_session_id plus resume_prompt to " +
       "also register a durable wait, and workflowd prompts your session when " +

@@ -58,6 +58,16 @@ export const ExecutionCapability = Schema.Struct({
 })
 export type ExecutionCapability = Schema.Schema.Type<typeof ExecutionCapability>
 
+/**
+ * An executor that takes model ids it cannot list: any id matching
+ * `accepted` (a `*` glob) is passed to it as given, with these efforts.
+ */
+export const ExplicitModels = Schema.Struct({
+  accepted: Schema.String,
+  efforts: Schema.Array(Schema.Struct({ id: Schema.String })),
+})
+export type ExplicitModels = Schema.Schema.Type<typeof ExplicitModels>
+
 export const ExecutionCapabilities = Schema.Struct({
   capabilities: Schema.Array(ExecutionCapability),
   sources: Schema.Array(
@@ -71,6 +81,7 @@ export const ExecutionCapabilities = Schema.Struct({
       observedAt: Schema.NullOr(Schema.String),
       freshUntil: Schema.NullOr(Schema.String),
       stale: Schema.Boolean,
+      explicitModels: Schema.optionalKey(ExplicitModels),
     }),
   ),
 })

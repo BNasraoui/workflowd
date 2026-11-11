@@ -4,6 +4,7 @@ import type {
   ExecutionCapabilities,
   ExecutionCapability,
   ExecutionThinking,
+  ExplicitModels,
 } from "./execution-capability-contract"
 
 /** Adapters return only public metadata. Native dialects and credentials stay inside the adapter. */
@@ -29,6 +30,8 @@ export type DiscoverySource = {
   readonly executor: string
   readonly kind?: string
   readonly protocol?: string
+  /** Model ids this executor accepts without listing them. */
+  readonly explicitModels?: ExplicitModels
   readonly checkCredentials?: () => Promise<void>
   /** Abort ends the observation; settle only after owned native resources have been released. */
   readonly discover: (
@@ -163,6 +166,7 @@ export function makeExecutionCapabilities(options: {
           observation.observedAt !== null &&
           (observation.status !== "available" ||
             now() - observation.observedAt >= options.refreshMs),
+        ...(source.explicitModels === undefined ? {} : { explicitModels: source.explicitModels }),
       })),
       capabilities: results.flatMap(({ source, observation }) =>
         observation.status !== "available" || now() - observation.checkedAt >= options.refreshMs

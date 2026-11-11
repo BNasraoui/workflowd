@@ -232,31 +232,180 @@ test("Codex can be selected automatically with honest unknown access opt-in and 
   expect(state.created).toHaveLength(0)
 })
 
-test("Claude CLI help cannot prove exact thinking application for configured aliases", async () => {
-  const cli = makeCodexCli([])
-  const port = {
-    ...cli.port,
-    validateEffort: () => Effect.succeed(true),
-  }
+const claudeRoutes = [{ name: "claude-fable", modelID: "claude-fable-5-1" }]
+const claudeListing: ExecutionCapabilities = {
+  sources: [
+    {
+      executor: "claude:local",
+      kind: "claude",
+      protocol: "unsupported",
+      status: "unsupported",
+      checkedAt: at,
+      observedAt: null,
+      freshUntil: null,
+      stale: false,
+    },
+  ],
+  capabilities: [],
+}
+const claudeSetup = (cli = makeCodexCli([{ type: "agent_message", text: "OK" }])) => {
   const layer = makeLayer(
     makeProvider(defaultState()),
     worktrees([]),
     undefined,
-    { claudeRoutes: [{ name: "opus", modelID: "opus" }] },
-    port,
+    { claudeRoutes },
+    cli.port,
+  ).pipe(
+    Layer.provideMerge(
+      Layer.succeed(ExecutionDiscovery, { list: () => Effect.succeed(claudeListing) }),
+    ),
+  )
+  return { cli, layer }
+}
+const claudeRequest = { repository: "workflowd", prompt: "Fix" }
+
+test("a configured Claude alias passes the requested effort to the claude command line", async () => {
+  const { cli, layer } = claudeSetup()
+  const receipt = await Effect.runPromise(
+    register({ ...claudeRequest, route: "claude-fable", thinking: { effort: "xhigh" } }).pipe(
+      Effect.provide(layer),
+    ),
+  )
+  expect(cli.state.spawned[0]).toMatchObject({ model: "claude-fable-5-1", effort: "xhigh" })
+  expect(receipt.requestedSelection?.thinking).toEqual({ effort: "xhigh" })
+  expect(receipt.resolvedSelection).toMatchObject({
+    executor: "claude:local",
+    executorKind: "claude",
+    model: "claude-fable-5-1",
+    thinking: { effort: "xhigh" },
+    evidence: "configured",
+  })
+})
+
+for (const field of ["model", "route"] as const)
+  test(`an unlisted Claude model id given as ${field} reaches the command line as given`, async () => {
+    const { cli, layer } = claudeSetup()
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const receipt = yield* register({
+          ...claudeRequest,
+          [field]: "claude-fable-5-2",
+          thinking: { effort: "xhigh" },
+        })
+        const store = yield* AgentRunStore
+        return { receipt, run: yield* store.read(receipt.runId) }
+      }).pipe(Effect.provide(layer)),
+    )
+    expect(cli.state.spawned[0]).toMatchObject({ model: "claude-fable-5-2", effort: "xhigh" })
+    expect(result.receipt.providerId).toBe("claude-cli")
+    expect(result.receipt.modelId).toBe("claude-fable-5-2")
+    expect(result.receipt.resolvedSelection).toMatchObject({
+      executor: "claude:local",
+      executorKind: "claude",
+      provider: null,
+      model: "claude-fable-5-2",
+      selectionModel: "claude-fable-5-2",
+      thinking: { effort: "xhigh" },
+      availability: "unknown",
+      evidence: "requested",
+    })
+    expect(result.run?.resolvedSelection).toEqual(result.receipt.resolvedSelection)
+  })
+
+test("an explicit Claude executor accepts an unlisted model without catalog evidence", async () => {
+  const { cli, layer } = claudeSetup()
+  await Effect.runPromise(
+    register({ ...claudeRequest, model: "claude-fable-5-2", executor: "claude:local" }).pipe(
+      Effect.provide(layer),
+    ),
+  )
+  expect(cli.state.spawned[0]).toMatchObject({ model: "claude-fable-5-2" })
+  expect(cli.state.spawned[0]?.effort).toBeUndefined()
+})
+
+test("a Claude alias name given as model still resolves to its configured model", async () => {
+  const { cli, layer } = claudeSetup()
+  const receipt = await Effect.runPromise(
+    register({ ...claudeRequest, model: "claude-fable" }).pipe(Effect.provide(layer)),
+  )
+  expect(cli.state.spawned[0]).toMatchObject({ model: "claude-fable-5-1" })
+  expect(receipt.resolvedSelection).toMatchObject({
+    model: "claude-fable-5-1",
+    evidence: "configured",
+  })
+})
+
+test("provider-prefixed Claude ids are still refused for the Claude executor", async () => {
+  const { cli, layer } = claudeSetup()
+  expect(
+    (
+      await refusalOf(
+        Effect.runPromise(
+          register({ ...claudeRequest, route: "anthropic/claude-fable-5-2" }).pipe(
+            Effect.provide(layer),
+          ),
+        ),
+      )
+    ).reason,
+  ).toBe("provider_prefixed_route")
+  for (const request of [
+    { model: "anthropic/claude-fable-5-2" },
+    { model: "anthropic/claude-fable-5-2", executor: "claude:local" },
+    { model: "claude-fable-5-2", provider: "anthropic", executor: "claude:local" },
+  ])
+    expect(
+      (
+        await refusalOf(
+          Effect.runPromise(register({ ...claudeRequest, ...request }).pipe(Effect.provide(layer))),
+        )
+      ).reason,
+    ).not.toBeUndefined()
+  expect(cli.state.spawned).toHaveLength(0)
+})
+
+test("a Claude effort the CLI does not take is refused with a typed reason naming it", async () => {
+  const { cli, layer } = claudeSetup()
+  for (const request of [
+    { route: "claude-fable", thinking: { effort: "turbo" } },
+    { model: "claude-fable-5-2", thinking: { effort: "turbo" } },
+  ]) {
+    const refusal = await refusalOf(
+      Effect.runPromise(register({ ...claudeRequest, ...request }).pipe(Effect.provide(layer))),
+    )
+    expect(refusal.reason).toBe("unsupported_thinking")
+    expect(refusal.detail).toContain('"turbo"')
+  }
+  const variant = await refusalOf(
+    Effect.runPromise(
+      register({ ...claudeRequest, model: "claude-fable-5-2", thinking: { variant: "deep" } }).pipe(
+        Effect.provide(layer),
+      ),
+    ),
+  )
+  expect(variant.reason).toBe("unsupported_thinking")
+  expect(cli.state.spawned).toHaveLength(0)
+})
+
+test("a Claude CLI that refuses the effort fails the run with a typed reason naming it", async () => {
+  const { cli, layer } = claudeSetup(
+    makeCodexCli(
+      [],
+      143,
+      undefined,
+      undefined,
+      "Warning: Unknown --effort value 'max' — ignoring it and using the default effort. Valid values: low, medium, high, xhigh.\n",
+    ),
   )
   const refusal = await refusalOf(
     Effect.runPromise(
-      register({
-        route: "opus",
-        repository: "workflowd",
-        prompt: "Fix",
-        thinking: { effort: "xhigh" },
-      }).pipe(Effect.provide(layer)),
+      register({ ...claudeRequest, model: "claude-fable-5-2", thinking: { effort: "max" } }).pipe(
+        Effect.provide(layer),
+      ),
     ),
   )
+  expect(cli.state.spawned[0]).toMatchObject({ effort: "max" })
   expect(refusal.reason).toBe("unsupported_thinking")
-  expect(cli.state.spawned).toHaveLength(0)
+  expect(refusal.detail).toContain("'max'")
 })
 
 test("Claude configured alias records its native initialization model", async () => {

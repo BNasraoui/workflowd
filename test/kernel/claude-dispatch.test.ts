@@ -102,6 +102,37 @@ test("durable worker invokes Claude print mode directly and persists output and 
   }
 })
 
+test("the worker stops a Claude CLI that ignores the requested effort before any model output", async () => {
+  const root = await mkdtemp(join(tmpdir(), "workflowd-claude-effort-"))
+  try {
+    // The real CLI warns and silently falls back to its default effort.
+    const binary = join(root, "fake-claude")
+    await writeFile(
+      binary,
+      `#!/usr/bin/env bun\nconsole.error("Warning: Unknown --effort value 'max' — ignoring it and using the default effort. Valid values: low, medium, high, xhigh.")\nawait Bun.sleep(2000)\nconsole.log(JSON.stringify({ type: "system", subtype: "init", session_id: "s" }))\nconsole.log(JSON.stringify({ type: "assistant", message: { content: [{type: "text", text: "OK"}] } }))\n`,
+      { mode: 0o700 },
+    )
+    await writeFile(join(root, "prompt"), "Reply OK")
+    const exitCode = await runClaudeWorker({
+      binary,
+      directory: root,
+      promptFile: join(root, "prompt"),
+      resultFile: join(root, "result"),
+      eventsFile: join(root, "events"),
+      stderrFile: join(root, "stderr"),
+      maxOutputBytes: 10000,
+      model: "claude-fable-5-2",
+      effort: "max",
+    })
+    expect(exitCode).not.toBe(0)
+    expect(await readFile(join(root, "events"), "utf8")).toBe("")
+    expect(await readFile(join(root, "stderr"), "utf8")).toContain("Unknown --effort value 'max'")
+    expect(JSON.parse(await readFile(join(root, "result"), "utf8")).exitCode).toBe(exitCode)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 test("Claude worker entrypoint reports malformed launches without starting a model", async () => {
   const errors = spyOn(console, "error").mockImplementation(() => {})
   try {

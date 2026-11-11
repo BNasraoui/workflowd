@@ -10,6 +10,7 @@ import {
   type RequestedSelection,
   type ResolvedSelection,
   type SelectionRefusal,
+  type ThinkingSelection,
 } from "../execution-selection"
 import { OpenCodeMailbox } from "../resident/opencode"
 import { WorkerIdentity } from "../worker-identity/service"
@@ -19,6 +20,8 @@ import { Context, Data, Effect, Layer, Option, Schema } from "effect"
 import {
   AgentRunSubmission,
   resolveAgentRunRouteChoice,
+  resolveClaudeModel,
+  resolveClaudeThinking,
   type AgentRunCodexRoute,
   type AgentRunClaudeRoute,
   type AgentRunReceipt,
@@ -267,6 +270,31 @@ const choiceForSelection = (
         provider: selection.executorKind,
         route: { name, modelID: selection.model },
       }
+
+const CLAUDE_EXECUTOR = "claude:local"
+
+/** A Claude choice is recorded as asked: the model and effort the CLI is given. */
+const claudeSelection = (
+  host: string,
+  route: AgentRunClaudeRoute,
+  configured: boolean,
+  thinking: ThinkingSelection | undefined,
+) => {
+  const effort = resolveClaudeThinking(thinking)
+  return effort.outcome === "refused"
+    ? Effect.fail(refuse("unsupported_thinking", effort.detail))
+    : Effect.succeed({
+        host,
+        executor: CLAUDE_EXECUTOR,
+        executorKind: "claude",
+        provider: null,
+        model: route.modelID,
+        selectionModel: route.modelID,
+        thinking: effort.thinking,
+        availability: "unknown",
+        evidence: configured ? "configured" : "requested",
+      } satisfies ResolvedSelection)
+}
 
 const make = (options: AgentRunIngressOptions) =>
   Effect.gen(function* () {
@@ -726,25 +754,62 @@ const make = (options: AgentRunIngressOptions) =>
           selection = yield* historicalSelection(keyed)
           resolution = choiceForSelection(selection, keyed.route)
         } else if (submission.model !== undefined) {
-          if (Option.isNone(discovery))
-            return yield* refuse("executor_unavailable", "Capability discovery is disabled")
-          const catalog = yield* discovery.value
-            .list()
-            .pipe(
-              Effect.mapError((cause) =>
-                refuse(
-                  "executor_unavailable",
-                  sandboxDiagnostic("ingress.capabilities", cause).message,
-                ),
-              ),
-            )
-          const selected = resolveExecutionSelection(catalog, requested)
-          if (selected.outcome === "refused")
+          // The Claude CLI lists no models, so a claude- id it may run is taken
+          // as given when no catalog serves it, or when claude:local is named.
+          const claudeModel =
+            claudeDispatch !== undefined &&
+            (submission.executor === undefined || submission.executor === CLAUDE_EXECUTOR) &&
+            submission.provider == null &&
+            submission.modelIdentity !== "catalog"
+              ? resolveClaudeModel(dispatch.claudeRoutes ?? [], submission.model)
+              : undefined
+          const explicitClaude = claudeModel?.outcome === "resolved" ? claudeModel : undefined
+          const claudeNamed = submission.executor === CLAUDE_EXECUTOR
+          if (claudeNamed && claudeModel?.outcome === "refused")
             return yield* refuse(
-              selected.reason,
-              `Selection refused: ${selected.reason}; consult list_execution_capabilities`,
+              claudeModel.reason,
+              routeRefusalDetail(submission.model, claudeModel.reason),
             )
-          selection = selected.selection
+          let selected: ReturnType<typeof resolveExecutionSelection> | undefined
+          if (!(claudeNamed && explicitClaude !== undefined)) {
+            if (Option.isNone(discovery)) {
+              if (explicitClaude === undefined)
+                return yield* refuse("executor_unavailable", "Capability discovery is disabled")
+            } else {
+              const catalog = yield* discovery.value
+                .list()
+                .pipe(
+                  Effect.mapError((cause) =>
+                    refuse(
+                      "executor_unavailable",
+                      sandboxDiagnostic("ingress.capabilities", cause).message,
+                    ),
+                  ),
+                )
+              selected = resolveExecutionSelection(catalog, requested)
+            }
+          }
+          if (selected?.outcome === "resolved") {
+            selection = selected.selection
+          } else if (
+            explicitClaude !== undefined &&
+            (selected === undefined ||
+              selected.reason === "unknown_model" ||
+              selected.reason === "executor_unavailable")
+          ) {
+            selection = yield* claudeSelection(
+              dispatch.identity.owningHostId,
+              explicitClaude.route,
+              explicitClaude.configured,
+              submission.thinking,
+            )
+          } else {
+            const reason = selected?.reason ?? "executor_unavailable"
+            return yield* refuse(
+              reason,
+              `Selection refused: ${reason}; consult list_execution_capabilities`,
+            )
+          }
           resolution = choiceForSelection(selection, identityRoute)
         } else {
           const alias = resolveAgentRunRouteChoice(
@@ -753,35 +818,53 @@ const make = (options: AgentRunIngressOptions) =>
             submission.route!,
             dispatch.claudeRoutes,
           )
-          if (alias.outcome === "refused")
+          // An unconfigured claude- id given as a route runs on Claude as given.
+          const explicitClaude =
+            alias.outcome === "refused" &&
+            alias.reason === "unknown_route" &&
+            claudeDispatch !== undefined
+              ? resolveClaudeModel([], submission.route!)
+              : undefined
+          if (explicitClaude?.outcome === "resolved") {
+            selection = yield* claudeSelection(
+              dispatch.identity.owningHostId,
+              explicitClaude.route,
+              false,
+              submission.thinking,
+            )
+            resolution = choiceForSelection(selection, explicitClaude.route.name)
+          } else if (alias.outcome === "refused")
             return yield* refuse(alias.reason, routeRefusalDetail(submission.route!, alias.reason))
-          resolution = alias
-          selection = {
-            host: dispatch.identity.owningHostId,
-            executor:
-              alias.provider === "opencode"
-                ? `opencode:${dispatch.identity.serverId}`
-                : `${alias.provider}:local`,
-            executorKind: alias.provider,
-            provider: alias.provider === "opencode" ? alias.route.providerID : null,
-            model: alias.route.modelID,
-            selectionModel: alias.route.modelID,
-            thinking: {},
-            availability: "unknown",
-            evidence: "configured",
-          }
-          if (submission.thinking !== undefined && Object.keys(submission.thinking).length > 0) {
-            if (alias.provider !== "opencode" && alias.route.modelID === null)
-              return yield* refuse(
-                "unsupported_thinking",
-                "This CLI alias pins no model, so thinking cannot be verified before execution",
-              )
-            if (alias.provider === "claude") {
-              return yield* refuse(
-                "unsupported_thinking",
-                "Claude cannot verify per-model thinking or silent effort caps before execution",
-              )
-            } else {
+          else if (alias.provider === "claude") {
+            resolution = alias
+            selection = yield* claudeSelection(
+              dispatch.identity.owningHostId,
+              alias.route,
+              true,
+              submission.thinking,
+            )
+          } else {
+            resolution = alias
+            selection = {
+              host: dispatch.identity.owningHostId,
+              executor:
+                alias.provider === "opencode"
+                  ? `opencode:${dispatch.identity.serverId}`
+                  : `${alias.provider}:local`,
+              executorKind: alias.provider,
+              provider: alias.provider === "opencode" ? alias.route.providerID : null,
+              model: alias.route.modelID,
+              selectionModel: alias.route.modelID,
+              thinking: {},
+              availability: "unknown",
+              evidence: "configured",
+            }
+            if (submission.thinking !== undefined && Object.keys(submission.thinking).length > 0) {
+              if (alias.provider === "codex" && alias.route.modelID === null)
+                return yield* refuse(
+                  "unsupported_thinking",
+                  "This CLI alias pins no model, so thinking cannot be verified before execution",
+                )
               if (Option.isNone(discovery))
                 return yield* refuse(
                   "unsupported_thinking",

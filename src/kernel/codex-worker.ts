@@ -7,6 +7,7 @@ import { constants } from "node:fs"
 import { open, readFile, rename, stat, writeFile } from "node:fs/promises"
 import { nativeSandboxArguments } from "../sandbox/native"
 import { codexProjectArguments } from "../execution/project-config"
+import { claudeIgnoredEffort } from "./claude-effort"
 
 export type CliWorkerOptions = {
   readonly binary: string
@@ -100,6 +101,8 @@ export async function runCliWorker(
   options: CliWorkerOptions,
   command: ReadonlyArray<string>,
   retryProvider = false,
+  /** Stops the CLI once its stderr shows it will not run as asked. */
+  refusedOnStderr?: (stderr: string) => boolean,
 ): Promise<number> {
   const prompt = await readFile(options.promptFile)
   await writeFile(options.eventsFile, "", {
@@ -113,6 +116,8 @@ export async function runCliWorker(
       flag: constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | constants.O_NOFOLLOW,
     })
     const turn = new CodexRetryTurn()
+    const stderrText = new TextDecoder()
+    let stderrSeen = ""
     const child = Bun.spawn(args, {
       cwd: options.directory,
       env: process.env,
@@ -128,7 +133,18 @@ export async function runCliWorker(
         options.maxOutputBytes,
         retryProvider ? (bytes) => turn.chunk(bytes) : undefined,
       ),
-      drainBounded(child.stderr, options.stderrFile, options.maxOutputBytes),
+      drainBounded(
+        child.stderr,
+        options.stderrFile,
+        options.maxOutputBytes,
+        refusedOnStderr === undefined
+          ? undefined
+          : (bytes) => {
+              if (stderrSeen.length >= 65_536) return
+              stderrSeen += stderrText.decode(bytes, { stream: true })
+              if (refusedOnStderr(stderrSeen)) child.kill()
+            },
+      ),
     ])
     const exitCode = typeof status === "number" ? status : -1
     const delay =
@@ -181,34 +197,39 @@ export const parseCodexWorkerArguments = (arguments_: ReadonlyArray<string>): Cl
 
 /** Claude Code uses its own local subscription credentials and persisted sessions. */
 export const runClaudeNativeWorker = async (options: CliWorkerOptions): Promise<number> =>
-  runCliWorker(options, [
-    options.binary,
-    "--print",
-    // Print-mode turns must finish their commands before workflowd records completion.
-    "--settings",
-    '{"env":{"CLAUDE_CODE_DISABLE_BACKGROUND_TASKS":"1"}}',
-    "--output-format",
-    "stream-json",
-    "--verbose",
-    "--include-partial-messages",
-    ...(options.sandboxBindingFile === undefined
-      ? [
-          "--setting-sources",
-          "user",
-          "--dangerously-skip-permissions",
-          "--strict-mcp-config",
-          "--mcp-config",
-          '{"mcpServers":{}}',
-        ]
-      : await nativeSandboxArguments(
-          "claude",
-          options.binary,
-          options.directory,
-          options.sandboxBindingFile,
-        )),
-    ...(options.model === null ? [] : ["--model", options.model]),
-    ...(options.effort === undefined ? [] : ["--effort", options.effort]),
-  ])
+  runCliWorker(
+    options,
+    [
+      options.binary,
+      "--print",
+      // Print-mode turns must finish their commands before workflowd records completion.
+      "--settings",
+      '{"env":{"CLAUDE_CODE_DISABLE_BACKGROUND_TASKS":"1"}}',
+      "--output-format",
+      "stream-json",
+      "--verbose",
+      "--include-partial-messages",
+      ...(options.sandboxBindingFile === undefined
+        ? [
+            "--setting-sources",
+            "user",
+            "--dangerously-skip-permissions",
+            "--strict-mcp-config",
+            "--mcp-config",
+            '{"mcpServers":{}}',
+          ]
+        : await nativeSandboxArguments(
+            "claude",
+            options.binary,
+            options.directory,
+            options.sandboxBindingFile,
+          )),
+      ...(options.model === null ? [] : ["--model", options.model]),
+      ...(options.effort === undefined ? [] : ["--effort", options.effort]),
+    ],
+    false,
+    (stderr) => claudeIgnoredEffort(stderr) !== undefined,
+  )
 
 export async function runHostWorker(inputPath: string, binary: string, io = process.cwd()) {
   // systemd selects the private I/O directory; argv cannot select another file tree.
