@@ -96,6 +96,9 @@ export async function runCodexWorker(options: CliWorkerOptions): Promise<number>
   )
 }
 
+/** How long a CLI stopped for a refusal has to exit after SIGTERM before SIGKILL. */
+const REFUSAL_GRACE_MS = 1_000
+
 /** Shared bounded capture for durable CLI processes. */
 export async function runCliWorker(
   options: CliWorkerOptions,
@@ -124,7 +127,18 @@ export async function runCliWorker(
       stdin: attempt === 0 ? prompt : new TextEncoder().encode("Continue."),
       stdout: "pipe",
       stderr: "pipe",
+      // Its own process group, so a refusal stops whatever the CLI started too.
+      detached: refusedOnStderr !== undefined,
     })
+    let refused = false
+    let escalation: ReturnType<typeof setTimeout> | undefined
+    const signalGroup = (signal: "SIGTERM" | "SIGKILL") => {
+      try {
+        process.kill(-child.pid, signal)
+      } catch {
+        // The group is already gone.
+      }
+    }
     const [status] = await Promise.all([
       child.exited,
       drainBounded(
@@ -140,12 +154,16 @@ export async function runCliWorker(
         refusedOnStderr === undefined
           ? undefined
           : (bytes) => {
-              if (stderrSeen.length >= 65_536) return
+              if (refused || stderrSeen.length >= 65_536) return
               stderrSeen += stderrText.decode(bytes, { stream: true })
-              if (refusedOnStderr(stderrSeen)) child.kill()
+              if (!refusedOnStderr(stderrSeen)) return
+              refused = true
+              signalGroup("SIGTERM")
+              escalation = setTimeout(() => signalGroup("SIGKILL"), REFUSAL_GRACE_MS)
             },
       ),
     ])
+    clearTimeout(escalation)
     const exitCode = typeof status === "number" ? status : -1
     const delay =
       retryProvider &&

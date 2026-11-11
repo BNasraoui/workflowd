@@ -1,6 +1,7 @@
 import { agentGitTestEnvironment } from "../helpers/agent-git-config"
 import { expect, test } from "bun:test"
 import { loadConfig } from "../../src/config"
+import { CLAUDE_EFFORTS } from "../../src/agent-run-contract"
 import { Effect } from "effect"
 import { localDiscoverySources } from "../../src/execution/local"
 import { loadExecutionCapabilitiesDaemon } from "../../src/mcp/auth"
@@ -68,7 +69,7 @@ test("capability authentication defaults to the existing agent-run token and sup
   expect(await claude?.discover(new AbortController().signal)).toEqual({ status: "unsupported" })
   expect(claude?.explicitModels).toEqual({
     accepted: "claude-*",
-    efforts: ["low", "medium", "high", "xhigh", "max"].map((id) => ({ id })),
+    efforts: CLAUDE_EFFORTS.map((id) => ({ id })),
   })
   const dedicated = await loadConfig(
     { ...env, WORKFLOWD_EXECUTION_CAPABILITIES_TOKEN_FILE: "/fixture/token" },

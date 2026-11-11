@@ -61,10 +61,15 @@ Any `claude-` model id runs on the Claude executor without a route entry:
 1. A configured `WORKFLOWD_AGENT_RUN_CLAUDE_ROUTES` entry wins for its own name, so
    `claude-fable` still means whatever model the host maps it to. A configured
    route serving that model id is used next.
-2. With `model`, a capability catalog that serves the id is used next. If no
-   catalog serves it (`unknown_model` or `executor_unavailable`), a `claude-` id
-   falls through to Claude. Set `executor: "claude:local"` to skip the catalog
-   and always run on Claude. `provider` must be omitted or null.
+2. With `model`, a capability catalog that serves the id is used next. A
+   `claude-` id falls through to Claude only when the catalog is healthy and does
+   not serve it (`unknown_model`). If another capability source is unavailable,
+   unauthenticated or out of date, it might serve the id, so the request is refused
+   as `executor_unavailable` naming that source rather than moved to Claude; the
+   same request therefore never lands on different executors depending on
+   discovery health. Set `executor: "claude:local"` to skip the catalog and always
+   run on Claude. `provider` must be omitted or null. A `claude-` id given as
+   `route` does not consult the catalog and runs on Claude.
 3. A `claude-` id (letters, digits, `.`, `_`, `-`, up to 128 bytes) is passed to
    `claude --model` as given. Workflowd keeps no list of Claude models; whether the
    account can run the model is learnt at launch.
@@ -99,8 +104,11 @@ records). Strings and numeric budgets retain provider-specific meanings.
   requested and resolved selections record it. Any other effort, a variant or a
   budget is refused before launch as `unsupported_thinking`, with the value named.
   The CLI itself does not exit on an effort it does not take: it warns on stderr and
-  runs at its default effort. The worker stops the CLI when that warning appears, and
-  the run fails as `unsupported_thinking` naming the effort. The recorded effort is the
+  runs at its default effort. The worker runs the CLI in its own process group and
+  stops the group when that warning appears: SIGTERM once, then SIGKILL one second
+  later if anything in the group is still running. The run fails as
+  `unsupported_thinking` naming the effort. Only Claude stderr is checked for this
+  warning. The recorded effort is the
   one asked; Claude documents that organization caps can silently clamp it in
   [JSON/stream-JSON output](https://code.claude.com/docs/en/model-config#configure-effort-level),
   and workflowd cannot observe that. Without an explicit effort the CLI default

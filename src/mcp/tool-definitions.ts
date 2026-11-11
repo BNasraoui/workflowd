@@ -261,7 +261,9 @@ export const TOOL_DEFINITIONS = [
       "Claude CLI and Codex CLI routes launch the respective local CLI directly, " +
       "using its own credentials and model selection; Claude CLI routes never " +
       "use an OpenCode provider. Any claude- model id (as model or route) runs on " +
-      "the Claude CLI as given when no configured route or catalog claims it; Claude " +
+      "the Claude CLI as given when no configured route or healthy catalog claims it " +
+      "(a model id is refused as executor_unavailable while a catalog source is down; " +
+      'name executor "claude:local" to run on Claude anyway). Claude ' +
       "takes thinking.effort low, medium, high, xhigh or max. " +
       "CLI runs have durable process custody and " +
       "inline completion supervision. " +

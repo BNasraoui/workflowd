@@ -755,7 +755,8 @@ const make = (options: AgentRunIngressOptions) =>
           resolution = choiceForSelection(selection, keyed.route)
         } else if (submission.model !== undefined) {
           // The Claude CLI lists no models, so a claude- id it may run is taken
-          // as given when no catalog serves it, or when claude:local is named.
+          // as given when claude:local is named, or when a healthy catalog does
+          // not serve it.
           const claudeModel =
             claudeDispatch !== undefined &&
             (submission.executor === undefined || submission.executor === CLAUDE_EXECUTOR) &&
@@ -763,52 +764,58 @@ const make = (options: AgentRunIngressOptions) =>
             submission.modelIdentity !== "catalog"
               ? resolveClaudeModel(dispatch.claudeRoutes ?? [], submission.model)
               : undefined
-          const explicitClaude = claudeModel?.outcome === "resolved" ? claudeModel : undefined
-          const claudeNamed = submission.executor === CLAUDE_EXECUTOR
-          if (claudeNamed && claudeModel?.outcome === "refused")
-            return yield* refuse(
-              claudeModel.reason,
-              routeRefusalDetail(submission.model, claudeModel.reason),
-            )
-          let selected: ReturnType<typeof resolveExecutionSelection> | undefined
-          if (!(claudeNamed && explicitClaude !== undefined)) {
-            if (Option.isNone(discovery)) {
-              if (explicitClaude === undefined)
-                return yield* refuse("executor_unavailable", "Capability discovery is disabled")
-            } else {
-              const catalog = yield* discovery.value
-                .list()
-                .pipe(
-                  Effect.mapError((cause) =>
-                    refuse(
-                      "executor_unavailable",
-                      sandboxDiagnostic("ingress.capabilities", cause).message,
-                    ),
-                  ),
-                )
-              selected = resolveExecutionSelection(catalog, requested)
-            }
-          }
-          if (selected?.outcome === "resolved") {
-            selection = selected.selection
-          } else if (
-            explicitClaude !== undefined &&
-            (selected === undefined ||
-              selected.reason === "unknown_model" ||
-              selected.reason === "executor_unavailable")
-          ) {
-            selection = yield* claudeSelection(
+          const onClaude = (claude: Extract<typeof claudeModel, { outcome: "resolved" }>) =>
+            claudeSelection(
               dispatch.identity.owningHostId,
-              explicitClaude.route,
-              explicitClaude.configured,
+              claude.route,
+              claude.configured,
               submission.thinking,
             )
+          if (submission.executor === CLAUDE_EXECUTOR && claudeModel !== undefined) {
+            if (claudeModel.outcome === "refused")
+              return yield* refuse(
+                claudeModel.reason,
+                routeRefusalDetail(submission.model, claudeModel.reason),
+              )
+            selection = yield* onClaude(claudeModel)
+          } else if (Option.isNone(discovery)) {
+            if (claudeModel?.outcome !== "resolved")
+              return yield* refuse("executor_unavailable", "Capability discovery is disabled")
+            selection = yield* onClaude(claudeModel)
           } else {
-            const reason = selected?.reason ?? "executor_unavailable"
-            return yield* refuse(
-              reason,
-              `Selection refused: ${reason}; consult list_execution_capabilities`,
-            )
+            const catalog = yield* discovery.value
+              .list()
+              .pipe(
+                Effect.mapError((cause) =>
+                  refuse(
+                    "executor_unavailable",
+                    sandboxDiagnostic("ingress.capabilities", cause).message,
+                  ),
+                ),
+              )
+            const selected = resolveExecutionSelection(catalog, requested)
+            if (selected.outcome === "resolved") selection = selected.selection
+            else if (claudeModel?.outcome === "resolved" && selected.reason === "unknown_model") {
+              // A down or out-of-date source might serve the id; moving the run
+              // to Claude would then depend on discovery health.
+              const down = catalog.sources.filter(
+                (source) =>
+                  source.executor !== CLAUDE_EXECUTOR &&
+                  (source.status === "unavailable" ||
+                    source.status === "unauthenticated" ||
+                    source.stale),
+              )
+              if (down.length > 0)
+                return yield* refuse(
+                  "executor_unavailable",
+                  `Capability source ${down.map((source) => source.executor).join(", ")} is unavailable or out of date, so it cannot be ruled out for ${submission.model}; retry later, or name executor "claude:local" to run on Claude`,
+                )
+              selection = yield* onClaude(claudeModel)
+            } else
+              return yield* refuse(
+                selected.reason,
+                `Selection refused: ${selected.reason}; consult list_execution_capabilities`,
+              )
           }
           resolution = choiceForSelection(selection, identityRoute)
         } else {

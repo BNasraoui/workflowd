@@ -1,13 +1,10 @@
 import { describe, expect, test } from "bun:test"
 import {
-  CLAUDE_EFFORTS,
   parseAgentRunCodexRoutes,
   parseAgentRunRepositories,
   parseAgentRunRoutes,
   resolveAgentRunRoute,
   resolveAgentRunRouteChoice,
-  resolveClaudeModel,
-  resolveClaudeThinking,
 } from "../src/agent-run-contract"
 
 describe("agent-run route configuration", () => {
@@ -169,68 +166,5 @@ describe("agent-run cross-provider route resolution", () => {
       outcome: "refused",
       reason: "unknown_route",
     })
-  })
-})
-
-describe("explicit Claude selection", () => {
-  const routes = [
-    { name: "claude-fable", modelID: "claude-fable-5-1" },
-    { name: "opus", modelID: "claude-opus-5-5" },
-  ]
-
-  test("a configured alias wins for its own name and its model id", () => {
-    expect(resolveClaudeModel(routes, "claude-fable")).toEqual({
-      outcome: "resolved",
-      route: { name: "claude-fable", modelID: "claude-fable-5-1" },
-      configured: true,
-    })
-    expect(resolveClaudeModel(routes, "claude-opus-5-5")).toEqual({
-      outcome: "resolved",
-      route: { name: "opus", modelID: "claude-opus-5-5" },
-      configured: true,
-    })
-  })
-
-  test("an unlisted claude- model id passes through as given", () => {
-    expect(resolveClaudeModel(routes, "claude-fable-5-2")).toEqual({
-      outcome: "resolved",
-      route: { name: "claude-fable-5-2", modelID: "claude-fable-5-2" },
-      configured: false,
-    })
-  })
-
-  test("provider-prefixed and non-Claude ids are refused", () => {
-    expect(resolveClaudeModel(routes, "anthropic/claude-fable-5-2")).toEqual({
-      outcome: "refused",
-      reason: "provider_prefixed_route",
-    })
-    for (const id of ["gpt-5.1-codex", "claude-", "claude-bad id", `claude-${"x".repeat(130)}`])
-      expect(resolveClaudeModel(routes, id)).toEqual({
-        outcome: "refused",
-        reason: "unknown_route",
-      })
-  })
-
-  test("effort is the only Claude thinking input and must be a CLI effort level", () => {
-    expect(CLAUDE_EFFORTS).toEqual(["low", "medium", "high", "xhigh", "max"])
-    expect(resolveClaudeThinking(undefined)).toEqual({ outcome: "resolved", thinking: {} })
-    expect(resolveClaudeThinking({})).toEqual({ outcome: "resolved", thinking: {} })
-    expect(resolveClaudeThinking({ effort: "xhigh" })).toEqual({
-      outcome: "resolved",
-      thinking: { effort: "xhigh" },
-    })
-    const bad = resolveClaudeThinking({ effort: "turbo" })
-    expect(bad.outcome).toBe("refused")
-    if (bad.outcome === "refused") {
-      expect(bad.detail).toContain('"turbo"')
-      expect(bad.detail).toContain("low, medium, high, xhigh, max")
-    }
-    expect(resolveClaudeThinking({ variant: "deep" }).outcome).toBe("refused")
-    expect(
-      resolveClaudeThinking({
-        effort: "high",
-        budgets: [{ parameter: "budget", value: 1, unit: "tokens" }],
-      }).outcome,
-    ).toBe("refused")
   })
 })

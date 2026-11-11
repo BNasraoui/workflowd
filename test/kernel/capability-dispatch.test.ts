@@ -248,19 +248,33 @@ const claudeListing: ExecutionCapabilities = {
   ],
   capabilities: [],
 }
-const claudeSetup = (cli = makeCodexCli([{ type: "agent_message", text: "OK" }])) => {
+const claudeSetup = (
+  cli = makeCodexCli([{ type: "agent_message", text: "OK" }]),
+  listing = claudeListing,
+) => {
+  const state = defaultState()
   const layer = makeLayer(
-    makeProvider(defaultState()),
+    makeProvider(state),
     worktrees([]),
     undefined,
     { claudeRoutes },
     cli.port,
   ).pipe(
-    Layer.provideMerge(
-      Layer.succeed(ExecutionDiscovery, { list: () => Effect.succeed(claudeListing) }),
-    ),
+    Layer.provideMerge(Layer.succeed(ExecutionDiscovery, { list: () => Effect.succeed(listing) })),
   )
-  return { cli, layer }
+  return { cli, state, layer }
+}
+const openCodeSource = catalog.sources[0]!
+const openCodeClaude = {
+  ...catalog.capabilities[0]!,
+  identity: {
+    host: "mint",
+    executor: "opencode:primary",
+    provider: "anthropic",
+    model: "claude-fable-5-2",
+  },
+  selectionModel: "claude-fable-5-2",
+  thinking: { status: "unknown" as const },
 }
 const claudeRequest = { repository: "workflowd", prompt: "Fix" }
 
@@ -312,16 +326,69 @@ for (const field of ["model", "route"] as const)
     expect(result.run?.resolvedSelection).toEqual(result.receipt.resolvedSelection)
   })
 
-test("an explicit Claude executor accepts an unlisted model without catalog evidence", async () => {
-  const { cli, layer } = claudeSetup()
-  await Effect.runPromise(
+test("an explicit Claude executor skips a catalog that serves the same model id", async () => {
+  const { cli, state, layer } = claudeSetup(undefined, {
+    sources: [...claudeListing.sources, openCodeSource],
+    capabilities: [openCodeClaude],
+  })
+  const receipt = await Effect.runPromise(
     register({ ...claudeRequest, model: "claude-fable-5-2", executor: "claude:local" }).pipe(
       Effect.provide(layer),
     ),
   )
   expect(cli.state.spawned[0]).toMatchObject({ model: "claude-fable-5-2" })
   expect(cli.state.spawned[0]?.effort).toBeUndefined()
+  expect(state.created).toHaveLength(0)
+  expect(receipt.resolvedSelection).toMatchObject({
+    executor: "claude:local",
+    evidence: "requested",
+  })
 })
+
+test("a catalog that serves a claude- model id comes before the Claude CLI", async () => {
+  const { cli, state, layer } = claudeSetup(undefined, {
+    sources: [...claudeListing.sources, openCodeSource],
+    capabilities: [openCodeClaude],
+  })
+  const receipt = await Effect.runPromise(
+    register({ ...claudeRequest, model: "claude-fable-5-2" }).pipe(Effect.provide(layer)),
+  )
+  expect(cli.state.spawned).toHaveLength(0)
+  expect(state.created).toHaveLength(1)
+  expect(receipt.resolvedSelection).toMatchObject({
+    executor: "opencode:primary",
+    evidence: "advertised",
+  })
+})
+
+for (const [label, down] of [
+  ["unavailable", { ...openCodeSource, status: "unavailable" as const, stale: true }],
+  ["out of date", { ...openCodeSource, stale: true }],
+] as const)
+  test(`a claude- model id is refused, not moved to Claude, while a catalog source is ${label}`, async () => {
+    const listing = { sources: [...claudeListing.sources, down], capabilities: [] }
+    const { cli, state, layer } = claudeSetup(undefined, listing)
+    const refusal = await refusalOf(
+      Effect.runPromise(
+        register({ ...claudeRequest, model: "claude-fable-5-2" }).pipe(Effect.provide(layer)),
+      ),
+    )
+    expect(refusal.reason).toBe("executor_unavailable")
+    expect(refusal.detail).toContain("opencode:primary")
+    expect(refusal.detail).toContain('executor "claude:local"')
+    expect(cli.state.spawned).toHaveLength(0)
+    expect(state.created).toHaveLength(0)
+    for (const request of [
+      { model: "claude-fable-5-2", executor: "claude:local" },
+      { route: "claude-fable-5-2" },
+    ]) {
+      const named = claudeSetup(undefined, listing)
+      await Effect.runPromise(
+        register({ ...claudeRequest, ...request }).pipe(Effect.provide(named.layer)),
+      )
+      expect(named.cli.state.spawned[0]).toMatchObject({ model: "claude-fable-5-2" })
+    }
+  })
 
 test("a Claude alias name given as model still resolves to its configured model", async () => {
   const { cli, layer } = claudeSetup()
@@ -348,18 +415,37 @@ test("provider-prefixed Claude ids are still refused for the Claude executor", a
       )
     ).reason,
   ).toBe("provider_prefixed_route")
-  for (const request of [
-    { model: "anthropic/claude-fable-5-2" },
-    { model: "anthropic/claude-fable-5-2", executor: "claude:local" },
-    { model: "claude-fable-5-2", provider: "anthropic", executor: "claude:local" },
-  ])
+  for (const [request, reason] of [
+    [{ model: "anthropic/claude-fable-5-2" }, "unknown_model"],
+    [{ model: "anthropic/claude-fable-5-2", executor: "claude:local" }, "provider_prefixed_route"],
+    [
+      { model: "claude-fable-5-2", provider: "anthropic", executor: "claude:local" },
+      "executor_unavailable",
+    ],
+  ] as const)
     expect(
       (
         await refusalOf(
           Effect.runPromise(register({ ...claudeRequest, ...request }).pipe(Effect.provide(layer))),
         )
       ).reason,
-    ).not.toBeUndefined()
+    ).toBe(reason)
+  expect(cli.state.spawned).toHaveLength(0)
+})
+
+test("ids that are not claude- model ids are not passed to the Claude CLI", async () => {
+  const { cli, layer } = claudeSetup()
+  for (const id of ["claude-", "claude-bad id", `claude-${"x".repeat(130)}`, "opus-5-5"])
+    for (const request of [{ route: id }, { model: id, executor: "claude:local" }])
+      expect(
+        (
+          await refusalOf(
+            Effect.runPromise(
+              register({ ...claudeRequest, ...request }).pipe(Effect.provide(layer)),
+            ),
+          )
+        ).reason,
+      ).toBe("unknown_route")
   expect(cli.state.spawned).toHaveLength(0)
 })
 
@@ -386,7 +472,7 @@ test("a Claude effort the CLI does not take is refused with a typed reason namin
   expect(cli.state.spawned).toHaveLength(0)
 })
 
-test("a Claude CLI that refuses the effort fails the run with a typed reason naming it", async () => {
+test("a Claude effort warning on the CLI stderr fails the run with a typed reason naming it", async () => {
   const { cli, layer } = claudeSetup(
     makeCodexCli(
       [],
@@ -444,4 +530,23 @@ test("Claude configured alias records its native initialization model", async ()
   })
   expect(result.duplicate.status).toBe("duplicate")
   expect(result.duplicate.resolvedSelection).toEqual(result.receipt.resolvedSelection)
+})
+
+test("the Claude effort warning is not read from another CLI's stderr", async () => {
+  const cli = makeCodexCli(
+    [],
+    1,
+    undefined,
+    undefined,
+    "Unknown --effort value 'max' — ignoring it and using the default effort.\n",
+  )
+  const layer = makeLayer(makeProvider(defaultState()), worktrees([]), cli.port, {
+    codexRoutes: [{ name: "scan", modelID: "native" }],
+  })
+  const refusal = await refusalOf(
+    Effect.runPromise(register({ ...claudeRequest, route: "scan" }).pipe(Effect.provide(layer))),
+  )
+  expect(cli.state.spawned).toHaveLength(1)
+  expect(refusal.reason).toBe("no_first_token")
+  expect(refusal.detail).toStartWith("codex exited before producing model output")
 })

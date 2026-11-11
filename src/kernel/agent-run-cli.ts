@@ -94,12 +94,15 @@ const diagnostic = (
   stallWindowMs: number,
   exit: Exit.Exit<CliExit, WorkspaceError>,
   turnFailed: string | null,
-  cliName: string,
+  cliName: "codex" | "claude",
   codexErrorInfo?: unknown,
 ) => {
   if (stalled)
     return `${cliName}_stalled: no ${cliName} event for ${stallWindowMs}ms; the process group was terminated`
-  const ignored = Exit.isSuccess(exit) ? claudeIgnoredEffort(exit.value.stderr) : undefined
+  const ignored =
+    cliName === "claude" && Exit.isSuccess(exit)
+      ? claudeIgnoredEffort(exit.value.stderr)
+      : undefined
   if (ignored !== undefined) return effortRefusal(cliName, ignored)
   const provider = providerFailure(turnFailed, codexErrorInfo)
   if (provider !== undefined) return `${provider.reason}: ${provider.message}`
@@ -145,7 +148,7 @@ const cliFailureDetail = (error: WorkspaceError) => `${error.operation}: ${Strin
 const observeFirstToken = (
   initial: CliRunProcess,
   timeoutMs: number,
-  cliName: string,
+  cliName: "codex" | "claude",
   /** Absent for resident threads, which have no durable custody to re-attach. */
   reattach:
     { readonly attach: Attach; readonly runId: string; readonly retryMs: number } | undefined,
@@ -288,7 +291,9 @@ const observeFirstToken = (
       codexFailureLooksUnauthenticated(errors) ||
       (terminalExit !== null && codexFailureLooksUnauthenticated([terminalExit.stderr]))
     const ignoredEffort =
-      terminalExit === null ? undefined : claudeIgnoredEffort(terminalExit.stderr)
+      cliName === "claude" && terminalExit !== null
+        ? claudeIgnoredEffort(terminalExit.stderr)
+        : undefined
     const reason = authFailed
       ? ("provider_not_authenticated" as const)
       : ignoredEffort !== undefined
