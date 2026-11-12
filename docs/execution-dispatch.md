@@ -63,9 +63,11 @@ Any `claude-` model id runs on the Claude executor without a route entry:
    route serving that model id is used next.
 2. With `model`, a capability catalog that serves the id is used next. A
    `claude-` id falls through to Claude only when the catalog is healthy and does
-   not serve it (`unknown_model`). If another capability source is unavailable,
-   unauthenticated or out of date, it might serve the id, so the request is refused
-   as `executor_unavailable` naming that source rather than moved to Claude; the
+   not serve it (`unknown_model`). If a provider catalog source (such as OpenCode)
+   is unavailable, unauthenticated or out of date, it might serve the id, so the
+   request is refused as `executor_unavailable` naming that source and its state
+   rather than moved to Claude. Codex and Claude sources run only their own
+   vendor's models, so their state never blocks a `claude-` id; the
    same request therefore never lands on different executors depending on
    discovery health. Set `executor: "claude:local"` to skip the catalog and always
    run on Claude. `provider` must be omitted or null. A `claude-` id given as
@@ -106,7 +108,10 @@ records). Strings and numeric budgets retain provider-specific meanings.
   The CLI itself does not exit on an effort it does not take: it warns on stderr and
   runs at its default effort. The worker runs the CLI in its own process group and
   stops the group when that warning appears: SIGTERM once, then SIGKILL one second
-  later if anything in the group is still running. The run fails as
+  later if the CLI has not yet exited and closed its output. Once the CLI has exited
+  and its stdout and stderr are closed, the worker sends nothing more; a process left
+  in the group is ended when the run's systemd unit stops, because the unit uses
+  `KillMode=control-group`. The run fails as
   `unsupported_thinking` naming the effort. Only Claude stderr is checked for this
   warning. The recorded effort is the
   one asked; Claude documents that organization caps can silently clamp it in

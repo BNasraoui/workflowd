@@ -272,6 +272,13 @@ const choiceForSelection = (
       }
 
 const CLAUDE_EXECUTOR = "claude:local"
+/**
+ * Source kinds that list and run only their own vendor's models, so they can
+ * never serve a `claude-` id: Codex runs OpenAI models, and the Claude CLI is
+ * the fallback itself. Any other kind, such as an OpenCode provider catalog,
+ * might serve one.
+ */
+const SINGLE_VENDOR_SOURCE_KINDS: ReadonlySet<string> = new Set(["codex", "claude"])
 
 /** A Claude choice is recorded as asked: the model and effort the CLI is given. */
 const claudeSelection = (
@@ -796,19 +803,22 @@ const make = (options: AgentRunIngressOptions) =>
             const selected = resolveExecutionSelection(catalog, requested)
             if (selected.outcome === "resolved") selection = selected.selection
             else if (claudeModel?.outcome === "resolved" && selected.reason === "unknown_model") {
-              // A down or out-of-date source might serve the id; moving the run
-              // to Claude would then depend on discovery health.
-              const down = catalog.sources.filter(
-                (source) =>
-                  source.executor !== CLAUDE_EXECUTOR &&
-                  (source.status === "unavailable" ||
-                    source.status === "unauthenticated" ||
-                    source.stale),
-              )
+              // A down or out-of-date provider catalog might serve the id; moving
+              // the run to Claude would then depend on discovery health.
+              const down = catalog.sources.flatMap((source) => {
+                if (SINGLE_VENDOR_SOURCE_KINDS.has(source.kind)) return []
+                const state =
+                  source.status === "unavailable" || source.status === "unauthenticated"
+                    ? source.status
+                    : source.stale
+                      ? "out of date"
+                      : undefined
+                return state === undefined ? [] : [`${source.executor} is ${state}`]
+              })
               if (down.length > 0)
                 return yield* refuse(
                   "executor_unavailable",
-                  `Capability source ${down.map((source) => source.executor).join(", ")} is unavailable or out of date, so it cannot be ruled out for ${submission.model}; retry later, or name executor "claude:local" to run on Claude`,
+                  `Capability ${down.length === 1 ? "source" : "sources"} ${down.join(", ")}, so ${down.length === 1 ? "it" : "they"} cannot be ruled out for ${submission.model}; retry later, or name executor "claude:local" to run on Claude`,
                 )
               selection = yield* onClaude(claudeModel)
             } else
