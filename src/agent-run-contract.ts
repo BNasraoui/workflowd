@@ -1,6 +1,10 @@
 import { Schema } from "effect"
 import { utf8BoundedText } from "./agent-wait-contract"
-import { RequestedSelection, ResolvedSelection } from "./execution-selection"
+import {
+  RequestedSelection,
+  ResolvedSelection,
+  type ThinkingSelection,
+} from "./execution-selection"
 
 export const MAX_AGENT_RUN_PROMPT_BYTES = 32_768
 export const MAX_AGENT_RUN_ROUTE_BYTES = 128
@@ -232,6 +236,73 @@ export function resolveAgentRunRouteChoice(
     named.length > 0 ? named : choices.filter(({ route }) => route.modelID === requested)
   if (matches.length === 1 && matches[0] !== undefined) return matches[0]
   return { outcome: "refused", reason: matches.length === 0 ? "unknown_route" : "ambiguous_route" }
+}
+
+/**
+ * The effort levels `claude --effort` takes (Claude Code 2.1.316 help). The
+ * CLI does not refuse other values: it warns on stderr and silently runs at
+ * its default effort, so workflowd refuses them before launch.
+ */
+export const CLAUDE_EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const
+
+/** Shape only: the Claude model is a runtime choice, never a list in code. */
+const CLAUDE_MODEL_PATTERN = /^claude-[A-Za-z0-9][A-Za-z0-9._-]*$/
+
+export type ClaudeModelResolution =
+  | {
+      readonly outcome: "resolved"
+      readonly route: AgentRunClaudeRoute
+      /** True when a configured route supplied the model. */
+      readonly configured: boolean
+    }
+  | { readonly outcome: "refused"; readonly reason: "provider_prefixed_route" | "unknown_route" }
+
+/**
+ * Resolves a Claude model request: a configured route name wins for its own
+ * name, then a configured route serving that model id, then any `claude-` id,
+ * which is passed to `claude --model` as given. Provider-prefixed ids are
+ * refused like every other route.
+ */
+export function resolveClaudeModel(
+  claudeRoutes: ReadonlyArray<AgentRunClaudeRoute>,
+  requested: string,
+): ClaudeModelResolution {
+  if (requested.includes("/")) return { outcome: "refused", reason: "provider_prefixed_route" }
+  const configured =
+    claudeRoutes.find((route) => route.name === requested) ??
+    claudeRoutes.find((route) => route.modelID === requested)
+  if (configured !== undefined) return { outcome: "resolved", route: configured, configured: true }
+  if (CLAUDE_MODEL_PATTERN.test(requested) && requested.length <= MAX_AGENT_RUN_ROUTE_BYTES)
+    return {
+      outcome: "resolved",
+      route: { name: requested, modelID: requested },
+      configured: false,
+    }
+  return { outcome: "refused", reason: "unknown_route" }
+}
+
+/** Claude takes one thinking input, an effort level from `CLAUDE_EFFORTS`. */
+export function resolveClaudeThinking(
+  requested: ThinkingSelection | undefined,
+):
+  | { readonly outcome: "resolved"; readonly thinking: ThinkingSelection }
+  | { readonly outcome: "refused"; readonly detail: string } {
+  if (requested === undefined || Object.keys(requested).length === 0)
+    return { outcome: "resolved", thinking: {} }
+  if (requested.variant !== undefined || requested.budgets !== undefined)
+    return {
+      outcome: "refused",
+      detail: "Claude takes only thinking.effort; variants and budgets are not Claude CLI inputs",
+    }
+  const effort = requested.effort
+  if (effort === undefined || !(CLAUDE_EFFORTS as ReadonlyArray<string>).includes(effort))
+    return {
+      outcome: "refused",
+      detail:
+        `Claude effort ${JSON.stringify(effort)} is not a claude --effort level; ` +
+        `use one of ${CLAUDE_EFFORTS.join(", ")}`,
+    }
+  return { outcome: "resolved", thinking: { effort } }
 }
 
 const CLAUDE_HOST_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/

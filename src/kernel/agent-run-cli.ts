@@ -20,6 +20,7 @@ import type { WorkSignalPort } from "../work-signal"
 import type { AgentRunRefusalError } from "./agent-run-ingress"
 import type { makeAgentRunCustody } from "./agent-run-custody"
 import { codexFailureLooksUnauthenticated } from "./codex-session"
+import { claudeIgnoredEffort } from "./claude-effort"
 import type { AgentRunRecord, AgentRunStorePort } from "./agent-run-store"
 import { createAgentRunWorktree, type AgentRunWorktreesPort } from "./agent-run-worktrees"
 
@@ -93,11 +94,16 @@ const diagnostic = (
   stallWindowMs: number,
   exit: Exit.Exit<CliExit, WorkspaceError>,
   turnFailed: string | null,
-  cliName: string,
+  cliName: "codex" | "claude",
   codexErrorInfo?: unknown,
 ) => {
   if (stalled)
     return `${cliName}_stalled: no ${cliName} event for ${stallWindowMs}ms; the process group was terminated`
+  const ignored =
+    cliName === "claude" && Exit.isSuccess(exit)
+      ? claudeIgnoredEffort(exit.value.stderr)
+      : undefined
+  if (ignored !== undefined) return effortRefusal(cliName, ignored)
   const provider = providerFailure(turnFailed, codexErrorInfo)
   if (provider !== undefined) return `${provider.reason}: ${provider.message}`
   const exitCode = Exit.isSuccess(exit) ? exit.value.exitCode : -1
@@ -109,6 +115,9 @@ const diagnostic = (
   return detail
 }
 
+const effortRefusal = (cliName: string, effort: string) =>
+  `unsupported_thinking: the ${cliName} CLI refused effort '${effort}'`
+
 type FirstToken =
   | {
       readonly outcome: "generating"
@@ -118,7 +127,11 @@ type FirstToken =
     }
   | {
       readonly outcome: "refused"
-      readonly reason: "provider_not_authenticated" | "no_first_token" | ProviderFailure["reason"]
+      readonly reason:
+        | "provider_not_authenticated"
+        | "no_first_token"
+        | "unsupported_thinking"
+        | ProviderFailure["reason"]
       readonly detail: string
       readonly finalMessage?: string | null
     }
@@ -135,7 +148,7 @@ const cliFailureDetail = (error: WorkspaceError) => `${error.operation}: ${Strin
 const observeFirstToken = (
   initial: CliRunProcess,
   timeoutMs: number,
-  cliName: string,
+  cliName: "codex" | "claude",
   /** Absent for resident threads, which have no durable custody to re-attach. */
   reattach:
     { readonly attach: Attach; readonly runId: string; readonly retryMs: number } | undefined,
@@ -277,10 +290,19 @@ const observeFirstToken = (
     const authFailed =
       codexFailureLooksUnauthenticated(errors) ||
       (terminalExit !== null && codexFailureLooksUnauthenticated([terminalExit.stderr]))
+    const ignoredEffort =
+      cliName === "claude" && terminalExit !== null
+        ? claudeIgnoredEffort(terminalExit.stderr)
+        : undefined
     const reason = authFailed
       ? ("provider_not_authenticated" as const)
-      : (provider?.reason ?? result.reason)
-    let detail = provider?.message ?? result.detail
+      : ignoredEffort !== undefined
+        ? ("unsupported_thinking" as const)
+        : (provider?.reason ?? result.reason)
+    let detail =
+      ignoredEffort === undefined
+        ? (provider?.message ?? result.detail)
+        : `the ${cliName} CLI refused effort '${ignoredEffort}' before model output`
     if (authFailed) detail += `: the ${cliName} CLI reported an authentication failure`
     else if (provider === undefined) {
       if (errors.length > 0) detail += `; last error: ${diagnosticMessage(errors.at(-1))}`

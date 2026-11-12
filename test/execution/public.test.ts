@@ -13,7 +13,16 @@ const { list: snapshot } = makeExecutionCapabilities({
   host: "box",
   refreshMs: 100,
   timeoutMs: 10,
-  sources: [{ executor: "fixture", discover: async () => [{ provider: "p", model: "new-model" }] }],
+  sources: [
+    { executor: "fixture", discover: async () => [{ provider: "p", model: "new-model" }] },
+    {
+      executor: "claude:local",
+      kind: "claude",
+      protocol: "unsupported",
+      explicitModels: { accepted: "claude-*", efforts: [{ id: "xhigh" }] },
+      discover: async () => ({ status: "unsupported" as const }),
+    },
+  ],
 })
 const listing = () => Effect.tryPromise({ try: snapshot, catch: () => new Error("failed") })
 const testLayer = Layer.mergeAll(McpQueriesLive, RemoteProbeProducerLive, WorkSignalLive).pipe(
@@ -101,6 +110,13 @@ test("MCP capability tool proxies the same contract, enforces auth and redacts p
   expect((await run(false)).isError).toBe(true)
   expect((await run(true)).structuredContent).toMatchObject({
     capabilities: [{ identity: { model: "new-model" } }],
+    sources: [
+      { executor: "fixture" },
+      {
+        executor: "claude:local",
+        explicitModels: { accepted: "claude-*", efforts: [{ id: "xhigh" }] },
+      },
+    ],
   })
   expect((await run(true, { route: "unsupported" })).isError).toBe(true)
   const handler = createMcpFetchHandler({

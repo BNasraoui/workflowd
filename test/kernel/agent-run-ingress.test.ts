@@ -1040,6 +1040,44 @@ for (const detail of [null, "turn.failed", "error"] as const) {
   })
 }
 
+test("after first output, the Claude effort warning on stderr is read only for a Claude run", async () => {
+  const warning =
+    "Warning: Unknown --effort value 'max' — ignoring it and using the default effort.\n"
+  const failing = () =>
+    makeCodexCli([{ type: "agent_message", text: "started" }], 1, undefined, "t", warning)
+  const diagnosticOf = (
+    request: { route: string; thinking?: { effort: string } },
+    layer: ReturnType<typeof makeLayer>,
+  ) =>
+    Effect.runPromise(
+      Effect.gen(function* () {
+        const receipt = yield* register({ ...request, repository: "workflowd", prompt: "task" })
+        return yield* waitForRunState(receipt.runId, ["operator_required"])
+      }).pipe(Effect.provide(layer)),
+    ).then((run) => run?.diagnostic)
+  const codex = failing()
+  expect(
+    await diagnosticOf(
+      { route: "scan" },
+      makeLayer(makeProvider(defaultState()), worktrees([]), codex.port),
+    ),
+  ).toStartWith("codex_failed: exit 1; stderr: Warning: Unknown --effort value 'max'")
+  expect(codex.state.spawned).toHaveLength(1)
+  const claude = failing()
+  expect(
+    await diagnosticOf(
+      { route: "opus", thinking: { effort: "max" } },
+      makeLayer(
+        makeProvider(defaultState()),
+        worktrees([]),
+        undefined,
+        { claudeRoutes: [{ name: "opus", modelID: "claude-opus-5-5" }] },
+        claude.port,
+      ),
+    ),
+  ).toBe("unsupported_thinking: the claude CLI refused effort 'max'")
+})
+
 test("resident OpenCode dispatch provisions the run before its initial prompt", async () => {
   const { OpenCodeMailbox } = await import("../../src/resident/opencode")
   const state = defaultState()

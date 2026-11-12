@@ -10,6 +10,7 @@ import {
   type RequestedSelection,
   type ResolvedSelection,
   type SelectionRefusal,
+  type ThinkingSelection,
 } from "../execution-selection"
 import { OpenCodeMailbox } from "../resident/opencode"
 import { WorkerIdentity } from "../worker-identity/service"
@@ -19,6 +20,8 @@ import { Context, Data, Effect, Layer, Option, Schema } from "effect"
 import {
   AgentRunSubmission,
   resolveAgentRunRouteChoice,
+  resolveClaudeModel,
+  resolveClaudeThinking,
   type AgentRunCodexRoute,
   type AgentRunClaudeRoute,
   type AgentRunReceipt,
@@ -267,6 +270,38 @@ const choiceForSelection = (
         provider: selection.executorKind,
         route: { name, modelID: selection.model },
       }
+
+const CLAUDE_EXECUTOR = "claude:local"
+/**
+ * Source kinds that list and run only their own vendor's models, so they can
+ * never serve a `claude-` id: Codex runs OpenAI models, and the Claude CLI is
+ * the fallback itself. Any other kind, such as an OpenCode provider catalog,
+ * might serve one.
+ */
+const SINGLE_VENDOR_SOURCE_KINDS: ReadonlySet<string> = new Set(["codex", "claude"])
+
+/** A Claude choice is recorded as asked: the model and effort the CLI is given. */
+const claudeSelection = (
+  host: string,
+  route: AgentRunClaudeRoute,
+  configured: boolean,
+  thinking: ThinkingSelection | undefined,
+) => {
+  const effort = resolveClaudeThinking(thinking)
+  return effort.outcome === "refused"
+    ? Effect.fail(refuse("unsupported_thinking", effort.detail))
+    : Effect.succeed({
+        host,
+        executor: CLAUDE_EXECUTOR,
+        executorKind: "claude",
+        provider: null,
+        model: route.modelID,
+        selectionModel: route.modelID,
+        thinking: effort.thinking,
+        availability: "unknown",
+        evidence: configured ? "configured" : "requested",
+      } satisfies ResolvedSelection)
+}
 
 const make = (options: AgentRunIngressOptions) =>
   Effect.gen(function* () {
@@ -726,25 +761,72 @@ const make = (options: AgentRunIngressOptions) =>
           selection = yield* historicalSelection(keyed)
           resolution = choiceForSelection(selection, keyed.route)
         } else if (submission.model !== undefined) {
-          if (Option.isNone(discovery))
-            return yield* refuse("executor_unavailable", "Capability discovery is disabled")
-          const catalog = yield* discovery.value
-            .list()
-            .pipe(
-              Effect.mapError((cause) =>
-                refuse(
-                  "executor_unavailable",
-                  sandboxDiagnostic("ingress.capabilities", cause).message,
+          // The Claude CLI lists no models, so a claude- id it may run is taken
+          // as given when claude:local is named, or when a healthy catalog does
+          // not serve it.
+          const claudeModel =
+            claudeDispatch !== undefined &&
+            (submission.executor === undefined || submission.executor === CLAUDE_EXECUTOR) &&
+            submission.provider == null &&
+            submission.modelIdentity !== "catalog"
+              ? resolveClaudeModel(dispatch.claudeRoutes ?? [], submission.model)
+              : undefined
+          const onClaude = (claude: Extract<typeof claudeModel, { outcome: "resolved" }>) =>
+            claudeSelection(
+              dispatch.identity.owningHostId,
+              claude.route,
+              claude.configured,
+              submission.thinking,
+            )
+          if (submission.executor === CLAUDE_EXECUTOR && claudeModel !== undefined) {
+            if (claudeModel.outcome === "refused")
+              return yield* refuse(
+                claudeModel.reason,
+                routeRefusalDetail(submission.model, claudeModel.reason),
+              )
+            selection = yield* onClaude(claudeModel)
+          } else if (Option.isNone(discovery)) {
+            if (claudeModel?.outcome !== "resolved")
+              return yield* refuse("executor_unavailable", "Capability discovery is disabled")
+            selection = yield* onClaude(claudeModel)
+          } else {
+            const catalog = yield* discovery.value
+              .list()
+              .pipe(
+                Effect.mapError((cause) =>
+                  refuse(
+                    "executor_unavailable",
+                    sandboxDiagnostic("ingress.capabilities", cause).message,
+                  ),
                 ),
-              ),
-            )
-          const selected = resolveExecutionSelection(catalog, requested)
-          if (selected.outcome === "refused")
-            return yield* refuse(
-              selected.reason,
-              `Selection refused: ${selected.reason}; consult list_execution_capabilities`,
-            )
-          selection = selected.selection
+              )
+            const selected = resolveExecutionSelection(catalog, requested)
+            if (selected.outcome === "resolved") selection = selected.selection
+            else if (claudeModel?.outcome === "resolved" && selected.reason === "unknown_model") {
+              // A down or out-of-date provider catalog might serve the id; moving
+              // the run to Claude would then depend on discovery health.
+              const down = catalog.sources.flatMap((source) => {
+                if (SINGLE_VENDOR_SOURCE_KINDS.has(source.kind)) return []
+                const state =
+                  source.status === "unavailable" || source.status === "unauthenticated"
+                    ? source.status
+                    : source.stale
+                      ? "out of date"
+                      : undefined
+                return state === undefined ? [] : [`${source.executor} is ${state}`]
+              })
+              if (down.length > 0)
+                return yield* refuse(
+                  "executor_unavailable",
+                  `Capability ${down.length === 1 ? "source" : "sources"} ${down.join(", ")}, so ${down.length === 1 ? "it" : "they"} cannot be ruled out for ${submission.model}; retry later, or name executor "claude:local" to run on Claude`,
+                )
+              selection = yield* onClaude(claudeModel)
+            } else
+              return yield* refuse(
+                selected.reason,
+                `Selection refused: ${selected.reason}; consult list_execution_capabilities`,
+              )
+          }
           resolution = choiceForSelection(selection, identityRoute)
         } else {
           const alias = resolveAgentRunRouteChoice(
@@ -753,35 +835,53 @@ const make = (options: AgentRunIngressOptions) =>
             submission.route!,
             dispatch.claudeRoutes,
           )
-          if (alias.outcome === "refused")
+          // An unconfigured claude- id given as a route runs on Claude as given.
+          const explicitClaude =
+            alias.outcome === "refused" &&
+            alias.reason === "unknown_route" &&
+            claudeDispatch !== undefined
+              ? resolveClaudeModel([], submission.route!)
+              : undefined
+          if (explicitClaude?.outcome === "resolved") {
+            selection = yield* claudeSelection(
+              dispatch.identity.owningHostId,
+              explicitClaude.route,
+              false,
+              submission.thinking,
+            )
+            resolution = choiceForSelection(selection, explicitClaude.route.name)
+          } else if (alias.outcome === "refused")
             return yield* refuse(alias.reason, routeRefusalDetail(submission.route!, alias.reason))
-          resolution = alias
-          selection = {
-            host: dispatch.identity.owningHostId,
-            executor:
-              alias.provider === "opencode"
-                ? `opencode:${dispatch.identity.serverId}`
-                : `${alias.provider}:local`,
-            executorKind: alias.provider,
-            provider: alias.provider === "opencode" ? alias.route.providerID : null,
-            model: alias.route.modelID,
-            selectionModel: alias.route.modelID,
-            thinking: {},
-            availability: "unknown",
-            evidence: "configured",
-          }
-          if (submission.thinking !== undefined && Object.keys(submission.thinking).length > 0) {
-            if (alias.provider !== "opencode" && alias.route.modelID === null)
-              return yield* refuse(
-                "unsupported_thinking",
-                "This CLI alias pins no model, so thinking cannot be verified before execution",
-              )
-            if (alias.provider === "claude") {
-              return yield* refuse(
-                "unsupported_thinking",
-                "Claude cannot verify per-model thinking or silent effort caps before execution",
-              )
-            } else {
+          else if (alias.provider === "claude") {
+            resolution = alias
+            selection = yield* claudeSelection(
+              dispatch.identity.owningHostId,
+              alias.route,
+              true,
+              submission.thinking,
+            )
+          } else {
+            resolution = alias
+            selection = {
+              host: dispatch.identity.owningHostId,
+              executor:
+                alias.provider === "opencode"
+                  ? `opencode:${dispatch.identity.serverId}`
+                  : `${alias.provider}:local`,
+              executorKind: alias.provider,
+              provider: alias.provider === "opencode" ? alias.route.providerID : null,
+              model: alias.route.modelID,
+              selectionModel: alias.route.modelID,
+              thinking: {},
+              availability: "unknown",
+              evidence: "configured",
+            }
+            if (submission.thinking !== undefined && Object.keys(submission.thinking).length > 0) {
+              if (alias.provider === "codex" && alias.route.modelID === null)
+                return yield* refuse(
+                  "unsupported_thinking",
+                  "This CLI alias pins no model, so thinking cannot be verified before execution",
+                )
               if (Option.isNone(discovery))
                 return yield* refuse(
                   "unsupported_thinking",

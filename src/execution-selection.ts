@@ -40,7 +40,7 @@ export const ResolvedSelection = Schema.Struct({
   selectionModel: Schema.NullOr(Schema.String),
   thinking: ThinkingSelection,
   availability: Schema.Literals(["available", "unknown"]),
-  evidence: Schema.Literals(["advertised", "configured", "runtime"]),
+  evidence: Schema.Literals(["advertised", "configured", "requested", "runtime"]),
 })
 export type ResolvedSelection = typeof ResolvedSelection.Type
 export type SelectionRefusal =

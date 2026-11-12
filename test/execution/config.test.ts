@@ -1,6 +1,7 @@
 import { agentGitTestEnvironment } from "../helpers/agent-git-config"
 import { expect, test } from "bun:test"
 import { loadConfig } from "../../src/config"
+import { resolveClaudeThinking } from "../../src/agent-run-contract"
 import { Effect } from "effect"
 import { localDiscoverySources } from "../../src/execution/local"
 import { loadExecutionCapabilitiesDaemon } from "../../src/mcp/auth"
@@ -66,6 +67,12 @@ test("capability authentication defaults to the existing agent-run token and sup
     (source) => source.kind === "claude",
   )
   expect(await claude?.discover(new AbortController().signal)).toEqual({ status: "unsupported" })
+  // Every effort the claude:local source advertises is one dispatch accepts.
+  expect(claude?.explicitModels?.accepted).toBe("claude-*")
+  const advertised = claude?.explicitModels?.efforts.map(({ id }) => id) ?? []
+  expect(advertised).toContain("xhigh")
+  for (const effort of advertised)
+    expect(resolveClaudeThinking({ effort })).toEqual({ outcome: "resolved", thinking: { effort } })
   const dedicated = await loadConfig(
     { ...env, WORKFLOWD_EXECUTION_CAPABILITIES_TOKEN_FILE: "/fixture/token" },
     { readFile: async () => "dedicated-secret\n" },

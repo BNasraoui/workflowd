@@ -38,9 +38,50 @@ access, then executor kinds rank Codex, Claude, OpenCode, then executor and cata
 IDs sort lexically. The order is independent of discovery response ordering.
 Failures return bounded reasons including `unknown_model`, `ambiguous_model`,
 `executor_unavailable`, `model_access_unknown`, `model_not_available` and
-`unsupported_thinking`. No fallback model or lower effort is selected. A CLI-default alias that pins no model
-refuses explicit thinking as `unsupported_thinking`; it cannot verify the native
-default model in advance.
+`unsupported_thinking`. No fallback model or lower effort is selected. A Codex
+CLI-default alias that pins no model refuses explicit thinking as
+`unsupported_thinking`; it cannot verify the native default model in advance.
+
+## Claude models
+
+The `claude` CLI cannot list models, so Claude dispatch takes the model id as asked.
+Any `claude-` model id runs on the Claude executor without a route entry:
+
+```json
+{
+  "model": "claude-fable-5-2",
+  "repository": "workflowd",
+  "prompt": "Implement the ticket",
+  "thinking": { "effort": "xhigh" }
+}
+```
+
+`route: "claude-fable-5-2"` does the same. Resolution order:
+
+1. A configured `WORKFLOWD_AGENT_RUN_CLAUDE_ROUTES` entry wins for its own name, so
+   `claude-fable` still means whatever model the host maps it to. A configured
+   route serving that model id is used next.
+2. With `model`, a capability catalog that serves the id is used next. A
+   `claude-` id falls through to Claude only when the catalog is healthy and does
+   not serve it (`unknown_model`). If a provider catalog source (such as OpenCode)
+   is unavailable, unauthenticated or out of date, it might serve the id, so the
+   request is refused as `executor_unavailable` naming that source and its state
+   rather than moved to Claude. Codex and Claude sources run only their own
+   vendor's models, so their state never blocks a `claude-` id; the
+   same request therefore never lands on different executors depending on
+   discovery health. Set `executor: "claude:local"` to skip the catalog and always
+   run on Claude. `provider` must be omitted or null. A `claude-` id given as
+   `route` does not consult the catalog and runs on Claude.
+3. A `claude-` id (letters, digits, `.`, `_`, `-`, up to 128 bytes) is passed to
+   `claude --model` as given. Workflowd keeps no list of Claude models; whether the
+   account can run the model is learnt at launch.
+
+Provider-prefixed ids such as `anthropic/claude-fable-5-2` are refused as
+`provider_prefixed_route`. Any other id that is not `claude-` shaped is refused as
+before. The resolved selection records `executor: "claude:local"`,
+`provider: null`, the model as asked, `availability: "unknown"` and evidence
+`requested` (or `configured` for a route entry). When the CLI's initialization
+event names the model it ran, that model replaces it with evidence `runtime`.
 
 ## Thinking inputs
 
@@ -58,19 +99,31 @@ records). Strings and numeric budgets retain provider-specific meanings.
   before the initial turn; a different or missing requested effort is refused and
   its process is closed. Resume mismatch escalates without another turn. Variants
   and numeric budgets have no verified native Codex input here and are refused.
-- Direct Claude model discovery remains unsupported. Explicit model requests cannot
-  invent a Claude catalog and are refused; use configured Claude aliases/defaults
-  for the existing direct launch path. Explicit thinking requests on aliases are
-  also refused: CLI help verifies `--effort` syntax but cannot prove per-model support
-  or organization caps. Claude documents that caps can silently clamp effort in
-  [JSON/stream-JSON output](https://code.claude.com/docs/en/model-config#configure-effort-level).
-  Native initialization model evidence replaces configured aliases in the resolved
-  selection when available. Default thinking remains unknown.
+- Claude takes `thinking.effort` only, one of the `claude --effort` levels `low`,
+  `medium`, `high`, `xhigh` and `max` (Claude Code `2.1.316` help). It applies to
+  configured routes (including a route with no model) and to explicit `claude-`
+  models. The executor passes it to the CLI as `--effort <level>`, and the receipt's
+  requested and resolved selections record it. Any other effort, a variant or a
+  budget is refused before launch as `unsupported_thinking`, with the value named.
+  The CLI itself does not exit on an effort it does not take: it warns on stderr and
+  runs at its default effort. The worker runs the CLI in its own process group and
+  stops the group when that warning appears: SIGTERM once, then SIGKILL one second
+  later if the CLI has not yet exited and closed its output. Once the CLI has exited
+  and its stdout and stderr are closed, the worker sends nothing more; a process left
+  in the group is ended when the run's systemd unit stops, because the unit uses
+  `KillMode=control-group`. The run fails as
+  `unsupported_thinking` naming the effort. Only Claude stderr is checked for this
+  warning. The recorded effort is the
+  one asked; Claude documents that organization caps can silently clamp it in
+  [JSON/stream-JSON output](https://code.claude.com/docs/en/model-config#configure-effort-level),
+  and workflowd cannot observe that. Without an explicit effort the CLI default
+  applies and recorded thinking stays empty.
 
 Protocol evidence: installed OpenCode client `0.0.0-beta-18684` Effect declarations
 (`Model.Ref.variant`, session create and switch-model), Codex CLI `0.159.1` generated
 v2 bindings (`ThreadStartParams.config`, `ThreadResumeParams.config`, native response
-`reasoningEffort`, and `TurnStartParams.effort`), and Claude Code `2.1.286` help.
+`reasoningEffort`, and `TurnStartParams.effort`), and Claude Code `2.1.316` help and
+its stderr warning for an unknown `--effort` value.
 No inference was needed to inspect these inputs. The resident continues to use its
 existing durable queue, rather than introducing a second turn-delivery protocol.
 
