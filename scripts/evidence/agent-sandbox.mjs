@@ -896,8 +896,10 @@ export function assertLivePublication(proof) {
   for (const receipt of receipts) {
     assert.deepEqual(receipt.binding, JSON.parse(comment))
     assert.equal(receipt.repository, policy.repository)
-    assert.equal(receipt.branch, submission.branch)
-    assert.equal(receipt.marker, marker)
+    assert.equal(receipt.v, 1)
+    assert.equal(receipt.failed, false)
+    assert.equal(receipt.branch, undefined)
+    assert.equal(receipt.marker, undefined)
   }
   const last = receipts.at(-1)
   assert.equal(last.stage, "published")

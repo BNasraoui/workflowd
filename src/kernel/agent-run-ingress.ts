@@ -98,6 +98,10 @@ export type AgentRunIngressError =
   | Schema.SchemaError
 
 export type AgentRunIngressPort = {
+  readonly nativeControl?: (
+    runId: string,
+    input: import("../sandbox/native-control").NativeControl,
+  ) => Effect.Effect<import("../sandbox/native-control").NativeControlReceipt, AgentRunIngressError>
   readonly register: (
     input: AgentRunSubmissionType,
     now: Date,
@@ -531,10 +535,21 @@ const make = (options: AgentRunIngressOptions) =>
     })
     yield* codexRuns.recover
     const claudeRuns =
-      claudeDispatch === undefined
+      claudeDispatch === undefined && sandbox?.prepareNative === undefined
         ? undefined
         : makeAgentRunCliDispatcher({
-            cli: claudeDispatch,
+            cli: claudeDispatch ?? {
+              ownership: "transient-exec",
+              preflight: Effect.fail({ kind: "cli_unusable", detail: "Local Claude is disabled" }),
+              attach: () => Effect.succeed(null),
+              spawn: () =>
+                Effect.fail(
+                  new WorkspaceError({
+                    operation: "Claude dispatch",
+                    cause: new Error("Native sandbox attachment required"),
+                  }),
+                ),
+            },
             ...(sandbox === undefined ? {} : { sandbox }),
             executor: {
               kind: "claude",
@@ -550,6 +565,33 @@ const make = (options: AgentRunIngressOptions) =>
             progressWindowMs: options.progressWindowMs,
           })
     if (claudeRuns !== undefined) yield* claudeRuns.recover
+    const openCodeNativeRuns =
+      sandbox?.prepareNative === undefined
+        ? undefined
+        : makeAgentRunCliDispatcher({
+            cli: {
+              ownership: "transient-exec",
+              preflight: Effect.void,
+              attach: () => Effect.succeed(null),
+              spawn: () =>
+                Effect.fail(
+                  new WorkspaceError({
+                    operation: "OpenCode native dispatch",
+                    cause: new Error("Native sandbox attachment required"),
+                  }),
+                ),
+            },
+            sandbox,
+            executor: { kind: "opencode", sessionCustodyId: opencodeSessionCustodyId },
+            store,
+            worktrees,
+            signals,
+            ensureResource,
+            ensureSession,
+            refuse,
+            verifyTimeoutMs: options.verifyTimeoutMs,
+            progressWindowMs: options.progressWindowMs,
+          })
 
     const registerWaitIfPaired = (input: {
       readonly submission: AgentRunSubmissionType
@@ -656,6 +698,21 @@ const make = (options: AgentRunIngressOptions) =>
             "invalid_selection",
             "Use model for explicit provider/executor selection; route is a configured alias",
           )
+        const actionsNative =
+          dispatch.sandboxRepositories?.some(
+            (policy) =>
+              policy.alias === submission.repository &&
+              policy.privateBootstrap?.mode === "actions-native",
+          ) === true
+        if (
+          actionsNative &&
+          submission.executor !== undefined &&
+          !["claude:actions", "codex:actions", "opencode:actions"].includes(submission.executor)
+        )
+          return yield* refuse(
+            "executor_unavailable",
+            "Repository requires an Actions-native executor",
+          )
         const requested: RequestedSelection = {
           ...(submission.route === undefined ? {} : { route: submission.route }),
           ...(submission.model === undefined ? {} : { model: submission.model }),
@@ -731,7 +788,17 @@ const make = (options: AgentRunIngressOptions) =>
                 ),
               ),
             )
-          const selected = resolveExecutionSelection(catalog, requested)
+          const selected = resolveExecutionSelection(
+            actionsNative
+              ? {
+                  ...catalog,
+                  capabilities: catalog.capabilities.filter((c) =>
+                    c.identity.executor.endsWith(":actions"),
+                  ),
+                }
+              : catalog,
+            requested,
+          )
           if (selected.outcome === "refused")
             return yield* refuse(
               selected.reason,
@@ -751,8 +818,9 @@ const make = (options: AgentRunIngressOptions) =>
           resolution = alias
           selection = {
             host: dispatch.identity.owningHostId,
-            executor:
-              alias.provider === "opencode"
+            executor: actionsNative
+              ? `${alias.provider}:actions`
+              : alias.provider === "opencode"
                 ? `opencode:${dispatch.identity.serverId}`
                 : `${alias.provider}:local`,
             executorKind: alias.provider,
@@ -763,7 +831,9 @@ const make = (options: AgentRunIngressOptions) =>
             availability: "unknown",
             evidence: "configured",
           }
-          if (submission.thinking !== undefined && Object.keys(submission.thinking).length > 0) {
+          const thinkingRequested =
+            submission.thinking !== undefined && Object.keys(submission.thinking).length > 0
+          if (thinkingRequested) {
             if (alias.provider !== "opencode" && alias.route.modelID === null)
               return yield* refuse(
                 "unsupported_thinking",
@@ -774,35 +844,54 @@ const make = (options: AgentRunIngressOptions) =>
                 "unsupported_thinking",
                 "Claude cannot verify per-model thinking or silent effort caps before execution",
               )
-            } else {
-              if (Option.isNone(discovery))
-                return yield* refuse(
-                  "unsupported_thinking",
-                  "Thinking requires native capability metadata",
-                )
-              const catalog = yield* discovery.value
-                .list()
-                .pipe(
-                  Effect.mapError((cause) =>
-                    refuse(
-                      "executor_unavailable",
-                      sandboxDiagnostic("ingress.capabilities", cause).message,
-                    ),
-                  ),
-                )
-              const selected = resolveExecutionSelection(catalog, {
-                model: alias.route.modelID ?? "",
-                modelIdentity: alias.provider === "opencode" ? "catalog" : "native",
-                executor: selection.executor,
-                ...(alias.provider === "opencode" ? { provider: alias.route.providerID } : {}),
-                thinking: submission.thinking,
-                allowUnknownAccess: true,
-              })
-              if (selected.outcome === "refused")
-                return yield* refuse(selected.reason, `Alias thinking refused: ${selected.reason}`)
-              selection = selected.selection
-              resolution = choiceForSelection(selection, alias.route.name)
             }
+          }
+          if (actionsNative || thinkingRequested) {
+            if (Option.isNone(discovery))
+              return yield* refuse(
+                actionsNative ? "executor_unavailable" : "unsupported_thinking",
+                "Alias selection requires native capability metadata",
+              )
+            const catalog = yield* discovery.value
+              .list()
+              .pipe(
+                Effect.mapError((cause) =>
+                  refuse(
+                    "executor_unavailable",
+                    sandboxDiagnostic("ingress.capabilities", cause).message,
+                  ),
+                ),
+              )
+            const selected = resolveExecutionSelection(catalog, {
+              model: alias.route.modelID ?? "",
+              modelIdentity: alias.provider === "opencode" ? "catalog" : "native",
+              executor: selection.executor,
+              ...(alias.provider === "opencode" ? { provider: alias.route.providerID } : {}),
+              ...(submission.thinking === undefined ? {} : { thinking: submission.thinking }),
+              allowUnknownAccess: true,
+            })
+            if (selected.outcome === "refused")
+              return yield* refuse(selected.reason, `Alias selection refused: ${selected.reason}`)
+            selection = selected.selection
+            resolution = choiceForSelection(selection, alias.route.name)
+          }
+        }
+        if (selection.executor.endsWith(":actions") && !actionsNative)
+          return yield* refuse(
+            "executor_unavailable",
+            "Actions-native requires a configured repository sandbox",
+          )
+        if (actionsNative) {
+          if (selection.model === null)
+            return yield* refuse(
+              "executor_unavailable",
+              "Actions-native requires an explicit configured model",
+            )
+          selection = {
+            ...selection,
+            host: "github-actions",
+            executor: `${selection.executorKind}:actions`,
+            provider: selection.executorKind === "claude" ? "anthropic" : selection.provider,
           }
         }
         const repository = dispatch.repositories.find(
@@ -823,9 +912,13 @@ const make = (options: AgentRunIngressOptions) =>
         }
         if (keyed !== null && keyed.state !== "accepted") {
           // Already-launched duplicates need no fresh launch preflight.
-        } else if (resolution.provider === "opencode" && submission.model === undefined) {
+        } else if (
+          resolution.provider === "opencode" &&
+          submission.model === undefined &&
+          !actionsNative
+        ) {
           yield* preflightRoute(resolution.route)
-        } else if (resolution.provider !== "opencode") {
+        } else if (resolution.provider !== "opencode" && !actionsNative) {
           const readiness = yield* currentReadiness(
             resolution.provider === "claude" ? claudeDispatch : codex,
             resolution.provider,
@@ -853,11 +946,13 @@ const make = (options: AgentRunIngressOptions) =>
           yield* prepareRegistration(input)
         const providerId =
           accepted?.providerId ??
-          (resolution.provider === "opencode"
-            ? resolution.route.providerID
-            : resolution.provider === "claude"
-              ? CLAUDE_PROVIDER_ID
-              : CODEX_PROVIDER_ID)
+          (selection.executor.endsWith(":actions") && selection.provider !== null
+            ? selection.provider
+            : resolution.provider === "opencode"
+              ? resolution.route.providerID
+              : resolution.provider === "claude"
+                ? CLAUDE_PROVIDER_ID
+                : CODEX_PROVIDER_ID)
         const modelId = accepted?.modelId ?? resolution.route.modelID ?? "<cli-default>"
         const parentKind = submission.parentKind ?? "opencode"
         const parentHost = submission.parentHost ?? options.identity.owningHostId
@@ -913,12 +1008,17 @@ const make = (options: AgentRunIngressOptions) =>
               (run.diagnostic === null ? "" : `: ${run.diagnostic}`),
           )
         }
+        const nativeExecution =
+          resolution.provider !== "opencode" || selection.executor === "opencode:actions"
         const immutableReceipt =
           run.state === "completed" ||
-          (resolution.provider !== "opencode" &&
-            run.state === "verified" &&
-            run.nativeSessionId !== null)
-        const nativeRuns = resolution.provider === "claude" ? claudeRuns : codexRuns
+          (nativeExecution && run.state === "verified" && run.nativeSessionId !== null)
+        const nativeRuns =
+          resolution.provider === "claude"
+            ? claudeRuns
+            : resolution.provider === "codex"
+              ? codexRuns
+              : openCodeNativeRuns
         const withMailbox = mailboxErrorMapper(run)
         const recoverWorktreeFailure = worktreeFailureRecovery(store, run, withMailbox)
         let dispatched
@@ -928,7 +1028,7 @@ const make = (options: AgentRunIngressOptions) =>
             outputTokens: run.lastOutputTokens,
             kind: resolution.provider,
           }
-        } else if (resolution.provider !== "opencode") {
+        } else if (nativeExecution) {
           if (nativeRuns === undefined)
             return yield* refuse("executor_unavailable", "Claude executor is disabled")
           dispatched = yield* recoverWorktreeFailure(
@@ -1013,6 +1113,8 @@ const make = (options: AgentRunIngressOptions) =>
           yield* sandbox.cancel(run).pipe(Effect.mapError(sandboxFailure))
           return
         }
+        if (run.resolvedSelection?.executor.endsWith(":actions"))
+          return yield* refuse("run_conflict", "Actions controller custody unavailable")
         if (agentRunExecutorKind(run) === "codex") {
           yield* codexRuns.cancel(run, now)
           return
@@ -1036,7 +1138,35 @@ const make = (options: AgentRunIngressOptions) =>
         yield* store.cancel({ runId, now })
       })
 
-    return AgentRunIngress.of({ register, cancel })
+    const nativeControl: NonNullable<AgentRunIngressPort["nativeControl"]> = (runId, input) =>
+      Effect.gen(function* () {
+        const run = yield* store.read(runId)
+        const nativeRuns =
+          run?.executorKind === "claude"
+            ? claudeRuns
+            : run?.executorKind === "codex"
+              ? codexRuns
+              : openCodeNativeRuns
+        if (
+          !run ||
+          run.state !== "verified" ||
+          !sandbox?.nativeControl ||
+          !sandbox.resumeNative ||
+          !nativeRuns
+        )
+          return yield* refuse("run_conflict", "Native controller custody unavailable")
+        if (input.operation === "resume") {
+          const cli = yield* sandbox
+            .resumeNative(run, input.nonce)
+            .pipe(Effect.mapError(sandboxFailure))
+          yield* nativeRuns.resumeNative(run, cli, input.prompt)
+          return yield* sandbox
+            .nativeControl(run, { operation: "status" })
+            .pipe(Effect.mapError(sandboxFailure))
+        }
+        return yield* sandbox.nativeControl(run, input).pipe(Effect.mapError(sandboxFailure))
+      })
+    return AgentRunIngress.of({ register, cancel, nativeControl })
   })
 
 export const AgentRunIngressLive = (options: AgentRunIngressOptions) =>

@@ -1,6 +1,9 @@
 import { realpathSync } from "node:fs"
 import { resolve } from "node:path"
 
+/** User configuration is retained; repository-local configuration is excluded. */
+export const claudeProjectArguments = ["--setting-sources", "user"] as const
+
 const projectDirectory = (directory: string) => {
   try {
     return realpathSync(directory)

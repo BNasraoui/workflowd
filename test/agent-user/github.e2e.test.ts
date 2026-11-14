@@ -1,7 +1,9 @@
 import { openCodePublisher } from "./github-opencode"
 import { expect, test } from "bun:test"
 import { chmod, chown, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
-import { join } from "node:path"
+import { join, resolve } from "node:path"
+import { randomUUID } from "node:crypto"
+import { fixtureExecutable } from "../helpers/fixture-executable.mjs"
 import { createServer } from "node:http"
 import { connect } from "node:net"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
@@ -32,10 +34,12 @@ async function command(argv: string[], env = process.env, cwd?: string) {
   return output.trim()
 }
 
-test("installed Codex, Claude and OpenCode push and open PRs with run-bound App identity", async () => {
+async function publication(kind: "codex" | "claude" | "opencode") {
   const fixture = await githubFixture()
   const root =
-    process.getuid!() === 0 ? await mkdtemp("/var/lib/workflowd-publish-") : fixture.directory
+    process.getuid!() === 0 && process.env.WORKFLOWD_AGENT_TEST_AGENT_UID
+      ? await mkdtemp("/var/lib/workflowd-publish-")
+      : fixture.directory
   const uid = Number(process.env.WORKFLOWD_AGENT_TEST_AGENT_UID ?? process.getuid!())
   const gid = Number(process.env.WORKFLOWD_AGENT_TEST_AUTH_GID ?? process.getgid!())
   const controllerUid = Number(process.env.WORKFLOWD_AGENT_TEST_BEN_UID ?? process.getuid!())
@@ -219,7 +223,8 @@ test("installed Codex, Claude and OpenCode push and open PRs with run-bound App 
       Effect.gen(function* () {
         const identity = yield* WorkerIdentity
         const runs = yield* AgentRunStore
-        for (const kind of ["codex", "claude", "opencode"] as const) {
+        for (const selected of [kind]) {
+          const kind = selected
           const home = join(root, kind),
             workspace = join(home, "work")
           yield* Effect.tryPromise(async () => {
@@ -412,24 +417,39 @@ test("installed Codex, Claude and OpenCode push and open PRs with run-bound App 
                   "--skip-git-repo-check",
                   "-",
                 ]
-              : [
-                  model.binary,
-                  "--setting-sources",
-                  "user",
-                  "--dangerously-skip-permissions",
-                  "-p",
-                  "--output-format",
-                  "json",
-                ]
+              : ["/usr/bin/python3", resolve("test/helpers/interactive-claude.py")]
           const child = Bun.spawn(asAgent(argv), {
             cwd: workspace,
-            env,
+            env: { ...env, WORKFLOWD_FIXTURE_HOST_NETNS: process.env.WORKFLOWD_FIXTURE_HOST_NETNS },
             stdin: "pipe",
             stdout: "pipe",
             stderr: "pipe",
           })
           identity.register(kind, child.pid)
-          child.stdin.write("Execute the fixture shell command and finish.\n")
+          child.stdin.write(
+            kind === "codex"
+              ? "Execute the fixture shell command and finish.\n"
+              : JSON.stringify({
+                  binary: fixtureExecutable("claude"),
+                  directory: workspace,
+                  home,
+                  session: randomUUID(),
+                  resume: false,
+                  baseUrl: model.modelUrl,
+                  prompt: "Execute the fixture shell command and finish.",
+                  transcript: join(home, "publication-transcript.jsonl"),
+                  pty: join(home, "publication-pty"),
+                  arguments: [
+                    "--setting-sources",
+                    "user",
+                    "--strict-mcp-config",
+                    "--mcp-config",
+                    '{"mcpServers":{}}',
+                    "--allowedTools",
+                    "Bash",
+                  ],
+                }),
+          )
           void child.stdin.end()
           try {
             const [output, errors, code] = yield* Effect.tryPromise(() =>
@@ -461,7 +481,7 @@ test("installed Codex, Claude and OpenCode push and open PRs with run-bound App 
         }
       }).pipe(Effect.provide(live)),
     )
-    expect(pulls).toHaveLength(3)
+    expect(pulls).toHaveLength(1)
     // Scope evidence is the token mint request; the unknown-path 403 is only fixture routing.
     expect(fixture.bodies).toEqual([
       { repositories: ["r"], permissions: { contents: "write", pull_requests: "write" } },
@@ -473,4 +493,11 @@ test("installed Codex, Claude and OpenCode push and open PRs with run-bound App 
     await fixture.close()
     if (root !== fixture.directory) await rm(root, { recursive: true, force: true })
   }
-}, 120000)
+}
+
+for (const kind of ["codex", "claude", "opencode"] as const)
+  test(
+    `installed ${kind} pushes and opens a PR with run-bound App identity`,
+    () => publication(kind),
+    120000,
+  )

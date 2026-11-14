@@ -191,10 +191,14 @@ export const makeSandboxOpenCode = (client: OpenCodeClient, executor: OpenCodeAd
     const root = bindingDirectory(binding.directory)
     const bridge = join(root, "bridge")
     const transportFile = join(root, "transport.json")
-    yield* Effect.tryPromise(async () => {
-      await compileSandboxBridge(bridge)
-      await saveSandboxFile(root, "transport.json", JSON.stringify(transport), true)
-    })
+    // A native build cannot be abandoned mid-write: an interrupted start (for example a
+    // concurrent sibling failed) joins its compilation before its caller can continue.
+    yield* Effect.uninterruptible(
+      Effect.tryPromise(async () => {
+        await compileSandboxBridge(bridge)
+        await saveSandboxFile(root, "transport.json", JSON.stringify(transport), true)
+      }),
+    )
     const session = yield* executor.createSession({
       id: binding.sessionId,
       directory: binding.directory,

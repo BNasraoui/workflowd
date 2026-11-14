@@ -8,20 +8,19 @@ import {
 import { createHash } from "node:crypto"
 import { refreshAgentGitGuard } from "../agent-git/guard"
 import { agentGitEnvironment, type AgentGitConfig } from "../agent-git/config"
-import { stat } from "node:fs/promises"
-import { homedir } from "node:os"
+import { mkdtemp, rm, stat } from "node:fs/promises"
+import { homedir, tmpdir } from "node:os"
 import { join } from "node:path"
 import { Context, Effect, Schema } from "effect"
-import { runWorkspaceCommandBytes } from "../workspace/command"
 import { WorkspaceError } from "../workspace/errors"
+import { claudeInteractiveArguments, runClaudeInteractiveTurn } from "./claude-interactive"
 
 /**
  * Claude Code sessions live as JSONL transcripts under
  * `~/.claude/projects/<encoded working directory>/<session id>.jsonl`, and
- * the `claude` CLI is their only programmatic surface: `claude -p --resume
- * <id>` continues the conversation and prints the answer. That CLI call is
- * the Claude analog of OpenCode's promptAsync, and — deliberately — the
- * only way workflowd ever drives a Claude model.
+ * this shared-host resume adapter continues them with a normal interactive
+ * `claude --resume <id>` turn in a private PTY. Actions-native runs use the
+ * separately supervised PTY path in sandbox/native-execution.ts.
  */
 export const CLAUDE_PROVIDER_ID = "claude-cli"
 export const CLAUDE_ENDPOINT_ALIAS = "local-cli"
@@ -65,6 +64,83 @@ export const ClaudeCli = Context.Service<ClaudeCliPort>("workflowd/kernel/Claude
 const MAX_CLAUDE_STDOUT_BYTES = 262_144
 const SESSION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9-]*$/
 
+/** Prepare a resumed interactive turn: Git guard, argv and environment, no launch. */
+export const prepareClaudeResume = Effect.fn("ClaudeCli.prepareResume")(function* (
+  binary: string,
+  input: Parameters<ClaudeCliPort["resume"]>[0],
+  git?: AgentGitConfig,
+  home?: string,
+) {
+  yield* refreshAgentGitGuard(input.directory, git)
+  const session = { id: input.nativeSessionId, resume: true }
+  const args = yield* Effect.tryPromise({
+    try: () =>
+      claudeInteractiveArguments({ binary, directory: input.directory, model: null }, session),
+    catch: (cause) => resumeFailure(cause),
+  })
+  // A selected transcript home is also the resumed process's home.
+  const env = { ...process.env, ...(home === undefined ? {} : { HOME: home }) }
+  return { args, env: { ...env, ...agentGitEnvironment(git) } }
+})
+
+const resumeFailure = (cause: unknown) =>
+  new WorkspaceError({
+    operation: "wake claude session",
+    cause: cause instanceof Error ? cause : new Error(String(cause)),
+  })
+
+/** Interruption aborts the turn and waits until the turn returns, which happens only
+ * after its PTY helper confirmed the process group reaped and the PTY at EOF (or the
+ * turn failed with unconfirmed cleanup). Escaped sessions are outside this group. */
+const interactiveTurn = (run: (signal: AbortSignal) => Promise<string>) =>
+  Effect.callback<string, WorkspaceError>((resume, signal) => {
+    const running = run(signal)
+    running.then(
+      (answer) => resume(Effect.succeed(answer)),
+      (cause: unknown) => resume(Effect.fail(resumeFailure(cause))),
+    )
+    return Effect.promise(() =>
+      running.then(
+        () => undefined,
+        () => undefined,
+      ),
+    )
+  })
+
+/** One resumed turn in a private PTY; the answer keeps the CLI result envelope. */
+const resumeInteractive = (
+  binary: string,
+  input: Parameters<ClaudeCliPort["resume"]>[0],
+  git?: AgentGitConfig,
+  home?: string,
+) =>
+  prepareClaudeResume(binary, input, git, home).pipe(
+    Effect.flatMap((prepared) =>
+      interactiveTurn(async (signal) => {
+        const directory = await mkdtemp(join(tmpdir(), "workflowd-claude-turn-"))
+        try {
+          const outcome = await runClaudeInteractiveTurn({
+            args: prepared.args,
+            prompt: input.prompt,
+            directory: input.directory,
+            session: input.nativeSessionId,
+            env: prepared.env,
+            hooksPath: join(directory, "hooks"),
+            signal,
+          })
+          if (!outcome.completed) throw new Error(outcome.failure ?? "claude resume did not complete")
+          // The bound covers the actual serialized envelope, including JSON escapes.
+          const envelope = JSON.stringify({ type: "result", is_error: false, result: outcome.text })
+          if (Buffer.byteLength(envelope) > MAX_CLAUDE_STDOUT_BYTES)
+            throw new Error("claude resume output exceeds its limit")
+          return envelope
+        } finally {
+          await rm(directory, { recursive: true, force: true })
+        }
+      }),
+    ),
+  )
+
 export const makeClaudeCli = (options: {
   readonly git?: AgentGitConfig | undefined
   readonly binary: string
@@ -98,52 +174,23 @@ export const makeClaudeCli = (options: {
           )
         },
         resume: (input) =>
-          // Argument-vector spawn, and the prompt rides stdin: untrusted session
-          // content never appears in argv or a shell string.
+          // Argument-vector spawn: untrusted session content is one argument after
+          // "--" and never appears in a shell string.
           withCredentialAdmission(
             options.credentialSocket,
             "claude",
-            refreshAgentGitGuard(input.directory, options.git)
-              .pipe(
-                Effect.andThen(
-                  runWorkspaceCommandBytes(
-                    "wake claude session",
-                    [
-                      options.binary,
-                      "--setting-sources",
-                      "user",
-                      "--settings",
-                      '{"env":{"CLAUDE_CODE_DISABLE_BACKGROUND_TASKS":"1"}}',
-                      "-p",
-                      "--resume",
-                      input.nativeSessionId,
-                      "--output-format",
-                      "json",
-                    ],
-                    {
-                      env: agentGitEnvironment(options.git),
-                      cwd: input.directory,
-                      stdin: input.prompt,
-                      maxStdoutBytes: MAX_CLAUDE_STDOUT_BYTES,
-                    },
+            resumeInteractive(options.binary, input, options.git, options.home).pipe(
+              Effect.timeoutOrElse({
+                duration: input.timeoutMs,
+                orElse: () =>
+                  Effect.fail(
+                    new WorkspaceError({
+                      operation: "wake claude session",
+                      cause: new Error(`claude resume did not finish within ${input.timeoutMs}ms`),
+                    }),
                   ),
-                ),
-              )
-              .pipe(
-                Effect.timeoutOrElse({
-                  duration: input.timeoutMs,
-                  orElse: () =>
-                    Effect.fail(
-                      new WorkspaceError({
-                        operation: "wake claude session",
-                        cause: new Error(
-                          `claude resume did not finish within ${input.timeoutMs}ms`,
-                        ),
-                      }),
-                    ),
-                }),
-                Effect.map((output) => new TextDecoder().decode(output.stdout)),
-              ),
+              }),
+            ),
           ).pipe(
             Effect.mapError((error) =>
               error instanceof WorkspaceError

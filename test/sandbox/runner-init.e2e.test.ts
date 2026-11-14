@@ -117,7 +117,9 @@ for (const path of ["initialize", "start source helper"]) {
       expect({ status, stderr: status === 0 ? "" : stderr }).toEqual({ status: 0, stderr: "" })
       if (path === "initialize") {
         expect(stdout.trim()).toBe(sourceSha)
-        expect(await exec("container-use", "config", "base-image", "get")).toBe("ubuntu:24.04")
+        expect(await exec("container-use", "config", "base-image", "get")).toBe(
+          "ubuntu@sha256:534baea6a22c03a63003dbc8dbe78fe34bc0d7e595d9a9dc9834884ff530eb55",
+        )
       }
       expect(await exec("git", "rev-parse", "HEAD")).toBe(sourceSha)
       expect(await exec("git", "rev-parse", "--is-shallow-repository")).toBe("false")

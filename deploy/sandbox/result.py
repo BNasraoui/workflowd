@@ -14,6 +14,8 @@ import tempfile
 from pathlib import Path
 import subprocess
 import sys
+import urllib.parse
+import tarfile
 
 if sys.flags.optimize:
     raise RuntimeError('Python optimization is not supported')
@@ -29,7 +31,7 @@ def commit_id(value):
     return value
 
 
-def git(repo, *args):
+def git(repo, *args, input=None):
     def bounds():
         resource.setrlimit(resource.RLIMIT_AS, (1024**3, 1024**3))
         resource.setrlimit(resource.RLIMIT_FSIZE, (128 * 1024**2, 128 * 1024**2))
@@ -44,9 +46,12 @@ def git(repo, *args):
              '-c', 'core.attributesFile=/dev/null', *args], cwd=repo,
             env={'PATH': '/usr/bin:/bin', 'HOME': '/nonexistent',
                  'GIT_CONFIG_NOSYSTEM': '1', 'GIT_CONFIG_GLOBAL': '/dev/null',
-                 'GIT_NO_REPLACE_OBJECTS': '1', 'GIT_TERMINAL_PROMPT': '0',
-                 'GIT_ALLOW_PROTOCOL': 'https:file'},
-            stdout=output, stderr=subprocess.DEVNULL, timeout=60,
+                  'GIT_NO_REPLACE_OBJECTS': '1', 'GIT_TERMINAL_PROMPT': '0',
+                  'GIT_AUTHOR_NAME': 'Workflowd Agent', 'GIT_COMMITTER_NAME': 'Workflowd Agent',
+                  'GIT_AUTHOR_EMAIL': 'agent@workflowd.invalid', 'GIT_COMMITTER_EMAIL': 'agent@workflowd.invalid',
+                  'GIT_AUTHOR_DATE': '2000-01-01T00:00:00Z', 'GIT_COMMITTER_DATE': '2000-01-01T00:00:00Z',
+                  'GIT_ALLOW_PROTOCOL': 'https:file'},
+             input=input, stdout=output, stderr=subprocess.DEVNULL, timeout=60,
             check=True, preexec_fn=bounds)
         if output.tell() > 16 * 1024**2:
             raise ValueError('Git inventory exceeded bound')
@@ -197,7 +202,160 @@ def safe_path(raw):
     return name.casefold()
 
 
-def inspect_changes(repo, source, result):
+def content_check(data, sensitive):
+    # Defined encodings only; this is not general DLP. Scan complete bounded values,
+    # including whitespace-fragmented forms, rather than independent output lines.
+    compact = re.sub(rb'\s+', b'', data)
+    if re.search(rb'(?:gh[pousr]_|github_pat_|sk-ant-)[A-Za-z0-9_-]{16,}|-----BEGIN(?:RSA|EC|OPENSSH)?PRIVATEKEY-----', compact):
+        raise ValueError('Credential-shaped public content')
+    for value in sensitive:
+        raw = value.encode('utf8')
+        forms = [raw, base64.b64encode(raw), base64.urlsafe_b64encode(raw).rstrip(b'='),
+                 raw.hex().encode(), raw.hex().upper().encode(), urllib.parse.quote(value, safe='').encode()]
+        if any(re.sub(rb'\s+', b'', form) in compact for form in forms):
+            raise ValueError('Sensitive public content')
+
+
+def native_seal(source):
+    """Called only after the supervisor stops the container and exports its fixed workspace.
+
+    source.git is controller-created and never mounted in the agent. repository is
+    an owned, offline export, not a live agent mount. No agent Git command is run.
+    """
+    source = commit_id(source)
+    raw = sys.stdin.buffer.read(262145)
+    if len(raw) > 262144: raise ValueError('Native input exceeded bound')
+    request = json.loads(raw)
+    if set(request) != {'completion', 'sensitiveValues'}: raise ValueError('Invalid native request')
+    completion, sensitive = request['completion'], request['sensitiveValues']
+    if set(completion) != {'branch', 'title', 'commitMessage', 'body'}: raise ValueError('Invalid native metadata')
+    if not isinstance(sensitive, list) or len(sensitive) > 32 or any(not isinstance(v, str) or not 16 <= len(v) <= 4096 for v in sensitive):
+        raise ValueError('Invalid sensitive values')
+    publication_text(completion['title'])
+    publication_text(completion['commitMessage'], True)
+    publication_body(completion['body'])
+    branch = completion['branch']
+    if not isinstance(branch, str) or branch.startswith('-') or len(branch.encode()) > 1024:
+        raise ValueError('Invalid branch')
+    content_check(json.dumps(completion, ensure_ascii=False).encode(), sensitive)
+    if Path('repository').is_symlink() or Path('source.git').is_symlink(): raise ValueError('Unsafe source path')
+    with tempfile.TemporaryDirectory(prefix='native-capture-', dir='.') as directory:
+        repo = str(Path(directory).absolute())
+        git(repo, 'init', '--bare', '.')
+        git(repo, 'check-ref-format', 'refs/heads/' + branch)
+        git(repo, 'fetch', '--no-tags', '--', str(Path('source.git').absolute()), source)
+        git(repo, 'read-tree', source)
+        selected = git(repo, '--work-tree=' + str(Path('repository').absolute()),
+                       'ls-files', '--cached', '--others', '--exclude-standard', '-z').split(b'\0')
+        git(repo, 'read-tree', '--empty')
+        index, total, count = [], 0, 0
+        for relative in sorted(set(selected) - {b''}):
+            content_check(relative, sensitive)
+            parts = relative.decode('utf8').split('/')
+            if any(part in ['', '.', '..', '.git'] for part in parts): raise ValueError('Unsafe native path')
+            path = Path('repository', *parts)
+            if any(parent.is_symlink() for parent in path.parents): raise ValueError('Linked directory')
+            try: info = path.lstat()
+            except FileNotFoundError: continue
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > 1024**2:
+                raise ValueError('Unsafe native file')
+            total += info.st_size
+            count += 1
+            if count > 10000 or total > 64 * 1024**2: raise ValueError('Native workspace exceeded bound')
+            data = path.read_bytes()
+            content_check(data, sensitive)
+            blob = git(repo, 'hash-object', '-w', '--no-filters', '--stdin', input=data).strip()
+            mode = b'100755' if info.st_mode & 0o111 else b'100644'
+            index.append(mode + b' blob ' + blob + b'\t' + relative + b'\0')
+        git(repo, 'update-index', '-z', '--index-info', input=b''.join(index))
+        tree = git(repo, 'write-tree').decode().strip()
+        if tree == git(repo, 'rev-parse', source + '^{tree}').decode().strip():
+            print(json.dumps({'empty': True, 'sourceSha': source}))
+            return
+        result = git(repo, 'commit-tree', tree, '-p', source, '-m', 'Native workspace result').decode().strip()
+        inspect_changes(repo, source, result, sensitive)
+        # Only validated, source-relative objects become an intended-public artifact.
+        root = Path('result')
+        root.mkdir(mode=0o700)
+        bundle = root / 'result.bundle'
+        git(repo, 'update-ref', 'refs/workflowd/result', result)
+        git(repo, 'bundle', 'create', str(bundle.absolute()), 'refs/workflowd/result', '^' + source)
+        if bundle.stat().st_size > 16 * 1024**2: raise ValueError('Bundle exceeded bound')
+        manifest = {**completion, 'sourceSha': source, 'resultSha': result, 'treeSha': tree, 'bundleSha256': sha(bundle.read_bytes())}
+        encoded = json.dumps(manifest, ensure_ascii=True, separators=(',', ':')).encode()
+        (root / 'result.json').write_bytes(encoded)
+        print(json.dumps({**manifest, 'manifestSha256': sha(encoded)}, separators=(',', ':')))
+
+
+def native_source(source):
+    source = commit_id(source)
+    with tempfile.TemporaryDirectory(prefix='native-source-', dir='.') as directory:
+        repo = str(Path(directory).absolute())
+        git(repo, 'init', '.')
+        git(repo, 'fetch', '--no-tags', '--', str(Path('source.git').absolute()), source)
+        git(repo, 'checkout', '--detach', source)
+        git(repo, 'config', 'user.name', 'Workflowd Agent')
+        git(repo, 'config', 'user.email', 'agent@workflowd.invalid')
+        def owned(info):
+            info.uid = info.gid = 1000
+            info.uname = info.gname = ''
+            info.mtime = 946684800
+            if not (info.isfile() or info.isdir()): raise ValueError('Unsafe source entry')
+            return info
+        with tarfile.open('source.tar', 'x') as archive:
+            archive.add(repo, arcname='.', filter=owned)
+        if Path('source.tar').stat().st_size > 64 * 1024**2: raise ValueError('Native source capacity')
+
+
+def native_export(archive, source=None):
+    # Never ask Docker/tar to extract agent-owned paths on the runner host.
+    # Even .git is discarded rather than loaded as a repository configuration.
+    if Path(archive).stat().st_size > 96 * 1024**2: raise ValueError('Native export capacity')
+    root = Path('repository')
+    root.mkdir(mode=0o700)
+    if source is not None: source = commit_id(source)
+    count, total, seen, links = 0, 0, set(), set()
+    with tarfile.open(archive, 'r:') as stream:
+        for item in stream:
+            if item.size < 0: raise ValueError('Invalid export size')
+            name = item.name.removeprefix('./').rstrip('/')
+            if name in ['', '.']: continue
+            parts = name.split('/')
+            if name.startswith('/') or any(p in ['', '.', '..'] for p in parts): raise ValueError('Unsafe export path')
+            if parts[0] == '.git': continue
+            count += 1
+            total += item.size
+            if count > 10000 or total > 64 * 1024**2 or item.size > 1024**2: raise ValueError('Native export capacity')
+            if name in seen: raise ValueError('Duplicate export path')
+            seen.add(name)
+            path = root.joinpath(*parts)
+            if item.isdir(): path.mkdir(parents=True, exist_ok=True, mode=0o700)
+            elif item.isfile():
+                path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+                with path.open('xb') as output, stream.extractfile(item) as data:
+                    output.write(data.read(1024**2 + 1))
+                path.chmod(0o700 if item.mode & 0o111 else 0o600)
+            elif item.issym() and source is not None:
+                # A regular empty placeholder lets Git apply ignore rules without
+                # ever creating/following an agent link or reading its destination.
+                path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+                path.touch(mode=0o600, exist_ok=False)
+                links.add(name.encode('utf8'))
+            else: raise ValueError('Unsafe export entry')
+    if links:
+        if Path('source.git').is_symlink(): raise ValueError('Unsafe source path')
+        with tempfile.TemporaryDirectory(prefix='native-selection-', dir='.') as directory:
+            repo = str(Path(directory).absolute())
+            git(repo, 'init', '--bare', '.')
+            git(repo, 'fetch', '--no-tags', '--', str(Path('source.git').absolute()), source)
+            git(repo, 'read-tree', source)
+            selected = set(git(repo, '--work-tree=' + str(root.absolute()),
+                               'ls-files', '--cached', '--others', '--exclude-standard', '-z').split(b'\0'))
+            if links & selected: raise ValueError('Selected export link')
+        for name in links: root.joinpath(name.decode('utf8')).unlink()
+
+
+def inspect_changes(repo, source, result, sensitive=()):
     commits = git(repo, 'rev-list', '--reverse', source + '..' + result).decode().splitlines()
     if not (1 <= len(commits) <= 100):
         raise ValueError('Commit count exceeded bound')
@@ -209,6 +367,7 @@ def inspect_changes(repo, source, result):
         total += int(git(repo, 'cat-file', '-s', obj.split(b' ')[0].decode()))
         if total > 64 * 1024 * 1024:
             raise ValueError('Object bytes exceeded bound')
+        content_check(git(repo, 'cat-file', '-p', obj.split(b' ')[0].decode()), sensitive)
     parent = source
     content = 0
     changed = set()
@@ -228,6 +387,7 @@ def inspect_changes(repo, source, result):
             old, new, _, blob, _ = fields
             old = old.removeprefix(':')
             path = entries[i + 1]
+            content_check(path, sensitive)
             safe_path(path)
             changed.add(path)
             if len(changed) > 100:
@@ -300,6 +460,7 @@ def validate(source_url):
     manifest = json.loads(raw)
     if set(manifest) != {'sourceSha', 'resultSha', 'treeSha', 'branch', 'bundleSha256', 'title', 'commitMessage', 'body'}:
         raise ValueError('Invalid manifest fields')
+    content_check(json.dumps(manifest, ensure_ascii=False).encode('utf8'), [])
     if not isinstance(manifest['branch'], str):
         raise ValueError('Invalid manifest branch')
     publication_text(manifest['title'])
@@ -357,6 +518,9 @@ if __name__ == '__main__':
     try:
         signal.alarm(180)
         if sys.argv[1] == 'seal': seal(*sys.argv[2:])
+        elif sys.argv[1] == 'native-seal': native_seal(*sys.argv[2:])
+        elif sys.argv[1] == 'native-source': native_source(*sys.argv[2:])
+        elif sys.argv[1] == 'native-export': native_export(*sys.argv[2:])
         elif sys.argv[1] == 'validate': validate(*sys.argv[2:])
         elif sys.argv[1] == 'tree': tree(*sys.argv[2:])
         else: raise ValueError('Unknown operation')

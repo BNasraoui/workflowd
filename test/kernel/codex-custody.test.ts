@@ -2,13 +2,14 @@ import { expect, test } from "bun:test"
 import { link, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { Effect } from "effect"
+import { Effect, Schema } from "effect"
 import { makeCodexCli, type CodexExecEvent } from "../../src/kernel/codex-session"
 import {
   parseCodexWorkerArguments,
   runCodexWorker,
   runHostWorker,
 } from "../../src/kernel/codex-worker"
+import { encodeClaudeProjectDir } from "../../src/kernel/claude-session"
 
 const fakeSystemd = (commands: ReadonlyArray<string>[]) => {
   let active = false
@@ -199,9 +200,23 @@ test("reattaches to durable output without relaunching and cancels only when exp
   }
 })
 
-test("host worker profiles preserve stdin and keep native result files bounded", async () => {
+test("host worker profiles keep prompts out of argv/shell text and native result files bounded", async () => {
   const root = await mkdtemp(join(tmpdir(), "host-worker-profiles-"))
+  const saved = { ...process.env }
   try {
+    // Normal Claude profiles run the PTY stand-in under a private config directory.
+    const claude = join(import.meta.dir, "../helpers/fake-interactive-claude.ts")
+    const record = join(root, "claude-invocation.json")
+    Object.assign(process.env, {
+      CLAUDE_CONFIG_DIR: join(root, "claude-config"),
+      FAKE_CLAUDE_RECORD: record,
+    })
+    await mkdir(join(root, "claude-config"))
+    // Explicit synthetic onboarding; the worker refuses rather than writing it.
+    await writeFile(
+      join(root, "claude-config", ".claude.json"),
+      '{"hasCompletedOnboarding":true}',
+    )
     const binary = join(root, "native")
     const capture = join(root, "capture")
     await writeFile(
@@ -235,15 +250,36 @@ test("host worker profiles preserve stdin and keep native result files bounded",
       )
       for (const name of ["prompt", "events", "stderr", "result"])
         await rm(join(root, name), { force: true })
-      expect(await runHostWorker(input, binary, root)).toBe(0)
+      const interactive = profile === "claude" || profile === "claude-resume"
+      for (const name of ["events.hooks", "stderr.hooks"])
+        await rm(join(root, name), { force: true })
+      const exit = await runHostWorker(input, interactive ? claude : binary, root)
+      expect(exit).toBe(0)
       expect(JSON.parse(await readFile(join(root, "result"), "utf8"))).toEqual({
         version: 1,
         exitCode: 0,
       })
-      if (["codex", "claude", "claude-resume", "codex-server"].includes(profile)) {
+      if (profile === "codex" || profile === "codex-server") {
         expect(await readFile(capture, "utf8")).toBe("secret stays on stdin")
         expect(await readFile(join(root, "events"), "utf8")).toContain("native output")
       }
+      if (interactive) {
+        // The actual spawned native argv never carries the prompt, a separator or print
+        // mode; the prompt reaches the native CLI only through its private PTY.
+        const { args } = Schema.decodeUnknownSync(
+          Schema.fromJsonString(Schema.Struct({ args: Schema.Array(Schema.String) })),
+        )(await readFile(record, "utf8"))
+        expect(args.some((value) => value.includes("secret stays on stdin"))).toBe(false)
+        for (const forbidden of ["--", "-p", "--print", "--output-format"])
+          expect(args).not.toContain(forbidden)
+        expect(await readFile(join(root, "events"), "utf8")).toContain(
+          "fixture:secret stays on stdin",
+        )
+      }
+      if (profile === "claude-resume")
+        expect(JSON.parse(await readFile(join(root, "events"), "utf8"))).toMatchObject({
+          result: "fixture:secret stays on stdin",
+        })
       if (profile === "codex-server")
         expect((await readFile(`${capture}-args`, "utf8")).split("\n")).toContain(
           `projects={${JSON.stringify(root)}={trust_level="untrusted"}}`,
@@ -273,6 +309,8 @@ test("host worker profiles preserve stdin and keep native result files bounded",
       "native authentication unavailable",
     )
   } finally {
+    for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key]
+    Object.assign(process.env, saved)
     await rm(root, { recursive: true, force: true })
   }
 })
@@ -342,7 +380,38 @@ test("host discovery worker exchanges the native model catalog and workspace wor
     await writeFile(input, JSON.stringify(request))
     for (const name of ["prompt", "events", "stderr", "result"])
       await rm(join(root, name), { force: true })
-    expect(await runHostWorker(input, binary, root)).toBe(0)
+    // Only this disposable workspace child gets its own Git configuration. The launcher
+    // retains its higher-priority hook fence for the real checkout and other children.
+    const workspace = async () => {
+      const child = Bun.spawn(
+        [
+          process.execPath,
+          join(import.meta.dir, "../../src/kernel/codex-worker.ts"),
+          "--host-input",
+          input,
+          "--binary",
+          binary,
+        ],
+        {
+          cwd: root,
+          env: {
+            PATH: process.env.PATH,
+            HOME: root,
+            GIT_CONFIG_NOSYSTEM: "1",
+            GIT_CONFIG_GLOBAL: "/dev/null",
+          },
+          stdout: "pipe",
+          stderr: "pipe",
+        },
+      )
+      const [code, stdout, stderr] = await Promise.all([
+        child.exited,
+        new Response(child.stdout).text(),
+        new Response(child.stderr).text(),
+      ])
+      return { code, stdout, stderr }
+    }
+    expect(await workspace()).toEqual({ code: 0, stdout: "", stderr: "" })
     expect((await stat(join(directory, ".git"))).isDirectory()).toBe(true)
     const hooks = join(directory, ".git", "workflowd-hooks")
     expect(await readFile(join(hooks, "agent-worktree"), "utf8")).toBe("")
@@ -356,28 +425,58 @@ test("host discovery worker exchanges the native model catalog and workspace wor
         () => null,
       ),
     ).toBeNull()
+    await expect(
+      git([
+        "-C",
+        directory,
+        "-c",
+        "user.name=Agent",
+        "-c",
+        "user.email=agent@example.test",
+        "commit",
+        "--allow-empty",
+        "--author=Blocked <blocked@example.test>",
+        "-m",
+        "blocked",
+      ]),
+    ).rejects.toThrow("workflowd: blocked git identity")
+    await git([
+      "-C",
+      directory,
+      "-c",
+      "user.name=Agent",
+      "-c",
+      "user.email=agent@example.test",
+      "commit",
+      "--allow-empty",
+      "-m",
+      "allowed",
+    ])
     await writeFile(input, JSON.stringify({ ...request, branch: "--invalid" }))
     for (const name of ["prompt", "events", "stderr", "result"])
       await rm(join(root, name), { force: true })
-    await expect(runHostWorker(input, binary, root)).rejects.toThrow("invalid workspace selection")
+    const invalid = await workspace()
+    expect(invalid.code).not.toBe(0)
+    expect(invalid.stderr).toContain("invalid workspace selection")
   } finally {
     await rm(root, { recursive: true, force: true })
   }
 })
 
-test("the deployed worker entrypoint completes a Claude launch without a circular module wait", async () => {
+test("the deployed worker entrypoint probes a Claude transcript without a circular module wait", async () => {
   const root = await mkdtemp(join(tmpdir(), "host-entrypoint-"))
   try {
-    const binary = join(root, "claude")
-    await writeFile(binary, '#!/bin/sh\ncat >/dev/null\necho \'{"type":"result"}\'\n', {
-      mode: 0o755,
-    })
+    const binary = "/must-not-execute"
+    const transcripts = join(root, ".claude", "projects", encodeClaudeProjectDir(root))
+    await mkdir(transcripts, { recursive: true })
+    await writeFile(join(transcripts, "fixture.jsonl"), "{}\n")
     const input = join(root, "input")
     await writeFile(
       input,
       JSON.stringify({
         operation: "start",
-        profile: "claude",
+        profile: "claude-session",
+        nativeSessionId: "fixture",
         runId: "entrypoint",
         directory: root,
         prompt: "fixture",
@@ -393,12 +492,14 @@ test("the deployed worker entrypoint completes a Claude launch without a circula
     await writeFile(worker, await build.outputs[0]!.text())
     const child = Bun.spawn([process.execPath, worker, "--host-input", input, "--binary", binary], {
       cwd: root,
+      env: { ...process.env, HOME: root },
       stdout: "ignore",
       stderr: "pipe",
     })
     const timer = setTimeout(() => child.kill("SIGKILL"), 1500)
     try {
       expect(await child.exited).toBe(0)
+      expect(await readFile(join(root, "events"), "utf8")).toBe("true")
       expect(JSON.parse(await readFile(join(root, "result"), "utf8"))).toEqual({
         version: 1,
         exitCode: 0,

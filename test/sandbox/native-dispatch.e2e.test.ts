@@ -8,7 +8,7 @@ import { dispatchRunnerFixture, sandboxGithubFixture, sandboxIngressFixtureLayer
 import { sharedOpenCodeFixture } from "./opencode-fixture"
 import { nativeModelFixture, remoteEnvironment } from "./native-fixture"
 import { makeCodexCli } from "../../src/kernel/codex-session"
-import { makeClaudeDispatchCli } from "../../src/kernel/claude-dispatch"
+import { makeInteractiveDispatchCli } from "../helpers/interactive-worker"
 import { AgentRunIngress } from "../../src/kernel/agent-run-ingress"
 import { AgentRunStore } from "../../src/kernel/agent-run-store"
 import { makeSandboxDispatch, SandboxDispatch } from "../../src/sandbox/dispatch"
@@ -41,12 +41,15 @@ for (const [kind, mode] of [
     const shared = await sharedOpenCodeFixture(`native-${kind}`)
     const fixture = await nativeModelFixture(kind, runner.root)
     const githubFixture = await sandboxGithubFixture(policy, runner.name)
+    const options = {
+      binary: fixture.binary,
+      custodyRoot: join(runner.root, "processes"),
+      unitPrefix: `wfd-native-test-${crypto.randomUUID()}-`,
+    }
     const cli = {
-      ...(kind === "codex" ? makeCodexCli : makeClaudeDispatchCli)({
-        binary: fixture.binary,
-        custodyRoot: join(runner.root, "processes"),
-        unitPrefix: `wfd-native-test-${crypto.randomUUID()}-`,
-      }),
+      ...(kind === "codex"
+        ? makeCodexCli(options)
+        : makeInteractiveDispatchCli(options, fixture.modelUrl)),
       preflight: Effect.void,
     }
     const sandbox = Effect.gen(function* () {

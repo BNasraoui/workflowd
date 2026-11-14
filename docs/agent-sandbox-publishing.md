@@ -14,7 +14,89 @@ The publish App is **ghettimonster**, App ID **5232172**, bot **339414993**
 `GHETTIMONSTER_PRIVATE_KEY`, held only in the caller's protected environment.
 Ben owns key provisioning, rulesets, environment settings and deployment pins.
 
-## Command status and public audit
+## Native capability-gateway publication (implementation gate)
+
+The P2 source accepts strict, run/channel-bound candidates at
+`POST /capabilities/v1/result`. A candidate can be corrected using its current
+revision; an identical retry returns the same revision. Submission grants no
+publication authority. The agent explicitly selects its latest candidate by sending
+`{"operation":"finalize","revision":LATEST_REVISION}` through the same run-local
+result helper. Admission binds the request to the current invocation and generation;
+commit rechecks run/attempt, channel, selection, grant, cancellation and exact revision.
+Corrections stop after this durable intent. Duplicate intent is inert; stale,
+superseded, paused or cancelled requests refuse. The ordinary controller observation
+pass claims the intent once and requests shutdown without an administrative bearer
+or fixture finish command. Intent is not trusted process or semantic completion.
+The controller freezes only that revision after an exact stopped receipt
+and clean bounded SSH closure. Extra control bytes, unsuccessful exit or diagnostic
+overflow leave the invocation uncertain and the candidate unfrozen.
+
+`native-result` exports the stopped workspace and seals a clean commit relative
+to the trusted source SHA. Capture ignores agent Git configuration and history;
+the clean index selects tracked files and non-ignored new files. Archive import
+rejects traversal, duplicate entries and selected links, discards `.git`, and
+bounds the archive/workspace. Generated symlinks are represented only by empty
+regular placeholders for trusted-index ignore selection; ignored placeholders
+are discarded, and selected symlinks are refused without creating or following
+their targets. Source and result sizes are bounded; large dependency trees can
+still exceed the capture limits.
+Known per-job sensitive values and recognizable credential forms are checked
+before creating the public bundle. The protected publisher independently checks
+the manifest, archive, paths, modes, history and credential-shaped content.
+These finite checks are not general DLP: selected source and PR metadata are
+intentional public outputs.
+
+Capture records an exclusive durable intent before export. A lost response can
+recover the saved receipt only for the same source/invocation/candidate and after
+rechecking the artifact hashes. An interrupted export/seal without a completed
+receipt retains uncertainty instead of repeating capture. This is offline local
+recovery evidence, not complete Actions upload/publication recovery acceptance.
+
+The native disposable Git identity is
+`Workflowd Agent <agent@workflowd.invalid>`. Protected publication preserves an
+arbitrary valid agent branch and requires one GitHub-verified ghettimonster commit
+and a draft PR, with exactly
+`Co-authored-by: Ben Nasraoui <81005232+BNasraoui@users.noreply.github.com>`.
+The publisher key remains confined to `agent-publish`.
+
+Public publisher receipts project only `v`, `binding`, `repository`, `stage`,
+`commitSha`, `pr`, `revoked`, `closingIssuesVerified` and `failed`. Branch, marker
+and arbitrary failure text remain in the private recovery receipt. The controller
+still requires the exact protected job, immutable intent binding and GitHub
+readback. Local source changes do not alter or establish the content of the
+approved remote action at
+`BNasraoui/workflowd/.github/actions/agent-publish@f74e0505155bc32aa2cedef00ba8b08ef1b90007`.
+Caller/workflow, publisher/tooling, image and local-content hashes are distinct.
+
+Run the audited local Git/HTTP publication slice through the isolated launcher:
+
+```sh
+python3 scripts/evidence/isolated-fixture.py \
+  bun scripts/check-capability-security.ts --suite publication-local \
+    --upstream fixture --evidence /tmp/opencode/evidence/publication-local
+```
+
+This uses synthetic GitHub HTTP and real local Git objects. To validate the exact
+artifact from an owned native-container run, pass its `native-runtime` directory:
+
+```sh
+WORKFLOWD_FIXTURE_NATIVE_CAPTURE=/tmp/opencode/wfd-owned-docker-<run>/native-runtime \
+  python3 scripts/evidence/isolated-fixture.py \
+  bun test test/sandbox/publisher-http.e2e.test.ts \
+    -t 'real publisher create-only Git/HTTP receipt: native capture'
+```
+
+The launcher copies only the bounded fixture receipt, synthetic canaries, trusted
+source bundle and sealed result files into isolated evidence. The test validates
+the ZIP and original source/result/tree hashes before exercising the actual
+publisher against synthetic GitHub HTTP. It checks the source-parented single
+commit, draft PR, exact co-author and token revocation. Raw/encoded native prompt
+and tool-output canaries remain private and are checked against publisher logs,
+metadata and decoded commit contents. These finite controls do not establish the
+full controlled-output matrix or general DLP. Live Actions, deployed protected
+custody and the combined application-controller/runner path remain unaccepted.
+
+## Remote-tool command audit
 
 The mint bridge wraps non-background `environment_run_cmd` calls that supply an explicit
 command. A fresh 128-bit nonce identifies an exit marker printed by a parent shell.
@@ -34,17 +116,16 @@ A reservation failure leaves an `audit-failed` receipt; incomplete records and t
 receipt prevent successful settlement. The record budget is 1,024 calls, 4 KiB each;
 command previews are limited to 512 characters. Results, file contents and environments
 are never copied into the audit. Recognizable credential strings are redacted. A command
-preview is **public** and redaction cannot detect every caller-supplied secret.
+preview is private task data; redaction cannot detect every caller-supplied secret.
 
 Mint sends bounded JSON on stdin through the existing pinned SSH connection policy to
 a fixed `runner-control audit` operation, separate from replaceable MCP stdio. No command
 text enters the SSH command line.
 The runner queues records by sequence, rejects conflicting replay and identity changes,
-and bounds its queue to 4 MiB. The `hold` process prints escaped single-line
-`workflowd.audit {...}` records on the same stdout used by the Actions hold step, then
-advances its acknowledgement watermark. SSH receives only that watermark. Replaying
-the same record does not print it again. A crash between stdout emission and checkpoint
-can repeat a line; correlate/deduplicate by run, lease and sequence.
+and bounds its queue to 4 MiB. The revised `hold` path keeps command records private
+and emits only fixed public status/count projections. SSH receives its private
+acknowledgement watermark. Replaying the same record does not advance it twice.
+The historical public command-preview emission is no longer the output contract.
 
 Settlement stops/revokes the session and reads the hold process acknowledgement in one
 bounded SSH call. It validates all canonical records, replays only sequences after the
@@ -177,13 +258,15 @@ Contents read. Its separate hosted runner has no Tailscale, OIDC, shared cache o
 agent checkout. The controller matches `sandbox / runner` and `agent-publish` exactly.
 
 The caller invokes the reviewed `.github/actions/agent-publish` composite action.
-Other repositories pin both the reusable workflow and action to the same exact
-approved workflowd SHA; the action finds `deploy/sandbox/publish.mjs` relative to
+Other repositories pin the reusable workflow and action to their respective
+approved workflowd SHAs; the action finds `deploy/sandbox/publish.mjs` relative to
 its own installation, independent of the caller repository or working directory.
 Workflowd also calls the action with a constant full 40-hex workflowd SHA. The lease
 SHA never selects the publisher action or `deploy/sandbox` code that receives the key.
 The caller can change only with Workflows permission, which neither App has.
-`ci-policy` requires this pinned action as the publisher job's only step; additional
+`ci-policy` requires the exact approved publisher reference
+`BNasraoui/workflowd/.github/actions/agent-publish@f74e0505155bc32aa2cedef00ba8b08ef1b90007`
+as the publisher job's only step. A different full-length SHA is refused; additional
 cache actions, setup cache options, restore/save scripts and local actions are refused.
 This works across repository owners without passing secrets through a reusable
 workflow. `secrets: inherit` is forbidden.
@@ -194,7 +277,10 @@ push the caller candidate, wait for exact-head CI, and stop for the coordinator 
 record the final caller/runner pin before a confirming live gate. Whenever the action
 or `deploy/sandbox` changes, deliberately update the caller's publisher pin to the
 reviewed tooling commit. Updating a lease ref or the runner pin alone cannot upgrade
-the publisher. The publisher tooling commit and final caller commit may differ.
+the publisher. Update the exact approved reference in `src/sandbox/ci-policy.ts`
+and its negative controls only after review of the new publisher. The local action
+content hash remains a separate check. The publisher tooling commit and final
+caller commit may differ.
 
 The caller passes `github.token`, the gate bot ID, App ID, the operator-set `co-author` and
 `publisher-private-key: ${{ secrets.GHETTIMONSTER_PRIVATE_KEY }}` as explicit inputs.
@@ -411,3 +497,33 @@ Repository skills are read through the environment at `/workdir/.agents/skills` 
 `/workdir/.claude/skills` when present, alongside the pinned `/opt/workflowd/skills` set.
 Upstream skill revisions remain unchanged; Nix fetches unpacked content with
 `fetchFromGitHub` hashes.
+# Native publisher activation prerequisite
+
+The approved action reference remains exactly
+`BNasraoui/workflowd/.github/actions/agent-publish@f74e0505155bc32aa2cedef00ba8b08ef1b90007`.
+Its actual publisher emits the **legacy** receipt (including `branch` and `marker`,
+without `v` or `failed`). Legacy reconciliation decodes that exact bounded schema,
+checks both fields against the saved approval, and projects only recognized receipt
+fields into durable state. It does not accept arbitrary spread fields or select a
+protocol based on an untrusted receipt.
+
+The local candidate publisher emits fixed-projection v1 receipts. It is exercised
+only as explicitly selected local fixture tooling. It does **not** exist at the
+approved remote pin. Actions-native acquisition and publication approval therefore
+fail early with a reviewed-pin prerequisite; existing legacy reconciliation remains
+available. Local container/artifact/publisher evidence is not activation evidence.
+
+Activation requires a separately authorized source commit and publication, review
+of the exact candidate action and its transitive scripts, and an immutable reviewed
+commit reference. Review must compare the candidate source hashes, fixed public
+projection, private-key custody, receipt decoder, and caller/tooling/image bindings.
+Then update the single exact reference and protocol in `publisher-contract.ts`, the
+caller action reference, and the exact-pin policy expectations together; replace
+the activation refusal only with that reviewed contract. Run the actual new pinned
+source contract tests, legacy reconciliation controls, and native publication
+controls before activation. Never substitute an arbitrary SHA, floating ref, or
+the old pin for uncommitted candidate code.
+
+The legacy source contract fixture is staged read-only from that exact Git object
+by `WORKFLOWD_FIXTURE_PINNED_PUBLISHER=1 scripts/evidence/isolated-fixture.py`; five
+transitive source files have independently checked SHA-256 values in the fixture.

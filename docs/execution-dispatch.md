@@ -44,6 +44,68 @@ default model in advance.
 
 ## Thinking inputs
 
+### Actions-native implementation gate
+
+The [P3 supported matrix](capability-gateway-p3.md) extends the same custody to
+`codex:actions` and `opencode:actions`, with configured protocol/model/effort
+metadata and unknown live entitlement. Native OpenCode runs the pinned isolated
+CLI; it does not preflight against or attach to Mint's shared OpenCode server.
+All three session endpoints name the actual Actions run/attempt while ccw.3's
+managed recipient remains coordinator-owned.
+
+A repository policy with `privateBootstrap.mode: "actions-native"` uses a
+configured Claude route with an explicit model, or explicit model selection from
+the configured `claude:actions` catalog. Accepted selection records
+`executor: "claude:actions"` and provider `anthropic`; after binding the job,
+the host becomes `github-actions:<run-id>:<attempt>`. The native session and
+existing run/recipient identity are retained in the ordinary stores. Local Claude
+installation/authentication does not authorize or gate this relocated executor.
+The gateway separately requires current run, lease, job/channel and provider
+authority. An absent native sandbox attachment refuses launch.
+
+The catalog exposes deduplicated configured Claude models when the Anthropic
+gateway and an Actions-native repository policy are configured. It reports
+`availability: "unknown"` and `evidence: "configured"`, with no credential role
+or local credential prerequisite. Explicit model selection requires
+`allowUnknownAccess: true`; it cannot borrow local CLI access or select the
+Actions executor for a repository without its native sandbox policy. This is
+configured metadata, not a live subscription/model-entitlement query.
+
+Explicit thinking still refuses unsupported per-model claims. The initial native
+invocation uses high effort and records that configured value in the saved
+selection; the synthetic interactive fixture observes the request, not production
+model access or organization policy. Dispatch/recovery never replay an uncertain prompt.
+The controller-only `POST /workflows/agent-runs/<run-id>/native` endpoint accepts
+strict `status`, `pause`, `finish` and `resume` operations under the existing
+controller bearer. `pause`/`finish` require the current nonce; `finish` also names
+the selected candidate revision. `resume` names the paused nonce and a new prompt,
+and cannot change session, model, effort, job, workspace or deadline. Nonterminal
+pause keeps capability authority but blocks requests until an explicit resume;
+uncertainty, terminal state, revoked authority and replayed invocations refuse.
+No initial prompt is sent again. Restart still cancels rather than transparently
+resuming owned native execution.
+
+Ordinary task completion uses the existing run-local result capability: submit a
+candidate, correct it using the returned revision, then submit
+`{"operation":"finalize","revision":LATEST_REVISION}` through
+`python3 /opt/workflowd/claude-interactive.py submit` with JSON on stdin. The
+controller claims this exact revision once and drives its existing finish path.
+The agent needs no administrative token. The request ends corrections but is not
+completion evidence: owned process/exec join and whole-container stop precede
+freeze, capture and publication. A request admitted before pause/resume cannot
+mutate the successor invocation.
+
+Progress consists of bounded, coalesced `provider.response` events from actual
+run-bound gateway responses, carrying only the saved model and cumulative token
+count. This also names selection evidence truthfully as `provider-response`;
+it is not native process attestation, live entitlement or semantic completion.
+The ordinary inactivity window remains in force for idle or hung tools, and the
+absolute job deadline bounds continuing activity. No periodic authority heartbeat
+is added. Activation remains gated on P2 review, the complete combined runner
+acceptance path, and a reviewed publisher pin with the fixed-output contract.
+
+### Local thinking selection
+
 `thinking` accepts `variant`, `effort` and `budgets` (native parameter/value/unit
 records). Strings and numeric budgets retain provider-specific meanings.
 

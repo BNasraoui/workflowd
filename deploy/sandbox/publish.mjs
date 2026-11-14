@@ -150,12 +150,23 @@ async function request(path, method = "GET", body) {
 }
 
 async function record(state) {
-  const value = { ...state }
-  delete value.metadata
+  const value = {
+    binding: state.binding, repository: state.repository, branch: state.branch, marker: state.marker,
+    stage: state.stage, commitSha: state.commitSha, pr: state.pr, revoked: state.revoked,
+    closingIssuesVerified: state.closingIssuesVerified === true,
+    ...(state.cause === undefined ? {} : { cause: state.cause }),
+  }
   await writeFile(receipt + ".tmp", JSON.stringify(value), { mode: 0o600 })
   await rename(receipt + ".tmp", receipt)
   // Only this trusted job emits receipts. The untrusted lease can forge same-run artifacts.
-  console.log("workflowd.publish.receipt " + Buffer.from(JSON.stringify(value)).toString("base64"))
+  const { v, run, attempt, artifact, digest, source, result, manifest, tree, base } = state.binding
+  const publicReceipt = {
+    v: 1, binding: { v, run, attempt, artifact, digest, source, result, manifest, tree, base },
+    repository: state.repository, stage: state.stage, commitSha: state.commitSha, pr: state.pr,
+    revoked: state.revoked, closingIssuesVerified: state.closingIssuesVerified === true,
+    failed: state.cause !== undefined,
+  }
+  console.log("workflowd.publish.receipt " + Buffer.from(JSON.stringify(publicReceipt)).toString("base64"))
 }
 
 function verifyPull(pull, state) {

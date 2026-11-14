@@ -6,6 +6,7 @@ export type CliEvent =
   | { readonly type: "thread.started"; readonly threadId: string; readonly model?: string }
   | { readonly type: "turn.started" }
   | { readonly type: "agent_message"; readonly text: string }
+  | { readonly type: "provider.response"; readonly model: string; readonly outputTokens: number }
   | { readonly type: "turn.completed"; readonly outputTokens: number | null }
   | { readonly type: "turn.failed"; readonly message: string; readonly codexErrorInfo?: unknown }
   | { readonly type: "error"; readonly message: string; readonly codexErrorInfo?: unknown }
@@ -17,13 +18,16 @@ export type CliPreflightError = {
   readonly detail: string
 }
 
-export type CliExit = { readonly exitCode: number; readonly stderr: string }
+export type CliExit = { readonly exitCode: number; readonly stderr: string; readonly paused?: true }
 
 export type CliRunProcess = {
   readonly executionId: string
   readonly events: AsyncIterable<CliEvent>
   readonly exited: Effect.Effect<CliExit, WorkspaceError>
   readonly cancel: Effect.Effect<void, WorkspaceError>
+  /** Explicit controller selection; never called in response to agent hook/transcript data. */
+  readonly finish?: (revision: number) => Effect.Effect<void, WorkspaceError>
+  readonly pause?: Effect.Effect<void, WorkspaceError>
 }
 
 export type CliSpawnInput = {

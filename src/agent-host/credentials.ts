@@ -72,7 +72,12 @@ export async function inspectCredentialLayout(
   policy: CredentialPolicy,
   client: "codex" | "claude",
   allowRepair = false,
+  access: "shared" | "provider-owner" = "shared",
 ) {
+  if (policy.providerAccess?.[client] !== undefined && access === "shared")
+    throw credentialRefusal(client, "provider_access_owner_required")
+  if (access === "provider-owner" && policy.providerAccess?.[client] === undefined)
+    throw credentialRefusal(client, "provider_access_owner_required")
   const login = policy[client]
   const fail = (reason: Parameters<typeof credentialRefusal>[1]): never => {
     throw credentialRefusal(client, reason)
@@ -99,7 +104,7 @@ export async function inspectCredentialLayout(
     if (
       target.uid !== policy.ownerUid ||
       target.gid !== policy.groupGid ||
-      (target.mode & 0o777) !== 0o660
+      (target.mode & 0o777) !== (access === "provider-owner" ? 0o600 : 0o660)
     )
       fail("shared_credential_permissions_invalid")
     for (const [path, uid] of [

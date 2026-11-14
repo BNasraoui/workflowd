@@ -324,6 +324,8 @@ async function automaticSource(policy: CredentialPolicy, client: "codex" | "clau
 
 /** Admission stays locked through handoff, including after an automatic repair. */
 export async function admitHostCredentials(policy: CredentialPolicy, client: "codex" | "claude") {
+  if (policy.providerAccess?.[client] !== undefined)
+    throw credentialRefusal(client, "provider_access_owner_required")
   let release = await credentialLock(policy, false)
   try {
     try {

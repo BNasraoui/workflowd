@@ -33,6 +33,7 @@ const CodexSharingEvidence = Schema.Struct({
   }),
 })
 const RefreshEvidence = Schema.Struct({
+  clients: Schema.Array(Schema.Literals(["codex", "claude"])),
   egressDenied: Schema.Boolean,
   uidCount: Schema.Number,
   canariesDenied: Schema.Boolean,
@@ -69,7 +70,7 @@ export async function probeClientVersions() {
   const root = await mkdtemp(join(tmpdir(), "workflowd-client-versions-"))
   const clients = [
     ["codex", "codex-cli 0.159.1", /^codex-cli \d+\.\d+\.\d+$/],
-    ["claude", "2.1.296 (Claude Code)", /^\d+\.\d+\.\d+ \(Claude Code\)$/],
+    ["claude", "2.1.301 (Claude Code)", /^\d+\.\d+\.\d+ \(Claude Code\)$/],
     ["opencode2", "opencode2 v0.0.0-beta-19242", /^opencode2 v\d+\.\d+\.\d+-beta-\d+$/],
   ] as const
   try {
@@ -109,7 +110,10 @@ export async function probeClientVersions() {
   }
 }
 
-async function isolatedCredentialProbe(kind: "--codex-sharing" | "--refresh-probe") {
+async function isolatedCredentialProbe(
+  kind: "--codex-sharing" | "--refresh-probe",
+  client?: "codex" | "claude",
+) {
   const child = Bun.spawn(
     [
       "unshare",
@@ -126,6 +130,7 @@ async function isolatedCredentialProbe(kind: "--codex-sharing" | "--refresh-prob
       process.execPath,
       import.meta.filename,
       kind,
+      ...(client ? [client] : []),
     ],
     { stdout: "pipe", stderr: "ignore" },
   )
@@ -268,7 +273,10 @@ export async function probeCodexCredentialSharing(): Promise<typeof CodexSharing
   }
 }
 
-async function isolatedRefreshProcess(identifier: string): Promise<unknown> {
+async function isolatedRefreshProcess(
+  identifier: string,
+  client: "codex" | "claude",
+): Promise<unknown> {
   const child = Bun.spawn(
     [
       "systemd-run",
@@ -297,6 +305,7 @@ async function isolatedRefreshProcess(identifier: string): Promise<unknown> {
       import.meta.filename,
       "--installed-refresh",
       identifier,
+      client,
     ],
     { stdout: "pipe", stderr: "ignore" },
   )
@@ -306,10 +315,12 @@ async function isolatedRefreshProcess(identifier: string): Promise<unknown> {
 }
 
 /** The entire protocol fixture runs in a network namespace containing only loopback. */
-export async function probeInstalledRefresh(): Promise<typeof RefreshEvidence.Type> {
+export async function probeInstalledRefresh(
+  client: "codex" | "claude",
+): Promise<typeof RefreshEvidence.Type> {
   if (process.getuid!() !== 0)
     return Schema.decodeUnknownSync(RefreshEvidence)(
-      await isolatedCredentialProbe("--refresh-probe"),
+      await isolatedCredentialProbe("--refresh-probe", client),
     )
   const root = await mkdtemp(join(tmpdir(), "workflowd-oauth-refresh-"))
   await chmod(root, 0o710)
@@ -320,15 +331,15 @@ export async function probeInstalledRefresh(): Promise<typeof RefreshEvidence.Ty
       .every((entry) => entry?.internal)
     const output =
       process.getuid?.() === 0 && isolated
-        ? await installedRefresh(root.slice(-6))
-        : await isolatedRefreshProcess(root.slice(-6))
+        ? await installedRefresh(root.slice(-6), client)
+        : await isolatedRefreshProcess(root.slice(-6), client)
     return Schema.decodeUnknownSync(RefreshEvidence)(output)
   } finally {
     await rm(root, { recursive: true, force: true })
   }
 }
 
-async function installedRefresh(identifier: string) {
+async function installedRefresh(identifier: string, selected: "codex" | "claude") {
   if (!/^[a-zA-Z0-9]{6}$/.test(identifier)) throw new Error("fixture_root_invalid")
   const root = join(tmpdir(), `workflowd-oauth-refresh-${identifier}`)
   const info = await lstat(root)
@@ -505,7 +516,7 @@ async function installedRefresh(identifier: string) {
       })
     },
   })
-  const clients = ["codex", "claude"] as const
+  const clients = [selected]
   const evidence = {
     codex: { refreshPersisted: true },
     claude: { refreshPersisted: true, linkPreserved: false, refusal: "", repaired: false },
@@ -596,17 +607,7 @@ async function installedRefresh(identifier: string) {
                 "--json",
                 "synthetic fixture",
               ]
-            : [
-                binary,
-                "-p",
-                "synthetic fixture",
-                "--output-format",
-                "json",
-                "--model",
-                "claude-opus-4-6",
-                "--tools",
-                "",
-              ]
+            : ["/usr/bin/python3", join(import.meta.dir, "../helpers/interactive-observe.py")]
         const child = Bun.spawn(
           uidCount === 2
             ? [
@@ -619,13 +620,56 @@ async function installedRefresh(identifier: string) {
                 ...command,
               ]
             : command,
-          { cwd: root, env, stdout: "ignore", stderr: "ignore" },
+          { cwd: root, env, stdin: "pipe", stdout: "pipe", stderr: "pipe" },
         )
+        if (client === "claude")
+          child.stdin.write(
+            JSON.stringify({
+              binary,
+              directory: root,
+              home: homes[index],
+              mode: "refresh",
+              seconds: 15,
+              arguments: ["--model", "claude-opus-4-6", "--tools", "", "--", "synthetic fixture"],
+              ready: join(homes[index]!, "refresh-ready.json"),
+              capture: join(homes[index]!, "refresh-pty"),
+            }) + "\n",
+          )
         const timer = setTimeout(() => child.kill("SIGKILL"), 20000)
         try {
-          await child.exited
+          const [code, output, diagnostic] = await Promise.all([
+            child.exited,
+            new Response(child.stdout).text(),
+            new Response(child.stderr).text(),
+          ])
+          if (client === "claude") {
+            if (code !== 0)
+              throw new Error(
+                "interactive_refresh_custody_failed: " +
+                  diagnostic.slice(-2000) +
+                  (await readFile(join(homes[index]!, "refresh-pty"), "utf8")).slice(-4000),
+              )
+            const receipt = JSON.parse(output)
+            if (receipt.joined !== true || !Number.isSafeInteger(receipt.pid))
+              throw new Error("interactive_refresh_join_unconfirmed")
+          }
         } finally {
           clearTimeout(timer)
+        }
+        if (process.pid === 1) {
+          // The isolated PID namespace owns any exited native CLI helper orphans.
+          const { dlopen, FFIType, ptr } = await import("bun:ffi")
+          const libc = dlopen("libc.so.6", {
+            waitpid: { args: [FFIType.i32, FFIType.ptr, FFIType.i32], returns: FFIType.i32 },
+          })
+          try {
+            const status = new Int32Array(1)
+            while (libc.symbols.waitpid(-1, ptr(status), 1) > 0) {
+              /* joined exited helpers */
+            }
+          } finally {
+            libc.close()
+          }
         }
         const refreshed = (await readFile(paths[index]!, "utf8")).includes(
           "synthetic-rotated-refresh",
@@ -663,7 +707,7 @@ async function installedRefresh(identifier: string) {
         }
       }
     }
-    return { egressDenied, uidCount, canariesDenied, ...evidence }
+    return { clients, egressDenied, uidCount, canariesDenied, ...evidence }
   } finally {
     await token.stop(true)
     for (const socket of connections) socket.destroy()
@@ -676,7 +720,14 @@ async function installedRefresh(identifier: string) {
 
 if (import.meta.main && process.argv[2] === "--installed-refresh") {
   try {
-    console.log(JSON.stringify(await installedRefresh(process.argv[3]!)))
+    console.log(
+      JSON.stringify(
+        await installedRefresh(
+          process.argv[3]!,
+          Schema.decodeUnknownSync(Schema.Literals(["codex", "claude"]))(process.argv[4]),
+        ),
+      ),
+    )
   } catch (error) {
     console.log(
       JSON.stringify({ reason: credentialReason(error) ?? "installed_refresh_probe_failed" }),
@@ -690,7 +741,9 @@ if (import.meta.main && ["--codex-sharing", "--refresh-probe"].includes(process.
     const evidence =
       process.argv[2] === "--codex-sharing"
         ? await probeCodexCredentialSharing()
-        : await probeInstalledRefresh()
+        : await probeInstalledRefresh(
+            Schema.decodeUnknownSync(Schema.Literals(["codex", "claude"]))(process.argv[3]),
+          )
     console.log(JSON.stringify(evidence))
   } catch (error) {
     console.log(JSON.stringify({ reason: credentialReason(error) ?? "credential_probe_failed" }))

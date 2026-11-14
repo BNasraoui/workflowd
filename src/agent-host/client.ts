@@ -4,10 +4,57 @@ import type { CliPort } from "../kernel/cli-process-contract"
 import { WorkspaceError } from "../workspace/errors"
 import {
   CredentialResponse,
+  ProviderAccessResponse,
   credentialReason,
   credentialRefusal,
   type CredentialClient,
 } from "./protocol"
+
+/** Authenticated local credential-host channel; only the Mint-side noscope adapter consumes this. */
+export function providerAccessSnapshot(
+  path: string,
+  provider: "claude" | "codex" | "opencode" = "claude",
+): Promise<{ token: string; expiresAt: number }> {
+  return new Promise((resolve, reject) => {
+    const socket = connect(path)
+    let text = ""
+    let settled = false
+    const fail = () => {
+      if (settled) return
+      settled = true
+      socket.destroy()
+      reject(new Error("provider access unavailable"))
+    }
+    socket.setTimeout(15000, fail)
+    socket.once("error", fail)
+    socket.once("close", () => {
+      if (!settled) fail()
+    })
+    socket.once("connect", () =>
+      socket.write(JSON.stringify({ operation: "providerAccess", provider }) + "\n"),
+    )
+    socket.on("data", (bytes) => {
+      text += bytes.toString("utf8")
+      if (text.length > 16384) {
+        fail()
+        return
+      }
+      if (!text.includes("\n")) return
+      try {
+        const value = Schema.decodeUnknownSync(ProviderAccessResponse)(JSON.parse(text))
+        if (value.token.length > 8192 || value.expiresAt <= Date.now()) {
+          fail()
+          return
+        }
+        settled = true
+        socket.end()
+        resolve({ token: value.token, expiresAt: value.expiresAt })
+      } catch {
+        fail()
+      }
+    })
+  })
+}
 
 export function acquireCredentialAdmission(
   path: string,

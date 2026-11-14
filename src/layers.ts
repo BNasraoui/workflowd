@@ -1,6 +1,6 @@
 import { App } from "@octokit/app"
 import { Octokit } from "@octokit/rest"
-import { Cause, Effect, Layer, Option } from "effect"
+import { Cause, Effect, Layer, Option, Scope } from "effect"
 import { SqlClient } from "effect/unstable/sql"
 import { readFile } from "node:fs/promises"
 import { dirname, join } from "node:path"
@@ -61,6 +61,8 @@ import { reviewServerId } from "./review-harness"
 import { SandboxDispatch, makeSandboxDispatch } from "./sandbox/dispatch"
 import { makeSandboxGithub } from "./sandbox/github"
 import { makeSandboxLeaseService } from "./sandbox/lease"
+import { makeCapabilityGateway } from "./capability-gateway/service"
+import { makeCapabilityTransport } from "./sandbox/capability-transport"
 import { routeSandboxHandoffs, routeSandboxProvider } from "./sandbox/provider"
 import { WorkflowStoreLive } from "./store"
 import { WorkflowStore } from "./store/contracts"
@@ -357,8 +359,28 @@ const makeAutomationLayer = (config: Extract<AppConfig, { readonly mode?: "autom
           SandboxDispatch,
           Effect.gen(function* () {
             const github = yield* makeSandboxGithub(config.github)
-            const leases = yield* makeSandboxLeaseService(github)
+            const controlRoot = join(dirname(config.storage.databasePath), "sandboxes")
+            const gatewayConfig = config.agentRuns?.capabilityGateway
+            const native =
+              gatewayConfig === undefined
+                ? undefined
+                : yield* Effect.gen(function* () {
+                    const gateway = yield* makeCapabilityGateway(gatewayConfig)
+                    const transport = yield* makeCapabilityTransport(
+                      gateway,
+                      gatewayConfig.nodeBinary,
+                      controlRoot,
+                    )
+                    return { gateway, transport }
+                  })
+            const leases = yield* makeSandboxLeaseService(
+              github,
+              controlRoot,
+              undefined,
+              native === undefined ? undefined : { native },
+            )
             return yield* makeSandboxDispatch({
+              nativeScope: yield* Scope.Scope,
               policies: sandboxPolicies,
               github,
               leases,

@@ -31,6 +31,7 @@ type Custody = ReturnType<typeof makeAgentRunCustody>
 export type AgentRunCliStore = Partial<Pick<AgentRunStorePort, "recordResolvedSelection">> &
   Pick<
     AgentRunStorePort,
+    | "read"
     | "claimSpawn"
     | "abandonLaunch"
     | "markSpawned"
@@ -124,20 +125,21 @@ const observeFirstToken = (process: CliRunProcess, timeoutMs: number, cliName: s
         }
         if (step.type === "thread.started") {
           threadId = step.threadId
-          nativeModel = step.model
-        } else if (step.type === "agent_message") {
-          firstMessage ??= step.text
-          if (threadId !== null)
-            return {
-              outcome: "generating" as const,
-              threadId,
-              firstMessage,
-              ...(nativeModel === undefined ? {} : { model: nativeModel }),
-            }
+          nativeModel = step.model ?? nativeModel
+        } else if (step.type === "agent_message" || step.type === "provider.response") {
+          firstMessage ??= step.type === "agent_message" ? step.text : ""
+          if (step.type === "provider.response") nativeModel = step.model
         } else if (step.type === "error" || step.type === "turn.failed") {
           errors.push(step.message)
           provider = providerFailure(step.message, step.codexErrorInfo)
         }
+        if (threadId !== null && firstMessage !== null)
+          return {
+            outcome: "generating" as const,
+            threadId,
+            firstMessage,
+            ...(nativeModel === undefined ? {} : { model: nativeModel }),
+          }
       }
     })
     const timedOut: Effect.Effect<FirstToken> = Effect.as(Effect.sleep(timeoutMs), {
@@ -210,9 +212,9 @@ const observeFirstToken = (process: CliRunProcess, timeoutMs: number, cliName: s
   })
 
 export const makeAgentRunCliDispatcher = (dependencies: {
-  /** Claude and Codex share durable process custody, verification, and recovery. */
+  /** Native CLIs share durable process custody, verification, and recovery. */
   readonly executor: {
-    readonly kind: "codex" | "claude"
+    readonly kind: "codex" | "claude" | "opencode"
     readonly sessionCustodyId: (nativeSessionId: string) => string
   }
   readonly cli: CliPort
@@ -253,15 +255,22 @@ export const makeAgentRunCliDispatcher = (dependencies: {
   }
 
   const recordModelEvidence = (run: AgentRunRecord, model: string | undefined, now: Date) =>
-    model === undefined ||
-    run.resolvedSelection == null ||
-    store.recordResolvedSelection === undefined
-      ? Effect.void
-      : store.recordResolvedSelection({
-          runId: run.runId,
-          now,
-          selection: { ...run.resolvedSelection, model, evidence: "runtime" },
-        })
+    Effect.gen(function* () {
+      if (model === undefined || store.recordResolvedSelection === undefined) return
+      const current = yield* store.read(run.runId)
+      if (current?.resolvedSelection == null) return
+      yield* store.recordResolvedSelection({
+        runId: run.runId,
+        now,
+        selection: {
+          ...current.resolvedSelection,
+          model,
+          evidence: current.resolvedSelection.executor.endsWith(":actions")
+            ? "provider-response"
+            : "runtime",
+        },
+      })
+    })
 
   const complete = (input: {
     readonly runId: string
@@ -278,6 +287,7 @@ export const makeAgentRunCliDispatcher = (dependencies: {
       let turnFailed: string | null = null
       let codexErrorInfo: unknown
       let stalled = false
+      let progressFailure: unknown
       for (;;) {
         const next = yield* pullEvent(input.iterator).pipe(
           Effect.timeoutOption(input.stallWindowMs),
@@ -295,14 +305,28 @@ export const makeAgentRunCliDispatcher = (dependencies: {
           outputTokens = null
         }
         if (event.type === "agent_message") finalMessage = event.text
-        else if (event.type === "turn.completed") outputTokens = event.outputTokens
+        else if (event.type === "provider.response") {
+          outputTokens = event.outputTokens
+          const progress = yield* store
+            .recordProgress({ runId: input.runId, outputTokens, now: new Date() })
+            .pipe(
+              Effect.catchTag("AgentRunStoreConflictError", () => Effect.void),
+              Effect.result,
+            )
+          if (progress._tag === "Failure") {
+            progressFailure = progress.failure
+            turnFailed = "Native progress persistence failed"
+            break
+          }
+        } else if (event.type === "turn.completed") outputTokens = event.outputTokens
         else if (event.type === "turn.failed" || (event.type === "error" && turnFailed === null)) {
           turnFailed = event.message
           codexErrorInfo = event.codexErrorInfo
         }
       }
-      if (stalled) yield* input.cancel.pipe(Effect.ignore)
+      if (stalled || progressFailure !== undefined) yield* input.cancel.pipe(Effect.ignore)
       const exit: Exit.Exit<CliExit, WorkspaceError> = yield* Effect.exit(Fiber.join(input.exited))
+      if (!stalled && Exit.isSuccess(exit) && exit.value.paused) return
       finalMessage = providerFailure(turnFailed, codexErrorInfo)?.message ?? finalMessage
       if (input.sandboxRun !== undefined) {
         yield* finishSandbox(input.sandboxRun, {
@@ -328,7 +352,7 @@ export const makeAgentRunCliDispatcher = (dependencies: {
                 codexErrorInfo,
               ),
               exitCode: Exit.isSuccess(exit) ? exit.value.exitCode : undefined,
-              cause: Exit.isFailure(exit) ? exit.cause : undefined,
+              cause: progressFailure ?? (Exit.isFailure(exit) ? exit.cause : undefined),
             },
             input.sandboxRun.createdAt.getTime(),
           ).message,
@@ -422,7 +446,7 @@ export const makeAgentRunCliDispatcher = (dependencies: {
                   ? run.prompt
                   : yield* dependencies.workerPrompt(run),
               model: run.resolvedSelection?.model ?? route.modelID,
-              ...(attachment === undefined
+              ...(attachment?.sandboxBindingFile === undefined
                 ? {}
                 : { sandboxBindingFile: attachment.sandboxBindingFile }),
               ...(run.resolvedSelection?.provider == null
@@ -469,7 +493,11 @@ export const makeAgentRunCliDispatcher = (dependencies: {
           }
           const threadId = observed.result.threadId
           yield* recordModelEvidence(run, observed.result.model, now)
+          const endpointRun = yield* store.read(run.runId)
           yield* ensureSession({
+            ...(endpointRun?.resolvedSelection?.executor.endsWith(":actions")
+              ? { actionsHost: endpointRun.resolvedSelection.host }
+              : {}),
             nativeSessionId: threadId,
             resourceId,
             createdAt: run.createdAt,
@@ -665,5 +693,45 @@ export const makeAgentRunCliDispatcher = (dependencies: {
       yield* store.cancel({ runId: run.runId, now })
     })
 
-  return { dispatch, recover, cancel }
+  const resumeNative = (run: AgentRunRecord, execution: CliPort, prompt: string) =>
+    Effect.suspend(() => {
+      let process: CliRunProcess | undefined
+      return Effect.gen(function* () {
+        process = yield* execution
+          .spawn({ runId: run.runId, directory: run.directory, model: run.modelId, prompt })
+          .pipe(Effect.mapError(sandboxFailure))
+        const observed = yield* observeFirstToken(process, dependencies.verifyTimeoutMs, kind)
+        if (
+          observed.result.outcome !== "generating" ||
+          observed.result.threadId !== run.nativeSessionId
+        )
+          return yield* Effect.fail(refuse("run_conflict", "Native resume verification failed"))
+        yield* recordModelEvidence(run, observed.result.model, new Date())
+        yield* Effect.forkDetach(
+          complete({
+            runId: run.runId,
+            iterator: observed.iterator,
+            exited: observed.exited,
+            cancel: observed.cancel,
+            initialFinalMessage: observed.result.firstMessage,
+            stallWindowMs: dependencies.progressWindowMs,
+            sandboxRun: run,
+          }),
+        )
+      }).pipe(
+        Effect.onExit((exit) =>
+          Exit.isSuccess(exit)
+            ? Effect.void
+            : Effect.gen(function* () {
+                if (process) yield* process.cancel.pipe(Effect.ignore)
+                yield* finishSandbox(run, {
+                  state: "operator_required",
+                  finalMessage: null,
+                  diagnostic: sandboxDiagnostic("native.resume", exit.cause).message,
+                })
+              }),
+        ),
+      )
+    })
+  return { dispatch, recover, cancel, resumeNative }
 }

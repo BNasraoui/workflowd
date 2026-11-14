@@ -1,12 +1,43 @@
 import { expect, test } from "bun:test"
-import { Schema } from "effect"
+import { Effect, Schema } from "effect"
 import { publicationBody, publicationCommitMessage } from "../../src/sandbox/config"
+import { ResultMetadata } from "../../src/sandbox/publish-store"
+import { decodePublicationReceipt } from "../../src/sandbox/publisher-contract"
 
 const coAuthor = "Ben Nasraoui <81005232+BNasraoui@users.noreply.github.com>"
+
+function assertPublicCanaryFree(chunks: ReadonlyArray<string>, canaries: ReadonlyArray<string>) {
+  const joined = chunks.join("")
+  if (
+    canaries.some(
+      (value) => joined.includes(value) || joined.includes(JSON.stringify(value).slice(1, -1)),
+    )
+  )
+    throw new Error("Private fixture data reached a public sink")
+}
+
+test("publication corpus detects fragmented raw and JSON-escaped native diagnostics", () => {
+  const raw = "fixture-private\n::error::multiline"
+  const corpus = [
+    raw,
+    Buffer.from(raw).toString("base64"),
+    Buffer.from(raw).toString("hex"),
+    encodeURIComponent(raw),
+  ]
+  expect(() => assertPublicCanaryFree(['{"stage":"published"}'], corpus)).not.toThrow()
+  for (const value of corpus)
+    for (const leaked of [value, JSON.stringify({ diagnostic: value })])
+      expect(() => assertPublicCanaryFree([leaked.slice(0, 13), leaked.slice(13)], corpus)).toThrow(
+        "Private fixture data",
+      )
+})
 
 // Only GitHub HTTP is substituted; fixture API writes real Git objects and create-only refs.
 for (const fault of [
   "none",
+  "approved pin",
+  "approved pin collision",
+  "native capture",
   "closing references",
   "closing references recovered",
   "closing delayed references",
@@ -43,7 +74,23 @@ for (const fault of [
     const { tmpdir } = await import("node:os")
     const { join, resolve } = await import("node:path")
     const { command } = await import("./harness")
+    const capture =
+      fault === "native capture" ? process.env.WORKFLOWD_FIXTURE_NATIVE_CAPTURE : undefined
+    const capturedMetadata = capture
+      ? Schema.decodeUnknownSync(
+          Schema.fromJsonString(Schema.Struct({ metadata: ResultMetadata })),
+        )(await Bun.file(join(capture, "receipt.json")).text()).metadata
+      : undefined
+    const canaries = capture
+      ? Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Array(Schema.String)))(
+          await Bun.file(join(capture, "private-canaries.json")).text(),
+        )
+      : []
     const root = await mkdtemp(join(tmpdir(), "publisher-http-"))
+    const pinned = fault.startsWith("approved pin")
+    const publisherSource = pinned
+      ? await (await import("./pinned-publisher-fixture")).pinnedPublisherFixture(root)
+      : resolve("deploy/sandbox/publish.mjs")
     const node = Bun.which("node")
     if (node === null) throw new Error("Publisher fixture requires Node on PATH")
     const runtime = join(root, "trusted node's runtime")
@@ -51,7 +98,7 @@ for (const fault of [
     const remote = join(root, "fixture/repo.git")
     const work = join(root, "workflowd-publish")
     const objects = join(work, "validated/objects.git")
-    const branch = "chosen/雪'$(touch-pwned);&"
+    const branch = capturedMetadata?.branch ?? "chosen/雪'$(touch-pwned);&"
     const token = "fixture-publisher-token-never-logged"
     let pushes = 0,
       posts = 0,
@@ -60,11 +107,12 @@ for (const fault of [
     let pull: Record<string, unknown> | undefined
     let publishedSha = ""
     const title =
-      fault === "maximum metadata"
+      capturedMetadata?.title ??
+      (fault === "maximum metadata"
         ? "雪".repeat(200)
         : fault === "format title"
           ? "hidden\u200btitle"
-          : "Agent title 雪"
+          : "Agent title 雪")
     const trailer = `Co-authored-by: ${coAuthor}`
     const body =
       fault === "maximum metadata"
@@ -77,11 +125,12 @@ for (const fault of [
     const other =
       "Co-authored-by: Another Person <another@example.invalid>\n co-AUTHORED-by : Forged <forged@example.invalid>"
     const commitMessage =
-      fault === "existing co-authors"
+      capturedMetadata?.commitMessage ??
+      (fault === "existing co-authors"
         ? `${body}\n\n\`\`\`text\n${other}\n\`\`\`\n`
         : fault === "duplicate co-author"
           ? `${body}\n\n\`\`\`text\n${trailer}\n${trailer}\n${other}\n\`\`\`\n`
-          : `${body}\n`
+          : `${body}\n`)
     const expectedMessage = publicationCommitMessage(commitMessage, coAuthor)
     await mkdir(join(root, "fixture"), { recursive: true })
     await command(["git", "init", "--bare", remote])
@@ -94,35 +143,88 @@ for (const fault of [
     await writeFile(join(root, "source/base"), "base")
     await git("add", ".")
     await git("commit", "-m", "base")
+    if (capture && capturedMetadata) {
+      await git("fetch", join(capture, "native/source.bundle"), "HEAD")
+      await git("reset", "--hard", "FETCH_HEAD")
+      expect(await git("rev-parse", "HEAD")).toBe(capturedMetadata.sourceSha)
+    }
     const source = await git("rev-parse", "HEAD")
     await git("push", remote, "HEAD:refs/heads/main")
-    await writeFile(join(root, "source/result"), "exact validated bytes")
-    await git("add", ".")
-    await git("commit", "-m", "result")
-    await writeFile(join(root, "source/binary"), Buffer.from([0, 255, 1, 128]))
-    await git("rm", "base")
-    await git("add", ".")
-    await git("commit", "-m", "second result")
-    const treeSha = await git("rev-parse", "HEAD^{tree}")
-    const result = await git("rev-parse", "HEAD")
-    await mkdir(join(work, "validated"), { recursive: true })
-    await command(["git", "clone", "--bare", join(root, "source"), objects])
-    const manifest = {
+    if (!capture) {
+      await writeFile(join(root, "source/result"), "exact validated bytes")
+      await git("add", ".")
+      await git("commit", "-m", "result")
+      await writeFile(join(root, "source/binary"), Buffer.from([0, 255, 1, 128]))
+      await git("rm", "base")
+      await git("add", ".")
+      await git("commit", "-m", "second result")
+    }
+    let treeSha = await git("rev-parse", "HEAD^{tree}")
+    let result = await git("rev-parse", "HEAD")
+    let manifest = {
       sourceSha: source,
       resultSha: result,
       treeSha,
       title,
       commitMessage,
       body:
-        fault === "unsafe body"
+        capturedMetadata?.body ??
+        (fault === "unsafe body"
           ? "<!-- hidden -->"
           : fault === "maximum metadata"
             ? "é".repeat(16384)
-            : "## Result\n\nReadable agent description.",
+            : "## Result\n\nReadable agent description."),
       branch,
       bundleSha256: "d".repeat(64),
     }
-    const rawManifest = JSON.stringify(manifest)
+    let rawManifest = JSON.stringify(manifest)
+    let archiveDigest = "sha256:" + "f".repeat(64)
+    if (fault === "native capture") {
+      const { nativePublicationArtifact } = await import("./native-publication-fixture")
+      const captured = await nativePublicationArtifact(root, source, {
+        branch,
+        title,
+        commitMessage,
+        body: manifest.body,
+      })
+      treeSha = captured.metadata.treeSha
+      result = captured.metadata.resultSha
+      manifest = {
+        ...manifest,
+        resultSha: result,
+        treeSha,
+        bundleSha256: captured.metadata.bundleSha256,
+      }
+      rawManifest = captured.rawManifest
+      archiveDigest = captured.archiveDigest
+      if (capture) {
+        if (!capturedMetadata) throw new Error("Owned capture receipt missing")
+        expect(captured.metadata).toEqual(capturedMetadata)
+        const receipt = Schema.decodeUnknownSync(
+          Schema.fromJsonString(
+            Schema.Struct({
+              client: Schema.optionalKey(Schema.Literals(["claude", "codex", "opencode"])),
+              interactive: Schema.Boolean,
+              revision: Schema.Int,
+              stopped: Schema.Boolean,
+              removed: Schema.Boolean,
+              metadata: ResultMetadata,
+            }),
+          ),
+        )(await Bun.file(join(capture, "receipt.json")).text())
+        const nativeCli = receipt.client === "codex" || receipt.client === "opencode"
+        expect(receipt).toMatchObject({
+          interactive: !nativeCli,
+          revision: 2,
+          stopped: true,
+          removed: true,
+        })
+        expect(receipt.metadata).toEqual(captured.metadata)
+      }
+    } else {
+      await mkdir(join(work, "validated"), { recursive: true })
+      await command(["git", "clone", "--bare", join(root, "source"), objects])
+    }
     const { createHash } = await import("node:crypto")
     const binding = {
       v: 4,
@@ -130,7 +232,7 @@ for (const fault of [
       run: 41,
       attempt: 1,
       artifact: 52,
-      digest: "sha256:" + "f".repeat(64),
+      digest: archiveDigest,
       source,
       result,
       manifest: createHash("sha256").update(rawManifest).digest("hex"),
@@ -166,7 +268,8 @@ for (const fault of [
       '#!/bin/sh\nwhile read old new ref; do test "$old" = 0000000000000000000000000000000000000000 || exit 1; done\n',
       { mode: 0o755 },
     )
-    if (fault === "collision") await git("push", remote, `HEAD:refs/heads/${branch}`)
+    if (["collision", "approved pin collision"].includes(fault))
+      await git("push", remote, `HEAD:refs/heads/${branch}`)
     const objectGit = async (args: string[], input = new Uint8Array()) => {
       const child = Bun.spawn(["git", "-C", remote, ...args], {
         env: {
@@ -379,7 +482,7 @@ for (const fault of [
       },
     })
     const invoke = async (operation: string) => {
-      const child = Bun.spawn([runtime, resolve("deploy/sandbox/publish.mjs"), operation], {
+      const child = Bun.spawn([runtime, publisherSource, operation], {
         cwd: root,
         env: {
           PATH: "/usr/bin:/bin",
@@ -402,12 +505,70 @@ for (const fault of [
         new Response(child.stderr).text(),
       ])
       expect(out + err).not.toContain(token)
+      assertPublicCanaryFree([out, err], canaries)
+      for (const line of out
+        .split("\n")
+        .filter((line) => line.startsWith("workflowd.publish.receipt "))) {
+        const publicReceipt = Schema.decodeUnknownSync(Schema.Record(Schema.String, Schema.Json))(
+          JSON.parse(
+            Buffer.from(line.slice("workflowd.publish.receipt ".length), "base64").toString(),
+          ),
+        )
+        const expected = { binding: JSON.stringify(binding), repository: "fixture/repo", branch }
+        const decoded = await Effect.runPromise(
+          decodePublicationReceipt(publicReceipt, expected, pinned ? "legacy" : "fixed-v1"),
+        )
+        expect(publicReceipt.stage).toBe(decoded.stage)
+        for (const altered of [
+          { ...publicReceipt, extra: "unreviewed" },
+          { ...publicReceipt, repository: "foreign/repo" },
+          { ...publicReceipt, binding: { ...binding, attempt: 2 } },
+          ...(pinned
+            ? [
+                { ...publicReceipt, branch: "foreign" },
+                { ...publicReceipt, marker: "foreign" },
+                { ...publicReceipt, v: 1, failed: false },
+              ]
+            : []),
+        ])
+          expect(
+            (
+              await Effect.runPromise(
+                decodePublicationReceipt(altered, expected, pinned ? "legacy" : "fixed-v1").pipe(
+                  Effect.result,
+                ),
+              )
+            )._tag,
+          ).toBe("Failure")
+        expect(Object.keys(publicReceipt).sort()).toEqual(
+          [
+            "binding",
+            "repository",
+            "stage",
+            "commitSha",
+            "pr",
+            "revoked",
+            "closingIssuesVerified",
+            ...(pinned
+              ? ["branch", "marker", ...(publicReceipt.cause === undefined ? [] : ["cause"])]
+              : ["v", "failed"]),
+          ].sort(),
+        )
+        if (!pinned) expect(publicReceipt.v).toBe(1)
+        expect(publicReceipt.binding).toEqual(binding)
+        if (pinned) expect(publicReceipt.branch).toBe(branch)
+        else expect(JSON.stringify(publicReceipt)).not.toContain(branch)
+      }
       return { code, out, err }
     }
     try {
       const published = await invoke("publish")
       expect(published.code).toBe(
-        ["none", "maximum metadata", "lost PR reply"].includes(fault) ? 0 : 1,
+        ["none", "approved pin", "native capture", "maximum metadata", "lost PR reply"].includes(
+          fault,
+        )
+          ? 0
+          : 1,
       )
       expect((await invoke("revoke")).code).toBe(0)
       expect(revokes).toBe(1)
@@ -443,20 +604,23 @@ for (const fault of [
         expect(receipt.cause).toContain("closing issue references")
         expect(receipt.stage).toBe("creating_pr")
       }
-      const expectedCause =
-        fault === "collision"
-          ? "branch already exists (HTTP 200)"
-          : fault === "race"
-            ? "branch creation failed (HTTP 422)"
-            : fault === "PR failure"
-              ? "PR creation failed (HTTP 422)"
-              : undefined
+      const expectedCause = ["collision", "approved pin collision"].includes(fault)
+        ? "branch already exists (HTTP 200)"
+        : fault === "race"
+          ? "branch creation failed (HTTP 422)"
+          : fault === "PR failure"
+            ? "PR creation failed (HTTP 422)"
+            : undefined
       if (expectedCause !== undefined) {
         expect(receipt.cause).toBe(expectedCause)
         expect(published.err).toContain(expectedCause)
       }
       if (fault === "wrong tree") expect(receipt.cause).toBe("commit validation failed")
-      if (["none", "maximum metadata", "lost PR reply"].includes(fault)) {
+      if (
+        ["none", "approved pin", "native capture", "maximum metadata", "lost PR reply"].includes(
+          fault,
+        )
+      ) {
         expect(closingQueries).toBe(3)
         expect(receipt).toMatchObject({
           stage: "published",
@@ -470,15 +634,49 @@ for (const fault of [
           `${publishedSha} ${source}`,
         )
         expect(await objectGit(["log", "-1", "--format=%B", publishedSha])).toBe(expectedMessage)
+        if (capture) {
+          expect(await objectGit(["show", `${publishedSha}:result.txt`])).toBe(
+            "Actual native container tool result",
+          )
+          assertPublicCanaryFree(
+            [JSON.stringify(pull), rawManifest, await objectGit(["log", "-p", publishedSha])],
+            canaries,
+          )
+          await Bun.write(
+            "/tmp/opencode/evidence/native-publication-receipt.json",
+            JSON.stringify({
+              source,
+              result,
+              treeSha,
+              commitSha: publishedSha,
+              pushes,
+              posts,
+              revokes,
+              branch,
+              coAuthor,
+              draft: pull?.draft,
+              capturedMetadata,
+            }),
+          )
+        }
       }
       if (fault === "lost ref reply") expect(receipt.stage).toBe("pushing")
-      const beforeRef = ["collision", "wrong tree", "wrong message"].includes(fault)
+      const beforeRef = [
+        "collision",
+        "approved pin collision",
+        "wrong tree",
+        "wrong message",
+      ].includes(fault)
       expect(posts).toBe(beforeRef || ["race", "lost ref reply"].includes(fault) ? 0 : 1)
       expect(pushes).toBe(beforeRef ? 0 : 1)
       if (!["wrong tree", "wrong message"].includes(fault)) {
         const remoteSha = await objectGit(["rev-parse", `refs/heads/${branch}`])
         expect(remoteSha).toBe(
-          fault === "race" ? source : fault === "collision" ? result : publishedSha,
+          fault === "race"
+            ? source
+            : ["collision", "approved pin collision"].includes(fault)
+              ? result
+              : publishedSha,
         )
       }
       expect(await Bun.file(join(root, "touch-pwned")).exists()).toBe(false)

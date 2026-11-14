@@ -1,5 +1,5 @@
 import { sandboxDiagnostic, retainSandboxFailure } from "./diagnostics"
-import { Context, Effect, Schedule, Schema } from "effect"
+import { Context, Effect, Schedule, Schema, Scope } from "effect"
 import { mkdir } from "node:fs/promises"
 import { dirname, join } from "node:path"
 import { AgentRunStore, type AgentRunRecord } from "../kernel/agent-run-store"
@@ -25,6 +25,11 @@ import type { CliPort, CliSpawnInput } from "../kernel/cli-process-contract"
 import { compileSandboxBridge } from "./bridge"
 import { makeSandboxPublisher, SandboxTerminal as Terminal } from "./publish"
 import { makePublishStore } from "./publish-store"
+import { makeNativeCli, makeNativeExecutionStore } from "./native-execution"
+import type { NativeControl, NativeControlReceipt } from "./native-control"
+import { makeNativeResultStore } from "./native-result"
+import { requireNativePublisherActivation, type PublisherContract } from "./publisher-contract"
+import { SqlClient } from "effect/unstable/sql"
 import {
   observeSandboxStage,
   observeSandboxTelemetry,
@@ -32,10 +37,18 @@ import {
 } from "./observation"
 
 export type SandboxDispatchPort = {
+  readonly nativeControl?: (
+    run: AgentRunRecord,
+    input: Exclude<NativeControl, { operation: "resume" }>,
+  ) => Effect.Effect<NativeControlReceipt, SandboxError>
+  readonly resumeNative?: (
+    run: AgentRunRecord,
+    nonce: string,
+  ) => Effect.Effect<CliPort, SandboxError>
   readonly prepareNative?: (run: AgentRunRecord) => Effect.Effect<
     {
       readonly cli: CliPort
-      readonly sandboxBindingFile: string
+      readonly sandboxBindingFile?: string
     },
     SandboxError
   >
@@ -85,13 +98,18 @@ export const makeSandboxDispatch = (options: {
   readonly executorId: string
   readonly endpointIdentity: string
   readonly nativeExecutors?: Partial<Record<"codex" | "claude", CliPort>>
+  readonly nativeScope?: Scope.Scope
+  readonly publicationContract?: PublisherContract
 }) =>
   Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient
     const store = yield* makeSandboxStore
+    const native = yield* makeNativeExecutionStore
+    const nativeProcesses = new Map<string, CliPort>()
     const runs = yield* AgentRunStore
     const { github, leases } = options
     const publications = yield* makePublishStore
-    const publisher = yield* makeSandboxPublisher(github, leases)
+    const publisher = yield* makeSandboxPublisher(github, leases, options.publicationContract)
     const continuePublication = publisher.continuePublication
     const cancelling = new Set<string>()
     const executor = makeSandboxOpenCode(options.client, options.executor)
@@ -180,6 +198,16 @@ export const makeSandboxDispatch = (options: {
       Effect.gen(function* () {
         const lease = yield* store.read(run.runId)
         if (lease === null) return
+        if (lease.policy.privateBootstrap?.mode === "actions-native") {
+          const cli = nativeProcesses.get(run.runId)
+          if (cli?.ownership === "transient-exec") {
+            const process = yield* cli.attach({ runId: run.runId })
+            if (process !== null) yield* process.cancel.pipe(Effect.ignore)
+          }
+          yield* leases.stopNative(run.runId)
+          nativeProcesses.delete(run.runId)
+          return
+        }
         if (run.executorKind === "codex" || run.executorKind === "claude") {
           const cli = yield* Effect.try(() => nativeCli(run))
           if (
@@ -350,15 +378,25 @@ export const makeSandboxDispatch = (options: {
       }).pipe((effect) => sandboxStage("dispatch.finishNative", effect))
     const prepareNative: NonNullable<SandboxDispatchPort["prepareNative"]> = (run) =>
       Effect.gen(function* () {
-        const cli = yield* Effect.try(() => nativeCli(run))
         const policy = options.policies.find((entry) => entry.alias === run.repository)
+        const actionsNative = policy?.privateBootstrap?.mode === "actions-native"
         if (
           policy === undefined ||
+          run.executorKind === undefined ||
           run.agent !== "sandbox" ||
           (run.resolvedSelection != null &&
-            run.resolvedSelection.executor !== `${run.executorKind}:local`)
+            run.resolvedSelection.executor !==
+              (actionsNative ? `${run.executorKind}:actions` : `${run.executorKind}:local`)) ||
+          (actionsNative &&
+            (options.nativeScope === undefined ||
+              (run.executorKind === "claude" && run.providerId !== "anthropic") ||
+              (policy.publish !== undefined &&
+                policy.publish.coAuthor !==
+                  "Ben Nasraoui <81005232+BNasraoui@users.noreply.github.com>")))
         )
           return yield* Effect.fail(failure())
+        if (actionsNative)
+          yield* requireNativePublisherActivation(policy, options.publicationContract)
         yield* Effect.tryPromise(async () => {
           await mkdir(dirname(run.directory), { recursive: true, mode: 0o700 })
           await mkdir(run.directory, { mode: 0o700 })
@@ -382,6 +420,35 @@ export const makeSandboxDispatch = (options: {
           }),
         )
         if (lease.transport === null) return yield* Effect.fail(failure())
+        if (actionsNative) {
+          yield* leases.initializeNative(run.runId)
+          const invocation = yield* native.reserve(run.runId)
+          const cli = yield* makeNativeCli({
+            runId: run.runId,
+            invocation,
+            transport: lease.transport,
+            client: run.executorKind,
+            provider: run.providerId,
+          }).pipe(
+            Effect.provideService(Scope.Scope, options.nativeScope!),
+            Effect.provideService(SqlClient.SqlClient, sql),
+          )
+          nativeProcesses.set(run.runId, cli)
+          yield* store.attachSession(run.runId, invocation.session_id)
+          if (run.resolvedSelection != null)
+            yield* runs.recordResolvedSelection({
+              runId: run.runId,
+              now: new Date(),
+              selection: {
+                ...run.resolvedSelection,
+                host: `github-actions:${lease.actions_run_id}:${lease.actions_attempt}`,
+                executor: `${run.executorKind}:actions`,
+                thinking: { effort: invocation.effort },
+              },
+            })
+          return { cli }
+        }
+        const cli = yield* Effect.try(() => nativeCli(run))
         const binding = {
           runId: run.runId,
           leaseId: lease.lease_id,
@@ -431,7 +498,8 @@ export const makeSandboxDispatch = (options: {
     const launch = (run: AgentRunRecord, model: OpenCodeModel) =>
       Effect.gen(function* () {
         const policy = options.policies.find((entry) => entry.alias === run.repository)
-        if (policy === undefined) return yield* Effect.fail(failure())
+        if (policy === undefined || policy.privateBootstrap?.mode === "actions-native")
+          return yield* Effect.fail(failure())
         if (
           run.agent !== "sandbox" ||
           (run.resolvedSelection != null && run.resolvedSelection.executor !== options.executorId)
@@ -545,6 +613,25 @@ export const makeSandboxDispatch = (options: {
             finalMessage: null,
             diagnostic: "Sandbox deadline exceeded",
           })
+        if (lease.policy.privateBootstrap?.mode === "actions-native") {
+          const selected = yield* native.claimFinalization(run.runId)
+          if (selected?.finalize_revision != null)
+            yield* nativeControl(run, {
+              operation: "finish",
+              nonce: selected.nonce,
+              revision: selected.finalize_revision,
+            }).pipe(
+              Effect.onError((cause) =>
+                settle(run, {
+                  state: "operator_required",
+                  sessionId: run.nativeSessionId,
+                  finalMessage: null,
+                  diagnostic: sandboxDiagnostic("native.finalization", cause).message,
+                }).pipe(Effect.ignore),
+              ),
+            )
+          return
+        }
         // Native workers settle through their durable process observer. On restart the
         // startup sweep below revokes and stops them before releasing their lease.
         if (run.executorKind === "codex" || run.executorKind === "claude") return
@@ -606,6 +693,7 @@ export const makeSandboxDispatch = (options: {
       for (const lease of yield* store.active())
         if (
           lease.state === "ready" &&
+          lease.policy.privateBootstrap?.mode !== "actions-native" &&
           (lease.policy.publish === undefined || (yield* publications.read(lease.run_id)) === null)
         )
           yield* leases.heartbeat(lease.run_id).pipe(
@@ -621,15 +709,79 @@ export const makeSandboxDispatch = (options: {
         const run = yield* runs.read(lease.run_id)
         if (run !== null) yield* observe(run).pipe(Effect.ignore)
       }
+      // Lease service admission is shared with release; known cleanup remains independent.
       yield* leases.reconcile(options.policies)
       // Release confirmation may have arrived during reconciliation.
       for (const kind of ["opencode", "codex", "claude"] as const)
         for (const run of yield* runs.listActiveByExecutor(kind))
           if ((yield* store.read(run.runId))?.state === "released") yield* observe(run)
     }).pipe((effect) => sandboxStage("dispatch.iteration", effect))
+    const nativeControl: NonNullable<SandboxDispatchPort["nativeControl"]> = (run, input) =>
+      Effect.gen(function* () {
+        const invocation = yield* native.read(run.runId)
+        if (run.agent !== "sandbox" || !invocation || invocation.session_id !== run.nativeSessionId)
+          return yield* Effect.fail(failure())
+        if (input.operation !== "status") {
+          const cli = nativeProcesses.get(run.runId)
+          const process =
+            cli?.ownership === "transient-exec" ? yield* cli.attach({ runId: run.runId }) : null
+          if (
+            invocation.nonce !== input.nonce ||
+            invocation.state !== "running" ||
+            !process?.pause ||
+            !process.finish
+          )
+            return yield* Effect.fail(failure())
+          yield* input.operation === "pause" ? process.pause : process.finish(input.revision)
+        }
+        const current = yield* native.read(run.runId)
+        const results = yield* makeNativeResultStore
+        return {
+          sessionId: invocation.session_id,
+          nonce: invocation.nonce,
+          state: current!.state,
+          revision: (yield* results.read(run.runId))?.revision ?? null,
+        }
+      }).pipe(Effect.provideService(SqlClient.SqlClient, sql), (effect) =>
+        sandboxStage("dispatch.nativeControl", effect),
+      )
+    const resumeNative: NonNullable<SandboxDispatchPort["resumeNative"]> = (run, nonce) =>
+      Effect.gen(function* () {
+        const lease = yield* store.read(run.runId)
+        if (
+          !lease ||
+          !lease.transport ||
+          lease.state !== "ready" ||
+          lease.policy.privateBootstrap?.mode !== "actions-native" ||
+          !options.nativeScope ||
+          run.executorKind === undefined ||
+          run.agent !== "sandbox" ||
+          run.state !== "verified"
+        )
+          return yield* Effect.fail(failure())
+        const prior = yield* native.read(run.runId)
+        if (!prior || prior.session_id !== run.nativeSessionId || prior.model !== run.modelId)
+          return yield* Effect.fail(failure())
+        const invocation = yield* native.resume(run.runId, nonce)
+        const cli = yield* Scope.provide(options.nativeScope)(
+          makeNativeCli({
+            runId: run.runId,
+            invocation,
+            transport: lease.transport,
+            client: run.executorKind,
+            provider: run.providerId,
+          }),
+        )
+        nativeProcesses.set(run.runId, cli)
+        return cli
+      }).pipe(Effect.provideService(SqlClient.SqlClient, sql), (effect) =>
+        sandboxStage("dispatch.resumeNative", effect),
+      )
     return {
       launch,
       prepareNative,
+      nativeControl,
+      resumeNative,
       finishNative,
       cancel,
       observe,
