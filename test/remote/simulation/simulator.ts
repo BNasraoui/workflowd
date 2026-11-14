@@ -2,7 +2,6 @@ import { SqlClient } from "effect/unstable/sql"
 import type { SqlClient as SqlClientService } from "effect/unstable/sql/SqlClient"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
 import { Effect, Layer } from "effect"
-import { tmpdir } from "node:os"
 import { KernelJobStore, type KernelJobStorePort } from "../../../src/kernel/job-store"
 import { encodeRemoteCommand } from "../../../src/remote/codec"
 import {
@@ -123,7 +122,7 @@ export class RemoteSimulation implements AsyncDisposable {
       readonly startAt?: Date
     } = {},
   ) {
-    const prefix = `${tmpdir()}/remote-simulation-${process.pid}-${crypto.randomUUID()}`
+    const prefix = `${process.cwd()}/remote-simulation-${process.pid}-${crypto.randomUUID()}`
     return Promise.resolve(new RemoteSimulation(seed, prefix, options))
   }
 

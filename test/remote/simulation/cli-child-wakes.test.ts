@@ -32,11 +32,9 @@ import {
   ClaudeCli,
   encodeClaudeProjectDir,
   makeClaudeCli,
-  prepareClaudeResume,
 } from "../../../src/kernel/claude-session"
 import { makeCodexCli, CodexCli } from "../../../src/kernel/codex-session"
 import { ClaudeDispatchCli, makeClaudeDispatchCli } from "../../../src/kernel/claude-dispatch"
-import { runWorkspaceCommandBytes } from "../../../src/workspace/command"
 import {
   OpenCodeResumeProvider,
   runOpenCodeResumeIteration,
@@ -115,7 +113,7 @@ import { join } from "node:path"
 const args = process.argv.slice(2)
 if (args[0] === "--version") { console.log("claude 1.0"); process.exit(0) }
 if (args[0] === "auth") { console.log(JSON.stringify({loggedIn:true})); process.exit(0) }
-if (args.includes("fixture-resume")) {
+if (args.includes("--resume")) {
   const prompt = await Bun.stdin.text()
   await appendFile(join(process.cwd(), "wakes.jsonl"), JSON.stringify({prompt})+"\\n")
   console.log(JSON.stringify({result:prompt.startsWith("{") && prompt.includes("terminal") ? "ACK line" : JSON.stringify({acknowledged:true,summary:"received"})}))
@@ -128,27 +126,13 @@ console.log(JSON.stringify({type:"result",is_error:false,usage:{output_tokens:5}
     { mode: 0o755 },
   )
   const processes = new Map<string, ReturnType<typeof Bun.spawn>>()
-  // This simulation already uses scripted event producers. Execute its real
-  // child/persistence boundary directly; historical Claude worker argv is only
-  // constructed by dispatch, never executed by this manager.
-  const scriptedWorker = join(root, "scripted-worker.ts")
-  await writeFile(
-    scriptedWorker,
-    `
-    import {parseCodexWorkerArguments,runCliWorker} from ${JSON.stringify(join(import.meta.dir, "../../../src/kernel/codex-worker.ts"))};
-    const options=parseCodexWorkerArguments(process.argv.slice(2));
-    process.exitCode=await runCliWorker(options,[options.binary]);
-  `,
-  )
   const descriptions = new Map<string, string>()
   const manager = async (command: ReadonlyArray<string>) => {
     if (command[0] === "systemd-run") {
       const unit = command.find((part) => part.startsWith("--unit="))!.slice(7)
       descriptions.set(unit, command.find((part) => part.startsWith("--description="))!.slice(14))
       const start = command.indexOf(process.execPath)
-      const invocation = command.slice(start)
-      if (command[command.indexOf("--binary") + 1] === claudeBinary) invocation[1] = scriptedWorker
-      const child = Bun.spawn(invocation, {
+      const child = Bun.spawn(command.slice(start), {
         stdin: "ignore",
         stdout: "ignore",
         stderr: "ignore",
@@ -176,22 +160,7 @@ console.log(JSON.stringify({type:"result",is_error:false,usage:{output_tokens:5}
   }
   const codex = makeCodexCli({ ...cliOptions, binary: codexBinary })
   const claudeDispatch = makeClaudeDispatchCli({ ...cliOptions, binary: claudeBinary })
-  const claude = {
-    ...makeClaudeCli({ binary: claudeBinary, home }),
-    resume: (input: Parameters<ReturnType<typeof makeClaudeCli>["resume"]>[0]) =>
-      Effect.gen(function* () {
-        const prepared = yield* prepareClaudeResume(claudeBinary, input)
-        expect(prepared.args.slice(-2)).toEqual(["--resume", input.nativeSessionId])
-        expect(prepared.args).not.toContain(input.prompt)
-        // Scripted wake recorder, not Claude: it receives the turn prompt directly.
-        const output = yield* runWorkspaceCommandBytes(
-          "scripted resume fixture",
-          [claudeBinary, "fixture-resume"],
-          { cwd: input.directory, stdin: input.prompt, maxStdoutBytes: 262_144 },
-        )
-        return new TextDecoder().decode(output.stdout)
-      }),
-  }
+  const claude = makeClaudeCli({ binary: claudeBinary, home })
   const providerState = defaultState()
   providerState.telemetry.set("ses_opencode_parent", {
     directory: parentDirectory,

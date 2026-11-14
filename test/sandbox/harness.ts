@@ -16,46 +16,18 @@ import { runStoreMigrations } from "../../src/store/migrations"
 
 const repository = resolve(import.meta.dir, "../..")
 
-export async function command(
-  args: ReadonlyArray<string>,
-  cwd = repository,
-  deadline?: number,
-): Promise<string> {
-  if (deadline !== undefined && Date.now() >= deadline)
-    throw new Error(`${args[0]} was not started before its deadline`)
+export async function command(args: ReadonlyArray<string>, cwd = repository): Promise<string> {
   const child = Bun.spawn([...args], { cwd, stdout: "pipe", stderr: "pipe" })
-  let expired = false
-  const timer =
-    deadline === undefined
-      ? undefined
-      : setTimeout(() => {
-          expired = true
-          child.kill("SIGKILL")
-        }, deadline - Date.now())
-  try {
-    const [status, stdout, stderr] = await Promise.all([
-      child.exited,
-      new Response(child.stdout).text(),
-      new Response(child.stderr).text(),
-    ])
-    // A result after the caller's absolute deadline is refused, never accepted late.
-    if (expired || (deadline !== undefined && Date.now() > deadline))
-      throw new Error(`${args[0]} did not finish before its deadline`)
-    if (status !== 0) throw new Error(`${args[0]} exited ${status}: ${stderr}`)
-    return stdout.trim()
-  } finally {
-    clearTimeout(timer)
-  }
+  const [status, stdout, stderr] = await Promise.all([
+    child.exited,
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+  ])
+  if (status !== 0) throw new Error(`${args[0]} exited ${status}: ${stderr}`)
+  return stdout.trim()
 }
 
-/** Same bound as fixtures/owned-dagger.sh, measured from the engine's own start. */
-const engineReadinessMs = 30_000
-
-export async function runnerFixture(
-  runnerAddresses: ReadonlyArray<string> = [],
-  // The caller's original absolute deadline, when it has one; readiness never outlives it.
-  options: { readonly deadline?: number } = {},
-) {
+export async function runnerFixture(runnerAddresses: ReadonlyArray<string> = []) {
   const root = await mkdtemp(join(tmpdir(), "workflowd-sandbox-"))
   const databasePath = join(root, "submission.sqlite")
   await Effect.runPromise(
@@ -109,41 +81,26 @@ export async function runnerFixture(
   }
 
   try {
-    const prebuilt = process.env.WORKFLOWD_SANDBOX_PREBUILT
-    if (prebuilt !== undefined && prebuilt !== "1") throw new Error("Invalid fixture image opt-in")
-    const images: { tooling: string; runner: string; engine: string } | undefined = prebuilt
-      ? JSON.parse(await command(["python3", "scripts/evidence/legacy-admit.py"]))
-      : undefined
-    const runtime = process.env.WORKFLOWD_SANDBOX_RUNTIME
-    if (runtime !== undefined && (runtime !== "1" || !images))
-      throw new Error("Invalid private runtime opt-in")
-    const engineConfig = runtime
-      ? "/source/legacy-runtime/engine.toml"
-      : `${repository}/deploy/sandbox/engine.toml`
-    // The owned offline build stage produced and source-qualified these real
-    // artifacts before this test's unchanged deadline. Ordinary fixtures build here.
-    if (!images) {
-      await docker(
-        "build",
-        "--memory=512m",
-        "--memory-swap=512m",
-        "-t",
-        "workflowd-sandbox-tooling:fixture",
-        "-f",
-        "deploy/sandbox/Containerfile",
-        "deploy/sandbox",
-      )
-      await docker(
-        "build",
-        "--memory=512m",
-        "--memory-swap=512m",
-        "-t",
-        "workflowd-sandbox-runner:fixture",
-        "-f",
-        "test/sandbox/fixtures/runner.Containerfile",
-        "test/sandbox/fixtures",
-      )
-    }
+    await docker(
+      "build",
+      "--memory=512m",
+      "--memory-swap=512m",
+      "-t",
+      "workflowd-sandbox-tooling:fixture",
+      "-f",
+      "deploy/sandbox/Containerfile",
+      "deploy/sandbox",
+    )
+    await docker(
+      "build",
+      "--memory=512m",
+      "--memory-swap=512m",
+      "-t",
+      "workflowd-sandbox-runner:fixture",
+      "-f",
+      "test/sandbox/fixtures/runner.Containerfile",
+      "test/sandbox/fixtures",
+    )
     await command(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", join(root, "key")])
     await docker("network", "create", name)
     await docker("volume", "create", `${name}-socket`)
@@ -159,130 +116,14 @@ export async function runnerFixture(
       "-v",
       `${name}-socket:/run/workflowd-engine`,
       "-v",
-      `${engineConfig}:/etc/dagger/engine.toml:ro`,
+      `${repository}/deploy/sandbox/engine.toml:/etc/dagger/engine.toml:ro`,
       "--privileged",
-      ...(images ? ["--cpus=2", "--pids-limit=512", "--cgroupns=private", "--ipc=private"] : []),
-      ...(runtime
-        ? ["--add-host", "registry-1.docker.io:127.0.0.1", "--add-host", "auth.docker.io:127.0.0.1"]
-        : []),
-      images?.engine ??
-        "registry.dagger.io/engine@sha256:56b68be5d9fc8e0a4e7c8db7599a76571f8806d5a9623d9afa6764ae3f8cae36",
+      "registry.dagger.io/engine@sha256:56b68be5d9fc8e0a4e7c8db7599a76571f8806d5a9623d9afa6764ae3f8cae36",
       "--addr",
       "unix:///run/workflowd-engine/engine.sock",
       "--group",
       "65532",
     )
-    const engineStarted = Date.now()
-    if (images) {
-      const inspect = JSON.parse(await docker("inspect", `${name}-engine`))[0]
-      const namespace = await docker("exec", `${name}-engine`, "readlink", "/proc/self/ns/net")
-      const cgroup = await docker("exec", `${name}-engine`, "readlink", "/proc/self/ns/cgroup")
-      const bind = await docker(
-        "exec",
-        `${name}-engine`,
-        "stat",
-        "-c",
-        "%d:%i",
-        "/etc/dagger/engine.toml",
-      )
-      const custody = {
-        uid: await docker("exec", `${name}-engine`, "id", "-u"),
-        cgroupPath: await docker("exec", `${name}-engine`, "cat", "/proc/self/cgroup"),
-        memory: await docker("exec", `${name}-engine`, "cat", "/sys/fs/cgroup/memory.max"),
-        controllerNetwork: await command(["readlink", "/proc/self/ns/net"]),
-        controllerCgroup: await command(["readlink", "/proc/self/ns/cgroup"]),
-        controllerBind: await command(["stat", "-c", "%d:%i", engineConfig]),
-      }
-      await writeFile(
-        "/evidence/legacy-dagger.json",
-        JSON.stringify({ inspect, namespace, cgroup, bind, custody }),
-      )
-      if (
-        inspect.HostConfig.CgroupnsMode !== "private" ||
-        inspect.HostConfig.Memory !== 2 * 1024 ** 3 ||
-        inspect.HostConfig.MemorySwap !== 2 * 1024 ** 3 ||
-        inspect.HostConfig.PidsLimit !== 512 ||
-        custody.uid !== "0" ||
-        // The pinned Dagger entrypoint moves its processes into private /init.
-        !["0::/init", "1:net_cls:/\n0::/init"].includes(custody.cgroupPath) ||
-        custody.memory !== String(2 * 1024 ** 3) ||
-        namespace === custody.controllerNetwork ||
-        cgroup === custody.controllerCgroup ||
-        bind !== custody.controllerBind
-      )
-        throw new Error("Private Dagger custody prerequisite differs")
-      if ((await docker("exec", `${name}-engine`, "cat", "/proc/1/comm")) !== "dagger-engine")
-        throw new Error("Private Dagger process prerequisite differs")
-      // /proc/1/comm changes at exec, before the engine creates its socket. One exec
-      // repeats the exact predicate; the exec itself is killed at the readiness bound,
-      // a result after it is refused, and Docker/exec failures still propagate at once.
-      const ready = Math.min(engineStarted + engineReadinessMs, options.deadline ?? Infinity)
-      const attempts = Math.floor((ready - Date.now()) / 1000)
-      if (attempts < 1) throw new Error("Private Dagger socket readiness deadline elapsed")
-      await command(
-        [
-          "docker",
-          ...fixtureArgs(name, [
-            "exec",
-            `${name}-engine`,
-            "sh",
-            "-ec",
-            `n=${attempts}; while :; do test -S /run/workflowd-engine/engine.sock && exit 0; n=$((n - 1)); [ "$n" -gt 0 ] || break; sleep 1; done; echo "engine socket absent" >&2; exit 1`,
-          ]),
-        ],
-        repository,
-        ready,
-      )
-      await writeFile("/evidence/legacy-dagger.log", await docker("logs", `${name}-engine`))
-    }
-    if (runtime && images) {
-      await docker("tag", images.tooling, "workflowd-sandbox-tooling:fixture")
-      if (
-        (await docker("inspect", "--format", "{{.Id}}", "workflowd-sandbox-tooling:fixture")) !==
-        images.tooling
-      )
-        throw new Error("Private tooling alias differs")
-      await docker(
-        "run",
-        "-d",
-        "--name",
-        `${name}-ubuntu`,
-        "--network",
-        `container:${name}-engine`,
-        "--memory=128m",
-        "--memory-swap=128m",
-        "--cpus=0.5",
-        "--pids-limit=32",
-        "--read-only",
-        "-v",
-        "/source/legacy-runtime/ubuntu:/ubuntu:ro",
-        "-v",
-        `${repository}/test/sandbox/fixtures/legacy-ubuntu-origin.py:/origin.py:ro`,
-        images.tooling,
-        "python3",
-        "-u",
-        "/origin.py",
-      )
-      await docker(
-        "exec",
-        `${name}-ubuntu`,
-        "python3",
-        "-c",
-        `
-import time,urllib.request,urllib.error
-for attempt in range(30):
- try:
-  assert urllib.request.urlopen('http://127.0.0.1:5000/v2/',timeout=1).read()==b'{}'
-  break
- except OSError:
-  if attempt==29:raise
-  time.sleep(.1)
-try:urllib.request.urlopen('http://127.0.0.1:5000/v2/library/ubuntu/manifests/latest',timeout=1)
-except urllib.error.HTTPError as error:assert error.code==404
-else:raise AssertionError('Mutable image input accepted')
-`,
-      )
-    }
     await docker(
       "cp",
       "deploy/sandbox/network.sh",
@@ -319,9 +160,7 @@ else:raise AssertionError('Mutable image input accepted')
       name,
       "-p",
       "127.0.0.1::22",
-      ...(images ? ["--cpus=1", "--pids-limit=128", "--cgroupns=private", "--ipc=private"] : []),
-      ...(runtime ? ["-v", "/source/legacy-runtime/dagger:/usr/local/bin/dagger:ro"] : []),
-      images?.runner ?? "workflowd-sandbox-runner:fixture",
+      "workflowd-sandbox-runner:fixture",
     )
     await docker("cp", join(root, "key.pub"), `${name}-runner:/home/runner/.ssh/authorized_keys`)
     await docker(
@@ -340,16 +179,6 @@ else:raise AssertionError('Mutable image input accepted')
       "cat",
       "/etc/ssh/ssh_host_ed25519_key.pub",
     )
-    if (images) {
-      const configuration = await docker("exec", `${name}-runner`, "/usr/sbin/sshd", "-T")
-      if (
-        !configuration.split("\n").includes("strictmodes yes") ||
-        !configuration.split("\n").includes("hostkey /etc/ssh/ssh_host_ed25519_key")
-      )
-        throw new Error("Private SSH prerequisite differs")
-      await writeFile(join(root, "sshd-effective.txt"), configuration)
-      await writeFile("/evidence/legacy-ssh.json", JSON.stringify({ configuration, hostKey, port }))
-    }
     await writeFile(join(root, "known_hosts"), `[127.0.0.1]:${port} ${hostKey}\n`)
     const transport: SandboxTransport = {
       leaseId: name,
@@ -370,26 +199,13 @@ cd /workspace/repository
 # The fixture digest stands in for the operator-published image. Keep real
 # container-use/Dagger execution on the small fixture Ubuntu image.
 if [ "$1 $2 $3" = "config base-image set" ] && [ "$4" = "ghcr.io/bnasraoui/workflowd-agent-base@sha256:${"f".repeat(64)}" ]; then
-  set -- config base-image set ubuntu@sha256:534baea6a22c03a63003dbc8dbe78fe34bc0d7e595d9a9dc9834884ff530eb55
+  set -- config base-image set ubuntu:24.04
 fi
-exec env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=/home/runner GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/home/runner/.gitconfig ${runtime ? "_EXPERIMENTAL_DAGGER_CLI_BIN=/usr/local/bin/dagger DO_NOT_TRACK=1 DAGGER_NO_NAG=1 " : ""}_EXPERIMENTAL_DAGGER_RUNNER_HOST=unix:///run/workflowd-engine/engine.sock /usr/local/bin/container-use-real "$@"
+exec env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=/home/runner GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/home/runner/.gitconfig _EXPERIMENTAL_DAGGER_RUNNER_HOST=unix:///run/workflowd-engine/engine.sock /usr/local/bin/container-use-real "$@"
 `,
       { mode: 0o755 },
     )
     await docker("cp", wrapper, `${name}-runner:/usr/local/bin/container-use`)
-    if (runtime)
-      await docker(
-        "exec",
-        `${name}-runner`,
-        "sh",
-        "-ec",
-        `
-mkdir .container-use
-printf '%s\n' '{"base_image":"ubuntu@sha256:534baea6a22c03a63003dbc8dbe78fe34bc0d7e595d9a9dc9834884ff530eb55","workdir":"/workdir"}' > .container-use/environment.json
-git add .container-use/environment.json
-git commit --amend --no-edit
-`,
-      )
     await docker(
       "exec",
       "-u",

@@ -157,14 +157,9 @@ jobs:
           printf '5e983fb693623f3ea500c63e4da9aa17e90490f120edf612e25c24a34bee405c  %s\n' "$(command -v opencode2)" | sha256sum --check
       - name: Install pinned native sandbox CLIs
         run: |
-          bun add --global --trust @openai/codex@0.159.1
-          curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
-            https://storage.googleapis.com/claude-code-dist-86c565f3-f756-42ad-8dfa-d59b1c096819/claude-code-releases/2.1.301/linux-x64/claude \
-            --output "$HOME/.bun/bin/claude"
-          printf '%s  %s\n' bc1aad9982c7b59c7d889ff92595d61cf46e0a6eae074cb551d932a989bcd222 "$HOME/.bun/bin/claude" | sha256sum --check --status
-          chmod 0555 "$HOME/.bun/bin/claude"
+          bun add --global --trust @openai/codex@0.159.1 @anthropic-ai/claude-code@2.1.296
           test "$(codex --version)" = 'codex-cli 0.159.1'
-          test "$(claude --version)" = '2.1.301 (Claude Code)'
+          test "$(claude --version)" = '2.1.296 (Claude Code)'
       - name: Pin credential probe runtime
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
@@ -212,8 +207,7 @@ jobs:
           sudo chmod -R go-w /opt/workflowd-credential-fixture
           sudo install -m 0755 "$(command -v bun)" /opt/workflowd-credential-fixture/bin/bun
           sudo install -m 0755 "$(command -v node)" /opt/workflowd-credential-fixture/bin/node
-          sudo install -m 0555 "$HOME/.bun/bin/claude" /opt/workflowd-credential-fixture/bin/claude
-          for client in codex opencode2; do
+          for client in codex claude opencode2; do
             source=$(readlink -f "$(command -v "$client")")
             relative=${source#"$HOME/.bun/install/global/"}
             test "$relative" != "$source"
@@ -312,9 +306,7 @@ jobs:
           cases = ET.parse('/tmp/workflowd-publishing-tests.xml').findall('.//testcase')
           assert all(len(case) == 0 for case in cases), 'Publishing tests failed or skipped'
           for name in [
-              'installed codex pushes and opens a PR with run-bound App identity',
-              'installed claude pushes and opens a PR with run-bound App identity',
-              'installed opencode pushes and opens a PR with run-bound App identity',
+              'installed Codex, Claude and OpenCode push and open PRs with run-bound App identity',
               'agent OpenCode startup retains Git identity and isolates project and controller configuration',
               'agent OpenCode service checks migrated sole ownership before starting the agent UID',
               'OpenCode recovered mailbox prompts refuse before provider I/O when migration admission fails',

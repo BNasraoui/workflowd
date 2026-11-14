@@ -180,14 +180,7 @@ export async function sharedOpenCodeFixture(
           2,
         ),
       )
-    }
-    // Only after the unit stop confirmed its control group (server and MCP bridge
-    // children) is gone and the model server stopped; a failed stop throws above and
-    // retains the root. Bridge compilations in this test process are joined by
-    // SandboxOpenCode.start, including an interrupted concurrent sibling. Evidence is
-    // the JSON above; the root holds ~90 MB compiled bridges on bounded private
-    // temporary storage and has no later consumer.
-    await rm(root, { recursive: true, force: true })
+    } else await rm(root, { recursive: true, force: true })
   }
   try {
     const configDirectory = join(root, "home/.config/opencode")

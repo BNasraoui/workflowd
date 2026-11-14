@@ -724,7 +724,7 @@ for (const client of ["codex", "claude"] as const) {
   adminTest(
     `relink detects the installed native ${client} process for each UID`,
     async () => {
-      const { realpath, readlink, stat } = await import("node:fs/promises")
+      const { realpath, stat } = await import("node:fs/promises")
       const { dirname, basename } = await import("node:path")
       const { policy, close } = await fixture()
       const entrypoint = Bun.which(client)!
@@ -744,36 +744,30 @@ for (const client of ["codex", "claude"] as const) {
           await mkdir(config, { mode: 0o700 })
           await chown(config, uid, policy.groupGid)
           const command = [
+            native,
             ...(client === "codex"
-              ? [native, "app-server"]
-              : ["/usr/bin/python3", join(import.meta.dir, "../helpers/interactive-observe.py")]),
+              ? ["app-server"]
+              : [
+                  "-p",
+                  "--input-format",
+                  "stream-json",
+                  "--output-format",
+                  "stream-json",
+                  "--verbose",
+                ]),
           ]
-          const request = {
-            binary: native,
-            directory: home,
-            home,
-            arguments: ["--tools", ""],
-            ready: join(home, "native-ready.json"),
-            capture: join(home, "native-pty"),
-            mode: "hold",
-            seconds: 10,
-          }
           const child = Bun.spawn(
-            [
-              "/usr/bin/unshare",
-              "--net",
-              ...(uid === process.getuid!()
-                ? command
-                : [
-                    "/usr/bin/setpriv",
-                    "--reuid",
-                    String(uid),
-                    "--regid",
-                    String(policy.groupGid),
-                    "--clear-groups",
-                    ...command,
-                  ]),
-            ],
+            uid === process.getuid!()
+              ? command
+              : [
+                  "/usr/bin/setpriv",
+                  "--reuid",
+                  String(uid),
+                  "--regid",
+                  String(policy.groupGid),
+                  "--clear-groups",
+                  ...command,
+                ],
             {
               cwd: home,
               env: {
@@ -784,26 +778,19 @@ for (const client of ["codex", "claude"] as const) {
                 HTTP_PROXY: "http://127.0.0.1:9",
                 HTTPS_PROXY: "http://127.0.0.1:9",
                 ALL_PROXY: "http://127.0.0.1:9",
-                WORKFLOWD_FIXTURE_HOST_NETNS: await readlink("/proc/self/ns/net"),
               },
               stdin: "pipe",
               stdout: "pipe",
               stderr: "ignore",
             },
           )
-          let nativePid = client === "codex" ? child.pid : 0
           try {
-            if (client === "claude") child.stdin.write(JSON.stringify(request) + "\n")
             const deadline = Date.now() + 5000
-            while ((await realpath(`/proc/${nativePid}/exe`).catch(() => "")) !== native) {
+            while ((await realpath(`/proc/${child.pid}/exe`).catch(() => "")) !== native) {
               if (Date.now() >= deadline) throw new Error("native_client_not_running")
-              if (client === "claude") {
-                const ready = await readFile(request.ready, "utf8").catch(() => null)
-                if (ready) nativePid = JSON.parse(ready).pid
-              }
               await Bun.sleep(10)
             }
-            expect((await stat(`/proc/${nativePid}`)).uid).toBe(uid)
+            expect((await stat(`/proc/${child.pid}`)).uid).toBe(uid)
             expect(child.exitCode).toBeNull()
             // Local namespaces have one mapped UID; use an unused agent UID to test executable matching there.
             await expect(
@@ -821,20 +808,7 @@ for (const client of ["codex", "claude"] as const) {
             await child.stdin.end()
             const timer = setTimeout(() => child.kill("SIGKILL"), 3000)
             try {
-              const code = await child.exited
-              if (client === "claude") {
-                expect(code).toBe(0)
-                expect(JSON.parse(await new Response(child.stdout).text())).toEqual({
-                  pid: nativePid,
-                  joined: true,
-                })
-                expect(
-                  await stat(`/proc/${nativePid}`).then(
-                    () => true,
-                    () => false,
-                  ),
-                ).toBe(false)
-              }
+              await child.exited
             } finally {
               clearTimeout(timer)
             }

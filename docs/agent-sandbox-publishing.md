@@ -76,19 +76,9 @@ python3 scripts/evidence/isolated-fixture.py \
     --upstream fixture --evidence /tmp/opencode/evidence/publication-local
 ```
 
-This uses synthetic GitHub HTTP and real local Git objects. To validate the exact
-artifact from an owned native-container run, pass its `native-runtime` directory:
-
-```sh
-WORKFLOWD_FIXTURE_NATIVE_CAPTURE=/tmp/opencode/wfd-owned-docker-<run>/native-runtime \
-  python3 scripts/evidence/isolated-fixture.py \
-  bun test test/sandbox/publisher-http.e2e.test.ts \
-    -t 'real publisher create-only Git/HTTP receipt: native capture'
-```
-
-The launcher copies only the bounded fixture receipt, synthetic canaries, trusted
-source bundle and sealed result files into isolated evidence. The test validates
-the ZIP and original source/result/tree hashes before exercising the actual
+This uses synthetic GitHub HTTP and real local Git objects. The native capture
+case captures a stopped workspace export with the in-repo capture code. The test
+validates the ZIP and original source/result/tree hashes before exercising the actual
 publisher against synthetic GitHub HTTP. It checks the source-parented single
 commit, draft PR, exact co-author and token revocation. Raw/encoded native prompt
 and tool-output canaries remain private and are checked against publisher logs,

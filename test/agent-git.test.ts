@@ -4,11 +4,9 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { pathToFileURL } from "node:url"
 import { identityGuard, guardedHook } from "../src/agent-git/hooks"
-import { Effect, Schema } from "effect"
+import { Effect } from "effect"
 import { loadConfig } from "../src/config"
 import { gitAgentRunWorktrees } from "../src/kernel/agent-run-worktrees"
-
-const Answer = Schema.Struct({ result: Schema.String })
 
 const run = async (cwd: string, args: string[], env: Record<string, string> = {}) => {
   const child = Bun.spawn(["git", ...args], {
@@ -251,42 +249,32 @@ test.each(["non-git", "checkout", "worktree", "managed"])(
       }
       const before =
         kind === "non-git" ? undefined : await readFile(join(root, ".git", "config"), "utf8")
-      // A normal-PTY stand-in executes the fixture's Git action as its native tool.
-      const binary = join(import.meta.dir, "helpers/fake-interactive-claude.ts")
-      const home = await mkdtemp(join(tmpdir(), "claude-git-home-"))
-      // Explicit synthetic onboarding; the resumed turn never writes user config.
-      await writeFile(join(home, ".claude.json"), '{"hasCompletedOnboarding":true}')
-      const saved = process.env.FAKE_CLAUDE_SCRIPT
-      process.env.FAKE_CLAUDE_SCRIPT = `if [ "$PROMPT" = identity ]; then
+      const binary = join(root, "claude-fixture")
+      await writeFile(
+        binary,
+        `#!/bin/sh
+prompt=$(cat)
+if [ "$prompt" = identity ]; then
   printf '%s\\n' "$GIT_AUTHOR_NAME" "$GIT_AUTHOR_EMAIL" "$GIT_COMMITTER_NAME" "$GIT_COMMITTER_EMAIL"
 else
   git commit --allow-empty --author='Blocked <blocked@example.test>' -m blocked
-fi`
-      const input = { nativeSessionId: crypto.randomUUID(), directory, timeoutMs: 20000 }
-      const cli = makeClaudeCli({ binary, git, home })
-      const resume = (prompt: string) =>
-        cli
-          .resume({ ...input, prompt })
-          .pipe(
-            Effect.map(
-              (output) => Schema.decodeUnknownSync(Schema.fromJsonString(Answer))(output).result,
-            ),
-          )
-      try {
-        expect(await Effect.runPromise(resume("identity"))).toBe(
-          "Agent\nagent@example.test\nAgent\nagent@example.test\n",
+fi
+`,
+        { mode: 0o700 },
+      )
+      const port = makeClaudeCli({ binary, git })
+      const input = { nativeSessionId: "fixture", directory, timeoutMs: 5000 }
+      expect(await Effect.runPromise(port.resume({ ...input, prompt: "identity" }))).toBe(
+        "Agent\nagent@example.test\nAgent\nagent@example.test\n",
+      )
+      if (before !== undefined) {
+        expect(await readFile(join(root, ".git", "config"), "utf8")).toBe(before)
+        const outcome = await Effect.runPromise(
+          port.resume({ ...input, prompt: "commit" }).pipe(Effect.result),
         )
-        if (before !== undefined) {
-          expect(await readFile(join(root, ".git", "config"), "utf8")).toBe(before)
-          const outcome = await Effect.runPromise(resume("commit").pipe(Effect.result))
-          expect(outcome._tag).toBe(kind === "managed" ? "Failure" : "Success")
-          if (outcome._tag === "Failure")
-            expect(outcome.failure.cause.message).toContain("workflowd: blocked git identity")
-        }
-      } finally {
-        if (saved === undefined) delete process.env.FAKE_CLAUDE_SCRIPT
-        else process.env.FAKE_CLAUDE_SCRIPT = saved
-        await rm(home, { recursive: true, force: true })
+        expect(outcome._tag).toBe(kind === "managed" ? "Failure" : "Success")
+        if (outcome._tag === "Failure")
+          expect(outcome.failure.cause.message).toContain("workflowd: blocked git identity")
       }
     } finally {
       await rm(root, { recursive: true, force: true })

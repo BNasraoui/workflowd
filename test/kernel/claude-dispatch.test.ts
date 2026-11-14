@@ -3,12 +3,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { parseClaudeDispatchEvent } from "../../src/kernel/claude-dispatch"
-import { runClaudeWorkerMain } from "../../src/kernel/claude-worker"
-import { runCliWorker, parseCodexWorkerArguments } from "../../src/kernel/codex-worker"
-import {
-  claudeInteractiveArguments,
-  claudeInteractiveSettings,
-} from "../../src/kernel/claude-interactive"
+import { runClaudeWorker, runClaudeWorkerMain } from "../../src/kernel/claude-worker"
 
 test("Claude stream recognizes session identity, actual model output, usage, and errors", () => {
   const parse = (value: unknown) => parseClaudeDispatchEvent(JSON.stringify(value))
@@ -46,7 +41,7 @@ test("Claude stream recognizes session identity, actual model output, usage, and
   expect(parseClaudeDispatchEvent("bad json")).toEqual({ type: "other" })
 })
 
-test("Claude interactive argv selects shared-host policy; shared capture persists real child output and exit", async () => {
+test("durable worker invokes Claude print mode directly and persists output and exit", async () => {
   const root = await mkdtemp(join(tmpdir(), "workflowd-claude-worker-"))
   try {
     const binary = join(root, "fake-claude")
@@ -59,25 +54,28 @@ test("Claude interactive argv selects shared-host policy; shared capture persist
     await writeFile(promptFile, "Reply OK")
     const resultFile = join(root, "result.json")
     const eventsFile = join(root, "events.jsonl")
-    const options = {
-      binary,
-      directory: root,
-      promptFile,
-      resultFile,
-      eventsFile,
-      stderrFile: join(root, "stderr"),
-      maxOutputBytes: 10000,
-      model: "claude-opus-5-5",
-      effort: "xhigh",
-    }
-    const args = await claudeInteractiveArguments(options, { id: "test-session", resume: false })
-    expect(await runCliWorker(options, [binary])).toBe(0)
+    expect(
+      await runClaudeWorker({
+        binary,
+        directory: root,
+        promptFile,
+        resultFile,
+        eventsFile,
+        stderrFile: join(root, "stderr"),
+        maxOutputBytes: 10000,
+        model: "claude-opus-5-5",
+        effort: "xhigh",
+      }),
+    ).toBe(0)
     const invoked = JSON.parse(await readFile(join(root, "invocation.json"), "utf8"))
-    expect(invoked.args).toEqual([])
-    expect(args).toEqual([
-      binary,
+    expect(invoked.args).toEqual([
+      "--print",
       "--settings",
-      claudeInteractiveSettings,
+      '{"env":{"CLAUDE_CODE_DISABLE_BACKGROUND_TASKS":"1"}}',
+      "--output-format",
+      "stream-json",
+      "--verbose",
+      "--include-partial-messages",
       "--setting-sources",
       "user",
       "--dangerously-skip-permissions",
@@ -88,8 +86,6 @@ test("Claude interactive argv selects shared-host policy; shared capture persist
       "claude-opus-5-5",
       "--effort",
       "xhigh",
-      "--session-id",
-      "test-session",
     ])
     expect(invoked.prompt).toBe("Reply OK")
     expect(invoked.cwd).toBe(root)
@@ -117,7 +113,7 @@ test("Claude worker entrypoint reports malformed launches without starting a mod
 })
 
 for (const status of [0, 7]) {
-  test(`worker argument parsing and shared capture persist child exit ${status}`, async () => {
+  test(`Claude worker entrypoint persists native exit ${status}`, async () => {
     const root = await mkdtemp(join(tmpdir(), "claude-entrypoint-"))
     try {
       const binary = join(root, "claude")
@@ -141,7 +137,7 @@ for (const status of [0, 7]) {
         "--max-output-bytes",
         "1024",
       ]
-      expect(await runCliWorker(parseCodexWorkerArguments(args), [binary])).toBe(status)
+      expect(await runClaudeWorkerMain(args)).toBe(status)
       expect(JSON.parse(await readFile(join(root, "result"), "utf8"))).toEqual({
         version: 1,
         exitCode: status,
@@ -172,7 +168,7 @@ test("rapid native exits persist every result after draining both output streams
         maxOutputBytes: 1024,
         model: null,
       }
-      expect(await runCliWorker(options, [binary])).toBe(0)
+      expect(await runClaudeWorker(options)).toBe(0)
       expect(JSON.parse(await readFile(options.resultFile, "utf8"))).toEqual({
         version: 1,
         exitCode: 0,

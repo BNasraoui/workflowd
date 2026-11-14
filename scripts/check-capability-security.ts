@@ -32,7 +32,6 @@ const nativeCases = [
   ["N8", "test/kernel/actions-native-routing.test.ts"],
   ["N9", "test/sandbox/native-capture-recovery.test.ts"],
   ["N10", "test/execution/config.test.ts"],
-  ["N11", "test/kernel/interactive-project-config.e2e.test.ts"],
   ["N12", "test/sandbox/native-command.test.ts"],
   ["N13", "test/sandbox/native-control.test.ts"],
   ["N14", "test/sandbox/native-progress.e2e.test.ts"],

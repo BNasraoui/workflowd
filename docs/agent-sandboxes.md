@@ -299,55 +299,6 @@ application-to-owned-container acceptance path remains a separate review gate.
 Neither local suite success nor daemon readiness proves live entitlement,
 deployed Actions execution, full security acceptance or 500-job continuity.
 
-### Owned backend evidence
-
-The trusted host launcher uses a fresh Docker configuration and exact random-owner
-labels against the explicitly authorized daemon. Only owned container IDs and
-owned volumes/networks are inspected or removed. Tests run against a private inner
-engine; the agent never receives either engine socket. Each substantive invocation
-is bounded to five minutes, 6 GiB without swap, two CPUs and 1,024 outer PIDs.
-An absolute container deadline and an independent exact-owner cleanup timer survive
-controller death. The death-injection case kills the controller and requires a
-stopped readback and removal receipt from the independent reaper.
-Reaper source, ownership ledger and host command/cleanup receipts stay outside
-the writable runtime evidence mount, including for adversarial tool fixtures.
-
-```sh
-python3 scripts/evidence/isolated-fixture.py --owned-docker-container
-python3 scripts/evidence/isolated-fixture.py --owned-docker-network
-python3 scripts/evidence/isolated-fixture.py --owned-docker-dagger
-python3 scripts/evidence/isolated-fixture.py --owned-docker-dagger-network
-python3 scripts/evidence/isolated-fixture.py --owned-docker-death
-```
-
-The network fixtures establish reachable synthetic listeners before installing
-`network.sh`, require actual IPv4/IPv6 DROP-counter increases, preserve synthetic
-public TCP/DNS, and verify restored connectivity after teardown. Dagger's host-only
-`http()` case is measured separately: host counters increase while engine CNI DROP
-counters stay unchanged. Nested execution separately hits the engine's isolation
-rules, including its own gateway. Dagger IPv6 disablement is read back; native
-Docker IPv6 has independent reachable positive controls. The real Dagger API also
-refuses `insecureRootCapabilities` with the pinned empty-entitlements policy.
-
-The optional Nix build uses a pinned, nonprivileged builder with a private store,
-read-only source snapshot and a twenty-minute limit. It records the image archive's
-SHA-256. Run one heavy invocation at a time:
-
-```sh
-python3 scripts/evidence/isolated-fixture.py --owned-docker-image
-WORKFLOWD_FIXTURE_AGENT_IMAGE=/tmp/opencode/wfd-owned-docker-<build>/agent-image.tar \
-WORKFLOWD_FIXTURE_AGENT_IMAGE_SHA256=<recorded-sha256> \
-  python3 scripts/evidence/isolated-fixture.py --owned-docker-native
-```
-
-Each invocation prints its private evidence directory. Retain `ledger.json`,
-`container-receipt.json`, command receipts and `cleanup-*.json`, including failed
-attempts. The native fixture uses the actual supervisor, Docker boundary, PTY and
-capture code, with a synthetic Unix-socket upstream. The trusted capture runtime
-uses Python 3.12/Unicode 15.0, independently of the agent image's Python tools.
-The application gateway/SQL/SSH controls have separate tests; this fixture does not
-substitute for their eventual combined production-path acceptance.
-
 ## Historical native CLI prototypes
 
 The live verifier accepts `opencode:opencode-primary`, `codex:local` and

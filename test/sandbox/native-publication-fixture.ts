@@ -1,4 +1,4 @@
-import { copyFile, mkdir, readFile, writeFile } from "node:fs/promises"
+import { mkdir, readFile, writeFile } from "node:fs/promises"
 import { join, resolve } from "node:path"
 import { createHash } from "node:crypto"
 import { Schema } from "effect"
@@ -6,7 +6,7 @@ import { captureNativeResult } from "../../deploy/sandbox/native-capture.mjs"
 import { ResultMetadata } from "../../src/sandbox/publish-store"
 import { command } from "./harness"
 
-/** Optional owned-container artifact; otherwise only the stopped export is substituted. */
+/** Native result captured from a stopped workspace export by the in-repo capture. */
 export async function nativePublicationArtifact(
   root: string,
   sourceSha: string,
@@ -37,39 +37,29 @@ export async function nativePublicationArtifact(
     state: "stopped",
     outcome: "completed",
   }
-  const external = process.env.WORKFLOWD_FIXTURE_NATIVE_CAPTURE
-  const metadata = external
-    ? Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Struct({ metadata: ResultMetadata })))(
-        await readFile(join(external, "receipt.json"), "utf8"),
-      ).metadata
-    : Schema.decodeUnknownSync(Schema.fromJsonString(ResultMetadata))(
-        await captureNativeResult({
-          root: runner,
-          directory,
-          tooling,
-          invocation,
-          request: { nonce: invocation.nonce, session: invocation.session, completion },
-          backend: {
-            async exportWorkspace() {
-              await command([
-                "tar",
-                "--exclude=.git",
-                "-cf",
-                join(directory, "capture.tar"),
-                "-C",
-                source,
-                ".",
-              ])
-            },
-          },
-          command: (args, input) => invoke(directory, args, input),
-        }),
-      )
-  if (external) {
-    await mkdir(join(runner, "result"), { recursive: true, mode: 0o700 })
-    for (const name of ["result.json", "result.bundle"])
-      await copyFile(join(external, "result", name), join(runner, "result", name))
-  }
+  const metadata = Schema.decodeUnknownSync(Schema.fromJsonString(ResultMetadata))(
+    await captureNativeResult({
+      root: runner,
+      directory,
+      tooling,
+      invocation,
+      request: { nonce: invocation.nonce, session: invocation.session, completion },
+      backend: {
+        async exportWorkspace() {
+          await command([
+            "tar",
+            "--exclude=.git",
+            "-cf",
+            join(directory, "capture.tar"),
+            "-C",
+            source,
+            ".",
+          ])
+        },
+      },
+      command: (args, input) => invoke(directory, args, input),
+    }),
+  )
   const archive = join(work, "result.zip")
   await command(
     [

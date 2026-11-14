@@ -2,16 +2,16 @@ import { expect, test } from "bun:test"
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { runClaudeWorker } from "../../src/kernel/claude-worker"
 import { runCliWorker, runCodexWorker } from "../../src/kernel/codex-worker"
 import { codexProjectConfig } from "../../src/execution/project-config"
 import { startAppServer } from "../../src/resident/process"
+import { makeClaudeCli } from "../../src/kernel/claude-session"
 import { linkedWorktree } from "./project-config-fixture"
-import { Schema } from "effect"
+import { Effect, Schema } from "effect"
 import { nativeModelFixture } from "../sandbox/native-fixture"
 
-// Claude's equivalent launch/resume controls use a normal PTY in
-// interactive-project-config.e2e.test.ts.
-for (const kind of ["codex"] as const) {
+for (const kind of ["claude", "codex"] as const) {
   test(`installed ${kind} excludes worktree hooks while retaining user hooks`, async () => {
     const root = await mkdtemp(join(tmpdir(), "workflowd-project-config-"))
     const home = join(root, "home")
@@ -31,12 +31,27 @@ for (const kind of ["codex"] as const) {
         SessionStart: [{ hooks: [{ type: "command", command: `touch ${JSON.stringify(path)}` }] }],
       },
     })
-    const file = "hooks.json"
+    const file = kind === "claude" ? "settings.json" : "hooks.json"
     await writeFile(
       join(directory, `.${kind}`, file),
       JSON.stringify(hooks(kind === "codex" ? hookMarker : marker)),
     )
     await writeFile(join(configHome, file), JSON.stringify(hooks(userMarker)))
+    if (kind === "claude") {
+      await writeFile(
+        join(directory, ".claude/settings.local.json"),
+        JSON.stringify({
+          ...hooks(localMarker),
+          enableAllProjectMcpServers: true,
+        }),
+      )
+      await writeFile(
+        join(directory, ".mcp.json"),
+        JSON.stringify({
+          mcpServers: { project_fixture: { command: "/usr/bin/touch", args: [mcpMarker] } },
+        }),
+      )
+    }
     if (kind === "codex") {
       // This CLI version resolves linked-worktree hook sources in the primary checkout.
       await mkdir(join(repository, ".codex"))
@@ -78,15 +93,27 @@ startup_timeout_sec=1
     await writeFile(options.promptFile, "Reply with the fixture completion.")
     try {
       // Positive control: the same installed CLI must actually execute the fixture hook.
-      const command = [
-        binary,
-        "exec",
-        "--json",
-        "--dangerously-bypass-approvals-and-sandbox",
-        "-m",
-        "fixture-model",
-        "-",
-      ]
+      const command =
+        kind === "claude"
+          ? [
+              binary,
+              "--print",
+              "--output-format",
+              "stream-json",
+              "--verbose",
+              "--model",
+              "fixture-model",
+              "--dangerously-skip-permissions",
+            ]
+          : [
+              binary,
+              "exec",
+              "--json",
+              "--dangerously-bypass-approvals-and-sandbox",
+              "-m",
+              "fixture-model",
+              "-",
+            ]
       const controlExit = await runCliWorker(options, command)
       expect({
         exit: controlExit,
@@ -102,9 +129,15 @@ startup_timeout_sec=1
         expect(await Bun.file(hookMarker).exists()).toBe(true)
         await rm(hookMarker)
       }
+      if (kind === "claude") {
+        expect(await Bun.file(localMarker).exists()).toBe(true)
+        expect(await Bun.file(mcpMarker).exists()).toBe(true)
+        await rm(localMarker)
+        await rm(mcpMarker)
+      }
       await rm(marker)
       await rm(userMarker)
-      expect(await runCodexWorker(options)).toBe(0)
+      expect(await (kind === "claude" ? runClaudeWorker : runCodexWorker)(options)).toBe(0)
       expect(await readFile(options.eventsFile, "utf8")).toContain("native-fixture-complete")
       expect(await Bun.file(userMarker).exists()).toBe(true)
       expect(await Bun.file(marker).exists()).toBe(false)
@@ -117,7 +150,40 @@ startup_timeout_sec=1
         .map((line) =>
           Schema.decodeUnknownSync(Schema.Record(Schema.String, Schema.Unknown))(JSON.parse(line)),
         )
-      {
+      if (kind === "claude") {
+        const session = Schema.decodeUnknownSync(Schema.Struct({ session_id: Schema.String }))(
+          events.find((event) => event.type === "system" && event.subtype === "init"),
+        )
+        // Positive control on resume too: persisted sessions must not hide inert fixtures.
+        expect(
+          await runCliWorker(options, [
+            binary,
+            "-p",
+            "--resume",
+            session.session_id,
+            "--output-format",
+            "stream-json",
+            "--verbose",
+            "--dangerously-skip-permissions",
+          ]),
+        ).toBe(0)
+        for (const path of [marker, localMarker, mcpMarker, userMarker]) {
+          expect(await Bun.file(path).exists()).toBe(true)
+          await rm(path)
+        }
+        const output = await Effect.runPromise(
+          makeClaudeCli({ binary }).resume({
+            nativeSessionId: session.session_id,
+            directory,
+            prompt: "Continue.",
+            timeoutMs: 15000,
+          }),
+        )
+        expect(output).toContain("native-fixture-complete")
+        expect(await Bun.file(userMarker).exists()).toBe(true)
+        for (const path of [marker, localMarker, mcpMarker])
+          expect(await Bun.file(path).exists()).toBe(false)
+      } else {
         let completion = Promise.withResolvers<unknown>()
         const server = startAppServer({ binary, home: configHome }, (frame) => {
           if (frame.method === "turn/completed") completion.resolve(frame.params)

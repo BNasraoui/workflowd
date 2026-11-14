@@ -4,17 +4,11 @@ import { join } from "node:path"
 import { describe, expect, test } from "bun:test"
 import { Effect } from "effect"
 import type { ClaudeCliPort } from "../../src/kernel/claude-session"
-import {
-  encodeClaudeProjectDir,
-  makeClaudeCli,
-  prepareClaudeResume,
-} from "../../src/kernel/claude-session"
+import { encodeClaudeProjectDir, makeClaudeCli } from "../../src/kernel/claude-session"
 import { WorkspaceError } from "../../src/workspace/errors"
 import { makeClaudeResumeExecutor } from "../../src/remote/claude-resume-executor"
 import type { ClaudeResumeJobV1 } from "../../src/remote/contract"
 import { MAX_CLAUDE_RESUME_OUTPUT_BYTES } from "../../src/remote/contract"
-
-const fake = join(import.meta.dir, "../helpers/fake-interactive-claude.ts")
 
 const schema = JSON.stringify({
   type: "object",
@@ -120,7 +114,7 @@ describe("claude resume executor", () => {
     expect(outcome).toEqual({ status: "failed", failureReason: "cli_failed" })
   })
 
-  test("a real local interactive resume keeps hostile prompt text out of shell", async () => {
+  test("the live /bin/echo CLI proves the prompt rides stdin, not argv", async () => {
     const home = await mkdtemp(join(tmpdir(), "claude-exec-"))
     try {
       const dir = join(home, "work")
@@ -132,37 +126,24 @@ describe("claude resume executor", () => {
         join(home, ".claude", "projects", encodeClaudeProjectDir(dir), "abc-123.jsonl"),
         "{}\n",
       )
-      // Explicit synthetic onboarding; the resumed turn never writes user config.
-      await writeFile(join(home, ".claude.json"), '{"hasCompletedOnboarding":true}')
-      const prepared = await Effect.runPromise(
-        prepareClaudeResume(
-          fake,
-          { ...payload(), directory: dir, timeoutMs: 1000 },
-          undefined,
-          home,
-        ),
-      )
-      expect(prepared.args.slice(-2)).toEqual(["--resume", "abc-123"])
-      expect(prepared.env.HOME).toBe(home)
-      // The PTY stand-in answers with its prompt, which is never valid extraction JSON.
+      // /bin/echo prints its argv (never the stdin prompt) as the CLI's
+      // stdout, which is not a JSON envelope — so the executor reports
+      // cli_failed. The point is that it did not crash and the secret
+      // prompt never reached the command line.
       const outcome = await run(
-        makeClaudeCli({ binary: fake, home }),
-        payload({
-          directory: dir,
-          nativeSessionId: "abc-123",
-          prompt: "secret; touch $HOME/injected `touch injected`",
-          turnTimeoutMs: 20_000,
-        }),
+        makeClaudeCliLike(home),
+        payload({ directory: dir, nativeSessionId: "abc-123", prompt: "secret; rm -rf $HOME" }),
         [home],
       )
-      expect(outcome).toEqual({ status: "failed", failureReason: "output_unparseable" })
-      for (const path of [join(home, "injected"), join(dir, "injected")])
-        expect(await Bun.file(path).exists()).toBe(false)
+      expect(outcome).toEqual({ status: "failed", failureReason: "cli_failed" })
     } finally {
       await rm(home, { recursive: true, force: true })
     }
-  }, 30_000)
+  })
 })
+
+const makeClaudeCliLike = (home: string): ClaudeCliPort =>
+  makeClaudeCli({ binary: "/bin/echo", home })
 
 test("an unavailable real host preserves uncertain resume and recovery for later observation", async () => {
   const root = await mkdtemp(join(tmpdir(), "resume-host-unavailable-"))

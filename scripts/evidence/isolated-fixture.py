@@ -22,9 +22,6 @@ def executable(name):
 
 
 def main():
-    if sys.argv[1:] in [['--owned-docker-probe'], ['--owned-docker-container'], ['--owned-docker-network'], ['--owned-docker-image'], ['--owned-docker-death'], ['--owned-docker-native'], ['--owned-docker-dagger'], ['--owned-docker-dagger-network']]:
-        arguments = [] if sys.argv[1] == '--owned-docker-probe' else ['--' + sys.argv[1].removeprefix('--owned-docker-')]
-        return subprocess.run([sys.executable, str(Path(__file__).with_name('owned-docker.py')), *arguments], check=False).returncode
     if len(sys.argv) < 2:
         raise SystemExit("Usage: isolated-fixture.py COMMAND [ARGS...]")
     os.umask(0o077)
@@ -45,21 +42,6 @@ def main():
         for name in ['publish.mjs', 'publication.mjs', 'publication-unicode.json', 'result.py', 'casefold.json']:
             data = subprocess.check_output(['git', 'show', 'f74e0505155bc32aa2cedef00ba8b08ef1b90007:deploy/sandbox/' + name], cwd=repo, timeout=10)
             (target / name).write_bytes(data)
-    capture = os.environ.get('WORKFLOWD_FIXTURE_NATIVE_CAPTURE')
-    if capture:
-        source = Path(capture).resolve(strict=True)
-        owned = source.parent.parent if source.parent.name == 'runtime' else source.parent
-        if owned.parent != Path('/tmp/opencode') or not owned.name.startswith('wfd-owned-docker-') or source.name != 'native-runtime':
-            raise SystemExit('Expected an owned native capture fixture')
-        target = evidence / 'native-capture'
-        target.mkdir(mode=0o700)
-        for name in ['receipt.json', 'private-canaries.json', 'result/result.json', 'result/result.bundle', 'native/source.bundle']:
-            original = source / name
-            if original.is_symlink() or not original.is_file() or original.stat().st_size > 128 * 1048576:
-                raise SystemExit('Native fixture input refused')
-            destination = target / name
-            destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-            shutil.copyfile(original, destination)
     binaries = {name: executable(name) for name in ["bun", "node", "noscope"]}
     for name, expected in {
         'codex': 'f1cd7fa4ac866c724122f173d408a95385257cbcc9ac5ce5ddba42669c74ba97',
@@ -83,8 +65,6 @@ def main():
     fixture_env = []
     if pinned_publisher:
         fixture_env.extend(['--setenv', 'WORKFLOWD_FIXTURE_PINNED_PUBLISHER', '/tmp/opencode/evidence/pinned-publisher'])
-    if capture:
-        fixture_env.extend(['--setenv', 'WORKFLOWD_FIXTURE_NATIVE_CAPTURE', '/tmp/opencode/evidence/native-capture'])
     for name, path in binaries.items():
         # Individual executable files only, never a user's package/config directory.
         binds.extend(["--ro-bind", path, "/opt/wfd-fixture/bin/" + name])
