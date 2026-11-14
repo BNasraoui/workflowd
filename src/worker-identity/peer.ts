@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs"
-import { chmod, chown } from "node:fs/promises"
-import { createServer } from "node:net"
+import { chmod, chown, lstat, rm } from "node:fs/promises"
+import { createConnection, createServer } from "node:net"
 import { Schema } from "effect"
 import type { Socket } from "node:net"
 import { dlopen, FFIType, ptr } from "bun:ffi"
@@ -57,6 +57,35 @@ export function loadRunSocketPolicy(
   return { controllerUid, agentUid, groupGid }
 }
 
+/** Why the socket at the path must stay, or undefined when the kernel refuses a connect. */
+function liveSocketReason(path: string) {
+  return new Promise<string | undefined>((resolve) => {
+    const probe = createConnection(path)
+    probe.once("connect", () => {
+      probe.destroy()
+      resolve("is held by a live process")
+    })
+    probe.once("error", (error: Error & { code?: string }) => {
+      probe.destroy()
+      resolve(error.code === "ECONNREFUSED" ? undefined : `could not be probed (${error.code})`)
+    })
+  })
+}
+
+/**
+ * A daemon stopped by SIGKILL leaves its socket file with no listener, and bind then fails
+ * with EADDRINUSE. Remove only such a file: a socket that refuses a connect. A live listener
+ * or any other kind of entry (file, directory, symbolic link) refuses the start and stays.
+ */
+async function claimSocketPath(path: string) {
+  // An unreadable path is left to bind, which reports its own error.
+  const entry = await lstat(path).catch(() => null)
+  if (entry === null) return
+  const reason = entry.isSocket() ? await liveSocketReason(path) : "exists and is not a socket"
+  if (reason !== undefined) throw new Error(`${path} ${reason}; refusing to remove it`)
+  await rm(path, { force: true })
+}
+
 /** Linux only: fail closed on hosts without a kernel-supplied peer PID. */
 export async function serveRunSocket(
   path: string,
@@ -64,6 +93,7 @@ export async function serveRunSocket(
   policy?: RunSocketPolicy,
 ) {
   if (process.platform !== "linux") throw new Error("Run sockets require Linux SO_PEERCRED")
+  await claimSocketPath(path)
   const libc = dlopen("libc.so.6", {
     getsockopt: {
       args: [FFIType.i32, FFIType.i32, FFIType.i32, FFIType.ptr, FFIType.ptr],

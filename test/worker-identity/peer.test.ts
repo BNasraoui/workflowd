@@ -1,9 +1,10 @@
 import { expect, test } from "bun:test"
-import { mkdtemp, rm } from "node:fs/promises"
+import { lstat, mkdir, mkdtemp, rm, symlink } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { requestRunSocket } from "../../src/worker-identity/socket-client"
 import { RunPeers, serveRunSocket } from "../../src/worker-identity/peer"
+import { leaveStaleSocket } from "../helpers/stale-socket"
 
 test("socket authenticates two concurrent process trees and denies outsiders", async () => {
   const directory = await mkdtemp(join(tmpdir(), "workflowd-peers-"))
@@ -81,4 +82,43 @@ test("socket UID policy denies a foreign UID even with filesystem access", async
     await server.close()
     await rm(directory, { recursive: true, force: true })
   }
+})
+
+const refusesAndKeeps = async (
+  prepare: (directory: string, socket: string) => Promise<void>,
+  message: string,
+  kept: (socket: string) => Promise<boolean>,
+) => {
+  const directory = await mkdtemp(join(tmpdir(), "workflowd-peer-claim-"))
+  const socket = join(directory, "broker.sock")
+  try {
+    await prepare(directory, socket)
+    await expect(serveRunSocket(socket, async () => undefined)).rejects.toThrow(
+      `${socket} ${message}`,
+    )
+    expect(await kept(socket)).toBe(true)
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+}
+
+test("socket start refuses a directory at its path and keeps it", async () => {
+  await refusesAndKeeps(
+    (_, socket) => mkdir(socket),
+    "exists and is not a socket",
+    async (socket) => (await lstat(socket)).isDirectory(),
+  )
+})
+
+test("socket start refuses a symbolic link to a stale socket and keeps both", async () => {
+  await refusesAndKeeps(
+    async (directory, socket) => {
+      await leaveStaleSocket(join(directory, "target.sock"))
+      await symlink(join(directory, "target.sock"), socket)
+    },
+    "exists and is not a socket",
+    async (socket) =>
+      (await lstat(socket)).isSymbolicLink() &&
+      (await lstat(join(socket, "../target.sock"))).isSocket(),
+  )
 })
