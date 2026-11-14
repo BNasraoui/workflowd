@@ -4,4 +4,10 @@ export function disposableSsh(
   port?: number,
   diagnosticFile?: string,
   login?: string,
-): Promise<{ root: string; key: string; args: string[]; close: () => Promise<void> }>
+): Promise<{
+  root: string
+  key: string
+  args: string[]
+  close: () => Promise<void>
+  socketPath: (name: string) => string
+}>

@@ -1,15 +1,15 @@
 import { expect, test } from "bun:test"
 import { mkdtemp, rm } from "node:fs/promises"
+import { tmpdir } from "node:os"
 import { connect } from "node:net"
 import { serveBootstrap, takeJobIdentity } from "../../deploy/sandbox/bootstrap.mjs"
 import { disposableSsh } from "./fixtures/ssh.mjs"
 import { readlink } from "node:fs/promises"
-import { resolve } from "node:path"
-import { exchangeJobProof } from "../../src/sandbox/bootstrap"
+import { join } from "node:path"
 import { fixtureExecutable } from "../helpers/fixture-executable.mjs"
 
 test("bootstrap proves once before activation and keeps proof off public output", async () => {
-  const root = await mkdtemp(`${process.env.TMPDIR}/wfd-bootstrap-`)
+  const root = await mkdtemp(join(tmpdir(), "wfd-bootstrap-"))
   let activated = false
   let issued = 0
   const server = await serveBootstrap({
@@ -53,7 +53,7 @@ test("bootstrap proves once before activation and keeps proof off public output"
 })
 
 test("helper timeout cannot activate late proof work", async () => {
-  const root = await mkdtemp(`${process.env.TMPDIR}/wfd-bootstrap-timeout-`)
+  const root = await mkdtemp(join(tmpdir(), "wfd-bootstrap-timeout-"))
   const entered = Promise.withResolvers<void>()
   const proceed = Promise.withResolvers<string>()
   let activated = 0
@@ -89,49 +89,31 @@ test("helper timeout cannot activate late proof work", async () => {
   }
 })
 
-test("private bootstrap waits for asynchronous admission before ending its input", async () => {
-  // A relative socket path keeps a deep checkout under the 107-byte sun_path bound,
-  // which Node's connect otherwise fails without output.
-  const ssh = await disposableSsh(
-    (root) =>
-      `cd ${root} && exec ${fixtureExecutable("node")} ${resolve("test/sandbox/fixtures/capability-job.mjs")} attach .`,
-  )
-  let activated = false
-  const server = await serveBootstrap({
-    directory: ssh.root,
-    identity: { peerId: "fixture", agentImage: "fixture", workflowSha: "fixture" },
-    issue: async () => "fixture-signed-token",
-    activate: async () => {
-      await Bun.sleep(50)
-      activated = true
-    },
-    timeoutMs: 1000,
-  })
-  const completed = server.completed.then(
-    () => "accepted",
-    () => "refused",
-  )
+test("capability job fixture fails visibly when its socket is absent", async () => {
+  const root = await mkdtemp(join(tmpdir(), "wfd-capability-job-"))
   try {
-    await exchangeJobProof(
-      [...ssh.args, "exec /usr/local/bin/runner-control bootstrap"],
-      { audience: "workflowd:fixture", peerId: "fixture" },
-      async (proof) => {
-        expect(proof).toEqual({
-          token: "fixture-signed-token",
-          peerId: "fixture",
-          agentImage: "fixture",
-          workflowSha: "fixture",
-        })
-        expect(activated).toBe(false)
-        return { mode: "remote-tools" }
+    const child = Bun.spawn(
+      [fixtureExecutable("node"), "test/sandbox/fixtures/capability-job.mjs", "attach", root],
+      {
+        env: {
+          PATH: "/usr/bin:/bin",
+          SSH_ORIGINAL_COMMAND: "exec /usr/local/bin/runner-control bootstrap",
+        },
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
       },
-      AbortSignal.timeout(2000),
     )
-    expect(await completed).toBe("accepted")
-    expect(activated).toBe(true)
+    const [exitCode, stdout, stderr] = await Promise.all([
+      child.exited,
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+    ])
+    expect(exitCode).not.toBe(0)
+    expect(stdout).toBe("")
+    expect(stderr).toContain("capability fixture connect failed")
   } finally {
-    server.close()
-    await ssh.close()
+    await rm(root, { recursive: true, force: true })
   }
 })
 

@@ -63,8 +63,8 @@ test("a late MCP cancellation leaves the audited bridge available for the next c
     for (const line of lines) expect(line.startsWith("workflowd.audit ")).toBe(true)
     expect(lines.map((line): unknown => JSON.parse(line.slice("workflowd.audit ".length)))).toEqual(
       [
-        { sequence: 1, outcome: "ok" },
-        { sequence: 2, outcome: "ok" },
+        { sequence: 1, tool: "environment_list", outcome: "ok" },
+        { sequence: 2, tool: "environment_list", outcome: "ok" },
       ],
     )
     const records = await Promise.all(

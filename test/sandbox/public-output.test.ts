@@ -2,7 +2,8 @@ import { expect, test } from "bun:test"
 import { Schema } from "effect"
 import { serializePublicStatus } from "../../src/sandbox/public-output"
 import { publicBootstrapConfiguration } from "../../deploy/sandbox/public-output.mjs"
-import { resolve } from "node:path"
+import { join, resolve } from "node:path"
+import { tmpdir } from "node:os"
 import { mkdtemp, readdir, rm, readFile, stat } from "node:fs/promises"
 
 const publicReceipt = Schema.Struct({
@@ -17,7 +18,7 @@ const validateReceipt = (text: string) =>
   Schema.decodeUnknownSync(publicReceipt, { onExcessProperty: "error" })(JSON.parse(text))
 
 test("Bun, Node and compiled imports stay inert with CLI-shaped arguments and preserve caller exit", async () => {
-  const root = await mkdtemp(`${process.env.TMPDIR}/wfd-public-import-`)
+  const root = await mkdtemp(join(tmpdir(), "wfd-public-import-"))
   try {
     const entry = `${root}/import.mjs`
     const binary = `${root}/compiled`
@@ -60,7 +61,7 @@ process.exitCode = 23;`,
 }, 30000)
 
 test("Node direct CLI retains the prescribed public receipt and owner-only private capture", async () => {
-  const root = await mkdtemp(`${process.env.TMPDIR}/wfd-node-public-`)
+  const root = await mkdtemp(join(tmpdir(), "wfd-node-public-"))
   try {
     const child = Bun.spawn(
       [
@@ -154,7 +155,7 @@ test("controlled receipts exclude arbitrary raw, encoded, chunked and multiline 
 })
 
 test("cancelled capture retains bounded private diagnostics and emits one fixed public receipt", async () => {
-  const root = await mkdtemp(`${process.env.TMPDIR}/wfd-cancel-public-`)
+  const root = await mkdtemp(join(tmpdir(), "wfd-cancel-public-"))
   const started = `${root}/started`
   const child = Bun.spawn(
     [
@@ -232,7 +233,7 @@ test("R2: exactly two trusted bootstrap fields are public, bounded and single-li
 })
 
 test("setup, error and cleanup captures cannot create Actions command files or print child diagnostics", async () => {
-  const root = await mkdtemp(`${process.env.TMPDIR}/wfd-public-`)
+  const root = await mkdtemp(join(tmpdir(), "wfd-public-"))
   try {
     for (const stage of ["setup", "cleanup"])
       for (const exit of [0, 1]) {

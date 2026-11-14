@@ -19,6 +19,13 @@ if (operation === "runner") {
   }[process.env.SSH_ORIGINAL_COMMAND]
   if (!file) throw new Error("fixture command refused")
   const socket = connect(`${root}/${file}`)
+  // A failed connect must not look like an empty, successful session.
+  const refused = (error) => {
+    process.stderr.write(`capability fixture connect failed: ${error.message}\n`)
+    process.exit(1)
+  }
+  socket.once("error", refused)
+  socket.once("connect", () => socket.off("error", refused))
   pipeline(process.stdin, socket, (error) => {
     if (error) socket.destroy()
   })

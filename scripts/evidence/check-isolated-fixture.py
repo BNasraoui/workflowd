@@ -36,8 +36,7 @@ def main():
         ]
         environment = {**os.environ, "WORKFLOWD_FIXTURE_EVIDENCE": str(evidence / "invocations")}
         # Minimal copies deliberately contain neither Git history nor native fixtures.
-        for key in ["WORKFLOWD_FIXTURE_PINNED_PUBLISHER", "WORKFLOWD_FIXTURE_NATIVE_CAPTURE"]:
-            environment.pop(key, None)
+        environment.pop("WORKFLOWD_FIXTURE_PINNED_PUBLISHER", None)
         with (evidence / (case + ".log")).open("w") as log:
             result = subprocess.run(command, env=environment, stdout=log, stderr=log, timeout=220)
         passed = result.returncode == 0 if case != "symlink" else result.returncode != 0

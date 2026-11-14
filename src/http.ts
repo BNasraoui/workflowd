@@ -147,20 +147,8 @@ function routeApplicationRequest(
       options.maxBodyBytes ?? 1_048_576,
     )
   }
-  const agentRunCancel = /^\/workflows\/agent-runs\/(agent-run-[a-zA-Z0-9_-]+)$/.exec(pathname)
-  const nativeControl = /^\/workflows\/agent-runs\/(agent-run-[a-zA-Z0-9_-]+)\/native$/.exec(
-    pathname,
-  )
-  if (nativeControl && request.method === "POST" && options.agentRuns?.nativeControl) {
-    return handleAgentRunNativeControl(
-      request,
-      { ...options.agentRuns, nativeControl: options.agentRuns.nativeControl },
-      nativeControl[1]!,
-    )
-  }
-  if (agentRunCancel !== null && request.method === "DELETE" && options.agentRuns !== undefined) {
-    return handleAgentRunCancel(request, options.agentRuns, agentRunCancel[1]!, options.now)
-  }
+  const agentRunResponse = routeAgentRunRequest(request, pathname, options)
+  if (agentRunResponse !== undefined) return agentRunResponse
   if (
     pathname === "/workflows/agent-runs" &&
     request.method === "POST" &&
@@ -183,6 +171,29 @@ function routeApplicationRequest(
   const testJobResponse = routeTestJobRequest(request, pathname, options)
   if (testJobResponse !== undefined) return testJobResponse
   return Effect.succeed(Response.json({ error: "not found" }, { status: 404 }))
+}
+
+/** Routes one agent run's cancel and native-control requests. */
+function routeAgentRunRequest(
+  request: Request,
+  pathname: string,
+  options: WebhookHandlerOptions,
+): Effect.Effect<Response, never, WorkflowStorePort | WorkSignalPort> | undefined {
+  const agentRuns = options.agentRuns
+  if (agentRuns === undefined) return undefined
+  const nativeControl = /^\/workflows\/agent-runs\/(agent-run-[a-zA-Z0-9_-]+)\/native$/.exec(
+    pathname,
+  )
+  if (nativeControl && request.method === "POST" && agentRuns.nativeControl)
+    return handleAgentRunNativeControl(
+      request,
+      { ...agentRuns, nativeControl: agentRuns.nativeControl },
+      nativeControl[1]!,
+    )
+  const agentRunCancel = /^\/workflows\/agent-runs\/(agent-run-[a-zA-Z0-9_-]+)$/.exec(pathname)
+  if (agentRunCancel !== null && request.method === "DELETE")
+    return handleAgentRunCancel(request, agentRuns, agentRunCancel[1]!, options.now)
+  return undefined
 }
 
 /** Bounded authenticated native-control body for one agent run. */

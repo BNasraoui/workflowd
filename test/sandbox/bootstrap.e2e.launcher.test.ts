@@ -47,7 +47,8 @@ for (const race of [
   test(`signed private SSH/HTTP2/noscope/SQLite acquisition; bind race=${race}`, async () => {
     const node = fixtureExecutable("node")
     const ssh = await disposableSsh(
-      (root) => `${node} ${resolve("test/sandbox/fixtures/capability-job.mjs")} attach ${root}`,
+      (root) =>
+        `cd ${root} && exec ${node} ${resolve("test/sandbox/fixtures/capability-job.mjs")} attach .`,
       "100.64.0.1",
       22,
     )
@@ -188,8 +189,9 @@ for (const race of [
         activate: async (grant) => {
           activated++
           const child = Bun.spawn(
-            [node, resolve("test/sandbox/fixtures/capability-job.mjs"), "runner", ssh.root],
+            [node, resolve("test/sandbox/fixtures/capability-job.mjs"), "runner", "."],
             {
+              cwd: ssh.root,
               env: { PATH: "/usr/bin:/bin", HOME: root },
               stdin: new Blob([JSON.stringify(grant)]),
               stdout: "pipe",
@@ -418,7 +420,7 @@ for (const race of [
           }
           const request = (sentinel: string) =>
             fetch("http://capability.invalid/v1/messages", {
-              unix: join(ssh.root, "gateway.sock"),
+              unix: ssh.socketPath("gateway.sock"),
               method: "POST",
               body: native,
               headers: {

@@ -281,7 +281,7 @@ else:
             while str(data["emittedThrough"] + 1) in data["records"]:
                 record = data["records"][str(data["emittedThrough"] + 1)]
                 validate(record)
-                print("workflowd.audit " + json.dumps({"sequence": record["sequence"], "outcome": record["outcome"]}, separators=(",", ":")), flush=True)
+                print("workflowd.audit " + json.dumps({"sequence": record["sequence"], "tool": record["tool"], "outcome": record["outcome"]}, separators=(",", ":")), flush=True)
                 data["emittedThrough"] += 1
                 changed = True
             if changed: save(data)

@@ -570,8 +570,12 @@ export const makeSandboxLeaseService = (
         yield* inventory(lease.policy)
         yield* discover(lease)
       }).pipe(Effect.result)
-      // A failed inventory is uncertainty, not permission to abandon known IDs.
-      const cleaned = yield* cleanup(lease.policy).pipe(Effect.result)
+      // Native inventory is shared and may stay unconfirmed; that uncertainty is not
+      // permission to abandon known IDs. Other policies clean up only after inventory.
+      const cleaned =
+        discovery._tag === "Success" || lease.policy.privateBootstrap?.mode === "actions-native"
+          ? yield* cleanup(lease.policy).pipe(Effect.result)
+          : discovery
       for (const result of [discovery, cleaned])
         if (result._tag === "Failure") {
           yield* store.recordError(runId, result.failure)
@@ -748,7 +752,11 @@ export const makeSandboxLeaseService = (
           (effect) => (nativePolicy ? effect.pipe(Effect.timeout("60 seconds")) : effect),
           Effect.result,
         )
-        const cleaned = yield* cleanup(policy).pipe(Effect.result)
+        // Only the shared native inventory cleans known IDs after a failed inventory.
+        const cleaned =
+          result._tag === "Success" || nativePolicy
+            ? yield* cleanup(policy).pipe(Effect.result)
+            : result
         if (result._tag === "Success" && cleaned._tag === "Success")
           yield* store.clearPolicyErrors(policy)
         if (result._tag === "Failure") failed ??= result.failure

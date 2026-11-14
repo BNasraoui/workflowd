@@ -78,8 +78,8 @@ test("OpenCode keeps its bridge after a parallel Code Mode error cancels a runni
     for (const line of lines) expect(line.startsWith("workflowd.audit ")).toBe(true)
     expect(lines.map((line): unknown => JSON.parse(line.slice("workflowd.audit ".length)))).toEqual(
       [
-        { sequence: 1, outcome: "ok" },
-        { sequence: 2, outcome: "ok" },
+        { sequence: 1, tool: "environment_create", outcome: "ok" },
+        { sequence: 2, tool: "environment_list", outcome: "ok" },
       ],
     )
     const records: unknown[] = await Promise.all(

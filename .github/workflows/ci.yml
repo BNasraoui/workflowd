@@ -434,6 +434,14 @@ jobs:
           node deploy/sandbox/public-output.mjs test -- python3 scripts/evidence/check-isolated-fixture.py
           node deploy/sandbox/public-output.mjs test -- python3 scripts/evidence/isolated-fixture.py \
             bun scripts/check-capability-security.ts --suite "$SUITE" --upstream fixture --evidence /tmp/opencode/evidence/security
+      - name: Require a launcher coverage record
+        run: |
+          # The suite's merge holds repository-relative paths and counts only.
+          set -euo pipefail
+          reports=(/tmp/opencode/wfd-isolated-*/security/lcov.info)
+          test "${#reports[@]}" -eq 1
+          bun scripts/merge-lcov.ts "$RUNNER_TEMP/launcher-lcov.info" "${reports[0]}"
+          test -s "$RUNNER_TEMP/launcher-lcov.info"
 
   aislop:
     name: AI slop (advisory)

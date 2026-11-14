@@ -29,7 +29,7 @@ async function expectHeldAudit(
   expect(lines).toHaveLength(expected.length)
   for (const line of lines) expect(line.startsWith("workflowd.audit ")).toBe(true)
   expect(lines.map((line): unknown => JSON.parse(line.slice("workflowd.audit ".length)))).toEqual(
-    expected.map(({ outcome }, index) => ({ sequence: index + 1, outcome })),
+    expected.map(({ tool, outcome }, index) => ({ sequence: index + 1, tool, outcome })),
   )
   const records: unknown[] = await Promise.all(
     expected.map((_, index) =>

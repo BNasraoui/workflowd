@@ -1,7 +1,7 @@
 import { spawn, execFileSync } from "node:child_process"
 import { mkdir, mkdtemp, readFile, readlink, writeFile, rm } from "node:fs/promises"
 import { once } from "node:events"
-import { resolve } from "node:path"
+import { relative, resolve } from "node:path"
 import { fixtureExecutable } from "../../helpers/fixture-executable.mjs"
 
 /** Fails rather than opening any fixture listener in the host network namespace. */
@@ -27,6 +27,13 @@ export async function disposableSsh(
       { env, encoding: "utf8" },
     )
   if (!/^[a-z_][a-z0-9_-]*$/.test(user)) throw new Error("fixture user unavailable")
+  // The root stays in the checkout (StrictModes refuses the launcher's /tmp), so socket
+  // paths are relative to the checkout to keep within the 107-byte sun_path bound.
+  const socketPath = (name) => {
+    const path = relative(process.cwd(), `${root}/${name}`)
+    if (Buffer.byteLength(path) > 107) throw new Error("fixture socket path exceeds sun_path")
+    return path
+  }
   let sshd
   let diagnostic = ""
   const close = async () => {
@@ -120,7 +127,7 @@ export async function disposableSsh(
       String(port),
       `${user}@${address}`,
     ]
-    return { root, key, args, close }
+    return { root, key, args, close, socketPath }
   } catch (error) {
     await close()
     throw error
