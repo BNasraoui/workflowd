@@ -36,5 +36,3 @@ result = subprocess.run(['sudo', '-n', 'tailscale', 'up', '--timeout=60s', '--ss
 if result.returncode:
     raise SystemExit("Tailscale enrollment failed")
 PY
-# Retain a route inventory in the job log; the live verifier validates it again.
-ip route show table 52

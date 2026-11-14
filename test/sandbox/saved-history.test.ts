@@ -22,6 +22,7 @@ import {
 } from "../../src/sandbox/migration"
 import { sandboxGithubFixture, sandboxPublicationFixture } from "./harness"
 import history from "./fixtures/saved-history.json"
+import capabilityPolicy from "./fixtures/saved-policy-capability-v1.json"
 
 // Frozen values from the named git revisions, including pre-merge development shapes.
 // Never build these policies by spreading today's config or relaxing its schema.
@@ -141,8 +142,9 @@ for (const { commit, metadata, receipt } of history.publications) {
 
 test("current saved policy round-trips every field; schema changes require a new frozen fixture", async () => {
   // Adding, removing or changing a policy field requires an explicit persistence decision.
-  expect(Schema.toJsonSchemaDocument(SandboxPolicy)).toMatchSnapshot()
-  const policy = { ...current, toolingSha: "c".repeat(40) }
+  // Preserve the pre-capability snapshot and historical policy bytes as separate evidence.
+  expect(Schema.toJsonSchemaDocument(SandboxPolicy)).toMatchSnapshot("capability-v1")
+  const policy = Schema.decodeUnknownSync(SandboxPolicy)(capabilityPolicy)
   expectEveryField(SandboxPolicy.ast, policy, "policy")
   expectEveryField(ResultMetadata.ast, validMetadata, "metadata")
   expectEveryField(

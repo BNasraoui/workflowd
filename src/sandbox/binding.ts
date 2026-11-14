@@ -111,29 +111,32 @@ export async function saveSandboxFile(
 ) {
   const temporary = join(directory, `${name}-${randomBytes(8).toString("hex")}`)
   const file = await open(temporary, "wx", 0o600)
-  try {
-    await file.writeFile(value)
-    await file.sync()
-  } finally {
-    await file.close()
-  }
   let created = true
-  if (exclusive) {
+  try {
     try {
-      await link(temporary, join(directory, name))
-    } catch (error) {
-      if (!(
-        typeof error === "object" &&
-        error !== null &&
-        "code" in error &&
-        error.code === "EEXIST"
-      ))
-        throw error
-      created = false
+      await file.writeFile(value)
+      await file.sync()
     } finally {
-      await rm(temporary, { force: true })
+      await file.close()
     }
-  } else await rename(temporary, join(directory, name))
+    if (exclusive) {
+      try {
+        await link(temporary, join(directory, name))
+      } catch (error) {
+        if (!(
+          typeof error === "object" &&
+          error !== null &&
+          "code" in error &&
+          error.code === "EEXIST"
+        ))
+          throw error
+        created = false
+      }
+    } else await rename(temporary, join(directory, name))
+  } finally {
+    // Only a successful wx open owns this path; never remove the published target.
+    await rm(temporary, { force: true })
+  }
   const parent = await open(directory, "r")
   try {
     await parent.sync()

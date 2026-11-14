@@ -229,6 +229,8 @@ for (const reference of [
   "v1",
   "${{ github.sha }}",
   "a".repeat(39),
+  "a".repeat(40),
+  "f74e0505155bc32aa2cedef00ba8b08ef1b90008",
   "./trusted/.github/actions/agent-publish",
 ]) {
   test(`publisher refuses unpinned action: ${reference}`, async () => {

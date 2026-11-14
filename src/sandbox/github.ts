@@ -295,42 +295,60 @@ export const makeSandboxGithub = (
         const client = yield* scoped(policy)
         const owned: OwnedLeaseRun[] = []
         const seen = new Set<number>()
-        let total: number | undefined
-        for (let number = 1; number <= 10; number++) {
-          const response = yield* request(
-            client,
-            "GET",
-            `/repos/${policy.repository}/actions/runs`,
-            {
-              head_sha: policy.workflowSha,
-              event: "push",
-              per_page: 100,
-              page: number,
-            },
-          )
-          if (response.status !== 200) return yield* Effect.fail(githubFailure(response))
-          const page = yield* Schema.decodeUnknownEffect(
-            Schema.Struct({ total_count: Schema.Int, workflow_runs: Schema.Array(Run) }),
-          )(response.data)
-          total ??= page.total_count
-          if (
-            total < 0 ||
-            total > 1000 ||
-            total !== page.total_count ||
-            page.workflow_runs.length !== Math.min(100, total - seen.size)
-          )
-            return yield* Effect.fail(githubFailure())
-          for (const run of page.workflow_runs) {
-            if (seen.has(run.id)) return yield* Effect.fail(githubFailure())
-            seen.add(run.id)
-            const leaseId = /^workflowd\/leases\/([a-zA-Z0-9-]{1,80})$/.exec(run.head_branch)?.[1]
-            if (leaseId === undefined) continue
-            const validated = yield* Effect.result(validateRun(policy, leaseId, run))
-            if (validated._tag === "Success") owned.push({ leaseId, run: validated.success })
+        // Native custody is driven by active statuses, never a bounded window of
+        // completed history. Exact saved IDs are reconciled separately even on failure.
+        const native = policy.privateBootstrap?.mode === "actions-native"
+        const statuses = native
+          ? ["queued", "in_progress", "waiting", "pending", "requested"]
+          : [undefined]
+        for (const status of statuses) {
+          let total: number | undefined
+          let complete = false
+          for (let number = 1; number <= 10; number++) {
+            const response = yield* request(
+              client,
+              "GET",
+              `/repos/${policy.repository}/actions/runs`,
+              {
+                head_sha: policy.workflowSha,
+                event: "push",
+                per_page: 100,
+                page: number,
+                ...(status === undefined ? {} : { status }),
+              },
+            )
+            if (response.status !== 200) return yield* Effect.fail(githubFailure(response))
+            const page = yield* Schema.decodeUnknownEffect(
+              Schema.Struct({ total_count: Schema.Int, workflow_runs: Schema.Array(Run) }),
+            )(response.data)
+            total ??= page.total_count
+            if (
+              page.total_count < 0 ||
+              page.total_count > 1000 ||
+              (!native && total !== page.total_count) ||
+              page.workflow_runs.length !==
+                Math.min(100, Math.max(0, page.total_count - (number - 1) * 100))
+            )
+              return yield* Effect.fail(githubFailure())
+            for (const run of page.workflow_runs) {
+              if (seen.has(run.id)) {
+                if (native) continue // Status transitions can repeat an ID between pages.
+                return yield* Effect.fail(githubFailure())
+              }
+              seen.add(run.id)
+              const leaseId = /^workflowd\/leases\/([a-zA-Z0-9-]{1,80})$/.exec(run.head_branch)?.[1]
+              if (leaseId === undefined) continue
+              const validated = yield* Effect.result(validateRun(policy, leaseId, run))
+              if (validated._tag === "Success") owned.push({ leaseId, run: validated.success })
+            }
+            if (number * 100 >= page.total_count) {
+              complete = true
+              break
+            }
           }
-          if (seen.size === total) return owned
+          if (!complete) return yield* Effect.fail(githubFailure())
         }
-        return yield* Effect.fail(githubFailure())
+        return owned
       }).pipe(
         Effect.timeout("60 seconds"),
         Effect.mapError((cause) => new SandboxError(sandboxDiagnostic("github.inventory", cause))),

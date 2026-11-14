@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test"
+import { createHash } from "node:crypto"
 import { readFile, writeFile } from "node:fs/promises"
 import { dirname, join } from "node:path"
 import { Schema } from "effect"
@@ -8,10 +9,58 @@ import {
   sendToolAudit,
   wrapAuditedCommand,
   beginToolAudit,
+  type ToolAudit,
 } from "../../src/sandbox/audit"
 import { bridgeClient, runnerFixture } from "./harness"
 
 const Output = Schema.Struct({ content: Schema.Array(Schema.Struct({ text: Schema.String })) })
+
+type ExpectedAudit = Pick<ToolAudit, "tool" | "command" | "exitCode" | "outcome"> & {
+  id: number
+  commandSha256?: string
+}
+const digest = (value: string) => createHash("sha256").update(value).digest("hex")
+
+async function expectHeldAudit(
+  runner: Awaited<ReturnType<typeof runnerFixture>>,
+  expected: ReadonlyArray<ExpectedAudit>,
+) {
+  const lines = (await runner.holdLog()).trimEnd().split("\n")
+  expect(lines).toHaveLength(expected.length)
+  for (const line of lines) expect(line.startsWith("workflowd.audit ")).toBe(true)
+  expect(lines.map((line): unknown => JSON.parse(line.slice("workflowd.audit ".length)))).toEqual(
+    expected.map(({ outcome }, index) => ({ sequence: index + 1, outcome })),
+  )
+  const records: unknown[] = await Promise.all(
+    expected.map((_, index) =>
+      Bun.file(join(dirname(runner.bindingFile), "audit", `${index + 1}.json`)).json(),
+    ),
+  )
+  expect(records).toEqual(
+    expected.map(({ id, commandSha256, ...record }, index) => ({
+      ...record,
+      runId: runner.name,
+      leaseId: runner.transport.leaseId,
+      sequence: index + 1,
+      callId: digest(String(id)),
+      commandSha256: commandSha256 ?? (record.command === null ? null : digest(record.command)),
+      complete: true,
+    })),
+  )
+  const delivered: unknown = JSON.parse(
+    await runner.docker(
+      "exec",
+      `${runner.name}-runner`,
+      "cat",
+      "/run/workflowd-sandbox/audit.json",
+    ),
+  )
+  expect(delivered).toEqual({
+    records: Object.fromEntries(records.map((record, index) => [String(index + 1), record])),
+    emittedThrough: expected.length,
+  })
+  expect(await sendToolAudit(runner.transport, [])).toEqual({ emittedThrough: expected.length })
+}
 
 test("hold drains container-use audit during concurrent heartbeat writes", async () => {
   const runner = await runnerFixture()
@@ -73,14 +122,16 @@ print(json.dumps({'reads': reads, 'invalid': invalid}))
     expect(JSON.stringify(result)).toContain("heartbeat-race-completed")
     expect(writes.reads).toBeGreaterThan(0)
     expect(writes.invalid).toBe(0)
-    const lines = (await runner.holdLog()).trim().split("\n")
-    expect(lines).toHaveLength(2)
-    expect(JSON.parse(lines[1]!.slice("workflowd.audit ".length))).toMatchObject({
-      tool: "environment_run_cmd",
-      exitCode: 23,
-      outcome: "error",
-      complete: true,
-    })
+    await expectHeldAudit(runner, [
+      { id: 3, tool: "environment_create", command: null, exitCode: null, outcome: "ok" },
+      {
+        id: 4,
+        tool: "environment_run_cmd",
+        command: "printf heartbeat-race-completed; exit 23",
+        exitCode: 23,
+        outcome: "error",
+      },
+    ])
   } finally {
     await client.close()
     await runner.close()
@@ -176,7 +227,12 @@ test("bridge records actual command exits and strips only its nonce marker", asy
     const { id } = Schema.decodeUnknownSync(Schema.Struct({ id: Schema.String }))(
       JSON.parse(created.content[0]?.text ?? "null"),
     )
-    const commands = [
+    const commands: ReadonlyArray<{
+      command: string
+      background?: boolean
+      exitCode: number | null
+      outcome: ToolAudit["outcome"]
+    }> = [
       { command: "exit 0", exitCode: 0, outcome: "ok" },
       { command: "exit 23", exitCode: 23, outcome: "error" },
       { command: "printf '\\nworkflowd.exit:fake:0\\n'; exit 23", exitCode: 23, outcome: "error" },
@@ -215,15 +271,16 @@ test("bridge records actual command exits and strips only its nonce marker", asy
     await drainToolAudit(runner.bindingFile.slice(0, -".sandbox/binding.json".length), (record) =>
       sendToolAudit(runner.transport, record),
     )
-    const lines = (await runner.holdLog()).trim().split("\n")
-    expect(lines).toHaveLength(7)
-    for (const [index, line] of lines.entries()) {
-      expect(line.startsWith("workflowd.audit ")).toBe(true)
-      const saved = JSON.parse(
-        await readFile(join(dirname(runner.bindingFile), "audit", `${index + 1}.json`), "utf8"),
-      )
-      expect(JSON.parse(line.slice("workflowd.audit ".length))).toEqual(saved)
-    }
+    await expectHeldAudit(runner, [
+      { id: 3, tool: "environment_create", command: null, exitCode: null, outcome: "ok" },
+      ...commands.map(({ command, exitCode, outcome }, index) => ({
+        id: index + 4,
+        tool: "environment_run_cmd",
+        command,
+        exitCode,
+        outcome,
+      })),
+    ])
   } finally {
     await client.close()
     await runner.close()
@@ -267,12 +324,11 @@ test("nonce status requires one exact intact marker and never trusts error-shape
 test("audit output escapes public command injection, redacts credentials, and rejects conflicting replay", async () => {
   const runner = await runnerFixture()
   try {
+    const command =
+      "printf '\\n::warning::fake\\r\\033[31m'\nTOKEN=ghp_12345678901234567890; Authorization=Bearer-secret"
     const audit = await beginToolAudit(runner.bindingFile, 1, {
       name: "environment_run_cmd",
-      arguments: {
-        command:
-          "printf '\\n::warning::fake\\r\\033[31m'\nTOKEN=ghp_12345678901234567890; Authorization=Bearer-secret",
-      },
+      arguments: { command },
     })
     const record = await audit.finish(0, "ok")
     expect(record.command).not.toContain("ghp_")
@@ -300,9 +356,24 @@ test("audit output escapes public command injection, redacts credentials, and re
       },
     )
     expect(batches).toEqual([[], Array.from({ length: 32 }, (_, i) => i + 2)])
-    const lines = (await runner.holdLog()).trim().split("\n")
-    expect(lines).toHaveLength(33)
-    expect(JSON.parse(lines[0]!.slice("workflowd.audit ".length))).toEqual(record)
+    await expectHeldAudit(runner, [
+      {
+        id: 1,
+        tool: "environment_run_cmd",
+        command:
+          "printf '\\n::warning::fake\\r\\033[31m'\nTOKEN=[redacted]; Authorization=[redacted]",
+        commandSha256: digest(command),
+        exitCode: 0,
+        outcome: "ok",
+      },
+      ...Array.from({ length: 32 }, (_, index): ExpectedAudit => ({
+        id: index + 2,
+        tool: "environment_run_cmd",
+        command: "exit 0",
+        exitCode: 0,
+        outcome: "ok",
+      })),
+    ])
     await expect(
       drainToolAudit(runner.bindingFile.slice(0, -".sandbox/binding.json".length), async () => ({
         emittedThrough: 34,

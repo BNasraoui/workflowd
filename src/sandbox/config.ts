@@ -1,6 +1,7 @@
 import { Schema } from "effect"
 import { safePublication } from "../../deploy/sandbox/publication.mjs"
 import skills from "../../deploy/sandbox/skills/catalog.json"
+import { publicBootstrapFields } from "../../deploy/sandbox/public-output.mjs"
 
 const PublicationCoAuthor = Schema.String.check(
   Schema.makeFilter(
@@ -25,7 +26,39 @@ export function publicationBody(marker: string, body: string): string {
 }
 
 const positiveId = Schema.Int.check(Schema.isGreaterThan(0))
+export const PrivateBootstrapPolicy = Schema.Struct({
+  repositoryOwnerId: positiveId,
+  mode: Schema.Literals(["remote-tools", "actions-native"]),
+})
+export const CapabilityGatewayConfig = Schema.Struct({
+  gitRead: Schema.optionalKey(Schema.Boolean),
+  native: Schema.optionalKey(
+    Schema.Struct({
+      protocol: Schema.Literals(["codex-chatgpt", "openai-chat"]),
+      models: Schema.Array(
+        Schema.Struct({
+          id: Schema.String.check(Schema.isPattern(/^[A-Za-z0-9_.-]{1,128}$/)),
+          efforts: Schema.Array(Schema.Literals(["low", "medium", "high", "xhigh"])).check(
+            Schema.isMinLength(1),
+            Schema.isMaxLength(4),
+          ),
+        }),
+      ).check(Schema.isMinLength(1), Schema.isMaxLength(32)),
+    }),
+  ),
+  nodeBinary: Schema.String.check(Schema.isPattern(/^\/[A-Za-z0-9/_.-]+$/)),
+  noscope: Schema.Struct({
+    binary: Schema.String.check(Schema.isPattern(/^\/[A-Za-z0-9/_.-]+$/)),
+    configHome: Schema.String.check(Schema.isPattern(/^\/[A-Za-z0-9/_.-]+$/)),
+  }),
+  providerId: Schema.NonEmptyString,
+  credentialRole: Schema.String.check(Schema.isPattern(/^[A-Za-z0-9_.-]{1,128}$/)),
+  maxStreams: Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 512 })),
+  maxStreamsPerRun: Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 4 })),
+})
+export type CapabilityGatewayConfig = typeof CapabilityGatewayConfig.Type
 export const SandboxPolicy = Schema.Struct({
+  privateBootstrap: Schema.optionalKey(PrivateBootstrapPolicy),
   alias: Schema.String.check(Schema.isPattern(/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$/)),
   repository: Schema.String.check(Schema.isPattern(/^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+$/)),
   repositoryId: positiveId,
@@ -45,8 +78,8 @@ export const SandboxPolicy = Schema.Struct({
       coAuthor: PublicationCoAuthor,
     }),
   ),
-  tailscaleClientId: Schema.NonEmptyString,
-  tailscaleAudience: Schema.NonEmptyString,
+  tailscaleClientId: Schema.String.check(Schema.isPattern(publicBootstrapFields.tailscaleClientId)),
+  tailscaleAudience: Schema.String.check(Schema.isPattern(publicBootstrapFields.tailscaleAudience)),
 })
 export type SandboxPolicy = typeof SandboxPolicy.Type
 

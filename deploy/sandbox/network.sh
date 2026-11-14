@@ -18,6 +18,10 @@ case "$1" in
         for destination in "$subnet" 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 100.64.0.0/10 169.254.0.0/16 168.63.129.16/32; do
           "$firewall" -w -A "$chain" -d "$destination" -j DROP
         done
+      else
+        for destination in ::1/128 fc00::/7 fe80::/10 ff00::/8; do
+          "$firewall" -w -A "$chain" -d "$destination" -j DROP
+        done
       fi
       "$firewall" -w -I DOCKER-USER 1 -i wfd-sandbox0 -j "$chain"
       # All local addresses, including eth0 and docker0, traverse INPUT.

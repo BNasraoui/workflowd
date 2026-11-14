@@ -53,13 +53,15 @@ esac
 test("hold starts with an empty OIDC request environment", async () => {
   const source = await Bun.file(`${root}/.github/workflows/agent-sandbox.yml`).text()
   const hold = source.slice(
-    source.indexOf("      - name: Hold the lease"),
+    source.indexOf("      - name: Hold the privately authenticated lease"),
     source.indexOf("      - name: Upload sealed result"),
   )
   expect(hold).toContain(
     "shell: /usr/bin/env -u ACTIONS_ID_TOKEN_REQUEST_TOKEN -u ACTIONS_ID_TOKEN_REQUEST_URL",
   )
-  expect(hold).toContain("run: exec /usr/local/bin/container-use hold")
+  expect(hold).toContain(
+    "run: exec node deploy/sandbox/public-output.mjs audit -- /usr/local/bin/container-use hold",
+  )
   expect(hold).toContain("env -u ACTIONS_ID_TOKEN_REQUEST_TOKEN -u ACTIONS_ID_TOKEN_REQUEST_URL")
   const directory = await mkdtemp(join(tmpdir(), "sandbox-hold-env-"))
   try {
@@ -181,18 +183,43 @@ test("release logs out even when container cleanup fails and preserves the failu
     .map((line) => line.slice(10))
     .join("\n")
   if (!script) throw new Error("Missing release script")
+  const cleanup = script.match(/cleanup -- bash -c '([\s\S]*)'\s*$/)?.[1]
+  if (!cleanup) throw new Error("Missing captured cleanup command")
   const directory = await mkdtemp(join(tmpdir(), "sandbox-release-"))
   try {
-    await writeFile(join(directory, "bash"), "#!/bin/sh\nexit 23\n", { mode: 0o755 })
+    await writeFile(
+      join(directory, "bash"),
+      '#!/bin/sh\nif [ "$1" = -c ]; then exec /bin/bash "$@"; fi\nexit 23\n',
+      { mode: 0o755 },
+    )
     await writeFile(join(directory, "sudo"), '#!/bin/sh\nprintf "%s\\n" "$*" >> "$CALLS"\n', {
       mode: 0o755,
     })
-    const child = Bun.spawn(["/bin/bash", "-e", "-c", script], {
-      env: { PATH: `${directory}:/usr/bin:/bin`, CALLS: join(directory, "calls") },
+    const env = { PATH: `${directory}:${process.env.PATH}`, CALLS: join(directory, "calls") }
+    const child = Bun.spawn(["/bin/bash", "-e", "-c", cleanup], {
+      env,
       stdout: "pipe",
       stderr: "pipe",
     })
     expect(await child.exited).toBe(23)
+    expect(await Bun.file(join(directory, "calls")).text()).toBe(
+      "tailscale logout\nsystemctl stop workflowd-tailscaled\n",
+    )
+    await writeFile(join(directory, "calls"), "")
+    const captured = Bun.spawn(["/bin/bash", "-e", "-c", script], {
+      env,
+      stdout: "pipe",
+      stderr: "pipe",
+    })
+    expect(await captured.exited).toBe(1)
+    expect(JSON.parse(await new Response(captured.stdout).text())).toMatchObject({
+      version: 1,
+      stage: "cleanup",
+      outcome: "failed",
+      reason: "unavailable",
+      count: 0,
+    })
+    expect(await new Response(captured.stderr).text()).toBe("")
     expect(await Bun.file(join(directory, "calls")).text()).toBe(
       "tailscale logout\nsystemctl stop workflowd-tailscaled\n",
     )

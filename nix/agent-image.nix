@@ -1,6 +1,28 @@
 { pkgs }:
 let
   skills = import ./agent-skills.nix { inherit pkgs; };
+  claudeBinary = pkgs.fetchurl {
+    url = "https://storage.googleapis.com/claude-code-dist-86c565f3-f756-42ad-8dfa-d59b1c096819/claude-code-releases/2.1.301/linux-x64/claude";
+    hash = "sha256-vBqtmYLHtZx9iJ/5JZXWHPRuCm6uB0y1UdkyqYm80iI=";
+  };
+  codexArchive = pkgs.fetchurl {
+    url = "https://registry.npmjs.org/@openai/codex/-/codex-0.159.1-linux-x64.tgz";
+    sha256 = "9d6476abf421afe566c7afade3bb3c4aa1586c6f673c6a9e346b625e6b19561f";
+  };
+  openCodeArchive = pkgs.fetchurl {
+    url = "https://registry.npmjs.org/@opencode-ai/cli-linux-x64/-/cli-linux-x64-0.0.0-beta-19242.tgz";
+    sha256 = "72fda4bcc37d1ceb4d743d5d00e793a0b3a9f52452daea41f09fcf49f65d6e94";
+  };
+  native = pkgs.runCommand "workflowd-native-claude-2.1.301" {} ''
+    mkdir -p $out/bin $out/opt/workflowd
+    cp ${claudeBinary} $out/bin/claude
+    chmod 0555 $out/bin/claude
+    cp ${../deploy/sandbox/claude-interactive.py} $out/opt/workflowd/claude-interactive.py
+    cp ${../deploy/sandbox/native-client.py} $out/opt/workflowd/native-client.py
+    ${pkgs.gnutar}/bin/tar -xOf ${codexArchive} package/vendor/x86_64-unknown-linux-musl/bin/codex > $out/bin/codex
+    ${pkgs.gnutar}/bin/tar -xOf ${openCodeArchive} package/bin/opencode2 > $out/bin/opencode2
+    chmod 0555 $out/bin/codex $out/bin/opencode2
+  '';
   tools = pkgs.buildEnv {
     name = "agent-tools";
     paths = with pkgs; [
@@ -17,7 +39,7 @@ pkgs.dockerTools.streamLayeredImage {
   name = "workflowd-agent-base";
   tag = "local";
   created = "1970-01-01T00:00:01Z";
-  contents = [ tools pkgs.nix-ld skills ];
+  contents = [ tools pkgs.nix-ld skills native ];
   # Keep native Dagger snapshotters from copying a long chain of tiny layers.
   maxLayers = 20;
   extraCommands = ''

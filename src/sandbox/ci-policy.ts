@@ -1,6 +1,7 @@
 import { readdir } from "node:fs/promises"
 import { createHash } from "node:crypto"
 import { Schema } from "effect"
+import { approvedPublisher } from "./publisher-contract"
 
 const ObjectValue = Schema.Record(Schema.String, Schema.Json)
 const object = (value: unknown) => Schema.decodeUnknownSync(ObjectValue)(value)
@@ -153,13 +154,10 @@ function assertPublishIsolation(
         const step = object(value)
         const inputs = object(step.with ?? {})
         if (
-          typeof step.uses !== "string" ||
-          !/^BNasraoui\/workflowd\/\.github\/actions\/agent-publish@[a-f0-9]{40}$/.test(
-            step.uses,
-          ) ||
+          step.uses !== approvedPublisher.reference ||
           Object.keys(step).some((key) => !["name", "uses", "with"].includes(key))
         )
-          throw new Error("Publisher must use a constant full SHA reference to the reviewed action")
+          throw new Error("Publisher must use the exact approved action reference")
         if (inputs["publisher-private-key"] !== undefined) {
           const { "publisher-private-key": key, ...other } = inputs
           if (
