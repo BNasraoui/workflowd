@@ -1,7 +1,12 @@
 import { requireAgentHostSocket } from "./agent-host/config"
 import { loadAgentGitConfig, type AgentGitConfig } from "./agent-git/config"
 import { loadPrRepositories, type PrRepositories } from "./pr-automation-config"
-import { parseSandboxRepositories, type SandboxPolicy } from "./sandbox/config"
+import {
+  CapabilityGatewayConfig,
+  parseSandboxRepositories,
+  type SandboxPolicy,
+} from "./sandbox/config"
+import { Schema } from "effect"
 import { parseInstallationAccountIds } from "./installation-policy"
 import {
   loadOpenCodeResidentSocket,
@@ -111,6 +116,7 @@ export interface QrspiConfig {
 }
 
 export interface AgentRunConfig {
+  readonly capabilityGateway?: CapabilityGatewayConfig
   readonly sandboxRepositories?: ReadonlyArray<SandboxPolicy>
   readonly token: string
   readonly claudeBinary: string
@@ -426,7 +432,8 @@ function loadAgentRunConfig(
       env.WORKFLOWD_AGENT_RUN_ROUTES !== undefined ||
       env.WORKFLOWD_AGENT_RUN_CODEX_ROUTES !== undefined ||
       env.WORKFLOWD_AGENT_RUN_CLAUDE_ROUTES !== undefined ||
-      env.WORKFLOWD_AGENT_RUN_SANDBOX_REPOSITORIES !== undefined
+      env.WORKFLOWD_AGENT_RUN_SANDBOX_REPOSITORIES !== undefined ||
+      env.WORKFLOWD_CAPABILITY_GATEWAY !== undefined
     ) {
       throw new Error("WORKFLOWD_AGENT_RUN_TOKEN is required when agent-run settings are present")
     }
@@ -442,6 +449,17 @@ function loadAgentRunConfig(
   }
   const repositories = parseAgentRunRepositories(required(env, "WORKFLOWD_AGENT_RUN_REPOSITORIES"))
   const sandboxRepositories = parseSandboxRepositories(env.WORKFLOWD_AGENT_RUN_SANDBOX_REPOSITORIES)
+  const capabilityGateway =
+    env.WORKFLOWD_CAPABILITY_GATEWAY === undefined
+      ? undefined
+      : Schema.decodeUnknownSync(CapabilityGatewayConfig, { onExcessProperty: "error" })(
+          JSON.parse(env.WORKFLOWD_CAPABILITY_GATEWAY),
+        )
+  if (
+    sandboxRepositories.some((policy) => policy.privateBootstrap?.mode === "actions-native") &&
+    capabilityGateway === undefined
+  )
+    throw new Error("Native Actions requires an explicit capability gateway configuration")
   if (
     sandboxRepositories.some(
       (policy) => !repositories.some((repository) => repository.name === policy.alias),
@@ -450,6 +468,7 @@ function loadAgentRunConfig(
     throw new Error("Unknown sandbox alias")
   return {
     ...(sandboxRepositories.length === 0 ? {} : { sandboxRepositories }),
+    ...(capabilityGateway === undefined ? {} : { capabilityGateway }),
     token,
     claudeBinary: env.WORKFLOWD_AGENT_RUN_CLAUDE_BIN ?? "claude",
     claudeHosts:

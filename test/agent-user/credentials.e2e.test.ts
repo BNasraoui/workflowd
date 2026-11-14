@@ -11,14 +11,17 @@ test("installed Codex re-login breaks sharing, then production relink restores s
   expect(evidence.repaired).toBe(true)
 }, 90_000)
 
-test("installed clients refresh synthetic OAuth credentials with external egress denied", async () => {
-  const evidence = await probeInstalledRefresh()
-  expect(evidence.egressDenied).toBe(true)
-  expect(evidence.uidCount).toBe(process.env.WORKFLOWD_AGENT_TEST_BEN_UID ? 2 : 1)
-  expect(evidence.canariesDenied).toBe(true)
-  expect(evidence.codex.refreshPersisted).toBe(true)
-  expect(evidence.claude.refreshPersisted).toBe(true)
-  expect(evidence.claude.linkPreserved).toBe(false)
-  expect(evidence.claude.refusal).toBe("shared_credential_diverged")
-  expect(evidence.claude.repaired).toBe(true)
-}, 150_000)
+for (const client of ["codex", "claude"] as const)
+  test(`installed ${client} refreshes synthetic OAuth credentials with external egress denied`, async () => {
+    const evidence = await probeInstalledRefresh(client)
+    expect(evidence.clients).toEqual([client])
+    expect(evidence.egressDenied).toBe(true)
+    expect(evidence.uidCount).toBe(process.env.WORKFLOWD_AGENT_TEST_BEN_UID ? 2 : 1)
+    expect(evidence.canariesDenied).toBe(true)
+    expect(evidence[client].refreshPersisted).toBe(true)
+    if (client === "claude") {
+      expect(evidence.claude.linkPreserved).toBe(false)
+      expect(evidence.claude.refusal).toBe("shared_credential_diverged")
+      expect(evidence.claude.repaired).toBe(true)
+    }
+  }, 150_000)

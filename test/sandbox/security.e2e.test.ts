@@ -105,7 +105,7 @@ for (const kind of ["codex", "claude"] as const) {
     const { bindingDirectory, readSandboxBinding, writeSandboxBinding } =
       await import("../../src/sandbox/binding")
     const { runCodexWorker } = await import("../../src/kernel/codex-worker")
-    const { runClaudeWorker } = await import("../../src/kernel/claude-worker")
+    const { runInteractiveWorker } = await import("../helpers/interactive-worker")
     const runner = await runnerFixture()
     const model = await nativeModelFixture(kind, runner.root)
     try {
@@ -148,18 +148,21 @@ for (const kind of ["codex", "claude"] as const) {
         }),
       )
       const eventsFile = join(root, "events")
+      const options = {
+        binary: model.binary,
+        directory,
+        model: "dispatch-selected-fixture",
+        promptFile: join(root, "prompt"),
+        eventsFile,
+        resultFile: join(root, "result"),
+        stderrFile: join(root, "stderr"),
+        maxOutputBytes: 1000000,
+        sandboxBindingFile: join(root, "binding.json"),
+      }
       expect(
-        await (kind === "codex" ? runCodexWorker : runClaudeWorker)({
-          binary: model.binary,
-          directory,
-          model: "dispatch-selected-fixture",
-          promptFile: join(root, "prompt"),
-          eventsFile,
-          resultFile: join(root, "result"),
-          stderrFile: join(root, "stderr"),
-          maxOutputBytes: 1000000,
-          sandboxBindingFile: join(root, "binding.json"),
-        }),
+        await (kind === "codex"
+          ? runCodexWorker(options)
+          : runInteractiveWorker(options, model.modelUrl)),
       ).toBe(0)
       await command([
         process.execPath,

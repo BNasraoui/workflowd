@@ -16,18 +16,46 @@ import { runStoreMigrations } from "../../src/store/migrations"
 
 const repository = resolve(import.meta.dir, "../..")
 
-export async function command(args: ReadonlyArray<string>, cwd = repository): Promise<string> {
+export async function command(
+  args: ReadonlyArray<string>,
+  cwd = repository,
+  deadline?: number,
+): Promise<string> {
+  if (deadline !== undefined && Date.now() >= deadline)
+    throw new Error(`${args[0]} was not started before its deadline`)
   const child = Bun.spawn([...args], { cwd, stdout: "pipe", stderr: "pipe" })
-  const [status, stdout, stderr] = await Promise.all([
-    child.exited,
-    new Response(child.stdout).text(),
-    new Response(child.stderr).text(),
-  ])
-  if (status !== 0) throw new Error(`${args[0]} exited ${status}: ${stderr}`)
-  return stdout.trim()
+  let expired = false
+  const timer =
+    deadline === undefined
+      ? undefined
+      : setTimeout(() => {
+          expired = true
+          child.kill("SIGKILL")
+        }, deadline - Date.now())
+  try {
+    const [status, stdout, stderr] = await Promise.all([
+      child.exited,
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+    ])
+    // A result after the caller's absolute deadline is refused, never accepted late.
+    if (expired || (deadline !== undefined && Date.now() > deadline))
+      throw new Error(`${args[0]} did not finish before its deadline`)
+    if (status !== 0) throw new Error(`${args[0]} exited ${status}: ${stderr}`)
+    return stdout.trim()
+  } finally {
+    clearTimeout(timer)
+  }
 }
 
-export async function runnerFixture(runnerAddresses: ReadonlyArray<string> = []) {
+/** Same bound as fixtures/owned-dagger.sh, measured from the engine's own start. */
+const engineReadinessMs = 30_000
+
+export async function runnerFixture(
+  runnerAddresses: ReadonlyArray<string> = [],
+  // The caller's original absolute deadline, when it has one; readiness never outlives it.
+  options: { readonly deadline?: number } = {},
+) {
   const root = await mkdtemp(join(tmpdir(), "workflowd-sandbox-"))
   const databasePath = join(root, "submission.sqlite")
   await Effect.runPromise(
@@ -81,26 +109,41 @@ export async function runnerFixture(runnerAddresses: ReadonlyArray<string> = [])
   }
 
   try {
-    await docker(
-      "build",
-      "--memory=512m",
-      "--memory-swap=512m",
-      "-t",
-      "workflowd-sandbox-tooling:fixture",
-      "-f",
-      "deploy/sandbox/Containerfile",
-      "deploy/sandbox",
-    )
-    await docker(
-      "build",
-      "--memory=512m",
-      "--memory-swap=512m",
-      "-t",
-      "workflowd-sandbox-runner:fixture",
-      "-f",
-      "test/sandbox/fixtures/runner.Containerfile",
-      "test/sandbox/fixtures",
-    )
+    const prebuilt = process.env.WORKFLOWD_SANDBOX_PREBUILT
+    if (prebuilt !== undefined && prebuilt !== "1") throw new Error("Invalid fixture image opt-in")
+    const images: { tooling: string; runner: string; engine: string } | undefined = prebuilt
+      ? JSON.parse(await command(["python3", "scripts/evidence/legacy-admit.py"]))
+      : undefined
+    const runtime = process.env.WORKFLOWD_SANDBOX_RUNTIME
+    if (runtime !== undefined && (runtime !== "1" || !images))
+      throw new Error("Invalid private runtime opt-in")
+    const engineConfig = runtime
+      ? "/source/legacy-runtime/engine.toml"
+      : `${repository}/deploy/sandbox/engine.toml`
+    // The owned offline build stage produced and source-qualified these real
+    // artifacts before this test's unchanged deadline. Ordinary fixtures build here.
+    if (!images) {
+      await docker(
+        "build",
+        "--memory=512m",
+        "--memory-swap=512m",
+        "-t",
+        "workflowd-sandbox-tooling:fixture",
+        "-f",
+        "deploy/sandbox/Containerfile",
+        "deploy/sandbox",
+      )
+      await docker(
+        "build",
+        "--memory=512m",
+        "--memory-swap=512m",
+        "-t",
+        "workflowd-sandbox-runner:fixture",
+        "-f",
+        "test/sandbox/fixtures/runner.Containerfile",
+        "test/sandbox/fixtures",
+      )
+    }
     await command(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", join(root, "key")])
     await docker("network", "create", name)
     await docker("volume", "create", `${name}-socket`)
@@ -116,14 +159,130 @@ export async function runnerFixture(runnerAddresses: ReadonlyArray<string> = [])
       "-v",
       `${name}-socket:/run/workflowd-engine`,
       "-v",
-      `${repository}/deploy/sandbox/engine.toml:/etc/dagger/engine.toml:ro`,
+      `${engineConfig}:/etc/dagger/engine.toml:ro`,
       "--privileged",
-      "registry.dagger.io/engine@sha256:56b68be5d9fc8e0a4e7c8db7599a76571f8806d5a9623d9afa6764ae3f8cae36",
+      ...(images ? ["--cpus=2", "--pids-limit=512", "--cgroupns=private", "--ipc=private"] : []),
+      ...(runtime
+        ? ["--add-host", "registry-1.docker.io:127.0.0.1", "--add-host", "auth.docker.io:127.0.0.1"]
+        : []),
+      images?.engine ??
+        "registry.dagger.io/engine@sha256:56b68be5d9fc8e0a4e7c8db7599a76571f8806d5a9623d9afa6764ae3f8cae36",
       "--addr",
       "unix:///run/workflowd-engine/engine.sock",
       "--group",
       "65532",
     )
+    const engineStarted = Date.now()
+    if (images) {
+      const inspect = JSON.parse(await docker("inspect", `${name}-engine`))[0]
+      const namespace = await docker("exec", `${name}-engine`, "readlink", "/proc/self/ns/net")
+      const cgroup = await docker("exec", `${name}-engine`, "readlink", "/proc/self/ns/cgroup")
+      const bind = await docker(
+        "exec",
+        `${name}-engine`,
+        "stat",
+        "-c",
+        "%d:%i",
+        "/etc/dagger/engine.toml",
+      )
+      const custody = {
+        uid: await docker("exec", `${name}-engine`, "id", "-u"),
+        cgroupPath: await docker("exec", `${name}-engine`, "cat", "/proc/self/cgroup"),
+        memory: await docker("exec", `${name}-engine`, "cat", "/sys/fs/cgroup/memory.max"),
+        controllerNetwork: await command(["readlink", "/proc/self/ns/net"]),
+        controllerCgroup: await command(["readlink", "/proc/self/ns/cgroup"]),
+        controllerBind: await command(["stat", "-c", "%d:%i", engineConfig]),
+      }
+      await writeFile(
+        "/evidence/legacy-dagger.json",
+        JSON.stringify({ inspect, namespace, cgroup, bind, custody }),
+      )
+      if (
+        inspect.HostConfig.CgroupnsMode !== "private" ||
+        inspect.HostConfig.Memory !== 2 * 1024 ** 3 ||
+        inspect.HostConfig.MemorySwap !== 2 * 1024 ** 3 ||
+        inspect.HostConfig.PidsLimit !== 512 ||
+        custody.uid !== "0" ||
+        // The pinned Dagger entrypoint moves its processes into private /init.
+        !["0::/init", "1:net_cls:/\n0::/init"].includes(custody.cgroupPath) ||
+        custody.memory !== String(2 * 1024 ** 3) ||
+        namespace === custody.controllerNetwork ||
+        cgroup === custody.controllerCgroup ||
+        bind !== custody.controllerBind
+      )
+        throw new Error("Private Dagger custody prerequisite differs")
+      if ((await docker("exec", `${name}-engine`, "cat", "/proc/1/comm")) !== "dagger-engine")
+        throw new Error("Private Dagger process prerequisite differs")
+      // /proc/1/comm changes at exec, before the engine creates its socket. One exec
+      // repeats the exact predicate; the exec itself is killed at the readiness bound,
+      // a result after it is refused, and Docker/exec failures still propagate at once.
+      const ready = Math.min(engineStarted + engineReadinessMs, options.deadline ?? Infinity)
+      const attempts = Math.floor((ready - Date.now()) / 1000)
+      if (attempts < 1) throw new Error("Private Dagger socket readiness deadline elapsed")
+      await command(
+        [
+          "docker",
+          ...fixtureArgs(name, [
+            "exec",
+            `${name}-engine`,
+            "sh",
+            "-ec",
+            `n=${attempts}; while :; do test -S /run/workflowd-engine/engine.sock && exit 0; n=$((n - 1)); [ "$n" -gt 0 ] || break; sleep 1; done; echo "engine socket absent" >&2; exit 1`,
+          ]),
+        ],
+        repository,
+        ready,
+      )
+      await writeFile("/evidence/legacy-dagger.log", await docker("logs", `${name}-engine`))
+    }
+    if (runtime && images) {
+      await docker("tag", images.tooling, "workflowd-sandbox-tooling:fixture")
+      if (
+        (await docker("inspect", "--format", "{{.Id}}", "workflowd-sandbox-tooling:fixture")) !==
+        images.tooling
+      )
+        throw new Error("Private tooling alias differs")
+      await docker(
+        "run",
+        "-d",
+        "--name",
+        `${name}-ubuntu`,
+        "--network",
+        `container:${name}-engine`,
+        "--memory=128m",
+        "--memory-swap=128m",
+        "--cpus=0.5",
+        "--pids-limit=32",
+        "--read-only",
+        "-v",
+        "/source/legacy-runtime/ubuntu:/ubuntu:ro",
+        "-v",
+        `${repository}/test/sandbox/fixtures/legacy-ubuntu-origin.py:/origin.py:ro`,
+        images.tooling,
+        "python3",
+        "-u",
+        "/origin.py",
+      )
+      await docker(
+        "exec",
+        `${name}-ubuntu`,
+        "python3",
+        "-c",
+        `
+import time,urllib.request,urllib.error
+for attempt in range(30):
+ try:
+  assert urllib.request.urlopen('http://127.0.0.1:5000/v2/',timeout=1).read()==b'{}'
+  break
+ except OSError:
+  if attempt==29:raise
+  time.sleep(.1)
+try:urllib.request.urlopen('http://127.0.0.1:5000/v2/library/ubuntu/manifests/latest',timeout=1)
+except urllib.error.HTTPError as error:assert error.code==404
+else:raise AssertionError('Mutable image input accepted')
+`,
+      )
+    }
     await docker(
       "cp",
       "deploy/sandbox/network.sh",
@@ -160,7 +319,9 @@ export async function runnerFixture(runnerAddresses: ReadonlyArray<string> = [])
       name,
       "-p",
       "127.0.0.1::22",
-      "workflowd-sandbox-runner:fixture",
+      ...(images ? ["--cpus=1", "--pids-limit=128", "--cgroupns=private", "--ipc=private"] : []),
+      ...(runtime ? ["-v", "/source/legacy-runtime/dagger:/usr/local/bin/dagger:ro"] : []),
+      images?.runner ?? "workflowd-sandbox-runner:fixture",
     )
     await docker("cp", join(root, "key.pub"), `${name}-runner:/home/runner/.ssh/authorized_keys`)
     await docker(
@@ -179,6 +340,16 @@ export async function runnerFixture(runnerAddresses: ReadonlyArray<string> = [])
       "cat",
       "/etc/ssh/ssh_host_ed25519_key.pub",
     )
+    if (images) {
+      const configuration = await docker("exec", `${name}-runner`, "/usr/sbin/sshd", "-T")
+      if (
+        !configuration.split("\n").includes("strictmodes yes") ||
+        !configuration.split("\n").includes("hostkey /etc/ssh/ssh_host_ed25519_key")
+      )
+        throw new Error("Private SSH prerequisite differs")
+      await writeFile(join(root, "sshd-effective.txt"), configuration)
+      await writeFile("/evidence/legacy-ssh.json", JSON.stringify({ configuration, hostKey, port }))
+    }
     await writeFile(join(root, "known_hosts"), `[127.0.0.1]:${port} ${hostKey}\n`)
     const transport: SandboxTransport = {
       leaseId: name,
@@ -199,13 +370,26 @@ cd /workspace/repository
 # The fixture digest stands in for the operator-published image. Keep real
 # container-use/Dagger execution on the small fixture Ubuntu image.
 if [ "$1 $2 $3" = "config base-image set" ] && [ "$4" = "ghcr.io/bnasraoui/workflowd-agent-base@sha256:${"f".repeat(64)}" ]; then
-  set -- config base-image set ubuntu:24.04
+  set -- config base-image set ubuntu@sha256:534baea6a22c03a63003dbc8dbe78fe34bc0d7e595d9a9dc9834884ff530eb55
 fi
-exec env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=/home/runner _EXPERIMENTAL_DAGGER_RUNNER_HOST=unix:///run/workflowd-engine/engine.sock /usr/local/bin/container-use-real "$@"
+exec env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=/home/runner GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/home/runner/.gitconfig ${runtime ? "_EXPERIMENTAL_DAGGER_CLI_BIN=/usr/local/bin/dagger DO_NOT_TRACK=1 DAGGER_NO_NAG=1 " : ""}_EXPERIMENTAL_DAGGER_RUNNER_HOST=unix:///run/workflowd-engine/engine.sock /usr/local/bin/container-use-real "$@"
 `,
       { mode: 0o755 },
     )
     await docker("cp", wrapper, `${name}-runner:/usr/local/bin/container-use`)
+    if (runtime)
+      await docker(
+        "exec",
+        `${name}-runner`,
+        "sh",
+        "-ec",
+        `
+mkdir .container-use
+printf '%s\n' '{"base_image":"ubuntu@sha256:534baea6a22c03a63003dbc8dbe78fe34bc0d7e595d9a9dc9834884ff530eb55","workdir":"/workdir"}' > .container-use/environment.json
+git add .container-use/environment.json
+git commit --amend --no-edit
+`,
+      )
     await docker(
       "exec",
       "-u",
@@ -863,7 +1047,7 @@ export async function leaseRunnerFixture(repositoryName: string) {
     const adapter = join(runner.root, "docker")
     await writeFile(
       adapter,
-      '#!/bin/sh\nset -eu\nif [ "$1" = cp ]; then cp -rf /workspace/result/. /run/workflowd-sandbox/result/; exit; fi\ntest "$1" = exec\nshift\nif [ "$1" = -i ]; then shift; fi\nworkdir=/workspace/repository\nif [ "$1" = -w ]; then workdir="$2"; shift 2; fi\ntest "$1" = workflowd-sandbox-tooling\nshift\ncd "$workdir"\nexport PATH=/usr/local/lib/tooling-bin:$PATH\nexec "$@"\n',
+      '#!/bin/sh\nset -eu\nif [ "$1" = cp ]; then cp -rf /workspace/result/. /run/workflowd-sandbox/result/; exit; fi\ntest "$1" = exec\nshift\nif [ "$1" = -i ]; then shift; fi\nworkdir=/workspace/repository\nif [ "$1" = -w ]; then workdir="$2"; shift 2; fi\ntest "$1" = workflowd-sandbox-tooling\nshift\ncd "$workdir"\nexport PATH=/usr/local/lib/tooling-bin:$PATH GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/home/runner/.gitconfig\nexec "$@"\n',
       { mode: 0o755 },
     )
     await runner.docker("cp", adapter, `${runner.name}-runner:/usr/local/bin/docker`)
@@ -968,6 +1152,13 @@ export function sandboxPublicationFixture(
   leaseId = "lease-1",
   fault = "none",
   branch = "no/name/rules '$()\n雪",
+  captured?: {
+    readonly actionsRunId: number
+    readonly leaseId: () => string
+    readonly metadata: () => Promise<
+      typeof import("../../src/sandbox/publish-store").ResultMetadata.Type
+    >
+  },
 ) {
   let reviews: unknown[] = []
   let posts = 0
@@ -977,6 +1168,9 @@ export function sandboxPublicationFixture(
   const title = "Agent title"
   const commitMessage = "Agent message\n\nDetails"
   fixture.publication(async (request) => {
+    const metadata = await captured?.metadata()
+    const selectedBranch = metadata?.branch ?? branch
+    const actionsRunId = captured?.actionsRunId ?? 41
     const path = new URL(request.url).pathname
     if (path.endsWith("/deployment_protection_rule")) {
       posts++
@@ -1018,8 +1212,12 @@ export function sandboxPublicationFixture(
       const receipt = {
         binding,
         repository: policy.repository,
-        branch,
-        marker: `<!-- workflowd-publication:${Buffer.from(JSON.stringify(binding)).toString("base64")} -->`,
+        ...(captured
+          ? { v: 1, failed: false }
+          : {
+              branch: selectedBranch,
+              marker: `<!-- workflowd-publication:${Buffer.from(JSON.stringify(binding)).toString("base64")} -->`,
+            }),
         stage,
         closingIssuesVerified: ![
           "unchecked PR",
@@ -1027,16 +1225,12 @@ export function sandboxPublicationFixture(
           "closing references",
           "closing query malformed",
         ].includes(fault),
-        ...(fault === "closing references"
-          ? { cause: "PR contains closing issue references; PR closed" }
-          : {}),
-        ...(fault === "closing query malformed"
-          ? { cause: "closing issue references could not be verified; PR closed" }
+        ...(["closing references", "closing query malformed", "branch collision"].includes(fault)
+          ? { cause: "Protected publication failed" }
           : {}),
         pr: stage === "published" ? 17 : null,
         revoked: fault !== "unrevoked",
         commitSha: "2".repeat(40),
-        ...(fault === "branch collision" ? { cause: "branch already exists (HTTP 200)" } : {}),
       }
       return new Response(
         "2026-10-08T00:00:00.0000000Z workflowd.publish.receipt " +
@@ -1044,11 +1238,11 @@ export function sandboxPublicationFixture(
           "\n",
       )
     }
-    if (decodeURIComponent(path.split("/git/ref/heads/")[1] ?? "") === branch)
+    if (decodeURIComponent(path.split("/git/ref/heads/")[1] ?? "") === selectedBranch)
       return posts === 0
         ? new Response(null, { status: 404 })
         : Response.json({
-            ref: `refs/heads/${branch}`,
+            ref: `refs/heads/${selectedBranch}`,
             object: { sha: "2".repeat(40) },
           })
     if (path.includes("/git/commits/"))
@@ -1061,14 +1255,14 @@ export function sandboxPublicationFixture(
             ? "changed"
             : fault === "missing co-author"
               ? commitMessage
-              : `${commitMessage}\n\nCo-authored-by: ${policy.publish!.coAuthor}`,
+              : `${metadata?.commitMessage ?? commitMessage}\n\nCo-authored-by: ${policy.publish!.coAuthor}`,
         verification: { verified: true },
       })
     if (path.endsWith("/pulls") || path.endsWith("/pulls/17")) {
       const pull = {
         number: 17,
         html_url: `https://github.com/${policy.repository}/pull/17`,
-        title: fault === "wrong title" ? "changed" : title,
+        title: fault === "wrong title" ? "changed" : (metadata?.title ?? title),
         draft: true,
         state: "open",
         maintainer_can_modify: false,
@@ -1078,7 +1272,7 @@ export function sandboxPublicationFixture(
           type: "Bot",
         },
         head: {
-          ref: branch,
+          ref: selectedBranch,
           sha: "2".repeat(40),
           repo: { id: policy.repositoryId, full_name: policy.repository },
         },
@@ -1089,7 +1283,7 @@ export function sandboxPublicationFixture(
         body:
           fault === "wrong body"
             ? "Changed description"
-            : `<!-- workflowd-publication:${Buffer.from(JSON.stringify(binding)).toString("base64")} -->\n\n## Result\n\nReadable agent description.`,
+            : `<!-- workflowd-publication:${Buffer.from(JSON.stringify(binding)).toString("base64")} -->\n\n${metadata?.body ?? "## Result\n\nReadable agent description."}`,
       }
       return Response.json(path.endsWith("/pulls") ? [{ number: pull.number }] : pull)
     }
@@ -1123,7 +1317,7 @@ export function sandboxPublicationFixture(
           {
             id: 101,
             name: "sandbox / runner",
-            run_id: 41,
+            run_id: actionsRunId,
             run_attempt: 1,
             head_sha: policy.workflowSha,
             status: "completed",
@@ -1132,7 +1326,7 @@ export function sandboxPublicationFixture(
           {
             id: 102,
             name: "agent-publish",
-            run_id: 41,
+            run_id: actionsRunId,
             run_attempt: 1,
             head_sha: policy.workflowSha,
             status: posts ? (waiting ? "in_progress" : "completed") : "waiting",
@@ -1146,16 +1340,16 @@ export function sandboxPublicationFixture(
         artifacts: [
           {
             id: posts && fault === "artifact replaced" ? 53 : 52,
-            name: "sandbox-result-41-1",
+            name: `sandbox-result-${actionsRunId}-1`,
             digest: "sha256:" + "f".repeat(64),
             size_in_bytes: 100,
             expired: false,
             workflow_run: {
-              id: fault === "foreign artifact" ? 42 : 41,
+              id: fault === "foreign artifact" ? 42 : actionsRunId,
               repository_id: policy.repositoryId,
               head_repository_id: policy.repositoryId,
               head_sha: policy.workflowSha,
-              head_branch: `workflowd/leases/${leaseId}`,
+              head_branch: `workflowd/leases/${captured?.leaseId() ?? leaseId}`,
             },
           },
         ],

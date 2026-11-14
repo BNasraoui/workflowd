@@ -311,12 +311,34 @@ async function nativeBoundary(simulatedManager: boolean) {
   await copyFile(await realpath(node), join(root, "node"))
   await chmod(join(root, "node"), 0o755)
   const build = await Bun.build({
-    entrypoints: [join(import.meta.dir, "../../src/kernel/codex-worker.ts")],
+    entrypoints: [join(import.meta.dir, "../helpers/interactive-host-worker.ts")],
     target: "bun",
     minify: false,
   })
   expect(build.success).toBe(true)
   await writeFile(worker, await build.outputs[0]!.text(), { mode: 0o644 })
+  const { fixtureExecutable } = await import("../helpers/fixture-executable.mjs")
+  const hostNetns = process.env.WORKFLOWD_FIXTURE_HOST_NETNS
+  if (!hostNetns) throw new Error("Native fixture requires an isolated namespace receipt")
+  const python = join(root, "interactive-claude.py")
+  await copyFile(join(import.meta.dir, "../helpers/interactive-claude.py"), python)
+  await writeFile(
+    join(root, "interactive-input.json"),
+    JSON.stringify({
+      binary: fixtureExecutable("claude"),
+      baseUrl: claude.modelUrl,
+      python,
+      hostNetns,
+      uid: agentUid,
+      identity: {
+        GIT_AUTHOR_NAME: "Fixture Agent",
+        GIT_AUTHOR_EMAIL: "agent@example.test",
+        GIT_COMMITTER_NAME: "Fixture Agent",
+        GIT_COMMITTER_EMAIL: "agent@example.test",
+      },
+    }),
+    { mode: 0o644 },
+  )
   const repository = join(root, "repository")
   const git = async (args: string[]) => {
     const child = Bun.spawn(["/usr/bin/git", ...args], {
@@ -1061,7 +1083,9 @@ console.log(JSON.stringify(await Effect.runPromise(executor.${recover ? "recover
         })
       }
     }
-    expect(claude.requests.length - baseline).toBe(2)
+    // Normal CLI may make advisory tool-less requests. Exactly one resumed main
+    // turn must be delivered even when the controller recovers twice.
+    expect(claude.catalogs.slice(baseline).filter((names) => names.length > 0)).toHaveLength(1)
     if (simulatedManager) {
       const owned = await startAgentHost(path, {
         runId: `resident-${randomUUID()}`,

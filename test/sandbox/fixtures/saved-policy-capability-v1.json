@@ -1,0 +1,23 @@
+{
+  "privateBootstrap": {
+    "repositoryOwnerId": 1,
+    "mode": "actions-native"
+  },
+  "alias": "workflowd",
+  "repository": "BNasraoui/workflowd",
+  "repositoryId": 1306107007,
+  "installationId": 147573449,
+  "workflowSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "appActorId": 306741873,
+  "agentImage": "ghcr.io/bnasraoui/workflowd-agent-base@sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+  "toolingSha": "cccccccccccccccccccccccccccccccccccccccc",
+  "publish": {
+    "baseRef": "main",
+    "environmentId": 7,
+    "publisherAppId": 5232172,
+    "publisherActorId": 339414993,
+    "coAuthor": "Ben <ben@example.test>"
+  },
+  "tailscaleClientId": "fixture",
+  "tailscaleAudience": "fixture"
+}

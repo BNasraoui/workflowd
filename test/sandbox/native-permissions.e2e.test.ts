@@ -4,7 +4,8 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 import { runCodexWorker } from "../../src/kernel/codex-worker"
-import { runClaudeWorker } from "../../src/kernel/claude-worker"
+import { claudeInteractiveArguments } from "../../src/kernel/claude-interactive"
+import { runInteractiveWorker } from "../helpers/interactive-worker"
 import { sandboxCompletionInstructions } from "../../src/sandbox/config"
 import { bindingDirectory, sandboxPolicyHash, writeSandboxBinding } from "../../src/sandbox/binding"
 
@@ -49,10 +50,16 @@ for (const kind of ["codex", "claude"] as const) {
         model: "dispatch-selected-fixture",
         sandboxBindingFile: join(bindingDirectory(directory), "binding.json"),
       }
-      expect(await (kind === "codex" ? runCodexWorker : runClaudeWorker)(options)).toBe(0)
-      const args = Schema.decodeUnknownSync(Schema.Array(Schema.String))(
-        JSON.parse(await readFile(options.eventsFile, "utf8")),
-      )
+      // Claude's interactive argv is inspected here; the normal PTY worker runs below.
+      const claudeArguments = (value: typeof options) =>
+        claudeInteractiveArguments(value, { id: "fixture-session", resume: false })
+      if (kind === "codex") expect(await runCodexWorker(options)).toBe(0)
+      const args =
+        kind === "claude"
+          ? await claudeArguments(options)
+          : Schema.decodeUnknownSync(Schema.Array(Schema.String))(
+              JSON.parse(await readFile(options.eventsFile, "utf8")),
+            )
       expect(args).toContain("dispatch-selected-fixture")
       expect(args.join(" ")).toContain("wfdlease_fixture")
       expect(args.join(" ")).not.toContain("dangerously")
@@ -81,7 +88,7 @@ for (const kind of ["codex", "claude"] as const) {
         expect(args).toContain("mcp__wfdlease_fixture__*")
       }
       await writeSandboxBinding({ ...binding, state: "revoked" })
-      await expect((kind === "codex" ? runCodexWorker : runClaudeWorker)(options)).rejects.toThrow(
+      await expect((kind === "codex" ? runCodexWorker : claudeArguments)(options)).rejects.toThrow(
         "inactive",
       )
     } finally {
@@ -164,7 +171,9 @@ for (const kind of ["codex", "claude"] as const) {
       },
     })
     try {
-      const status = await (kind === "codex" ? runCodexWorker : runClaudeWorker)(options)
+      const status = await (kind === "codex"
+        ? runCodexWorker(options)
+        : runInteractiveWorker(options, fixture.modelUrl))
       const stderr = await readFile(options.stderrFile, "utf8")
       const events = await readFile(options.eventsFile, "utf8")
       expect({ status, stderr, events }).toMatchObject({ status: 0 })

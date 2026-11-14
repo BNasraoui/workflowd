@@ -22,7 +22,8 @@ import {
 test.each(["short", "full"])(
   "production prompts advertise and execute the lease bridge namespace (%s)",
   async (mode) => {
-    const runner = await runnerFixture()
+    // This case's original 120s clock, started with the test body.
+    const runner = await runnerFixture([], { deadline: Date.now() + 120000 })
     const fixture = await sharedOpenCodeFixture("production-catalog")
     const marker = await installGlobalWorkflowdProbe(fixture)
     const waitGlobal = async (directory: string) => {
@@ -320,13 +321,15 @@ test("global sandbox agent confines native execution through completed compactio
 }, 180_000)
 
 test("global sandbox agent keeps runtime bridges exclusive to their locations", async () => {
-  const runner = await runnerFixture()
+  // This case's original 300s clock, started with the test body.
+  const deadline = Date.now() + 300_000
+  const runner = await runnerFixture([], { deadline })
   let runnerB: Awaited<ReturnType<typeof runnerFixture>> | undefined
   let fixture: Awaited<ReturnType<typeof sharedOpenCodeFixture>> | undefined
   const evidence: Record<string, unknown> = {}
   try {
     fixture = await sharedOpenCodeFixture("bridges")
-    runnerB = await runnerFixture()
+    runnerB = await runnerFixture([], { deadline })
     const directoryA = join(fixture.root, "sandbox-a")
     const directoryB = join(fixture.root, "sandbox-b")
     const executor = makeSandboxOpenCode(fixture.client, fixture.executor)

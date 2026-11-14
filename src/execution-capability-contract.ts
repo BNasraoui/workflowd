@@ -12,7 +12,7 @@ const ThinkingSettings = {
 }
 
 export const ExecutionThinking = Schema.Struct({
-  status: Schema.Literals(["advertised", "unknown", "unsupported"]),
+  status: Schema.Literals(["advertised", "configured", "unknown", "unsupported"]),
   reasoning: Schema.optionalKey(Schema.Struct({ supported: Schema.Boolean })),
   variants: Schema.optionalKey(
     Schema.Array(Schema.Struct({ id: Schema.String, ...ThinkingSettings })),
@@ -35,6 +35,7 @@ export const ExecutionCapability = Schema.Struct({
     model: Schema.String,
   }),
   selectionModel: Schema.String,
+  evidence: Schema.optionalKey(Schema.Literals(["configured", "advertised"])),
   name: Schema.optionalKey(Schema.String),
   thinking: ExecutionThinking,
   defaultModel: Schema.optionalKey(Schema.Boolean),

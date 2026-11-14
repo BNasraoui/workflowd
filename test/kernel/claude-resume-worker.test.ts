@@ -15,6 +15,7 @@ import {
   claudeSessionCustodyId,
   encodeClaudeProjectDir,
   makeClaudeCli,
+  prepareClaudeResume,
   type ClaudeCliPort,
 } from "../../src/kernel/claude-session"
 import { KernelEventStoreLive } from "../../src/kernel/event-store"
@@ -518,7 +519,7 @@ describe("claude resume worker", () => {
     expect(result.request).toMatchObject({ state: "operator_required" })
   })
 
-  test("the live CLI port spawns argv-vector and probes real transcripts", async () => {
+  test("the legacy resume plan keeps prompts off argv and probes real transcripts", async () => {
     const { mkdtemp, mkdir, writeFile, rm } = await import("node:fs/promises")
     const { tmpdir } = await import("node:os")
     const { join } = await import("node:path")
@@ -543,10 +544,9 @@ describe("claude resume worker", () => {
       const hostile = await Effect.runPromise(
         port.sessionExists({ nativeSessionId: "../escape", directory: projectDir }),
       )
-      // /bin/echo prints the argv back: the flags are present and the
-      // prompt is ABSENT — it rides stdin, never the command line.
-      const echoed = await Effect.runPromise(
-        port.resume({
+      // Construct the interactive resume argv only; the turn itself is not launched here.
+      const prepared = await Effect.runPromise(
+        prepareClaudeResume("/bin/echo", {
           nativeSessionId: "abc-123",
           directory: projectDir,
           prompt: "hello; rm -rf $HOME",
@@ -556,9 +556,19 @@ describe("claude resume worker", () => {
       expect(exists).toBe(true)
       expect(missing).toBe(false)
       expect(hostile).toBe(false)
-      expect(echoed).toContain("--setting-sources user")
-      expect(echoed).toContain("-p --resume abc-123 --output-format json")
-      expect(echoed).not.toContain("rm -rf")
+      expect(prepared.args.join(" ")).toContain("--setting-sources user")
+      expect(prepared.args.slice(-2)).toEqual(["--resume", "abc-123"])
+      // The admitted user policy: no imposed permission mode or MCP override.
+      for (const forbidden of [
+        "-p",
+        "--print",
+        "--output-format",
+        "--permission-mode",
+        "--strict-mcp-config",
+        "--dangerously-skip-permissions",
+      ])
+        expect(prepared.args).not.toContain(forbidden)
+      expect(prepared.args.join(" ")).not.toContain("rm -rf")
     } finally {
       await rm(home, { recursive: true, force: true })
     }

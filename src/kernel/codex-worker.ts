@@ -7,6 +7,12 @@ import { constants } from "node:fs"
 import { open, readFile, rename, stat, writeFile } from "node:fs/promises"
 import { nativeSandboxArguments } from "../sandbox/native"
 import { codexProjectArguments } from "../execution/project-config"
+import { randomUUID } from "node:crypto"
+import {
+  claudeInteractiveArguments,
+  runClaudeInteractiveTurn,
+  type ClaudeSession,
+} from "./claude-interactive"
 
 export type CliWorkerOptions = {
   readonly binary: string
@@ -179,38 +185,125 @@ export const parseCodexWorkerArguments = (arguments_: ReadonlyArray<string>): Cl
   }
 }
 
-/** Claude Code uses its own local subscription credentials and persisted sessions. */
-export const runClaudeNativeWorker = async (options: CliWorkerOptions): Promise<number> =>
-  runCliWorker(options, [
-    options.binary,
-    "--print",
-    // Print-mode turns must finish their commands before workflowd records completion.
-    "--settings",
-    '{"env":{"CLAUDE_CODE_DISABLE_BACKGROUND_TASKS":"1"}}',
-    "--output-format",
-    "stream-json",
-    "--verbose",
-    "--include-partial-messages",
-    ...(options.sandboxBindingFile === undefined
-      ? [
-          "--setting-sources",
-          "user",
-          "--dangerously-skip-permissions",
-          "--strict-mcp-config",
-          "--mcp-config",
-          '{"mcpServers":{}}',
-        ]
-      : await nativeSandboxArguments(
-          "claude",
-          options.binary,
-          options.directory,
-          options.sandboxBindingFile,
-        )),
-    ...(options.model === null ? [] : ["--model", options.model]),
-    ...(options.effort === undefined ? [] : ["--effort", options.effort]),
-  ])
+/** Durable worker files for one interactive Claude turn. A dispatched turn keeps the
+ * stream-event contract from real transcript records; a resumed turn returns its answer. */
+export async function runClaudeInteractiveWorker(
+  options: CliWorkerOptions,
+  session: ClaudeSession,
+  timeoutMs?: number,
+  env: Readonly<Record<string, string | undefined>> = process.env,
+): Promise<number> {
+  const prompt = await readFile(options.promptFile, "utf8")
+  for (const path of [options.eventsFile, options.stderrFile])
+    await writeFile(path, "", {
+      mode: 0o600,
+      flag: constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | constants.O_NOFOLLOW,
+    })
+  const events = await open(
+    options.eventsFile,
+    constants.O_WRONLY | constants.O_APPEND | constants.O_NOFOLLOW,
+  )
+  // Ordinary records leave room for a final failure record. Once a required record is
+  // lost, no later result may report success.
+  const reserve = Math.min(4096, options.maxOutputBytes)
+  let written = 0
+  let lost = false
+  const emit = async (line: string, limit = options.maxOutputBytes - reserve) => {
+    const bytes = Buffer.from(line + "\n")
+    if (lost || written + bytes.length > limit) {
+      lost = true
+      return false
+    }
+    await writeAll(events, bytes)
+    written += bytes.length
+    return true
+  }
+  let outcome: Awaited<ReturnType<typeof runClaudeInteractiveTurn>>
+  try {
+    outcome = await runClaudeInteractiveTurn({
+      args: await claudeInteractiveArguments(options, session),
+      prompt,
+      directory: options.directory,
+      session: session.id,
+      env,
+      hooksPath: `${options.stderrFile}.hooks`,
+      ...(timeoutMs === undefined ? {} : { deadline: Date.now() + timeoutMs }),
+      ...(session.resume
+        ? {}
+        : {
+            onStart: async (model) => {
+              const init = { type: "system", subtype: "init", session_id: session.id }
+              await emit(JSON.stringify(model === null ? init : { ...init, model }))
+            },
+            onRecord: async (line) => {
+              await emit(line)
+            },
+          }),
+    })
+    if (lost) outcome = capacityFailure(outcome)
+    const result = (value: typeof outcome) => ({
+      type: "result",
+      is_error: value.failure !== null,
+      result: value.failure ?? value.text,
+      session_id: session.id,
+      usage: { output_tokens: value.outputTokens },
+    })
+    // The final record may use the reserve; an oversized answer becomes a failure.
+    lost = false
+    if (!(await emit(JSON.stringify(result(outcome)), options.maxOutputBytes))) {
+      lost = false
+      outcome = capacityFailure(outcome)
+      await emit(JSON.stringify(result(outcome)), options.maxOutputBytes)
+    }
+  } catch (error) {
+    // No result is published for unconfirmed custody; keep its reason privately.
+    await events.close().catch(() => undefined)
+    await writeFile(
+      options.stderrFile,
+      Buffer.from(error instanceof Error ? error.message : String(error)).subarray(
+        0,
+        options.maxOutputBytes,
+      ),
+      { mode: 0o600, flag: constants.O_WRONLY | constants.O_TRUNC | constants.O_NOFOLLOW },
+    ).catch(() => undefined)
+    throw error
+  }
+  await events.close()
+  if (outcome.failure !== null)
+    await writeFile(
+      options.stderrFile,
+      Buffer.from(`${outcome.failure}\n${outcome.diagnostic}`).subarray(0, options.maxOutputBytes),
+      {
+        mode: 0o600,
+        flag: constants.O_WRONLY | constants.O_TRUNC | constants.O_NOFOLLOW,
+      },
+    )
+  await writeResult(options.resultFile, outcome.exitCode)
+  return outcome.exitCode
+}
 
-export async function runHostWorker(inputPath: string, binary: string, io = process.cwd()) {
+const capacityFailure = <T extends { readonly exitCode: number }>(outcome: T) => ({
+  ...outcome,
+  exitCode: outcome.exitCode === 0 ? 1 : outcome.exitCode,
+  completed: false,
+  failure: "Claude output capacity",
+})
+
+/** FileHandle writes may be partial; every byte is written or the write fails. */
+async function writeAll(file: Awaited<ReturnType<typeof open>>, bytes: Uint8Array) {
+  for (let offset = 0; offset < bytes.length; ) {
+    const { bytesWritten } = await file.write(bytes, offset, bytes.length - offset)
+    if (bytesWritten <= 0) throw new Error("Claude output write made no progress")
+    offset += bytesWritten
+  }
+}
+
+/** Claude Code uses its own local subscription credentials and persisted sessions. */
+export const runClaudeNativeWorker = (options: CliWorkerOptions): Promise<number> =>
+  runClaudeInteractiveWorker(options, { id: randomUUID(), resume: false })
+
+/** Own the input/output files without launching the selected native adapter. */
+export async function prepareHostWorker(inputPath: string, binary: string, io = process.cwd()) {
   // systemd selects the private I/O directory; argv cannot select another file tree.
   const input = join(io, "input")
   if (inputPath !== input) throw new Error("invalid host input path")
@@ -255,6 +348,11 @@ export async function runHostWorker(inputPath: string, binary: string, io = proc
     ...(request.effort === undefined ? {} : { effort: request.effort }),
     ...(request.provider === undefined ? {} : { provider: request.provider }),
   }
+  return { request, options }
+}
+
+export async function runHostWorker(inputPath: string, binary: string, io = process.cwd()) {
+  const { request, options } = await prepareHostWorker(inputPath, binary, io)
   if (request.profile === "workspace") {
     const { runWorkspaceCommand } = await import("../workspace/command")
     if (
@@ -341,18 +439,11 @@ export async function runHostWorker(inputPath: string, binary: string, io = proc
     return 0
   }
   if (request.profile === "claude-resume")
-    return runCliWorker(options, [
-      binary,
-      "--setting-sources",
-      "user",
-      "--settings",
-      '{"env":{"CLAUDE_CODE_DISABLE_BACKGROUND_TASKS":"1"}}',
-      "-p",
-      "--resume",
-      request.nativeSessionId!,
-      "--output-format",
-      "json",
-    ])
+    return runClaudeInteractiveWorker(
+      { ...options, model: null },
+      { id: request.nativeSessionId!, resume: true },
+      request.timeoutMs,
+    )
   if (request.profile === "codex-discovery") {
     const { makeCodexDiscovery } = await import("../execution/codex")
     const models = await makeCodexDiscovery("codex:local", {

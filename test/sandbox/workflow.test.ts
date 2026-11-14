@@ -3,6 +3,7 @@ import { resolve } from "node:path"
 import { Schema } from "effect"
 
 const Step = Schema.Struct({
+  if: Schema.optionalKey(Schema.String),
   uses: Schema.optionalKey(Schema.String),
   run: Schema.optionalKey(Schema.String),
   with: Schema.optionalKey(Schema.Record(Schema.String, Schema.Json)),
@@ -25,6 +26,32 @@ const Workflow = Schema.Struct({
 })
 
 const root = resolve(import.meta.dir, "../..")
+
+test("R5: legacy readiness remains the explicit default and private bootstrap never uploads rendezvous", async () => {
+  const workflow = Schema.decodeUnknownSync(Workflow)(
+    Bun.YAML.parse(await Bun.file(`${root}/.github/workflows/agent-sandbox.yml`).text()),
+  )
+  const call = Schema.decodeUnknownSync(
+    Schema.Struct({
+      inputs: Schema.Struct({
+        "bootstrap-mode": Schema.optionalKey(
+          Schema.Struct({ type: Schema.String, default: Schema.String }),
+        ),
+      }),
+    }),
+  )(workflow.on.workflow_call)
+  expect(call.inputs["bootstrap-mode"]?.default).toBe("legacy-artifact")
+  const steps = workflow.jobs.runner?.steps ?? []
+  const legacy = steps.filter((step) => step.if === "inputs.bootstrap-mode == 'legacy-artifact'")
+  const privateSteps = steps.filter((step) => step.if === "inputs.bootstrap-mode == 'private'")
+  expect(legacy.some((step) => step.run?.endsWith("runner.sh prepare"))).toBe(true)
+  expect(legacy.some((step) => step.with?.path === "/run/workflowd-sandbox/ready.json")).toBe(true)
+  expect(privateSteps.some((step) => step.run?.endsWith("runner.sh prepare-private"))).toBe(true)
+  expect(
+    steps.filter((step) => step.with?.path === "/run/workflowd-sandbox/ready.json"),
+  ).toHaveLength(1)
+  expect(privateSteps.some((step) => step.uses?.startsWith("actions/upload-artifact@"))).toBe(false)
+})
 
 test("only App lease pushes can invoke the repository-bound reusable workflow", async () => {
   const caller = Schema.decodeUnknownSync(Workflow)(
@@ -61,7 +88,13 @@ test("runner workflow grants only read/OIDC and pins third-party actions", async
       "persist-credentials"
     ],
   ).toBe(false)
-  expect(job.steps.some((step) => step.run === "bash deploy/sandbox/tailscale.sh")).toBe(true)
+  expect(
+    job.steps.some(
+      (step) =>
+        step.run ===
+        "node deploy/sandbox/public-output.mjs setup -- bash deploy/sandbox/tailscale.sh",
+    ),
+  ).toBe(true)
   expect(job.steps.some((step) => step.uses?.startsWith("tailscale/github-action@"))).toBe(false)
 })
 
@@ -80,14 +113,20 @@ test("runner joins without accepting routes or DNS before preparing tooling", as
   const source = await Bun.file(`${root}/deploy/sandbox/tailscale.sh`).text()
   expect(source).toContain("--accept-routes=false")
   expect(source).toContain("--accept-dns=false")
-  expect(source).toContain("ip route show table 52")
+  expect(source).not.toContain("ip route show table 52")
   const workflow = Schema.decodeUnknownSync(Workflow)(
     Bun.YAML.parse(await Bun.file(`${root}/.github/workflows/agent-sandbox.yml`).text()),
   )
   const steps = workflow.jobs.runner?.steps ?? []
-  const join = steps.findIndex((step) => step.run === "bash deploy/sandbox/tailscale.sh")
+  const join = steps.findIndex(
+    (step) =>
+      step.run ===
+      "node deploy/sandbox/public-output.mjs setup -- bash deploy/sandbox/tailscale.sh",
+  )
   expect(join).toBeGreaterThan(0)
-  expect(steps[join + 1]?.run).toBe("bash deploy/sandbox/runner.sh prepare")
+  expect(steps[join + 1]?.run).toBe(
+    "node deploy/sandbox/public-output.mjs bootstrap -- bash deploy/sandbox/runner.sh prepare",
+  )
   expect(steps.at(-1)?.run).toContain("tailscale logout")
 })
 

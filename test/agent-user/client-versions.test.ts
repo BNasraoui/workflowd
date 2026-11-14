@@ -5,7 +5,7 @@ test("installed client entrypoints run in the scrubbed credential probe environm
   const versions = await probeClientVersions()
   expect(versions.map(({ version }) => version)).toEqual([
     "codex-cli 0.159.1",
-    "2.1.296 (Claude Code)",
+    "2.1.301 (Claude Code)",
     "opencode2 v0.0.0-beta-19242",
   ])
   expect(versions.every(({ exitCode }) => exitCode === 0)).toBe(true)

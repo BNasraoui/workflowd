@@ -1,0 +1,4 @@
+root:x:0:0:Root:/root:/bin/bash
+runner:x:0:0:Disposable SSH controller:/root:/bin/bash
+agent:x:1000:1000:Agent:/home/agent:/bin/bash
+sshd:x:65534:65534:Disposable SSH privilege separation:/var/empty:/bin/false

@@ -41,7 +41,7 @@ export async function nativeModelFixture(kind: "codex" | "claude", root: string)
           ],
       )
       catalogs.push(names)
-      const next = actions.shift()
+      const next = kind === "claude" && names.length === 0 ? undefined : actions.shift()
       const action = typeof next === "function" ? next(raw) : next
       const name =
         action === undefined
@@ -175,7 +175,7 @@ export async function nativeModelFixture(kind: "codex" | "claude", root: string)
       : []
   await writeFile(
     path,
-    `#!${process.execPath}\nconst args=process.argv.slice(2); const i=args.indexOf("exec"), j=args.indexOf("app-server"); if(i>=0) args.splice(i+1,0,...${JSON.stringify(config)}); else if(j>=0) args.splice(j,0,...${JSON.stringify(config)}); const child=Bun.spawn([${JSON.stringify(binary)},...args],{stdin:"inherit",stdout:"inherit",stderr:"inherit",env:{...process.env,ANTHROPIC_BASE_URL:${JSON.stringify(model.url.toString())},ANTHROPIC_AUTH_TOKEN:"fixture-only",ANTHROPIC_API_KEY:"fixture-only",CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC:"1"}});process.exitCode=await child.exited\n`,
+    `#!${process.execPath}\nconst args=process.argv.slice(2); if (${kind === "claude"} && args.some(value=>["-p","--print"].includes(value))) throw new Error("Claude print execution is prohibited"); const i=args.indexOf("exec"), j=args.indexOf("app-server"); if(i>=0) args.splice(i+1,0,...${JSON.stringify(config)}); else if(j>=0) args.splice(j,0,...${JSON.stringify(config)}); const child=Bun.spawn([${JSON.stringify(binary)},...args],{stdin:"inherit",stdout:"inherit",stderr:"inherit",env:{...process.env,ANTHROPIC_BASE_URL:${JSON.stringify(model.url.toString())},ANTHROPIC_AUTH_TOKEN:"fixture-only",ANTHROPIC_API_KEY:"fixture-only",CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC:"1"}});process.exitCode=await child.exited\n`,
     { mode: 0o755 },
   )
   return {

@@ -4,6 +4,20 @@ This is the repository-maintained revision of the [approved onboarding runbook](
 
 ## Public gate App prerequisite
 
+For the capability-gateway/native Actions work, this runbook is deployment
+context, not activation approval. P2 is still in progress. Existing Tailscale
+enrollment and protected publication settings are reused; only client ID and
+audience are public bootstrap configuration. Peer discovery, signed job proof,
+grant and private diagnostics travel over authenticated control. No address/OIDC
+readiness payload is uploaded publicly.
+
+Keep the approved publisher action reference at
+`f74e0505155bc32aa2cedef00ba8b08ef1b90007` until a new remote publisher revision is
+explicitly reviewed. Workflow/tooling and image pins must be reviewed separately;
+editing the local publisher does not update that remote action. Actual native
+container/Dagger, production UID, IPv4/IPv6 DROP-counter controls, complete local
+security gates and supervisor review precede any separately authorized live job.
+
 Before making GitHub App 4337845 public or installing it on `quality-sh/provenance`, the owner must deploy PR #81's early installation rejection and verify it. Set mint's effective environment to:
 
 ```sh
@@ -158,13 +172,14 @@ gh run list --repo quality-sh/provenance --commit "$RESULT_HEAD" --json database
 
 The three workflowd runs and at least one provenance run must each retain: draft PR URL with author ghettimonster[bot], result SHA/metadata receipt, real remote test evidence, audit lines in Actions, safe PR CI, revoked binding/token and confirmed process/Actions/ref cleanup. No patches/bundles are downloaded to mint as proof. Keep failed-run evidence. Four successes are the minimum; six are not required.
 
-After all live receipts, use existing Claude auth and a fresh independent invocation with the final diff, plan and sanitized evidence:
+After all separately authorized live receipts, obtain the supervisor's independent
+review of the final diff, plan and sanitized evidence. The current P2 authority
+prohibits Claude print mode, including through fixtures and workers. A separately
+authorized native reviewer uses the normal interactive CLI under a PTY, with an
+explicitly selected approved model and authentication; this runbook grants no
+credential access or reviewer dispatch authority.
 
-```bash
-claude --print --model claude-opus-5-5 < /tmp/workflowd-d6g-security-review.txt
-```
-
-The review prompt requests findings only, no edits, and covers result identity, secret isolation, rules/CI, name pass-through, audit honesty, races/recovery and both repositories. Save the report; blocking findings prevent merge. If that model/auth is unavailable, review remains incomplete; do not substitute. On failure disable publishing, retain protections/custody, and reconcile; do not delete result branches or weaken rules as automatic rollback.
+The review prompt requests findings only, no edits, and covers result identity, secret isolation, rules/CI, name pass-through, audit honesty, races/recovery and both repositories. Save the report; blocking findings prevent merge. If the approved model/auth is unavailable, review remains incomplete; do not substitute. On failure disable publishing, retain protections/custody, and reconcile; do not delete result branches or weaken rules as automatic rollback.
 
 ## Recording the agent image digest
 
