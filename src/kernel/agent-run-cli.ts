@@ -32,10 +32,11 @@ type RefusalReason =
   | "unsupported_thinking"
   | "model_not_available"
 type Custody = ReturnType<typeof makeAgentRunCustody>
-export type AgentRunCliStore = Partial<Pick<AgentRunStorePort, "recordResolvedSelection">> &
+export type AgentRunCliStore = Partial<
+  Pick<AgentRunStorePort, "recordResolvedSelection" | "read">
+> &
   Pick<
     AgentRunStorePort,
-    | "read"
     | "claimSpawn"
     | "abandonLaunch"
     | "markSpawned"
@@ -358,7 +359,8 @@ export const makeAgentRunCliDispatcher = (dependencies: {
   const recordModelEvidence = (run: AgentRunRecord, model: string | undefined, now: Date) =>
     Effect.gen(function* () {
       if (model === undefined || store.recordResolvedSelection === undefined) return
-      const current = yield* store.read(run.runId)
+      // The stored selection may have changed since dispatch read the run.
+      const current = store.read === undefined ? run : yield* store.read(run.runId)
       if (current?.resolvedSelection == null) return
       yield* store.recordResolvedSelection({
         runId: run.runId,
@@ -729,7 +731,7 @@ export const makeAgentRunCliDispatcher = (dependencies: {
           }
           const threadId = observed.result.threadId
           yield* recordModelEvidence(run, observed.result.model, now)
-          const endpointRun = yield* store.read(run.runId)
+          const endpointRun = store.read === undefined ? run : yield* store.read(run.runId)
           yield* ensureSession({
             ...(endpointRun?.resolvedSelection?.executor.endsWith(":actions")
               ? { actionsHost: endpointRun.resolvedSelection.host }

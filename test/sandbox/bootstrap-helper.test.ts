@@ -90,9 +90,11 @@ test("helper timeout cannot activate late proof work", async () => {
 })
 
 test("private bootstrap waits for asynchronous admission before ending its input", async () => {
+  // A relative socket path keeps a deep checkout under the 107-byte sun_path bound,
+  // which Node's connect otherwise fails without output.
   const ssh = await disposableSsh(
     (root) =>
-      `${fixtureExecutable("node")} ${resolve("test/sandbox/fixtures/capability-job.mjs")} attach ${root}`,
+      `cd ${root} && exec ${fixtureExecutable("node")} ${resolve("test/sandbox/fixtures/capability-job.mjs")} attach .`,
   )
   let activated = false
   const server = await serveBootstrap({
