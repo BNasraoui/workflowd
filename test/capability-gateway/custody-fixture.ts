@@ -9,6 +9,8 @@ import {
   importLogin,
   oauthFixture,
   proof,
+  sentRefresh,
+  sse,
   startGatewayProcess,
   writeCustodyProvider,
   type Fixture,
@@ -88,4 +90,23 @@ export async function imported(f: Fixture, login: object) {
   const result = await importLogin(custodyEnv(f, loginDirectory(f)), JSON.stringify(login))
   expect(result).toMatchObject({ code: 0, stderr: "" })
   return result
+}
+
+/** Waits until `ready` holds, for at most 10 seconds. */
+export async function until(ready: () => boolean) {
+  const end = Date.now() + 10000
+  while (!ready()) {
+    if (Date.now() > end) throw new Error("the condition did not come")
+    await Bun.sleep(20)
+  }
+}
+
+/** The call works with the fixture's next access value; the OAuth server got one more request. */
+export async function works(gateway: Gateway, token: string, oauth: OAuthFixture, old: string) {
+  const before = oauth.requests().length
+  const call = await client(gateway.port).call(token)
+  expect(call.status).toBe(200)
+  expect(await call.text()).toBe(sse)
+  expect(oauth.requests()).toHaveLength(before + 1)
+  expect(sentRefresh(oauth.requests().at(-1))).toBe(old)
 }
