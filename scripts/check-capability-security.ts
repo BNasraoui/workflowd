@@ -79,27 +79,6 @@ async function main() {
         results,
         completeCoreCases: suite === "core" && results.every((result) => result.ok),
         completeListedCases: results.every((result) => result.ok),
-        separateP1Evidence: [
-          "Node real-SSH transport feasibility",
-          "changed-line and per-file coverage",
-          "final static gates",
-        ],
-        separateP2Evidence: [
-          "owned-Docker image/runtime/UID/Dagger/network and death-injection receipts",
-          "owned native artifact through ZIP validation and synthetic protected publisher",
-        ],
-        separateP3Evidence: [
-          "exact-client owned-container/controller/SSH/result/publication receipts",
-          "pinned image build and exact-owner cleanup",
-        ],
-        separateActivationGates: [
-          "reviewed production fixed-v1 publisher pin",
-          "production restart/drain or reviewed same-job reattachment",
-          "deployed federation/ACL and credential-owner activation",
-          "actual provider and Actions entitlement",
-        ],
-        separateMergeGates: ["source-qualified coverage", "per-file coverage", "CRAP", "full CI"],
-        completeSecurityAcceptance: false,
       },
       null,
       2,
