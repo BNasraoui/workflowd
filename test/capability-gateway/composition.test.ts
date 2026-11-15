@@ -197,7 +197,8 @@ test("the gateway config bounds its streams: an idle limit of 1 ms to the listen
   const socketTimeout = spyOn(Server.prototype, "setTimeout")
   try {
     capabilityHttpServer(async () => new Response(null))
-    expect(socketTimeout.mock.calls.map((call): unknown => call[0])).toEqual([120000])
+    expect(socketTimeout).toHaveBeenCalledTimes(1)
+    expect(socketTimeout).toHaveBeenCalledWith(120000, expect.any(Function))
   } finally {
     socketTimeout.mockRestore()
   }
