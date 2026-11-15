@@ -36,8 +36,9 @@ const pause = (milliseconds, signal) =>
   })
 
 /**
- * Network failures that can clear by a wait: a refused connection, a reset and a timeout, by
- * the codes of Node's fetch and of Bun's.
+ * Network failures that can clear by a wait: a refused connection, a reset, a timeout, and a
+ * name that does not resolve yet (the first seconds after the runner joins the tailnet), by the
+ * codes of Node's fetch and of Bun's.
  */
 const passing = new Set([
   "ECONNREFUSED",
@@ -45,6 +46,8 @@ const passing = new Set([
   "ConnectionClosed",
   "ECONNRESET",
   "ETIMEDOUT",
+  "ENOTFOUND",
+  "EAI_AGAIN",
   "UND_ERR_SOCKET",
   "UND_ERR_CONNECT_TIMEOUT",
   "UND_ERR_HEADERS_TIMEOUT",
@@ -66,8 +69,8 @@ const passes = (error) =>
 
 /**
  * Opens the run's gateway session: a challenge for the lease, an OIDC proof for that challenge,
- * and the session post. A challenge that is not ready (503, a refused connection, a reset or a
- * timeout) uses no attempt: the helper waits, with backoff up to 10 seconds, for at most `wait`
+ * and the session post. A challenge that is not ready (503, a refused connection, a reset, a
+ * timeout or a name that does not resolve yet) uses no attempt: the helper waits, with backoff up to 10 seconds, for at most `wait`
  * milliseconds in all, since the daemon may record the Actions run after the runner first asks.
  * Any other failure of the challenge ends the exchange at once: a refused challenge (the lease is
  * not open to this runner), another status, and a certificate that the runner does not trust,
