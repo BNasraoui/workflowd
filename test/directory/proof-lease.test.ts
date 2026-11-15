@@ -48,6 +48,8 @@ test("signed challenge and runner freshness do not shorten or renew native sourc
         90_000,
       )
       const local = (yield* store.managed(new Date(), 90_000))[0]
+      // One clock reading, so the proof lives exactly 34 seconds.
+      const issued = Date.now()
       const command = {
         version: 1,
         kind: "directory_observe",
@@ -55,8 +57,8 @@ test("signed challenge and runner freshness do not shorten or renew native sourc
         coordinatorHostId: "coordinator",
         generation: 1,
         nonce: crypto.randomUUID(),
-        issuedAt: new Date().toISOString(),
-        expiresAt: new Date(Date.now() + 34_000).toISOString(),
+        issuedAt: new Date(issued).toISOString(),
+        expiresAt: new Date(issued + 34_000).toISOString(),
       } as const
       const bytes = directoryBytes({ ...command, signature: directoryMac(credential, command) })
       yield* Effect.gen(function* () {
