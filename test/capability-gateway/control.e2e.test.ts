@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test"
 import { createConnection } from "node:net"
 import { chmod, mkdir, stat } from "node:fs/promises"
-import { join, resolve } from "node:path"
+import { dirname, join, resolve } from "node:path"
 import { Effect } from "effect"
 import { AgentRunStore } from "../../src/kernel/agent-run-store"
 import { Schema } from "effect"
@@ -82,7 +82,8 @@ interface Daemon {
 async function startDaemon(database: string, socket: string): Promise<Daemon> {
   const child = Bun.spawn([process.execPath, "-e", daemonProgram(database, socket)], {
     cwd: resolve("."),
-    env: { PATH: process.env.PATH, HOME: "/nonexistent" },
+    // A writable home of its own, beside its database, as Bun needs one for its caches.
+    env: { PATH: process.env.PATH, HOME: dirname(database) },
     stdin: "pipe",
     stdout: "pipe",
     stderr: "inherit",
@@ -333,6 +334,7 @@ test("the gateway refuses a caller whose uid is not the daemon's", async () => {
     ).toEqual({ ok: false, error: "caller" })
     const daemon = await startDaemon(daemonDatabase(f), socketOf(f))
     try {
+      expect(daemon.ready).toBe(true)
       expect(await daemon.send("authorize run")).toEqual({
         ok: false,
         tag: "CapabilityControlRefused",
