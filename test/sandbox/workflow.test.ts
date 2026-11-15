@@ -281,7 +281,7 @@ for (const tracked of [false, true]) {
   })
 }
 
-test("a private runner gets the gateway URL and joins the tailnet without Tailscale SSH", async () => {
+test("a private runner gets the gateway URL, waits at most five minutes for its first contact, and joins the tailnet without Tailscale SSH", async () => {
   const workflow = Schema.decodeUnknownSync(
     Schema.Struct({
       jobs: Schema.Struct({
@@ -290,6 +290,7 @@ test("a private runner gets the gateway URL and joins the tailnet without Tailsc
             Schema.Struct({
               name: Schema.optionalKey(Schema.String),
               env: Schema.optionalKey(Schema.Record(Schema.String, Schema.String)),
+              "timeout-minutes": Schema.optionalKey(Schema.Number),
             }),
           ),
         }),
@@ -300,6 +301,7 @@ test("a private runner gets the gateway URL and joins the tailnet without Tailsc
   expect(step("Prepare private first contact")?.env?.SANDBOX_GATEWAY_URL).toBe(
     "${{ inputs.gateway-url }}",
   )
+  expect(step("Prepare private first contact")?.["timeout-minutes"]).toBe(5)
   expect(step("Join the restricted tailnet")?.env?.SANDBOX_BOOTSTRAP_MODE).toBe(
     "${{ inputs.bootstrap-mode }}",
   )

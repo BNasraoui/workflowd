@@ -67,6 +67,13 @@ test("a signed exact GitHub job proves the private challenge", () => {
 
 test("signature, immutable job context and fresh challenge are all required", () => {
   expect(verifyJobProof(token(), expected, jwks, now).jti).toBe("fixture-jti")
+  // A proof issued up to ten seconds ahead of this clock is accepted; its x5t is not checked.
+  expect(
+    verifyJobProof(token({ iat: now / 1000 + 10, nbf: now / 1000 + 10 }), expected, jwks, now).jti,
+  ).toBe("fixture-jti")
+  expect(verifyJobProof(token({}, { x5t: "thumbprint" }), expected, jwks, now).jti).toBe(
+    "fixture-jti",
+  )
   for (const change of [
     { repository: "fork/repo" },
     { repository_id: "99" },
@@ -87,7 +94,8 @@ test("signature, immutable job context and fresh challenge are all required", ()
     { aud: "another-connection" },
     { iss: "https://attacker.invalid" },
     { exp: now / 1000 },
-    { nbf: now / 1000 + 1 },
+    { nbf: now / 1000 + 11 },
+    { iat: now / 1000 + 11 },
     { jti: "" },
   ])
     expect(() => verifyJobProof(token(change), expected, jwks, now)).toThrow("job proof refused")

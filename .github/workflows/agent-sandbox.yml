@@ -85,6 +85,8 @@ jobs:
           retention-days: 1
       - name: Prepare private first contact
         if: inputs.bootstrap-mode == 'private'
+        # The helper waits up to 180 seconds for the gateway to know the run, then proves itself.
+        timeout-minutes: 5
         env:
           SANDBOX_AGENT_IMAGE: ${{ inputs.agent-image }}
           SANDBOX_TOOLING_SHA: ${{ inputs.tooling-sha || github.sha }}

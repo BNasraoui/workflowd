@@ -6,7 +6,11 @@ const Header = Schema.Struct({
   alg: Schema.Literal("RS256"),
   typ: Schema.Literal("JWT"),
   kid: Schema.NonEmptyString,
+  // GitHub may name the key's thumbprint too; the key is selected by kid alone.
+  x5t: Schema.optionalKey(Schema.String),
 })
+/** A proof issued this far ahead of this clock is still accepted; its expiry has no leeway. */
+const issuedLeewayMs = 10000
 const Claims = Schema.Struct({
   iss: Schema.String,
   aud: Schema.String,
@@ -115,8 +119,8 @@ export function verifyJobProof(
     }
     if (
       Object.entries(exact).some(([key, value]) => Reflect.get(claims, key) !== value) ||
-      claims.nbf * 1000 > now ||
-      claims.iat * 1000 > now ||
+      claims.nbf * 1000 > now + issuedLeewayMs ||
+      claims.iat * 1000 > now + issuedLeewayMs ||
       claims.exp * 1000 <= now ||
       claims.exp <= claims.iat ||
       claims.exp - claims.iat > 600 ||

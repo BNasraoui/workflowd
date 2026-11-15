@@ -52,6 +52,7 @@ test("the runner proves itself for each challenge and keeps only the granted ses
       issue,
       send: gateway.send,
       backoff: () => 0,
+      waitBackoff: () => 0,
     }),
   ).toEqual(grant)
   expect(gateway.seen).toEqual([
@@ -163,6 +164,8 @@ test("the runner is admitted over HTTPS by a gateway it trusts, and not by one i
         issue: async (audience) => `proof-for-${audience}`,
         send: (url, init) => fetch(url, { ...init, tls: trusted ? { ca } : {} }),
         attempts: 1,
+        // An untrusted gateway is a network error: the helper does not wait for it here.
+        wait: 0,
       })
     await expect(admit(false)).rejects.toThrow("gateway session unavailable")
     expect(proofs).toEqual([])

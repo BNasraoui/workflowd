@@ -15,6 +15,11 @@ export function openSession(options: {
   send?: (url: URL, init: RequestInit) => Promise<Response>
   attempts?: number
   backoff?: (attempt: number) => number
+  /** How long, in all, a challenge that is not ready (503 or a network error) is waited for. */
+  wait?: number
+  waitBackoff?: (waited: number) => number
+  clock?: () => number
+  sleep?: (milliseconds: number, signal?: AbortSignal) => Promise<void>
   signal?: AbortSignal
 }): Promise<SessionGrant>
 export function takeJobIdentity(

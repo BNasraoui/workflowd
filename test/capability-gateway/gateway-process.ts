@@ -18,8 +18,8 @@ export const jwks = {
 
 /**
  * A GitHub Actions OIDC proof for a lease of the fixture repository (Actions run 78, attempt 1,
- * unless `claims` names others). `header` adds header fields; `issuedIn` moves `iat` and `nbf`
- * that many seconds from now.
+ * unless `claims` names others). `header` adds header fields; `issuedAt` sets `iat` and `nbf`
+ * (seconds since the epoch), five seconds ago unless named.
  */
 export const proof = (
   audience: string,
@@ -28,11 +28,11 @@ export const proof = (
     readonly lease?: string
     readonly claims?: Record<string, string | number>
     readonly header?: Record<string, string>
-    readonly issuedIn?: number
+    readonly issuedAt?: number
   } = {},
 ) => {
   const now = Math.floor(Date.now() / 1000)
-  const issued = now + (options.issuedIn ?? -5)
+  const issued = options.issuedAt ?? now - 5
   const ref = `refs/heads/workflowd/leases/${options.lease ?? "lease"}`
   const input = [
     { alg: "RS256", typ: "JWT", kid: "fixture", ...options.header },
