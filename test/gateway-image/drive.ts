@@ -1,7 +1,7 @@
 import "../resources/preload"
 import { strict as assert } from "node:assert"
 import { chmod, readFile, readdir, writeFile } from "node:fs/promises"
-import { join } from "node:path"
+import { dirname, join } from "node:path"
 import {
   client,
   fixture,
@@ -149,6 +149,37 @@ async function imageGateway(f: Fixture, entrypoint: boolean): Promise<Gateway> {
   return { port: container.port, stop }
 }
 
+/**
+ * The gateway's control directory is the image user's, mode 0710, so the runner cannot remove the
+ * socket in it. A container of the image, as that user, removes the directory.
+ */
+async function removeControlDirectory(f: Fixture) {
+  const removal = Bun.spawn(
+    [
+      "docker",
+      "run",
+      "--rm",
+      "--network",
+      "none",
+      "--cap-drop",
+      "ALL",
+      "--security-opt",
+      "no-new-privileges",
+      "--group-add",
+      runnerGroup(),
+      "--volume",
+      `${f.root}:${f.root}`,
+      "--entrypoint",
+      "/bin/bun",
+      image,
+      "-e",
+      `require("node:fs").rmSync(${JSON.stringify(dirname(f.config.controlSocket))}, { recursive: true, force: true })`,
+    ],
+    { stdout: "ignore", stderr: "inherit" },
+  )
+  if ((await removal.exited) !== 0) throw new Error("cannot remove the gateway's control directory")
+}
+
 const f = await fixture()
 const gateways: Gateway[] = []
 const start = async (entrypoint = false) => {
@@ -210,5 +241,6 @@ try {
   console.log("gateway image: image user, session, second proof and restart passed")
 } finally {
   for (const gateway of gateways) await gateway.stop()
+  await removeControlDirectory(f)
   await f.close()
 }
