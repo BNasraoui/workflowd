@@ -3,7 +3,7 @@ import { join } from "node:path"
 import { inflateSync } from "node:zlib"
 import { Data, Effect, Redacted, Schema, Semaphore, type Scope } from "effect"
 import type { AgentGitConfig } from "../agent-git/config"
-import { PublicationMessage } from "../sandbox/config"
+import { PublicationBody, PublicationMessage, PublicationTitle } from "../sandbox/config"
 
 /**
  * The daemon's check of a sealed result from a run placed off the host, and its
@@ -140,9 +140,16 @@ const quoted = (value: string) =>
 const decoder = new TextDecoder("utf-8", { fatal: true })
 const utf8Bytes = (value: string) => new TextEncoder().encode(value).byteLength
 const commitId = /^[0-9a-f]{40}$/
-// A title is one line; a message or body may hold newlines and no other control.
+// A title is one line; a body may hold newlines and no other control; a final message
+// may hold newlines and tabs and no other control or format character.
 const controlOrFormat = /[\p{Cc}\p{Cf}\u2028\u2029]/u
 const controlButNewline = /(?![\n])[\p{Cc}\p{Cf}]/u
+const controlButNewlineOrTab = /(?![\n\t])[\p{Cc}\p{Cf}]/u
+// The publication rules of the seal (result.py safe_publication), with the same
+// Unicode data: no mention, HTML, math, backslash, character reference, closing
+// issue reference, link reference definition, stacked marks or ambiguous fence.
+const isTitle = Schema.is(PublicationTitle)
+const isBody = Schema.is(PublicationBody)
 
 const manifestKeys = ["sourceSha", "title", "body", "finalMessage"] as const
 
@@ -156,7 +163,8 @@ const textChecks: ReadonlyArray<
     (value) =>
       value.length > 0 &&
       [...value].length <= sealedResultLimits.titleCharacters &&
-      !controlOrFormat.test(value),
+      !controlOrFormat.test(value) &&
+      isTitle(value),
   ],
   [
     "body",
@@ -164,12 +172,16 @@ const textChecks: ReadonlyArray<
     (value) =>
       value.trim().length > 0 &&
       utf8Bytes(value) <= sealedResultLimits.bodyBytes &&
-      !controlButNewline.test(value),
+      !controlButNewline.test(value) &&
+      isBody(value),
   ],
   [
     "finalMessage",
     "final_message",
-    (value) => utf8Bytes(value) <= sealedResultLimits.finalMessageBytes && !value.includes("\0"),
+    (value) =>
+      value.isWellFormed() &&
+      utf8Bytes(value) <= sealedResultLimits.finalMessageBytes &&
+      !controlButNewlineOrTab.test(value),
   ],
 ]
 

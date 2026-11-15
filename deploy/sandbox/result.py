@@ -249,7 +249,9 @@ def native_seal(source):
     publication_text(completion['commitMessage'], True)
     publication_body(completion['body'])
     final = completion['finalMessage']
-    if not isinstance(final, str) or '\0' in final or len(final.encode('utf8', errors='strict')) > 65536:
+    # Data to the caller: newlines and tabs, and no other control or format character.
+    if not isinstance(final, str) or len(final.encode('utf8', errors='strict')) > 65536 or any(
+            unicodedata.category(c) in ('Cc', 'Cf') and c not in '\n\t' for c in final):
         raise ValueError('Invalid final message')
     content_check(json.dumps(completion, ensure_ascii=False).encode(), sensitive)
     if Path('repository').is_symlink() or Path('source.git').is_symlink(): raise ValueError('Unsafe source path')

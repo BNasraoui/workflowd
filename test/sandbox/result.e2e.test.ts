@@ -486,7 +486,7 @@ const native = {
   title: "Native result",
   commitMessage: "Native change\n\nOne file.",
   body: "## Result\n\nNative change.",
-  finalMessage: "Done.",
+  finalMessage: "Done.\n\tA tab and a newline stay.",
 }
 const secret = "fixture-sensitive-value-93b28a5d"
 // The identity the daemon gives agent runs; the seal commits with it.
@@ -596,6 +596,8 @@ const refusedSeals = new Map([
   ["branch key", "Invalid native metadata"],
   ["missing final message", "Invalid native metadata"],
   ["NUL in the final message", "Invalid final message"],
+  ["terminal control sequence in the final message", "Invalid final message"],
+  ["bidirectional control in the final message", "Invalid final message"],
   ["newline in the title", "Invalid publication text"],
   ["an identity with an angle bracket", "Invalid identity"],
   ["no identity", "Invalid native request"],
@@ -649,6 +651,11 @@ for (const variant of sealVariants)
           body: native.body,
         },
         "NUL in the final message": { ...native, finalMessage: "a\u0000b" },
+        "terminal control sequence in the final message": {
+          ...native,
+          finalMessage: "a \u001b[2J b",
+        },
+        "bidirectional control in the final message": { ...native, finalMessage: "abc\u202edef" },
         "newline in the title": { ...native, title: "one\ntwo" },
       }
       const identities: Record<string, unknown> = {

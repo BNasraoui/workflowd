@@ -302,6 +302,33 @@ for (const [name, fields, check] of [
   ["an empty title", { title: "" }, "title"],
   ["a title that is not text", { title: 7 }, "title"],
   ["a source that is not a commit id", { sourceSha: "--upload-pack=touch" }, "source"],
+  ["a mention in the title", { title: "Ask @owner" }, "title"],
+  ["HTML in the title", { title: "<img src=x>" }, "title"],
+  ["a bidirectional control in the title", { title: "abc\u202edef" }, "title"],
+  ["a mention in the body", { body: "Thanks @owner" }, "body"],
+  ["an issue closing reference in the body", { body: "Closes #1" }, "body"],
+  ["a link reference definition in the body", { body: "[x]: https://example.invalid" }, "body"],
+  ["a character reference in the body", { body: "&#64;owner" }, "body"],
+  ["a blank body", { body: " \n " }, "body"],
+  [
+    "a terminal control sequence in the final message",
+    { finalMessage: "a \u001b[2J b" },
+    "final_message",
+  ],
+  [
+    "an operating system command in the final message",
+    { finalMessage: "\u001b]8;;http://x\u001b\\" },
+    "final_message",
+  ],
+  ["a carriage return in the final message", { finalMessage: "one\rtwo" }, "final_message"],
+  [
+    "a bidirectional control in the final message",
+    { finalMessage: "abc\u202edef" },
+    "final_message",
+  ],
+  ["a zero-width space in the final message", { finalMessage: "a\u200bb" }, "final_message"],
+  ["a lone surrogate in the final message", { finalMessage: "a\ud800b" }, "final_message"],
+  ["a final message over 64 KiB", { finalMessage: "a".repeat(64 * 1024 + 1) }, "final_message"],
 ] as const)
   test(`result.json with ${name} is refused`, async () => {
     const error = await Effect.runPromise(
@@ -310,6 +337,16 @@ for (const [name, fields, check] of [
     expect(error).toBeInstanceOf(SealedResultRefused)
     expect(error.check).toBe(check)
   })
+
+test("result.json keeps a newline and a tab in the final message", async () => {
+  const result = await Effect.runPromise(
+    decodeSealedResult(
+      manifest("a".repeat(40), { finalMessage: "Done.\n\tOne file: @owner <b> $x \\" }),
+      new Uint8Array([1, 2, 3]),
+    ),
+  )
+  expect(result.finalMessage).toBe("Done.\n\tOne file: @owner <b> $x \\")
+})
 
 test("result.json with a key outside SealedResult is refused by the name of the key", async () => {
   const error = await Effect.runPromise(
