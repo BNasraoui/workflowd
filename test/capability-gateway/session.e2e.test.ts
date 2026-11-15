@@ -3,6 +3,7 @@ import { generateKeyPairSync, sign } from "node:crypto"
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
+import { connect } from "node:net"
 import { Effect, Exit, Schema, Scope } from "effect"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
 import { SqlClient } from "effect/unstable/sql"
@@ -213,12 +214,11 @@ async function scenario(start: (f: Fixture) => Promise<{ port: number; stop(): P
   let gateway = await start(f)
   try {
     const url = (path: string) => `http://127.0.0.1:${gateway.port}${path}`
-    const session = (token: string, signal?: AbortSignal) =>
+    const session = (token: string) =>
       fetch(url("/capabilities/v1/session"), {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ token }),
-        ...(signal ? { signal } : {}),
       })
     const call = (token: string) =>
       fetch(url("/capabilities/v1/providers/anthropic/v1/messages"), {
@@ -255,11 +255,17 @@ async function scenario(start: (f: Fixture) => Promise<{ port: number; stop(): P
 
     // A session request cut while its run token is minted consumes neither challenge nor jti.
     await writeFile(join(f.root, "slow"), "")
-    const cut = new AbortController()
-    const interrupted = session(proof(audience, "jti-1"), cut.signal).catch(() => "aborted")
+    const body = JSON.stringify({ token: proof(audience, "jti-1") })
+    const socket = connect(gateway.port, "127.0.0.1")
+    let answered = ""
+    socket.on("data", (bytes) => (answered += bytes.toString()))
+    socket.write(
+      `POST /capabilities/v1/session HTTP/1.1\r\nhost: 127.0.0.1\r\ncontent-type: application/json\r\ncontent-length: ${Buffer.byteLength(body)}\r\n\r\n${body}`,
+    )
     await Bun.sleep(300)
-    cut.abort()
-    expect(await interrupted).toBe("aborted")
+    socket.destroy()
+    await Bun.sleep(200)
+    expect(answered).toBe("")
     await rm(join(f.root, "slow"))
 
     const granted = await session(proof(audience, "jti-1"))

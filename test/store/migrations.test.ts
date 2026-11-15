@@ -232,6 +232,7 @@ describe("strict initial store schema", () => {
       { migration_id: 38, name: "agent_directory" },
       { migration_id: 39, name: "capability_gateway" },
       { migration_id: 40, name: "native_results" },
+      { migration_id: 41, name: "capability_session" },
     ])
     expect(result.tables).toHaveLength(36)
     expect(result.tables.every((table) => table.strict === 1)).toBe(true)
