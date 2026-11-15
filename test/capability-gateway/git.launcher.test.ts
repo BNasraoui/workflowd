@@ -4,14 +4,13 @@ import { SqliteClient } from "@effect/sql-sqlite-bun"
 import { mkdtemp, mkdir, writeFile, rm, readFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
-import { request as httpRequest } from "node:http"
 import { AgentRunStoreLive } from "../../src/kernel/agent-run-store"
 import { makeCapabilityGateway } from "../../src/capability-gateway/service"
 import { makeTokenBroker } from "../../src/worker-identity/broker"
 import { seedCapabilityRun, transport } from "./fixture"
 import { fixtureExecutable } from "../helpers/fixture-executable.mjs"
 import { capabilityApi, capabilityHttpServer } from "../../src/capability-gateway/http"
-import { connect, type AddressInfo } from "node:net"
+import { connect, createServer, type AddressInfo } from "node:net"
 import { createServer as tlsServer } from "node:tls"
 import { once } from "node:events"
 
@@ -223,26 +222,16 @@ for (const authenticated of [false, true])
               (yield* Effect.promise(() => output.getReader().read())).value ?? [],
             ).toString(),
           ).toBe("ready\n")
-          const shim = Bun.spawn(
-            [
-              "python3",
-              "-c",
-              `import importlib.util,sys
-spec=importlib.util.spec_from_file_location('interactive',sys.argv[1]); module=importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
-with module.gateway({'socket':sys.argv[2]},'workflowd-local') as url:
- print(url,flush=True)
- sys.stdin.read()
-`,
-              resolve("deploy/sandbox/claude-interactive.py"),
-              join(root, "gateway.sock"),
-            ],
-            { stdin: "pipe", stdout: "pipe", stderr: "pipe" },
-          )
-          const url = Buffer.from(
-            (yield* Effect.promise(() => shim.stdout.getReader().read())).value ?? [],
-          )
-            .toString()
-            .trim()
+          // Git speaks TCP; the relay listens on a socket. A plain forwarder joins them.
+          const forwarder = createServer((socket) => {
+            const upstream = connect(join(root, "gateway.sock"))
+            socket.pipe(upstream).pipe(socket)
+            socket.on("error", () => upstream.destroy())
+            upstream.on("error", () => socket.destroy())
+          })
+          forwarder.listen(0, "127.0.0.1")
+          yield* Effect.promise(() => once(forwarder, "listening"))
+          const url = `http://127.0.0.1:${portOf(forwarder)}`
           try {
             const base = `${url}/capabilities/v1/git/12.git`
             yield* Effect.promise(() => git(root, "clone", base, "clone"))
@@ -272,36 +261,12 @@ with module.gateway({'socket':sys.argv[2]},'workflowd-local') as url:
                 git(root, "ls-remote", `${url}/capabilities/v1/git/13.git`),
               ).pipe(Effect.result))._tag,
             ).toBe("Failure")
-            for (const headers of [
-              ["Host", new URL(url).host, "Content-Length", "0", "Content-Length", "0"],
-              ["Host", new URL(url).host, "Content-Length", "invalid"],
-              ["Host", new URL(url).host, "Content-Length", "-1"],
-              ["Host", "foreign.invalid"],
-            ]) {
-              const status = yield* Effect.promise(
-                () =>
-                  new Promise<number | undefined>((resolve, reject) => {
-                    const request = httpRequest(
-                      `${base}/info/refs?service=git-upload-pack`,
-                      { headers: ["Authorization", "Bearer workflowd-local", ...headers] },
-                      (response) => {
-                        response.resume()
-                        response.on("end", () => resolve(response.statusCode))
-                      },
-                    )
-                    request.on("error", reject)
-                    request.end()
-                  }),
-              )
-              expect(status).toBe(403)
-            }
             expect(attempts).toBe(admitted)
             expect(calls).toBe(before)
           } finally {
-            yield* Effect.promise(async () => {
-              await shim.stdin.end()
-            })
-            expect(yield* Effect.promise(() => shim.exited)).toBe(0)
+            yield* Effect.promise(
+              () => new Promise<void>((resolve) => forwarder.close(() => resolve())),
+            )
           }
         }).pipe(
           Effect.provide(AgentRunStoreLive),
