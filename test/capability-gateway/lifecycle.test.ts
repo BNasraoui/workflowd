@@ -184,7 +184,7 @@ for (const [ending, phase] of [
               },
             )
           }
-          const pending = yield* gateway.handle(grant.binding, request()).pipe(Effect.forkScoped)
+          const pending = yield* gateway.handle(request()).pipe(Effect.forkScoped)
           const signal = yield* Effect.promise(() => started.promise)
           let body: Promise<string> | undefined
           if (phase === "body" || phase === "network-body") {
@@ -230,7 +230,7 @@ for (const [ending, phase] of [
             expect(yield* Effect.promise(() => reading)).toBe("interrupted")
           }
           expect(aborted).toBe(true)
-          const next = yield* gateway.handle(grant.binding, request())
+          const next = yield* gateway.handle(request())
           expect(next.status).toBe(ending === "interrupt" ? 200 : 403)
           if (ending === "interrupt") expect(yield* Effect.promise(() => next.text())).toBe("valid")
           expect(calls).toBe(

@@ -204,7 +204,6 @@ for (const behavior of [
               headers.set("authorization", `Bearer ${grant.token}`)
               return Effect.runPromise(
                 gateway.handle(
-                  grant.binding,
                   new Request(
                     "http://capability.invalid/capabilities/v1/providers/anthropic" +
                       url.pathname +

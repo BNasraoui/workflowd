@@ -5,7 +5,7 @@ import { tmpdir } from "node:os"
 import { generateKeyPairSync } from "node:crypto"
 import { Effect, Option } from "effect"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
-import { loadConfig } from "../../src/config"
+import { loadCapabilityGatewayConfig, loadConfig } from "../../src/config"
 import { makeLiveLayer } from "../../src/layers"
 import { SandboxDispatch } from "../../src/sandbox/dispatch"
 import { seedCapabilityRun, transport } from "./fixture"
@@ -14,7 +14,7 @@ import { requiredEnvironment } from "../helpers/config"
 import { AgentRunStoreLive } from "../../src/kernel/agent-run-store"
 import { fixtureExecutable } from "../helpers/fixture-executable.mjs"
 
-test("configured live composition revokes prior grants and refuses P2 native launch before external effects", async () => {
+test("configured live composition settles prior leases, which revokes their grants, and refuses P2 native launch before external effects", async () => {
   const root = await mkdtemp(join(tmpdir(), "gateway-composition-"))
   const gateway = {
     nodeBinary: fixtureExecutable("node"),
@@ -68,6 +68,34 @@ test("configured live composition revokes prior grants and refuses P2 native lau
       ).rejects.toThrow()
     const loaded = await loadConfig(environment, { home: root })
     expect(loaded.agentRuns?.capabilityGateway).toEqual(gateway)
+    // The gateway's own process needs a listen address; workflowd accepts and ignores one.
+    const listen = { host: "127.0.0.1", port: 0 }
+    const served = { ...gateway, listen }
+    expect(
+      (
+        await loadConfig(
+          { ...environment, WORKFLOWD_CAPABILITY_GATEWAY: JSON.stringify(served) },
+          { home: root },
+        )
+      ).agentRuns?.capabilityGateway,
+    ).toEqual(served)
+    expect(
+      loadCapabilityGatewayConfig({ WORKFLOWD_CAPABILITY_GATEWAY: JSON.stringify(served) }, root),
+    ).toEqual({ gateway: served, databasePath: join(root, ".local/state/workflowd/workflowd.db") })
+    expect(() => loadCapabilityGatewayConfig({}, root)).toThrow("is required")
+    expect(() =>
+      loadCapabilityGatewayConfig({ WORKFLOWD_CAPABILITY_GATEWAY: JSON.stringify(gateway) }, root),
+    ).toThrow("requires a listen address")
+    for (const bad of [
+      { host: "gateway.example", port: 1 },
+      { host: "127.0.0.1", port: 65536 },
+    ])
+      expect(() =>
+        loadCapabilityGatewayConfig(
+          { WORKFLOWD_CAPABILITY_GATEWAY: JSON.stringify({ ...gateway, listen: bad }) },
+          root,
+        ),
+      ).toThrow()
     // Discovery is optional in the composition API; this boundary fixture does
     // not ask for a provider catalog, preflight, or an executor launch.
     const { executionCapabilities: _discovery, ...config } = loaded

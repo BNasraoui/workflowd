@@ -162,7 +162,7 @@ for (const protocol of ["codex-chatgpt", "openai-chat"] as const) {
           mode = "capture-fault"
           const beforeCapture = yield* native.read("run")
           for (let attempt = 1; attempt <= 3; attempt++) {
-            const failed = yield* gateway.handle(issued.binding, request())
+            const failed = yield* gateway.handle(request())
             expect(failed.status).toBe(503)
             expect(yield* Effect.promise(() => failed.text())).toBe("")
             expect(captureCancelled).toBe(attempt)
@@ -177,7 +177,7 @@ for (const protocol of ["codex-chatgpt", "openai-chat"] as const) {
           }
           yield* Effect.promise(() => rm(join(root, "provider-response.json"), { recursive: true }))
           mode = "valid"
-          const valid = yield* gateway.handle(issued.binding, request())
+          const valid = yield* gateway.handle(request())
           expect(valid.status).toBe(200)
           expect(yield* Effect.promise(() => valid.text())).toBe(bytes)
           expect(sent[0]?.url).toBe(
@@ -223,13 +223,8 @@ for (const protocol of ["codex-chatgpt", "openai-chat"] as const) {
             request(path, body, { "x-workflowd-run": "other" }),
             request(path, body, { connection: "upgrade" }),
           ])
-            expect((yield* gateway.handle(issued.binding, denied)).status).toBe(403)
+            expect((yield* gateway.handle(denied)).status).toBe(403)
           expect(sent.length).toBe(4)
-          for (const binding of [
-            { ...issued.binding, runId: "other" },
-            { ...issued.binding, channel: "f".repeat(64) },
-          ])
-            expect((yield* gateway.handle(binding, request())).status).toBe(403)
           for (const swap of [
             sql`UPDATE kernel_agent_runs SET repository='other' WHERE run_id='run'`,
             sql`UPDATE kernel_agent_runs SET attempt=attempt+1 WHERE run_id='run'`,
@@ -242,25 +237,22 @@ for (const protocol of ["codex-chatgpt", "openai-chat"] as const) {
               .withTransaction(
                 Effect.gen(function* () {
                   yield* swap
-                  expect((yield* gateway.handle(issued.binding, request())).status).toBe(403)
+                  expect((yield* gateway.handle(request())).status).toBe(403)
                   expect(sent.length).toBe(before)
                   return yield* Effect.fail("fixture rollback")
                 }),
               )
               .pipe(Effect.result)
-            const adjacent = yield* gateway.handle(issued.binding, request())
+            const adjacent = yield* gateway.handle(request())
             expect(adjacent.status).toBe(200)
             expect(yield* Effect.promise(() => adjacent.text())).toBe(bytes)
           }
-          const renewed = yield* gateway.handle(
-            issued.binding,
-            request("/capabilities/v1/renew", {}),
-          )
+          const renewed = yield* gateway.handle(request("/capabilities/v1/renew", {}))
           expect(renewed.status).toBe(200)
           const next = yield* Effect.promise(async () =>
             Schema.decodeUnknownSync(Schema.Struct({ token: Schema.String }))(await renewed.json()),
           )
-          const control = yield* gateway.handle(issued.binding, request(path, body, {}, next.token))
+          const control = yield* gateway.handle(request(path, body, {}, next.token))
           expect(yield* Effect.promise(() => control.text())).toBe(bytes)
           expect((yield* native.read("run"))?.nonce).toBe(invocation.nonce)
           for (const invalid of [
@@ -277,7 +269,7 @@ for (const protocol of ["codex-chatgpt", "openai-chat"] as const) {
               "chatgpt-account-id": account,
               "x-unknown-quota": "20",
             }
-            const response = yield* gateway.handle(issued.binding, request())
+            const response = yield* gateway.handle(request())
             expect(response.status).toBe(200)
             expect(yield* Effect.promise(() => response.text())).toBe(bytes)
             expect(yield* Effect.promise(() => diagnostics())).toEqual({
@@ -291,7 +283,7 @@ for (const protocol of ["codex-chatgpt", "openai-chat"] as const) {
           for (const invalid of ["NaN", "Infinity", "-1", "9".repeat(40), access, "1e3"]) {
             responseHeaders = Object.fromEntries(Object.keys(quota).map((name) => [name, invalid]))
             responseHeaders["x-request-id"] = "req_numeric-control"
-            const response = yield* gateway.handle(issued.binding, request())
+            const response = yield* gateway.handle(request())
             expect(yield* Effect.promise(() => response.text())).toBe(bytes)
             expect(yield* Effect.promise(() => diagnostics())).toEqual({
               version: 1,
@@ -303,7 +295,7 @@ for (const protocol of ["codex-chatgpt", "openai-chat"] as const) {
           }
           responseStatus = 429
           responseHeaders = { ...quota, "x-request-id": "req_quota-error" }
-          const quotaError = yield* gateway.handle(issued.binding, request())
+          const quotaError = yield* gateway.handle(request())
           expect(quotaError.status).toBe(429)
           expect(yield* Effect.promise(() => quotaError.text())).toBe(bytes)
           expect(yield* Effect.promise(() => diagnostics("provider-error.json"))).toEqual({
@@ -320,7 +312,7 @@ for (const protocol of ["codex-chatgpt", "openai-chat"] as const) {
             "chatgpt-account-id": quotaValue,
             [quotaName]: quotaValue,
           }
-          const reflection = yield* gateway.handle(issued.binding, request())
+          const reflection = yield* gateway.handle(request())
           expect(yield* Effect.promise(() => reflection.text())).toBe(bytes)
           expect(yield* Effect.promise(() => diagnostics())).toEqual({
             version: 1,
@@ -330,7 +322,7 @@ for (const protocol of ["codex-chatgpt", "openai-chat"] as const) {
             quota: {},
           })
           responseHeaders = { "x-request-id": "req_bound-control", [quotaName]: "1000000000001" }
-          const overflow = yield* gateway.handle(issued.binding, request())
+          const overflow = yield* gateway.handle(request())
           expect(yield* Effect.promise(() => overflow.text())).toBe(bytes)
           expect(yield* Effect.promise(() => diagnostics())).toEqual({
             version: 1,
@@ -340,20 +332,20 @@ for (const protocol of ["codex-chatgpt", "openai-chat"] as const) {
             quota: {},
           })
           mode = "redirect"
-          expect((yield* gateway.handle(issued.binding, request())).status).toBe(503)
+          expect((yield* gateway.handle(request())).status).toBe(503)
           mode = "reflect"
-          const reflected = yield* gateway.handle(issued.binding, request())
+          const reflected = yield* gateway.handle(request())
           yield* Effect.promise(async () => {
             await expect(reflected.text()).rejects.toThrow()
           })
           mode = "stall"
-          const pending = yield* gateway.handle(issued.binding, request())
+          const pending = yield* gateway.handle(request())
           const reader = pending.body!.getReader()
           yield* Effect.promise(() => reader.read())
           yield* gateway.revoke("run")
           expect(sent.at(-1)?.signal.aborted).toBe(true)
           expect(cancelled).toBe(true)
-          expect((yield* gateway.handle(issued.binding, request())).status).toBe(403)
+          expect((yield* gateway.handle(request())).status).toBe(403)
         }).pipe(
           Effect.scoped,
           Effect.provide(AgentRunStoreLive),

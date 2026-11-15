@@ -2,9 +2,68 @@ import { createServer } from "node:http"
 import { Readable } from "node:stream"
 import { pipeline } from "node:stream/promises"
 import type { Socket } from "node:net"
+import { Cause, Effect, Exit } from "effect"
+import { readRequestBody } from "./claude"
+import { CapabilityRefused } from "./store"
+import type { CapabilityGateway } from "./service"
+
+const noStore = { headers: { "cache-control": "no-store" } }
+// A refusal is final for this proof or lease; anything else (store, keys, mint) may be retried.
+const refusedOr = (exit: Exit.Exit<unknown, unknown>) =>
+  new Response(null, {
+    status:
+      Exit.isFailure(exit) &&
+      exit.cause.reasons.some(
+        (reason) => Cause.isFailReason(reason) && reason.error instanceof CapabilityRefused,
+      )
+        ? 403
+        : 503,
+  })
+
+/**
+ * The gateway's API. A runner gets a challenge for its lease and posts its OIDC proof for that
+ * challenge; every other route is a run's call and carries its run token.
+ */
+export const capabilityApi =
+  (gateway: typeof CapabilityGateway.Service) =>
+  async (request: Request): Promise<Response> => {
+    const url = new URL(request.url)
+    if (url.pathname === "/capabilities/v1/challenge") {
+      const lease = url.searchParams.get("lease")
+      if (request.method !== "GET" || lease === null || [...url.searchParams].length !== 1)
+        return new Response(null, { status: 403 })
+      const exit = await Effect.runPromiseExit(gateway.sessionChallenge(lease), {
+        signal: request.signal,
+      })
+      return Exit.isSuccess(exit) ? Response.json(exit.value, noStore) : refusedOr(exit)
+    }
+    if (url.pathname === "/capabilities/v1/session") {
+      if (
+        request.method !== "POST" ||
+        url.search !== "" ||
+        request.headers.get("content-type") !== "application/json"
+      )
+        return new Response(null, { status: 403 })
+      const proof = await readRequestBody(
+        request,
+        AbortSignal.any([request.signal, AbortSignal.timeout(10000)]),
+        20000,
+      )
+        .then((body): unknown => JSON.parse(body.toString("utf8")))
+        .catch(() => undefined)
+      if (proof === undefined) return new Response(null, { status: 403 })
+      const exit = await Effect.runPromiseExit(gateway.session(proof), { signal: request.signal })
+      return Exit.isSuccess(exit) ? Response.json(exit.value, noStore) : refusedOr(exit)
+    }
+    return Effect.runPromise(gateway.handle(request), { signal: request.signal })
+  }
 
 /** Preserve incomplete responses as connection failures, including on Bun 1.3.14. */
-export function capabilityHttpServer(handle: (request: Request) => Promise<Response>) {
+export function capabilityHttpServer(
+  handle: (request: Request) => Promise<Response>,
+  /** On the gateway's network listener, Host names the listener, not the capability origin. */
+  network = false,
+) {
   const sockets = new Set<Socket>()
   const pending = new Set<Promise<void>>()
   const server = createServer({ maxHeaderSize: 8192 }, (incoming, outgoing) => {
@@ -19,6 +78,7 @@ export function capabilityHttpServer(handle: (request: Request) => Promise<Respo
         // These are the local relay's HTTP/1 framing, not agent capability headers.
         headers.delete("connection")
         headers.delete("transfer-encoding")
+        if (network) headers.delete("host")
         const request = new Request(`http://capability.invalid${incoming.url}`, {
           method: incoming.method ?? "GET",
           headers,

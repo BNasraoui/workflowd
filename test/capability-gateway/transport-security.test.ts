@@ -121,7 +121,7 @@ test("bound streaming preserves native bytes, renews with noscope, and denies cr
             },
             body,
           })
-        const valid = yield* gateway.handle(issued.binding, request())
+        const valid = yield* gateway.handle(request())
         expect(valid.status).toBe(200)
         expect(yield* Effect.promise(() => valid.text())).toBe(responseBytes)
         expect(valid.headers.has("authorization")).toBe(false)
@@ -144,7 +144,7 @@ test("bound streaming preserves native bytes, renews with noscope, and denies cr
             },
           }),
         })
-        const pendingRenewal = Effect.runPromise(gateway.handle(issued.binding, oversizedRenewal))
+        const pendingRenewal = Effect.runPromise(gateway.handle(oversizedRenewal))
         const bounded = yield* Effect.promise(() =>
           Promise.race([
             pendingRenewal.then((response) => response.status),
@@ -170,23 +170,17 @@ test("bound streaming preserves native bytes, renews with noscope, and denies cr
             authorization: `Bearer ${issued.token}, Bearer ${issued.token}`,
           }),
         ])
-          expect((yield* gateway.handle(issued.binding, denied)).status).toBe(403)
-        expect(
-          (yield* gateway.handle({ ...issued.binding, channel: "0".repeat(64) }, request())).status,
-        ).toBe(403)
+          expect((yield* gateway.handle(denied)).status).toBe(403)
         expect(sent.length).toBe(1)
         expect(yield* Effect.promise(() => readFile(join(root, "mint-count"), "utf8"))).toBe("x")
-        const renew = yield* gateway.handle(
-          issued.binding,
-          request("/capabilities/v1/renew", issued.token, "{}"),
-        )
+        const renew = yield* gateway.handle(request("/capabilities/v1/renew", issued.token, "{}"))
         expect(renew.status).toBe(200)
         const successor = yield* Effect.promise(() => renew.json()).pipe(
           Effect.flatMap(Schema.decodeUnknownEffect(Schema.Struct({ token: Schema.String }))),
         )
         const retries = yield* Effect.all(
           Array.from({ length: 12 }, () =>
-            gateway.handle(issued.binding, request("/capabilities/v1/renew", issued.token, "{}")),
+            gateway.handle(request("/capabilities/v1/renew", issued.token, "{}")),
           ),
           { concurrency: "unbounded" },
         )
@@ -197,7 +191,7 @@ test("bound streaming preserves native bytes, renews with noscope, and denies cr
           )
           expect(repeated.token).toBe(successor.token)
         }
-        const next = yield* gateway.handle(issued.binding, request(undefined, successor.token))
+        const next = yield* gateway.handle(request(undefined, successor.token))
         expect(next.status).toBe(200)
         yield* Effect.promise(() => next.text())
         for (const form of [
@@ -206,10 +200,7 @@ test("bound streaming preserves native bytes, renews with noscope, and denies cr
           Buffer.from("fixture-access").toString("hex"),
         ]) {
           reflect = form
-          const reflected = yield* gateway.handle(
-            issued.binding,
-            request(undefined, successor.token),
-          )
+          const reflected = yield* gateway.handle(request(undefined, successor.token))
           yield* Effect.promise(async () => {
             await expect(reflected.text()).rejects.toThrow("capability stream interrupted")
           })
@@ -217,16 +208,14 @@ test("bound streaming preserves native bytes, renews with noscope, and denies cr
         reflect = undefined
         for (const fault of ["redirect", "encoding", "header"]) {
           upstreamFault = fault
-          expect((yield* gateway.handle(issued.binding, request())).status).toBe(503)
+          expect((yield* gateway.handle(request())).status).toBe(503)
           upstreamFault = undefined
-          const control = yield* gateway.handle(issued.binding, request())
+          const control = yield* gateway.handle(request())
           expect(yield* Effect.promise(() => control.text())).toBe(responseBytes)
         }
         const beforeRevocation = sent.length
         stalled = true
-        const http = capabilityHttpServer(() =>
-          Effect.runPromise(gateway.handle(issued.binding, request())),
-        )
+        const http = capabilityHttpServer(() => Effect.runPromise(gateway.handle(request())))
         yield* Effect.promise(
           () => new Promise<void>((resolve) => http.server.listen(0, "127.0.0.1", resolve)),
         )
@@ -249,14 +238,9 @@ test("bound streaming preserves native bytes, renews with noscope, and denies cr
         } finally {
           yield* Effect.promise(http.close)
         }
+        expect((yield* gateway.handle(request(undefined, successor.token))).status).toBe(403)
         expect(
-          (yield* gateway.handle(issued.binding, request(undefined, successor.token))).status,
-        ).toBe(403)
-        expect(
-          (yield* gateway.handle(
-            issued.binding,
-            request("/capabilities/v1/renew", issued.token, "{}"),
-          )).status,
+          (yield* gateway.handle(request("/capabilities/v1/renew", issued.token, "{}"))).status,
         ).toBe(403)
         expect(sent.length).toBe(beforeRevocation + 1)
       }).pipe(
@@ -349,7 +333,7 @@ const streamThroughGateway = async (
             body: '{"model":"fixture-model","stream":true,"messages":[]}',
           })
         const started = Date.now()
-        const response = yield* gateway.handle(issued.binding, request())
+        const response = yield* gateway.handle(request())
         expect(response.status).toBe(200)
         if (!response.body) throw new Error("missing streaming body")
         const reader = response.body.getReader()
@@ -364,7 +348,7 @@ const streamThroughGateway = async (
         })
         const elapsed = Date.now() - started
         // The ended stream released its per-run slot: the next call is admitted, not 429.
-        const next = yield* gateway.handle(issued.binding, request())
+        const next = yield* gateway.handle(request())
         const admitted = next.status
         yield* Effect.promise(() => next.body?.cancel() ?? Promise.resolve())
         return { ending, received, elapsed, admitted, upstreamCancelled }

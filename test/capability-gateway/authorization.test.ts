@@ -5,6 +5,8 @@ import { SqlClient } from "effect/unstable/sql"
 import { AgentRunStoreLive, AgentRunStore } from "../../src/kernel/agent-run-store"
 import { makeCapabilityStore } from "../../src/capability-gateway/store"
 import { seedCapabilityRun, transport } from "./fixture"
+import { capabilitySession } from "../../src/store/0041-capability-session"
+import { makeNativeExecutionStore } from "../../src/sandbox/native-execution"
 
 const now = Date.now()
 const seed = Effect.gen(function* () {
@@ -81,8 +83,8 @@ test("renewal cannot resurrect expiry or survive durable revocation and restart"
       expect((yield* Effect.result(store.authorize(binding, "b".repeat(64), now + 4)))._tag).toBe(
         "Failure",
       )
+      // A restart revokes nothing by itself; the durable cancellation still holds.
       const restarted = yield* makeCapabilityStore
-      yield* restarted.revokeAll()
       expect(
         (yield* Effect.result(restarted.authorize(binding, "b".repeat(64), now + 4)))._tag,
       ).toBe("Failure")
@@ -147,7 +149,7 @@ test("accepted grant rejects each durable identity/context swap with adjacent ro
       expect(races.filter((value) => value._tag === "Success")).toHaveLength(1)
       yield* Effect.all(
         [
-          store.revokeAll(),
+          store.revoke("run"),
           store
             .renew(binding, "b".repeat(64), "d".repeat(64), now + 60000, now + 2)
             .pipe(Effect.result),
@@ -158,6 +160,37 @@ test("accepted grant rejects each durable identity/context swap with adjacent ro
         expect(
           (yield* Effect.result(store.authorize(binding, digest.repeat(64), now + 3)))._tag,
         ).toBe("Failure")
+    }),
+  )
+})
+
+test("the session migration keeps live bindings, their tokens and revocation triggers", async () => {
+  await run(
+    Effect.gen(function* () {
+      const { store, leases, sql } = yield* seed
+      yield* sql`PRAGMA foreign_keys = ON`
+      const binding = yield* store.bind(
+        yield* store.challenge("run", transport, now),
+        "fixture-jti",
+        "a".repeat(64),
+        now + 60000,
+        now,
+      )
+      yield* leases.bind("run", 78, 1, transport)
+      yield* store.renew(binding, "a".repeat(64), "b".repeat(64), now + 60000, now + 1)
+      yield* (yield* makeNativeExecutionStore).reserve("run")
+      const count = () =>
+        sql`SELECT (SELECT count(*) FROM capability_tokens) AS tokens,
+          (SELECT count(*) FROM sandbox_native_executions) AS executions,
+          (SELECT count(*) FROM sqlite_master WHERE name='capability_tokens_run') AS indexes`
+      expect(yield* count()).toEqual([{ tokens: 2, executions: 1, indexes: 1 }])
+      // Rebuild again, with foreign keys on, over a bound row, a renewal chain and an execution.
+      yield* sql.withTransaction(capabilitySession)
+      expect(yield* count()).toEqual([{ tokens: 2, executions: 1, indexes: 1 }])
+      expect((yield* store.authorize(binding, "b".repeat(64), now + 2)).runId).toBe("run")
+      expect(yield* sql`PRAGMA foreign_key_check`).toEqual([])
+      yield* leases.beginRelease("run")
+      expect(yield* sql`SELECT revoked FROM capability_bindings`).toEqual([{ revoked: 1 }])
     }),
   )
 })

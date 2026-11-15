@@ -41,13 +41,12 @@ test("native result candidates are correctable, idempotent and bound to current 
           body: "## Result\n\nUseful work.",
           commitMessage: "Implement result",
         }
-        const submit = (body: unknown, binding = grant.binding, signal?: AbortSignal) =>
+        const submit = (body: unknown, token = grant.token, signal?: AbortSignal) =>
           gateway.handle(
-            binding,
             new Request("http://capability.invalid/capabilities/v1/result", {
               method: "POST",
               headers: {
-                authorization: `Bearer ${grant.token}`,
+                authorization: `Bearer ${token}`,
                 "content-type": "application/json",
               },
               body: JSON.stringify(body),
@@ -70,12 +69,7 @@ test("native result candidates are correctable, idempotent and bound to current 
           { revision: 2, completion: corrected, runId: "other" },
         ])
           expect((yield* submit(invalid)).status).toBe(400)
-        expect(
-          (yield* submit(
-            { revision: 2, completion },
-            { ...grant.binding, channel: "e".repeat(64) },
-          )).status,
-        ).toBe(403)
+        expect((yield* submit({ revision: 2, completion }, "e".repeat(43))).status).toBe(403)
         const saved =
           yield* sql`SELECT channel, revision, completion FROM sandbox_native_results WHERE run_id='run'`
         expect(saved).toHaveLength(1)
@@ -106,7 +100,7 @@ test("native result candidates are correctable, idempotent and bound to current 
               ending === "finalize pause/resume"
                 ? { operation: "finalize", revision: 2 }
                 : { revision: 2, completion: { ...corrected, title: "Stale request" } },
-              grant.binding,
+              grant.token,
               controller.signal,
             ),
           )

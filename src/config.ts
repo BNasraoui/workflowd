@@ -452,9 +452,7 @@ function loadAgentRunConfig(
   const capabilityGateway =
     env.WORKFLOWD_CAPABILITY_GATEWAY === undefined
       ? undefined
-      : Schema.decodeUnknownSync(CapabilityGatewayConfig, { onExcessProperty: "error" })(
-          JSON.parse(env.WORKFLOWD_CAPABILITY_GATEWAY),
-        )
+      : decodeCapabilityGateway(env.WORKFLOWD_CAPABILITY_GATEWAY)
   if (
     sandboxRepositories.some((policy) => policy.privateBootstrap?.mode === "actions-native") &&
     capabilityGateway === undefined
@@ -587,6 +585,25 @@ function openCodeBaseUrl(env: Record<string, string | undefined>): string {
 
 function workerHostId(env: Record<string, string | undefined>): string {
   return agentId(env.WORKFLOWD_HOST_ID ?? env.HOSTNAME ?? "localhost", "WORKFLOWD_HOST_ID")
+}
+
+function decodeCapabilityGateway(value: string): CapabilityGatewayConfig {
+  return Schema.decodeUnknownSync(CapabilityGatewayConfig, { onExcessProperty: "error" })(
+    JSON.parse(value),
+  )
+}
+
+/** The gateway's own process reads only its section and the store it shares with workflowd. */
+export function loadCapabilityGatewayConfig(
+  env: Record<string, string | undefined>,
+  home = homedir(),
+) {
+  const value = env.WORKFLOWD_CAPABILITY_GATEWAY
+  if (value === undefined) throw new Error("WORKFLOWD_CAPABILITY_GATEWAY is required")
+  const gateway = decodeCapabilityGateway(value)
+  if (gateway.listen === undefined)
+    throw new Error("WORKFLOWD_CAPABILITY_GATEWAY requires a listen address")
+  return { gateway: { ...gateway, listen: gateway.listen }, ...storageSection(env, home) }
 }
 
 function stateRoot(env: Record<string, string | undefined>, home: string): string {

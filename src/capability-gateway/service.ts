@@ -4,7 +4,8 @@ import { randomInt } from "node:crypto"
 import type { SandboxTransport } from "../sandbox/transport"
 import { mintCapability, type NoscopeConfiguration } from "./noscope"
 import { claudeRequest, readRequestBody, type ClaudeUpstream } from "./claude"
-import { capabilityDigest, makeCapabilityStore, type CapabilityBinding } from "./store"
+import { CapabilityRefused, capabilityDigest, makeCapabilityStore } from "./store"
+import { githubJobKeys, verifyJobProof } from "../sandbox/bootstrap"
 import { runLifetime } from "../store/run-lifetime"
 import { ownedPromise } from "./owned"
 import {
@@ -37,6 +38,21 @@ const RenewalKey = Schema.Struct({
   channel: Schema.String,
   predecessor: Schema.String,
 })
+const SessionProof = Schema.Struct({ token: Schema.String.check(Schema.isMaxLength(16384)) })
+const SessionAudience = /^workflowd:([a-f0-9]{64}):([a-f0-9]{64})$/
+/** Reads the audience of an unverified proof only to select its challenge; verification follows. */
+const proofAudience = (token: string) => {
+  try {
+    const value: unknown = JSON.parse(
+      Buffer.from(token.split(".")[1] ?? "", "base64url").toString("utf8"),
+    )
+    const audience: unknown =
+      typeof value === "object" && value !== null ? Reflect.get(value, "aud") : undefined
+    return typeof audience === "string" ? SessionAudience.exec(audience) : null
+  } catch {
+    return null
+  }
+}
 const denied = () => new Response(null, { status: 403 })
 const unavailable = () => new Response(null, { status: 503, headers: { "retry-after": "5" } })
 
@@ -48,6 +64,7 @@ export const makeCapabilityGateway = (
     readonly broker?: Effect.Success<ReturnType<typeof makeTokenBroker>>
     readonly upstream?: GitUpstream
   },
+  keys: typeof githubJobKeys = githubJobKeys,
 ) =>
   Effect.gen(function* () {
     const streamIdleMs = config.streamIdleMs ?? 120000
@@ -73,8 +90,15 @@ export const makeCapabilityGateway = (
     const abortRun = (runId: string) => {
       for (const controller of active.get(runId) ?? []) controller.abort()
     }
-    // First bounded mode has no same-job restart survival. Revoke before exposing any handler.
-    yield* store.revokeAll()
+    // Bindings outlive this process: a restart revokes nothing. Another process (workflowd, or a
+    // second gateway) revokes through the store, so live streams follow the durable flag.
+    yield* Effect.suspend(() => store.revokedAmong([...active.keys()])).pipe(
+      Effect.tap((runIds) => Effect.sync(() => runIds.forEach(abortRun))),
+      Effect.ignore,
+      Effect.andThen(Effect.sleep("1 second")),
+      Effect.forever,
+      Effect.forkScoped,
+    )
     yield* Effect.addFinalizer(() =>
       Effect.sync(() => {
         for (const runId of active.keys()) abortRun(runId)
@@ -136,6 +160,64 @@ export const makeCapabilityGateway = (
         renewAt: Math.min(token.expiresAt, Date.now() + randomInt(45 * 60000, 55 * 60000)),
       }
     })
+    const sessionChallenge = Effect.fn("CapabilityGateway.sessionChallenge")((lease: string) =>
+      store.leaseChallenge(lease, Date.now()),
+    )
+    /** The runner's OIDC proof for `workflowd:<channel>:<nonce>` becomes its run token once. */
+    const session = Effect.fn("CapabilityGateway.session")(function* (proof: unknown) {
+      const { token } = yield* Schema.decodeUnknownEffect(SessionProof)(proof, {
+        onExcessProperty: "error",
+      }).pipe(Effect.mapError(() => new CapabilityRefused()))
+      const audience = proofAudience(token)
+      if (!audience?.[1] || !audience[2]) return yield* Effect.fail(new CapabilityRefused())
+      const job = yield* store.sessionContext(audience[1], Date.now())
+      const jwks = yield* ownedPromise(keys)
+      const policy = job.policy
+      const ref = `refs/heads/workflowd/leases/${job.leaseId}`
+      const verified = yield* Effect.try({
+        catch: () => new CapabilityRefused(),
+        try: () =>
+          verifyJobProof(
+            token,
+            {
+              audience: audience[0],
+              repository: policy.repository,
+              repositoryId: policy.repositoryId,
+              ownerId: policy.privateBootstrap.repositoryOwnerId,
+              actorId: policy.appActorId,
+              ref,
+              workflowSha: policy.workflowSha,
+              toolingSha: policy.toolingSha ?? policy.workflowSha,
+              workflowRef: `${policy.repository}/.github/workflows/agent-sandbox-caller.yml@${ref}`,
+              jobWorkflowRef:
+                policy.toolingSha === undefined
+                  ? `${policy.repository}/.github/workflows/agent-sandbox.yml@${ref}`
+                  : `BNasraoui/workflowd/.github/workflows/agent-sandbox.yml@${policy.toolingSha}`,
+              runId: job.actionsRunId,
+              attempt: job.actionsAttempt,
+            },
+            jwks,
+            Date.now(),
+          ),
+      })
+      const grant = yield* bind(
+        {
+          runId: job.runId,
+          channel: audience[1],
+          nonce: audience[2],
+          recipientId: job.recipientId,
+          deadline: job.deadline,
+          expiresAt: job.challengeExpires,
+        },
+        verified.jti,
+      )
+      return {
+        token: grant.token,
+        expiresAt: grant.expiresAt,
+        renewAt: grant.renewAt,
+        deadline: job.deadline,
+      }
+    })
     const revoke = Effect.fn("CapabilityGateway.revoke")((runId: string) =>
       authority.change(
         runId,
@@ -143,10 +225,14 @@ export const makeCapabilityGateway = (
       ),
     )
     const handle = Effect.fn("CapabilityGateway.handle")(
-      function* (binding: CapabilityBinding, request: Request) {
+      function* (request: Request) {
         const auth = /^Bearer ([A-Za-z0-9_-]{43})$/.exec(request.headers.get("authorization") ?? "")
         if (!auth?.[1] || !request.url.startsWith("http://capability.invalid/")) return denied()
         const digest = capabilityDigest(auth[1])
+        // The run token alone selects its binding; no route reads a body before this check.
+        const found = yield* Effect.result(store.bindingFor(digest, Date.now()))
+        if (found._tag === "Failure") return denied()
+        const binding = found.success
         const checked = yield* Effect.result(
           authority.withPermit(store.authorize(binding, digest, Date.now())),
         )
@@ -510,7 +596,7 @@ export const makeCapabilityGateway = (
       },
       Effect.catch(() => Effect.succeed(unavailable())),
     )
-    return { challenge, bind, revoke, handle }
+    return { challenge, bind, sessionChallenge, session, revoke, handle }
   })
 
 export const CapabilityGateway = Context.Service<

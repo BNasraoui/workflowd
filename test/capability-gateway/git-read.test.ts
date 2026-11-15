@@ -207,7 +207,7 @@ const setup = (authenticated: boolean) =>
               headers,
               ...(request.method === "POST" ? { body: await request.arrayBuffer() } : {}),
             })
-            return Effect.runPromise(gateway.handle(grant.binding, forwarded))
+            return Effect.runPromise(gateway.handle(forwarded))
           },
         }),
       ),
@@ -221,7 +221,7 @@ const setup = (authenticated: boolean) =>
         ...init,
         headers: { authorization: `Bearer ${grant.token}`, ...init.headers },
       })
-    const call = (request: Request) => gateway.handle(grant.binding, request)
+    const call = (request: Request) => gateway.handle(request)
     return {
       root,
       source,

@@ -64,7 +64,7 @@ export const makeCapabilityTransport = (
                   if (backend.length > 100) throw new Error("capability socket path too long")
                   signal.throwIfAborted()
                   const { server, close: closeServer } = capabilityHttpServer((request) =>
-                    Effect.runPromise(gateway.handle(binding, request), { signal: request.signal }),
+                    Effect.runPromise(gateway.handle(request), { signal: request.signal }),
                   )
                   stopServer = closeServer
                   await new Promise<void>((resolve, reject) => {

@@ -83,7 +83,6 @@ test("pinned interactive Claude submits and corrects a candidate through the bou
         const progress: number[] = []
         const unlisten = native.listen("run", (tokens) => progress.push(tokens))
         const foreign = yield* gateway.handle(
-          grant.binding,
           new Request("http://capability.invalid/capabilities/v1/providers/anthropic/v1/messages", {
             method: "POST",
             headers: {
@@ -112,7 +111,6 @@ test("pinned interactive Claude submits and corrects a candidate through the bou
             headers.set("authorization", "Bearer " + grant.token)
             return Effect.runPromise(
               gateway.handle(
-                grant.binding,
                 new Request("http://capability.invalid" + path, {
                   method: request.method,
                   headers,
