@@ -1,4 +1,4 @@
-import { generateKeyPairSync, sign } from "node:crypto"
+import { generateKeyPairSync, randomBytes, sign } from "node:crypto"
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
@@ -144,12 +144,14 @@ try {
       { mode: 0o600 },
     )
   let stall = false
+  let onUpstream: ((request: Request) => Promise<void>) | undefined
   const received: UpstreamRequest[] = []
   const upstream = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
     fetch: async (request) => {
       const url = new URL(request.url)
+      await onUpstream?.(request)
       received.push({
         path: url.pathname + url.search,
         headers: Object.fromEntries(request.headers),
@@ -244,6 +246,10 @@ try {
     setStall: (value: boolean) => {
       stall = value
     },
+    /** Runs before the model upstream records and answers each request. */
+    onUpstream: (hook: ((request: Request) => Promise<void>) | undefined) => {
+      onUpstream = hook
+    },
     /** A query on the gateway's own store, as a test that sets its rows directly needs. */
     gatewaySql: <A>(query: (sql: SqlClient.SqlClient) => Effect.Effect<A, unknown>) =>
       Effect.runPromise(
@@ -272,6 +278,8 @@ export type Fixture = Awaited<ReturnType<typeof fixture>>
 export interface Gateway {
   readonly port: number
   stop(): Promise<void>
+  /** Each byte the process wrote to standard output and standard error so far. */
+  readonly output?: () => string
 }
 
 /**
@@ -304,11 +312,19 @@ export async function startGatewayProcess(
     cwd: resolve("."),
     env: { ...env },
     stdout: "pipe",
-    stderr: "inherit",
+    stderr: "pipe",
   })
+  let errors = ""
+  const forwarded = (async () => {
+    for await (const chunk of child.stderr) {
+      errors += Buffer.from(chunk).toString()
+      process.stderr.write(chunk)
+    }
+  })()
   const stop = async () => {
     child.kill("SIGKILL")
     await child.exited
+    await forwarded
   }
   const reader = child.stdout.getReader()
   let text = ""
@@ -327,7 +343,10 @@ export async function startGatewayProcess(
   } finally {
     reader.releaseLock()
   }
-  return { port, stop }
+  void (async () => {
+    for await (const chunk of child.stdout) text += Buffer.from(chunk).toString()
+  })()
+  return { port, stop, output: () => text + errors }
 }
 
 /**
@@ -486,4 +505,128 @@ export async function withGateway(
     await gateway?.stop()
     await f.close()
   }
+}
+
+/** A synthetic login of Claude, as Claude Code's credentials file holds it. */
+export const claudeLogin = (access: string, refresh: string, expiresAt: number) => ({
+  claudeAiOauth: {
+    accessToken: access,
+    refreshToken: refresh,
+    expiresAt,
+    scopes: ["user:inference", "user:profile"],
+    subscriptionType: "fixture",
+  },
+})
+
+/** A synthetic value that no real login holds. */
+export const syntheticValue = (kind: string) =>
+  `synthetic-${kind}-${randomBytes(18).toString("hex")}`
+
+/** A request that reached the fixture OAuth server: its body, and when it arrived. */
+export interface OAuthRequest {
+  readonly body: string
+  readonly at: number
+}
+
+/**
+ * A fixture OAuth server on loopback, a real HTTP server in this process. In `renew` it answers a
+ * refresh with `next` (an access value that lives an hour, and a new refresh value). In `refuse`
+ * it answers 400 `invalid_grant`. In `silent` it never answers. In `cut` it sends the status and
+ * part of the body, calls `onCut`, and never sends the rest.
+ */
+export function oauthFixture() {
+  let mode: "renew" | "refuse" | "silent" | "cut" = "renew"
+  let next = { access: syntheticValue("access"), refresh: syntheticValue("refresh") }
+  let onCut: (() => void) | undefined
+  const requests: OAuthRequest[] = []
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    idleTimeout: 0,
+    fetch: async (request) => {
+      requests.push({ body: await request.text(), at: performance.now() })
+      if (mode === "refuse") return Response.json({ error: "invalid_grant" }, { status: 400 })
+      if (mode === "silent") return new Promise<Response>(() => {})
+      const body = JSON.stringify({
+        token_type: "Bearer",
+        access_token: next.access,
+        refresh_token: next.refresh,
+        expires_in: 3600,
+        scope: "user:inference user:profile",
+      })
+      if (mode === "renew") return Response.json(JSON.parse(body))
+      return new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode(body.slice(0, 40)))
+            setTimeout(() => onCut?.(), 50)
+          },
+        }),
+        { headers: { "content-type": "application/json" } },
+      )
+    },
+  })
+  return {
+    url: `http://127.0.0.1:${server.port}/v1/oauth/token`,
+    requests: (): ReadonlyArray<OAuthRequest> => requests,
+    mode: (value: typeof mode, cut?: () => void) => {
+      mode = value
+      onCut = cut
+    },
+    /** The values the next renewal gives. */
+    next: () => next,
+    renewWith: (value: { access: string; refresh: string }) => {
+      next = value
+    },
+    stop: () => server.stop(true),
+  }
+}
+export type OAuthFixture = ReturnType<typeof oauthFixture>
+
+/**
+ * The noscope provider `provider-access` as custody serves it, for the login in `directory`,
+ * renewed against `tokenUrl`. `bun` and `source` are the paths of an image when it runs there.
+ */
+export async function writeCustodyProvider(
+  root: string,
+  directory: string,
+  tokenUrl: string,
+  bun = process.execPath,
+  source = resolve("src/capability-gateway/custody.ts"),
+) {
+  await writeFile(
+    join(root, "noscope/providers/provider-access.toml"),
+    `contract_version = 1\n[commands]\nmint = "${bun} ${source} access ${directory} --token-url ${tokenUrl} {role} {ttl}"\n`,
+    { mode: 0o600 },
+  )
+}
+
+/** The gateway's configuration of a fixture with custody of the Claude login in `directory`. */
+export const custodyEnv = (f: Fixture, directory: string) => ({
+  ...f.env,
+  WORKFLOWD_CAPABILITY_GATEWAY: JSON.stringify({
+    ...f.config,
+    credentialRole: "claude",
+    login: { directory },
+  }),
+})
+
+/** The gateway's `import-login` command, with `input` on its standard input. */
+export async function importLogin(
+  env: Readonly<Record<string, string | undefined>>,
+  input: string,
+  args: ReadonlyArray<string> = ["claude"],
+) {
+  const child = Bun.spawn(
+    [process.execPath, resolve("src/capability-gateway-server.ts"), "import-login", ...args],
+    { cwd: resolve("."), env: { ...env }, stdin: "pipe", stdout: "pipe", stderr: "pipe" },
+  )
+  child.stdin.write(input)
+  await child.stdin.end()
+  const [stdout, stderr, code] = await Promise.all([
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+    child.exited,
+  ])
+  return { code, stdout, stderr }
 }
