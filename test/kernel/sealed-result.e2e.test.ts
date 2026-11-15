@@ -1499,6 +1499,26 @@ const refusals: ReadonlyArray<
     }),
   ],
   [
+    "a commit object over 16 KiB",
+    "commit_format",
+    async (f) => ({
+      bundle: await handBundle(f, (_git, dir) =>
+        commitObject(f, dir, "", `${"a".repeat(sealedResultLimits.commitBytes)}\n`),
+      ),
+    }),
+    `is over ${sealedResultLimits.commitBytes} bytes`,
+  ],
+  [
+    "a commit that is not UTF-8",
+    "commit_format",
+    async (f) => ({
+      bundle: await handBundle(f, (_git, dir) =>
+        commitObject(f, dir, "", Uint8Array.from([0x43, 0xff, 0x0a])),
+      ),
+    }),
+    "is not UTF-8",
+  ],
+  [
     "a commit with an unknown header",
     "commit_format",
     async (f) => ({
@@ -1516,7 +1536,7 @@ async function commitObject(
   f: Fixture,
   dir: string,
   headers: string,
-  message: string,
+  message: string | Uint8Array,
   author = agentLine,
   committer = agentLine,
 ): Promise<string> {
@@ -1525,7 +1545,10 @@ async function commitObject(
   const tree = await f.git(dir, "write-tree")
   const parent = await f.git(dir, "rev-parse", "HEAD")
   const stamp = (who: string) => (who.includes(" +0000") ? who : `${who} 946684800 +0000`)
-  const raw = `tree ${tree}\nparent ${parent}\nauthor ${stamp(author)}\ncommitter ${stamp(committer)}\n${headers}\n${message}`
+  const raw = concat(
+    `tree ${tree}\nparent ${parent}\nauthor ${stamp(author)}\ncommitter ${stamp(committer)}\n${headers}\n`,
+    message,
+  )
   const commit = await run(["git", "hash-object", "-t", "commit", "-w", "--stdin"], dir, raw)
   await f.git(dir, "reset", "-q", "--soft", commit)
   return commit
