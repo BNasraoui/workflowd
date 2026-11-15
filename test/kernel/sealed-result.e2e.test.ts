@@ -1914,7 +1914,9 @@ for (const item of sealedTextCases)
               : commitObject(f, dir, "", item.value),
           )
       const decoded = await Effect.runPromiseExit(decodeSealedResult(json, bundle))
-      const exit = Exit.isSuccess(decoded) ? await publish(decoded.value, options(f)) : decoded
+      const exit: Exit.Exit<unknown, unknown> = Exit.isSuccess(decoded)
+        ? await publish(decoded.value, options(f))
+        : decoded
       if (item.accepted) {
         if (Exit.isFailure(exit)) throw Cause.squash(exit.cause)
       } else expect(textChecks[item.field]).toContain(refusedCheck(exit))
