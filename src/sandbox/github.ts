@@ -633,16 +633,14 @@ export const makeSandboxGithub = (
     const repositoryVisibility = (policy: PolicyRepository) =>
       withInstallationToken(policy, { metadata: "read" }, (token) => readVisibility(policy, token))
     /**
-     * A token for the daemon's one push of a checked result, revoked when `use` ends;
-     * it never leaves the daemon.
+     * A token for the daemon's one push of a checked result, revoked when its scope
+     * closes, also on a failure or an interruption; it never leaves the daemon.
      */
-    const withPushToken = <A, E, R>(
-      policy: PolicyRepository,
-      use: (token: Redacted.Redacted<string>) => Effect.Effect<A, E, R>,
-    ) => withInstallationToken(policy, { contents: "write" }, use)
+    const pushToken = (policy: PolicyRepository) =>
+      Effect.acquireRelease(installationToken(policy, { contents: "write" }), revokeToken)
     return {
       repositoryVisibility,
-      withPushToken,
+      pushToken,
       repositoryUrl: (policy: SavedSandboxPolicy) =>
         new OctokitClass().request.endpoint(`GET /repos/${policy.repository}`).url,
       publicationRead,

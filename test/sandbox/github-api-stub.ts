@@ -19,7 +19,7 @@ export type GithubApiRequest = {
  * request, else 404. It records each request. Nothing reaches GitHub.
  */
 export async function githubApiStub(
-  route: (path: string) => Response | undefined = () => undefined,
+  route: (path: string) => Response | Promise<Response> | undefined = () => undefined,
   token = "fixture-token",
 ) {
   const root = await mkdtemp(join(tmpdir(), "github-api-stub-"))
@@ -33,6 +33,8 @@ export async function githubApiStub(
   const server = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
+    // A request the route never answers stays open until the client ends it.
+    idleTimeout: 0,
     async fetch(request) {
       const path = new URL(request.url).pathname
       const text = await request.text()
@@ -57,6 +59,8 @@ export async function githubApiStub(
   )
   return {
     github,
+    /** The base URL of the stub, on the loopback address. */
+    url: server.url.toString(),
     requests,
     /** The requests that mint a token, by their body, and those that revoke one. */
     minted: () =>

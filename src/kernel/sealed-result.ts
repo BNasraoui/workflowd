@@ -1,7 +1,7 @@
 import { lstat, mkdir, mkdtemp, readdir, rm } from "node:fs/promises"
 import { join } from "node:path"
 import { inflateSync } from "node:zlib"
-import { Data, Effect, Redacted, Schema, Semaphore, type Scope } from "effect"
+import { Context, Data, Effect, Layer, Redacted, Schema, Semaphore, type Scope } from "effect"
 import type { AgentGitConfig } from "../agent-git/config"
 import { PublicationBody, PublicationMessage, PublicationTitle } from "../sandbox/config"
 
@@ -38,6 +38,23 @@ export const sealedResultLimits = {
   diskBytes: 128 * MiB,
   /** Checks that hold a scratch directory at one time; a further check waits. */
   concurrentChecks: 4,
+  /**
+   * Checks that wait for a slot at one time; a further check is refused. Each runner
+   * run sends one result, and the daemon runs at most WORKFLOWD_RUNNER_MAX_RUNS (4 by
+   * default) runner runs at one time, so no more results than that can be waiting.
+   */
+  waitingChecks: 4,
+  /**
+   * How long a check waits for a slot. A slot is held by a check and its push, each
+   * ended at `timeLimitMs`.
+   */
+  waitLimitMs: 240_000,
+  /**
+   * A git child that speaks to the remote and gets less than this many bytes a second
+   * for `lowSpeedSeconds` ends, also when no daemon is left to kill it.
+   */
+  lowSpeedBytes: 1,
+  lowSpeedSeconds: 30,
   /** Address space of each git child. */
   memoryBytes: 1024 * MiB,
 } as const
@@ -61,28 +78,22 @@ export type SealedResultTarget = {
   readonly expectedHead: string | null
 }
 
-export type SealedResultOptions = {
+export type SealedResultOptions<E = never> = {
   /** Git URL of the target repository. */
   readonly remote: string
   /** The source commit the daemon chose at start. */
   readonly sourceSha: string
-  /** The installation token; it reaches git only through the environment. */
-  readonly token: Redacted.Redacted<string>
+  /**
+   * Makes the installation token, and revokes it when its scope closes. The check runs
+   * it once it holds a slot, so a check that waits holds no token. The token reaches
+   * only the git children that speak to the remote, through their environment.
+   */
+  readonly token: Effect.Effect<Redacted.Redacted<string>, E, Scope.Scope>
   /**
    * The identity the daemon gives agent runs: the author and the committer of each
    * commit, and the addresses no commit message may name.
    */
   readonly agentGit: AgentGitConfig
-  /**
-   * The daemon's root of scratch directories, mode 0700: each check makes its scratch
-   * repository below it and removes it; `removeSealedResultScratch` removes what an
-   * earlier process left.
-   */
-  readonly scratchRoot: string
-  /** Only tests set it (a recording or a slow git); the daemon runs /usr/bin/git. */
-  readonly gitBinary?: string
-  /** Only tests set it; the daemon uses `sealedResultLimits.timeLimitMs`. */
-  readonly timeLimitMs?: number
 }
 
 export type SealedResultCheck =
@@ -108,12 +119,15 @@ export type SealedResultCheck =
   | "file_mode"
   | "mode_change"
   | "github_path"
+  | "path_name"
   | "changed_paths"
   | "blob_size"
   | "identity"
   | "commit_format"
   | "target_exists"
   | "target_moved"
+  | "checks_waiting"
+  | "wait_limit"
 
 export class SealedResultRefused extends Data.TaggedError("SealedResultRefused")<{
   readonly check: SealedResultCheck
@@ -390,6 +404,8 @@ type GitRun = {
 
 type GitContext = {
   readonly binary: string
+  /** The `-c` options of each child. */
+  readonly config: ReadonlyArray<string>
   readonly env: Record<string, string>
   readonly cwd: string
   /** The scratch directory of the check, whose size bounds what a child may write. */
@@ -399,44 +415,71 @@ type GitContext = {
   readonly secrets: ReadonlyArray<string>
 }
 
+/** The protocols a remote of the check may use: the daemon's are https only. */
+export type SealedResultProtocol = "https" | "http" | "file"
+
 // Each git child sees this configuration and nothing of the caller's.
-const gitConfig = [
-  "core.hooksPath=/dev/null",
-  "core.fsmonitor=false",
-  "core.attributesFile=/dev/null",
-  "credential.helper=",
-  "transfer.fsckObjects=true",
-  "fetch.fsckObjects=true",
-  "transfer.unpackLimit=1",
-  "fetch.unpackLimit=1",
-  "core.bigFileThreshold=1m",
-  "gc.auto=0",
-  "maintenance.auto=false",
-  "fetch.recurseSubmodules=false",
-  "http.followRedirects=false",
-  "protocol.allow=never",
-  "protocol.file.allow=always",
-  "protocol.https.allow=always",
+const gitConfig = (protocols: ReadonlyArray<SealedResultProtocol>) =>
+  [
+    "core.hooksPath=/dev/null",
+    "core.fsmonitor=false",
+    "core.attributesFile=/dev/null",
+    "credential.helper=",
+    "transfer.fsckObjects=true",
+    "fetch.fsckObjects=true",
+    "transfer.unpackLimit=1",
+    "fetch.unpackLimit=1",
+    "core.bigFileThreshold=1m",
+    "gc.auto=0",
+    "maintenance.auto=false",
+    "fetch.recurseSubmodules=false",
+    "http.followRedirects=false",
+    "protocol.allow=never",
+    ...protocols.map((protocol) => `protocol.${protocol}.allow=always`),
+  ].flatMap((entry) => ["-c", entry])
+
+// A child that speaks to the remote ends when it gets almost no bytes.
+const networkConfig = [
+  `http.lowSpeedLimit=${sealedResultLimits.lowSpeedBytes}`,
+  `http.lowSpeedTime=${sealedResultLimits.lowSpeedSeconds}`,
 ].flatMap((entry) => ["-c", entry])
 
-const gitEnvironment = (remote: string, token: Redacted.Redacted<string>) => {
-  const env: Record<string, string> = {
-    PATH: "/usr/bin:/bin",
-    HOME: "/nonexistent",
-    LC_ALL: "C",
-    GIT_CONFIG_NOSYSTEM: "1",
-    GIT_CONFIG_SYSTEM: "/dev/null",
-    GIT_CONFIG_GLOBAL: "/dev/null",
-    GIT_TERMINAL_PROMPT: "0",
-    GIT_NO_REPLACE_OBJECTS: "1",
-    GIT_ALLOW_PROTOCOL: "file:https",
-  }
+const gitEnvironment = (
+  protocols: ReadonlyArray<SealedResultProtocol>,
+): Record<string, string> => ({
+  PATH: "/usr/bin:/bin",
+  HOME: "/nonexistent",
+  LC_ALL: "C",
+  GIT_CONFIG_NOSYSTEM: "1",
+  GIT_CONFIG_SYSTEM: "/dev/null",
+  GIT_CONFIG_GLOBAL: "/dev/null",
+  GIT_TERMINAL_PROMPT: "0",
+  GIT_NO_REPLACE_OBJECTS: "1",
+  GIT_ALLOW_PROTOCOL: protocols.join(":"),
+})
+
+/**
+ * The context of the children that speak to the remote (ls-remote, fetch, push): the
+ * token is a header of the target URL only, set through their environment. No other
+ * child gets it.
+ */
+const networkContext = (
+  context: GitContext,
+  remote: string,
+  token: Redacted.Redacted<string>,
+): GitContext => {
   const basic = Buffer.from(`x-access-token:${Redacted.value(token)}`).toString("base64")
-  // The token is a header of the target URL only, set through the environment.
-  env.GIT_CONFIG_COUNT = "1"
-  env.GIT_CONFIG_KEY_0 = `http.${remote}.extraHeader`
-  env.GIT_CONFIG_VALUE_0 = `Authorization: Basic ${basic}`
-  return { env, secrets: [Redacted.value(token), basic] }
+  return {
+    ...context,
+    config: [...context.config, ...networkConfig],
+    env: {
+      ...context.env,
+      GIT_CONFIG_COUNT: "1",
+      GIT_CONFIG_KEY_0: `http.${remote}.extraHeader`,
+      GIT_CONFIG_VALUE_0: `Authorization: Basic ${basic}`,
+    },
+    secrets: [Redacted.value(token), basic],
+  }
 }
 
 const redact = (text: string, secrets: ReadonlyArray<string>) =>
@@ -511,7 +554,7 @@ const spawnGit = async (
   if (fileBlocks <= 0) return { ...ended, diskFull: true }
   if (signal.aborted) return ended
   const limits = `ulimit -f ${fileBlocks} && ulimit -v ${sealedResultLimits.memoryBytes / 1024} && exec "$0" "$@"`
-  const child = Bun.spawn(["/bin/sh", "-c", limits, context.binary, ...gitConfig, ...args], {
+  const child = Bun.spawn(["/bin/sh", "-c", limits, context.binary, ...context.config, ...args], {
     cwd: context.cwd,
     env: context.env,
     detached: true,
@@ -605,8 +648,6 @@ const gitOk = (context: GitContext, args: ReadonlyArray<string>, input?: Uint8Ar
     ),
   )
 
-const checks = Semaphore.makeUnsafe(sealedResultLimits.concurrentChecks)
-
 const scratchPrefix = "sealed-result-"
 
 /**
@@ -630,28 +671,20 @@ const scratchRootReady = (root: string) =>
       }),
   })
 
-/**
- * Removes the scratch directories an earlier process of the daemon left below the
- * root (a daemon that was killed does not remove them). Call it before the first
- * check of the process: it also removes the scratch of a check that runs.
- */
-export const removeSealedResultScratch = (root: string): Effect.Effect<void, SealedResultFault> =>
-  scratchRootReady(root).pipe(
-    Effect.andThen(
-      Effect.tryPromise({
-        try: async () => {
-          for (const entry of await readdir(root))
-            if (entry.startsWith(scratchPrefix))
-              await rm(join(root, entry), { recursive: true, force: true })
-        },
-        catch: () =>
-          new SealedResultFault({
-            operation: "scratch",
-            message: "Scratch directories of an earlier process remain",
-          }),
+/** Removes the scratch directories an earlier process of the daemon left below the root. */
+const removeEarlierScratch = (root: string) =>
+  Effect.tryPromise({
+    try: async () => {
+      for (const entry of await readdir(root))
+        if (entry.startsWith(scratchPrefix))
+          await rm(join(root, entry), { recursive: true, force: true })
+    },
+    catch: () =>
+      new SealedResultFault({
+        operation: "scratch",
+        message: "Scratch directories of an earlier process remain",
       }),
-    ),
-  )
+  })
 
 const targetRef = /^refs\/heads\/(?!-)[A-Za-z0-9._/-]{1,200}$/
 
@@ -860,109 +893,210 @@ export type CheckedSealedResult = {
   >
 }
 
+/** How the daemon runs git for a check. */
+export type SealedResultGitSettings = {
+  /**
+   * The daemon's root of scratch directories, mode 0700: each check makes its scratch
+   * repository below it and removes it.
+   */
+  readonly scratchRoot: string
+  readonly binary: string
+  /** Wall clock for the whole check, and again for the push. */
+  readonly timeLimitMs: number
+  /** How long a check waits for a slot. */
+  readonly waitLimitMs: number
+  /** The protocols a remote may use. */
+  readonly protocols: ReadonlyArray<SealedResultProtocol>
+}
+
+export type SealedResultGitPort = {
+  /**
+   * Checks a sealed result in a scratch bare repository that lives as long as the
+   * scope. Refuses `result_refused: <check>` when a check of the result fails, or
+   * when no slot is free in time; a fault of the daemon or the remote is a
+   * SealedResultFault, and a failure to make the token is the token's own error.
+   */
+  readonly check: <E>(
+    result: SealedResult,
+    target: SealedResultTarget,
+    options: SealedResultOptions<E>,
+  ) => Effect.Effect<CheckedSealedResult, SealedResultError | E, Scope.Scope>
+}
+
+export const SealedResultGit = Context.Service<SealedResultGitPort>("workflowd/SealedResultGit")
+
 /**
- * Checks a sealed result in a scratch bare repository that lives as long as the
- * scope. Refuses `result_refused: <check>` when a check of the result fails; a
- * fault of the daemon or the remote is a SealedResultFault.
+ * Builds the git runner of the checks. It removes, once, what an earlier process
+ * left below the scratch root, before any check of this runner can run.
  */
-export const checkSealedResult = (
+export const makeSealedResultGit = (
+  settings: SealedResultGitSettings,
+): Effect.Effect<SealedResultGitPort, SealedResultFault> =>
+  Effect.gen(function* () {
+    yield* scratchRootReady(settings.scratchRoot)
+    yield* removeEarlierScratch(settings.scratchRoot)
+    const permits = yield* Semaphore.make(sealedResultLimits.concurrentChecks)
+    let waiting = 0
+    const wait = permits.take(1).pipe(
+      Effect.timeoutOrElse({
+        duration: settings.waitLimitMs,
+        orElse: () =>
+          Effect.fail(refused("wait_limit", `no slot was free within ${settings.waitLimitMs} ms`)),
+      }),
+      Effect.ensuring(Effect.sync(() => (waiting -= 1))),
+    )
+    // The slot is held until the scratch directory is gone. A check over the bound of
+    // waiting checks is refused at once.
+    const slot = Effect.uninterruptibleMask((restore) =>
+      Effect.suspend(() => {
+        if (waiting >= sealedResultLimits.waitingChecks)
+          return Effect.fail(
+            refused(
+              "checks_waiting",
+              `${waiting} checks wait for a slot; the bound is ${sealedResultLimits.waitingChecks}`,
+            ),
+          )
+        waiting += 1
+        return restore(wait).pipe(Effect.andThen(Effect.addFinalizer(() => permits.release(1))))
+      }),
+    )
+    const check = <E>(
+      result: SealedResult,
+      target: SealedResultTarget,
+      options: SealedResultOptions<E>,
+    ): Effect.Effect<CheckedSealedResult, SealedResultError | E, Scope.Scope> =>
+      Effect.gen(function* () {
+        if (!targetRef.test(target.ref) || target.ref.includes(".."))
+          return yield* new SealedResultFault({
+            operation: "target",
+            message: "Invalid target ref",
+          })
+        if (target.expectedHead !== null && !commitId.test(target.expectedHead))
+          return yield* new SealedResultFault({
+            operation: "target",
+            message: "Invalid expected head",
+          })
+        if (result.sourceSha !== options.sourceSha) return yield* refused("source")
+        const base = target.expectedHead ?? options.sourceSha
+        const bundle = checkBundle(result, base)
+        if (bundle instanceof SealedResultRefused) return yield* bundle
+        yield* slot
+        yield* scratchRootReady(settings.scratchRoot)
+        const scratch = yield* Effect.acquireRelease(
+          Effect.tryPromise({
+            try: () => mkdtemp(join(settings.scratchRoot, scratchPrefix)),
+            catch: () =>
+              new SealedResultFault({
+                operation: "scratch",
+                message: "Scratch directory unavailable",
+              }),
+          }),
+          (path) =>
+            Effect.promise(() =>
+              rm(path, { recursive: true, force: true }).then(
+                () => true,
+                () => false,
+              ),
+            ).pipe(
+              Effect.flatMap((removed) =>
+                removed
+                  ? Effect.void
+                  : Effect.logWarning("Sealed result scratch directory remains"),
+              ),
+            ),
+        )
+        // The token is made only now that the check holds its slot.
+        const token = yield* options.token
+        const repository = join(scratch, "repository.git")
+        const local: GitContext = {
+          binary: settings.binary,
+          config: gitConfig(settings.protocols),
+          env: gitEnvironment(settings.protocols),
+          cwd: scratch,
+          scratch,
+          deadline: Date.now() + settings.timeLimitMs,
+          timeLimitMs: settings.timeLimitMs,
+          secrets: [],
+        }
+        yield* gitOk(local, ["init", "--quiet", "--bare", "--template=", repository])
+        const inRepository: GitContext = { ...local, cwd: repository }
+        const network = networkContext(inRepository, options.remote, token)
+        const offline: GitContext = { ...inRepository, secrets: network.secrets }
+        const head = yield* readTarget(network, options.remote, target.ref)
+        if (target.expectedHead === null && head !== null) return yield* refused("target_exists")
+        if (target.expectedHead !== null && head !== target.expectedHead)
+          return yield* refused("target_moved")
+        yield* gitOk(network, [
+          "fetch",
+          "--quiet",
+          "--no-tags",
+          "--no-write-fetch-head",
+          "--depth=1",
+          "--",
+          options.remote,
+          `${base}:refs/workflowd/base`,
+        ])
+        // index-pack reads the pack of the bundle from stdin under --strict (fsck of every
+        // object); a bundle fetch of this git version does not fsck what it unpacks.
+        const unpack = yield* git(
+          offline,
+          [
+            "index-pack",
+            "--stdin",
+            "--fix-thin",
+            "--strict",
+            `--max-input-size=${sealedResultLimits.bundleBytes}`,
+          ],
+          result.bundle.subarray(bundle.packOffset),
+        )
+        if (unpack.status !== 0)
+          return yield* refused(
+            "fsck",
+            JSON.stringify(redact(unpack.stderr, offline.secrets).split("\n")[0] ?? ""),
+          )
+        const commit = yield* git(offline, ["cat-file", "-t", bundle.resultSha])
+        if (commit.status !== 0 || new TextDecoder().decode(commit.stdout).trim() !== "commit")
+          return yield* refused("ref", "the ref of the bundle names no commit of its pack")
+        const commits = yield* checkHistory(offline, base, bundle.resultSha)
+        yield* checkCommits(offline, commits, options.agentGit)
+        yield* checkChanges(offline, commits, base)
+        return {
+          resultSha: bundle.resultSha,
+          target,
+          push: () =>
+            pushChecked(
+              { ...network, deadline: Date.now() + settings.timeLimitMs },
+              options.remote,
+              target,
+              bundle.resultSha,
+            ),
+        }
+      })
+    return { check }
+  })
+
+/** The daemon's git runner: /usr/bin/git, the time limits of the plan, https remotes only. */
+export const SealedResultGitLive = (scratchRoot: string) =>
+  Layer.effect(
+    SealedResultGit,
+    makeSealedResultGit({
+      scratchRoot,
+      binary: "/usr/bin/git",
+      timeLimitMs: sealedResultLimits.timeLimitMs,
+      waitLimitMs: sealedResultLimits.waitLimitMs,
+      protocols: ["https"],
+    }),
+  )
+
+/** Checks a sealed result with the daemon's git runner; see `SealedResultGitPort.check`. */
+export const checkSealedResult = <E>(
   result: SealedResult,
   target: SealedResultTarget,
-  options: SealedResultOptions,
-): Effect.Effect<CheckedSealedResult, SealedResultError, Scope.Scope> =>
+  options: SealedResultOptions<E>,
+): Effect.Effect<CheckedSealedResult, SealedResultError | E, Scope.Scope | SealedResultGitPort> =>
   Effect.gen(function* () {
-    if (!targetRef.test(target.ref) || target.ref.includes(".."))
-      return yield* new SealedResultFault({ operation: "target", message: "Invalid target ref" })
-    if (target.expectedHead !== null && !commitId.test(target.expectedHead))
-      return yield* new SealedResultFault({ operation: "target", message: "Invalid expected head" })
-    if (result.sourceSha !== options.sourceSha) return yield* refused("source")
-    const base = target.expectedHead ?? options.sourceSha
-    const bundle = checkBundle(result, base)
-    if (bundle instanceof SealedResultRefused) return yield* bundle
-    // The permit is held until the scratch directory is gone.
-    yield* Effect.acquireRelease(checks.take(1), () => checks.release(1))
-    yield* scratchRootReady(options.scratchRoot)
-    const scratch = yield* Effect.acquireRelease(
-      Effect.tryPromise({
-        try: () => mkdtemp(join(options.scratchRoot, scratchPrefix)),
-        catch: () =>
-          new SealedResultFault({ operation: "scratch", message: "Scratch directory unavailable" }),
-      }),
-      (path) =>
-        Effect.promise(() =>
-          rm(path, { recursive: true, force: true }).then(
-            () => true,
-            () => false,
-          ),
-        ).pipe(
-          Effect.flatMap((removed) =>
-            removed ? Effect.void : Effect.logWarning("Sealed result scratch directory remains"),
-          ),
-        ),
-    )
-    const { env, secrets } = gitEnvironment(options.remote, options.token)
-    const timeLimitMs = options.timeLimitMs ?? sealedResultLimits.timeLimitMs
-    const context: GitContext = {
-      binary: options.gitBinary ?? "/usr/bin/git",
-      env,
-      cwd: scratch,
-      scratch,
-      deadline: Date.now() + timeLimitMs,
-      timeLimitMs,
-      secrets,
-    }
-    const repository = join(scratch, "repository.git")
-    yield* gitOk(context, ["init", "--quiet", "--bare", "--template=", repository])
-    const inRepository: GitContext = { ...context, cwd: repository }
-    const head = yield* readTarget(inRepository, options.remote, target.ref)
-    if (target.expectedHead === null && head !== null) return yield* refused("target_exists")
-    if (target.expectedHead !== null && head !== target.expectedHead)
-      return yield* refused("target_moved")
-    yield* gitOk(inRepository, [
-      "fetch",
-      "--quiet",
-      "--no-tags",
-      "--no-write-fetch-head",
-      "--depth=1",
-      "--",
-      options.remote,
-      `${base}:refs/workflowd/base`,
-    ])
-    // index-pack reads the pack of the bundle from stdin under --strict (fsck of every
-    // object); a bundle fetch of this git version does not fsck what it unpacks.
-    const unpack = yield* git(
-      inRepository,
-      [
-        "index-pack",
-        "--stdin",
-        "--fix-thin",
-        "--strict",
-        `--max-input-size=${sealedResultLimits.bundleBytes}`,
-      ],
-      result.bundle.subarray(bundle.packOffset),
-    )
-    if (unpack.status !== 0)
-      return yield* refused(
-        "fsck",
-        JSON.stringify(redact(unpack.stderr, secrets).split("\n")[0] ?? ""),
-      )
-    const commit = yield* git(inRepository, ["cat-file", "-t", bundle.resultSha])
-    if (commit.status !== 0 || new TextDecoder().decode(commit.stdout).trim() !== "commit")
-      return yield* refused("ref", "the ref of the bundle names no commit of its pack")
-    const commits = yield* checkHistory(inRepository, base, bundle.resultSha)
-    yield* checkCommits(inRepository, commits, options.agentGit)
-    yield* checkChanges(inRepository, commits, base)
-    return {
-      resultSha: bundle.resultSha,
-      target,
-      push: () =>
-        pushChecked(
-          { ...inRepository, deadline: Date.now() + timeLimitMs },
-          options.remote,
-          target,
-          bundle.resultSha,
-        ),
-    }
+    const runner = yield* SealedResultGit
+    return yield* runner.check(result, target, options)
   })
 
 const pushChecked = (

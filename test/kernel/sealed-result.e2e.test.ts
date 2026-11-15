@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test"
-import { Cause, Effect, Exit, Fiber, Redacted, Schema } from "effect"
+import { Cause, Effect, Exit, Fiber, Layer, Redacted, Schema } from "effect"
 import {
   chmod,
   lstat,
@@ -18,13 +18,17 @@ import { constants as zlibConstants, deflateRawSync, deflateSync } from "node:zl
 import {
   checkSealedResult,
   decodeSealedResult,
+  makeSealedResultGit,
   pushSealedResult,
-  removeSealedResultScratch,
   SealedResultFault,
+  SealedResultGit,
+  SealedResultGitLive,
   SealedResultRefused,
   sealedResultLimits,
   type SealedResult,
   type SealedResultCheck,
+  type SealedResultGitPort,
+  type SealedResultGitSettings,
   type SealedResultOptions,
 } from "../../src/kernel/sealed-result"
 import { githubApiStub } from "../sandbox/github-api-stub"
@@ -108,14 +112,37 @@ async function fixture(): Promise<Fixture> {
   return { root, work, remote, scratchRoot, sourceSha, git }
 }
 
-const options = (f: Fixture, extra: Partial<SealedResultOptions> = {}): SealedResultOptions => ({
-  remote: f.remote,
-  sourceSha: f.sourceSha,
-  token: Redacted.make(token),
-  agentGit,
-  scratchRoot: f.scratchRoot,
-  ...extra,
-})
+/** The options of one check, and the settings of the git runner that a test builds for it. */
+type CheckOptions = SealedResultOptions<unknown> & { readonly git: SealedResultGitSettings }
+
+/**
+ * The daemon's settings, but a remote on disk: the test runner permits the `file`
+ * protocol, which the daemon's runner does not.
+ */
+const options = (
+  f: Fixture,
+  extra: Partial<SealedResultOptions<unknown>> & Partial<SealedResultGitSettings> = {},
+): CheckOptions => {
+  const { scratchRoot, binary, timeLimitMs, waitLimitMs, protocols, ...check } = extra
+  return {
+    remote: f.remote,
+    sourceSha: f.sourceSha,
+    token: Effect.succeed(Redacted.make(token)),
+    agentGit,
+    ...check,
+    git: {
+      scratchRoot: scratchRoot ?? f.scratchRoot,
+      binary: binary ?? "/usr/bin/git",
+      timeLimitMs: timeLimitMs ?? sealedResultLimits.timeLimitMs,
+      waitLimitMs: waitLimitMs ?? sealedResultLimits.waitLimitMs,
+      protocols: protocols ?? ["file"],
+    },
+  }
+}
+
+/** A git runner of the tests, built by the constructor of the daemon's runner. */
+const gitLayer = (settings: SealedResultGitSettings) =>
+  Layer.effect(SealedResultGit, makeSealedResultGit(settings))
 
 const manifest = (sourceSha: string, fields: Record<string, unknown> = {}) =>
   new TextEncoder().encode(JSON.stringify({ sourceSha, ...wording, ...fields }))
@@ -196,22 +223,30 @@ const commitFile = async (
 const decode = (json: Uint8Array, bundle: Uint8Array) =>
   Effect.runPromise(decodeSealedResult(json, bundle))
 
-/** Check, then optionally act on the remote, then push; one scope holds the scratch repository. */
+/**
+ * Check, then optionally act on the remote, then push; one scope holds the scratch
+ * repository. A runner of its own for the check, unless one is given.
+ */
 const publish = (
   result: SealedResult,
-  opts: SealedResultOptions,
+  opts: CheckOptions,
   between: () => Promise<void> = async () => {},
   checkedTarget: { ref: string; expectedHead: string | null } = target,
-) =>
-  Effect.runPromiseExit(
-    Effect.scoped(
-      Effect.gen(function* () {
-        const checked = yield* checkSealedResult(result, checkedTarget, opts)
-        yield* Effect.promise(between)
-        return yield* pushSealedResult(checked)
-      }),
-    ),
+  runner?: SealedResultGitPort,
+) => {
+  const published = Effect.scoped(
+    Effect.gen(function* () {
+      const checked = yield* checkSealedResult(result, checkedTarget, opts)
+      yield* Effect.promise(between)
+      return yield* pushSealedResult(checked)
+    }),
   )
+  return Effect.runPromiseExit(
+    runner === undefined
+      ? Effect.provide(published, gitLayer(opts.git))
+      : Effect.provideService(published, SealedResultGit, runner),
+  )
+}
 
 const failure = (exit: Exit.Exit<unknown, unknown>) => {
   if (Exit.isSuccess(exit)) throw new Error("expected a failure")
@@ -460,6 +495,16 @@ async function recordingGit(f: Fixture) {
   return { path, calls }
 }
 
+/** The git subcommand of a recorded call: the first argument after the `-c` options. */
+const subcommand = (argv: ReadonlyArray<string>) => {
+  let index = 0
+  while (argv[index] === "-c") index += 2
+  return argv[index]
+}
+
+/** The children that speak to the remote; only they get the token header. */
+const networkCommands = ["ls-remote", "fetch", "push"]
+
 test(
   "the token reaches git only through the environment; a failed push holds it nowhere",
   withFixture(async (f) => {
@@ -468,7 +513,7 @@ test(
       await writeFile(join(workspace, "result.txt"), "content\n")
     })
     const result = await decode(sealed.json, sealed.bundle)
-    const exit = await publish(result, options(f, { gitBinary: recorder.path }), () =>
+    const exit = await publish(result, options(f, { binary: recorder.path }), () =>
       // The target ref appears in the remote after the check and before the push.
       command(["git", "update-ref", target.ref, f.sourceSha], f.remote).then(() => undefined),
     )
@@ -499,11 +544,28 @@ test(
         expect(call.env[key]).toBeUndefined()
       const values = Object.entries(call.env)
       expect(values.filter(([, value]) => value?.includes(token))).toEqual([])
-      if (call.env.GIT_CONFIG_COUNT !== undefined)
-        expect(values.filter(([, value]) => value?.includes(encoded)).map(([key]) => key)).toEqual([
-          "GIT_CONFIG_VALUE_0",
-        ])
+      // The header holds the token in the children that speak to the remote, and no
+      // other child holds it.
+      expect({
+        command: subcommand(call.argv),
+        keys: values.filter(([, value]) => value?.includes(encoded)).map(([key]) => key),
+      }).toEqual({
+        command: subcommand(call.argv),
+        keys: networkCommands.includes(subcommand(call.argv)!) ? ["GIT_CONFIG_VALUE_0"] : [],
+      })
     }
+    expect(new Set(calls.map((call) => subcommand(call.argv)))).toEqual(
+      new Set([
+        "init",
+        "ls-remote",
+        "fetch",
+        "index-pack",
+        "cat-file",
+        "rev-list",
+        "diff-tree",
+        "push",
+      ]),
+    )
     // Never forced: the ref that appeared keeps its value.
     expect(await remoteRef(f)).toBe(f.sourceSha)
   }),
@@ -537,22 +599,23 @@ test(
         json: new TextDecoder().decode(sealed.json),
         bundle: Buffer.from(sealed.bundle).toString("base64"),
         target,
-        options: { ...options(f, { gitBinary: recorder.path }), token: undefined },
+        options: { ...options(f, { binary: recorder.path }), token: undefined },
         token,
+        settings: options(f, { binary: recorder.path }).git,
       }),
     )
     const daemonProcess = Bun.spawn(
       [
         process.execPath,
         "-e",
-        `import { Effect, Exit, Redacted } from "effect"
-import { checkSealedResult, decodeSealedResult, pushSealedResult } from "./src/kernel/sealed-result"
+        `import { Effect, Exit, Layer, Redacted } from "effect"
+import { checkSealedResult, decodeSealedResult, makeSealedResultGit, pushSealedResult, SealedResultGit } from "./src/kernel/sealed-result"
 const input = JSON.parse(await Bun.file(process.env.SEALED_RESULT_INPUT).text())
 const exit = await Effect.runPromiseExit(Effect.scoped(Effect.gen(function* () {
   const result = yield* decodeSealedResult(new TextEncoder().encode(input.json), Buffer.from(input.bundle, "base64"))
-  const options = { ...input.options, token: Redacted.make(input.token) }
+  const options = { ...input.options, token: Effect.succeed(Redacted.make(input.token)) }
   return yield* pushSealedResult(yield* checkSealedResult(result, input.target, options))
-})))
+})).pipe(Effect.provide(Layer.effect(SealedResultGit, makeSealedResultGit(input.settings)))))
 console.log(Exit.isSuccess(exit) ? "pushed" : String(exit.cause))`,
       ],
       {
@@ -574,25 +637,29 @@ console.log(Exit.isSuccess(exit) ? "pushed" : String(exit.cause))`,
     })
     const calls = await recorder.calls()
     expect(calls.length).toBeGreaterThan(5)
+    // PWD is set by the shell of the recording git, not by the daemon.
+    const fixed = [
+      "GIT_ALLOW_PROTOCOL",
+      "GIT_CONFIG_GLOBAL",
+      "GIT_CONFIG_NOSYSTEM",
+      "GIT_CONFIG_SYSTEM",
+      "GIT_NO_REPLACE_OBJECTS",
+      "GIT_TERMINAL_PROMPT",
+      "HOME",
+      "LC_ALL",
+      "PATH",
+      "PWD",
+    ]
+    const header = ["GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0"]
     for (const call of calls) {
-      // PWD is set by the shell of the recording git, not by the daemon.
-      expect(Object.keys(call.env).sort()).toEqual([
-        "GIT_ALLOW_PROTOCOL",
-        "GIT_CONFIG_COUNT",
-        "GIT_CONFIG_GLOBAL",
-        "GIT_CONFIG_KEY_0",
-        "GIT_CONFIG_NOSYSTEM",
-        "GIT_CONFIG_SYSTEM",
-        "GIT_CONFIG_VALUE_0",
-        "GIT_NO_REPLACE_OBJECTS",
-        "GIT_TERMINAL_PROMPT",
-        "HOME",
-        "LC_ALL",
-        "PATH",
-        "PWD",
-      ])
-      expect(call.env.GIT_CONFIG_COUNT).toBe("1")
-      expect(call.env.GIT_CONFIG_KEY_0).toBe(`http.${f.remote}.extraHeader`)
+      const command = subcommand(call.argv)!
+      const network = networkCommands.includes(command)
+      expect({ command, keys: Object.keys(call.env).sort() }).toEqual({
+        command,
+        keys: (network ? [...fixed, ...header] : fixed).sort(),
+      })
+      expect(call.env.GIT_ALLOW_PROTOCOL).toBe("file")
+      if (network) expect(call.env.GIT_CONFIG_KEY_0).toBe(`http.${f.remote}.extraHeader`)
     }
     expect(await Bun.file(trace).exists()).toBe(false)
     expect(await Bun.file(join(f.root, "executed")).exists()).toBe(false)
@@ -611,16 +678,7 @@ test(
       })
       const result = await decode(sealed.json, sealed.bundle)
       const publishWithToken = () =>
-        Effect.runPromiseExit(
-          stub.github.withPushToken(policy, (pushToken) =>
-            Effect.scoped(
-              Effect.gen(function* () {
-                const opts = options(f, { token: pushToken, gitBinary: recorder.path })
-                return yield* pushSealedResult(yield* checkSealedResult(result, target, opts))
-              }),
-            ),
-          ),
-        )
+        publish(result, options(f, { token: stub.github.pushToken(policy), binary: recorder.path }))
       expect(Exit.isSuccess(await publishWithToken())).toBe(true)
       const push = (await recorder.calls()).find((call) => call.argv.includes("push"))!
       expect(push.env.GIT_CONFIG_KEY_0).toBe(`http.${f.remote}.extraHeader`)
@@ -740,11 +798,8 @@ test(
     })
     expect(bundle.byteLength).toBeLessThan(sealedResultLimits.bundleBytes)
     const result = await decode(manifest(f.sourceSha), bundle)
-    const started = Date.now()
-    const exit = await publish(result, options(f, { gitBinary: recorder.path }))
+    const exit = await publish(result, options(f, { binary: recorder.path }))
     expect(refusedCheck(exit)).toBe("object_bytes")
-    // The walk refuses at the declared size of the object, before any inflation.
-    expect(Date.now() - started).toBeLessThan(2_000)
     expect(
       (await recordedCalls(f, recorder)).some((call) => call.argv.includes("index-pack")),
     ).toBe(false)
@@ -834,7 +889,7 @@ test(
     expect(bundle.byteLength).toBeLessThan(4096)
     const exit = await publish(
       await decode(manifest(f.sourceSha), bundle),
-      options(f, { gitBinary: recorder.path }),
+      options(f, { binary: recorder.path }),
     )
     expect(refusedCheck(exit)).toBe("object_bytes")
     expect(
@@ -843,17 +898,80 @@ test(
   }),
 )
 
+/**
+ * Runs the check of a bundle in a process of its own, and gives the refusal and the
+ * peak resident memory of that process in bytes.
+ */
+async function checkInOwnProcess(f: Fixture, bundle: Uint8Array) {
+  const input = join(f.root, `check-${crypto.randomUUID()}.json`)
+  await writeFile(
+    input,
+    JSON.stringify({
+      json: new TextDecoder().decode(manifest(f.sourceSha)),
+      bundle: Buffer.from(bundle).toString("base64"),
+      target,
+      options: { ...options(f), token: undefined, git: undefined },
+      settings: options(f).git,
+    }),
+  )
+  const child = Bun.spawn(
+    [
+      process.execPath,
+      "-e",
+      `import { Cause, Effect, Exit, Layer, Redacted } from "effect"
+import { checkSealedResult, decodeSealedResult, makeSealedResultGit, SealedResultGit } from "./src/kernel/sealed-result"
+const input = JSON.parse(await Bun.file(process.env.SEALED_RESULT_INPUT).text())
+const exit = await Effect.runPromiseExit(Effect.scoped(Effect.gen(function* () {
+  const result = yield* decodeSealedResult(new TextEncoder().encode(input.json), Buffer.from(input.bundle, "base64"))
+  delete input.bundle
+  const options = { ...input.options, token: Effect.succeed(Redacted.make("fixture")) }
+  return yield* checkSealedResult(result, input.target, options)
+})).pipe(Effect.provide(Layer.effect(SealedResultGit, makeSealedResultGit(input.settings)))))
+const error = Exit.isFailure(exit) ? Cause.squash(exit.cause) : undefined
+console.log(JSON.stringify({ check: error?.check ?? null, peak: process.resourceUsage().maxRSS * 1024 }))`,
+    ],
+    {
+      cwd: resolve("."),
+      env: { ...process.env, SEALED_RESULT_INPUT: input },
+      stdout: "pipe",
+      stderr: "pipe",
+    },
+  )
+  const [status, stdout, stderr] = await Promise.all([
+    child.exited,
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+  ])
+  if (status !== 0) throw new Error(`the check process exited ${status}: ${stderr}`)
+  return Schema.decodeUnknownSync(
+    Schema.Struct({ check: Schema.NullOr(Schema.String), peak: Schema.Number }),
+  )(JSON.parse(stdout))
+}
+
+// What a check process holds at most: the 16 MiB bundle a few times, and the runtime.
+const checkPeakBytes = 256 * MiB
+
+test(
+  "an object that declares a size above the bound is refused before it is inflated: the peak memory of the check stays below what it declares",
+  withFixture(async (f) => {
+    // The header declares 512 MiB, and the stream of about 512 KiB inflates to it.
+    const bundle = packBundle(f, pack([concat(objectHeader(3, 512 * MiB), zerosStream(512))]))
+    expect(bundle.byteLength).toBeLessThan(MiB)
+    const { check, peak } = await checkInOwnProcess(f, bundle)
+    expect(check).toBe("object_bytes")
+    expect(peak).toBeLessThan(checkPeakBytes)
+  }),
+  30_000,
+)
+
 test(
   "a pack whose header gives a size below what its stream inflates to is refused, inflating no more than the size",
   withFixture(async (f) => {
-    // The header says 10 bytes; the stream holds 256 MiB of zeros.
-    const bundle = packBundle(f, pack([concat(objectHeader(3, 10), zerosStream(256))]))
-    const result = await decode(manifest(f.sourceSha), bundle)
-    const peak = process.resourceUsage().maxRSS
-    const exit = await publish(result, options(f))
-    expect(refusedCheck(exit)).toBe("bundle_format")
-    // The peak memory of the process (KiB) grew by far less than the stream holds.
-    expect(process.resourceUsage().maxRSS - peak).toBeLessThan(128 * 1024)
+    // The header says 10 bytes; the stream holds 512 MiB of zeros.
+    const bundle = packBundle(f, pack([concat(objectHeader(3, 10), zerosStream(512))]))
+    const { check, peak } = await checkInOwnProcess(f, bundle)
+    expect(check).toBe("bundle_format")
+    expect(peak).toBeLessThan(checkPeakBytes)
   }),
   30_000,
 )
@@ -1058,17 +1176,90 @@ test(
         await Bun.sleep(5)
       }
     })()
+    const opts = options(f, { binary: slow })
+    const runner = await Effect.runPromise(makeSealedResultGit(opts.git))
     const runs = Array.from({ length: sealedResultLimits.concurrentChecks + 1 }, (_, index) =>
-      publish(result, options(f, { gitBinary: slow }), undefined, {
-        ref: `refs/heads/agent-run/run-${index}`,
-        expectedHead: null,
-      }),
+      publish(
+        result,
+        opts,
+        undefined,
+        { ref: `refs/heads/agent-run/run-${index}`, expectedHead: null },
+        runner,
+      ),
     )
     const exits = await Promise.all(runs)
     sampling = false
     await sampler
     for (const exit of exits) expect(Exit.isSuccess(exit)).toBe(true)
     expect(most).toBe(sealedResultLimits.concurrentChecks)
+  }),
+  30_000,
+)
+
+test(
+  "a check over the bound of waiting checks is refused at once, a check that waits past its limit is refused, and neither makes a token",
+  withFixture(async (f) => {
+    // A git that waits until the gate opens: each check that holds a slot stays in init.
+    const gate = join(f.root, "gate")
+    const gated = join(f.root, "gated-git")
+    await writeFile(
+      gated,
+      `#!/bin/sh\nwhile [ ! -e ${gate} ]; do sleep 0.02; done\nexec /usr/bin/git "$@"\n`,
+    )
+    await chmod(gated, 0o755)
+    const sealed = await sealWithResultPy(f, async (workspace) => {
+      await writeFile(join(workspace, "result.txt"), "content\n")
+    })
+    const result = await decode(sealed.json, sealed.bundle)
+    let minted = 0
+    let revoked = 0
+    const counted = options(f, {
+      binary: gated,
+      waitLimitMs: 3_000,
+      token: Effect.acquireRelease(
+        Effect.sync(() => {
+          minted += 1
+          return Redacted.make(token)
+        }),
+        () => Effect.sync(() => (revoked += 1)),
+      ),
+    })
+    const runner = await Effect.runPromise(makeSealedResultGit(counted.git))
+    const check = (index: number) =>
+      publish(
+        result,
+        counted,
+        undefined,
+        { ref: `refs/heads/agent-run/run-${index}`, expectedHead: null },
+        runner,
+      )
+    const { concurrentChecks, waitingChecks } = sealedResultLimits
+    const holding = Array.from({ length: concurrentChecks }, (_, index) => check(index))
+    while (minted < concurrentChecks) await Bun.sleep(10)
+    const waiting = Array.from({ length: waitingChecks }, (_, index) =>
+      check(concurrentChecks + index),
+    )
+    await Bun.sleep(100)
+    const over = refusal(await check(concurrentChecks + waitingChecks))
+    expect(over.check).toBe("checks_waiting")
+    expect(over.detail).toBe(
+      `${waitingChecks} checks wait for a slot; the bound is ${waitingChecks}`,
+    )
+    const waited = await Promise.all(waiting)
+    expect(waited.map((exit) => refusal(exit).check)).toEqual(
+      Array.from({ length: waitingChecks }, () => "wait_limit"),
+    )
+    expect(refusal(waited[0]!).detail).toBe("no slot was free within 3000 ms")
+    // Only the checks that got a slot made a token.
+    expect(minted).toBe(concurrentChecks)
+    await writeFile(gate, "")
+    for (const exit of await Promise.all(holding)) expect(Exit.isSuccess(exit)).toBe(true)
+    expect({ minted, revoked }).toEqual({ minted: concurrentChecks, revoked: concurrentChecks })
+    // The slots are free again, and the waiting count is back to zero.
+    const exits = await Promise.all(
+      Array.from({ length: concurrentChecks + waitingChecks }, (_, index) => check(100 + index)),
+    )
+    for (const exit of exits) expect(Exit.isSuccess(exit)).toBe(true)
   }),
   30_000,
 )
@@ -1084,11 +1275,13 @@ test(
     await writeFile(slow, '#!/bin/sh\nsleep 30\nexec /usr/bin/git "$@"\n')
     await chmod(slow, 0o755)
     const started = Date.now()
-    const exit = await publish(result, options(f, { gitBinary: slow, timeLimitMs: 500 }))
+    const exit = await publish(result, options(f, { binary: slow, timeLimitMs: 500 }))
     expect(refusedCheck(exit)).toBe("time_limit")
-    expect(Date.now() - started).toBeLessThan(10_000)
+    // The git child sleeps 30 s; the check ends at its limit of 500 ms.
+    expect(Date.now() - started).toBeLessThan(5_000)
     expect(await remoteRef(f)).toBe("")
   }),
+  20_000,
 )
 
 /** Whether a process runs: it exists and is not a zombie that waits for its parent. */
@@ -1116,8 +1309,9 @@ test(
     const endless = join(f.root, "endless-git")
     await writeFile(endless, `#!/bin/sh\nsleep 300 &\necho "$$ $!" > ${pids}\nwait\n`)
     await chmod(endless, 0o755)
+    const opts = options(f, { binary: endless })
     const fiber = Effect.runFork(
-      Effect.scoped(checkSealedResult(result, target, options(f, { gitBinary: endless }))),
+      Effect.provide(Effect.scoped(checkSealedResult(result, target, opts)), gitLayer(opts.git)),
     )
     while (!(await Bun.file(pids).exists()) || (await Bun.file(pids).text()) === "")
       await Bun.sleep(10)
@@ -1133,25 +1327,32 @@ test(
 )
 
 test(
-  "what an earlier process left below the scratch root is removed, and a root others can use is a fault",
+  "the runner removes what an earlier process left below its scratch root when it is built, and only below its own root",
   withFixture(async (f) => {
-    const stale = join(f.scratchRoot, "sealed-result-earlier")
-    await mkdir(join(stale, "repository.git"), { recursive: true })
-    await writeFile(join(stale, "repository.git", "pack"), "left by a process that ended\n")
-    await Effect.runPromise(removeSealedResultScratch(f.scratchRoot))
+    const leave = async (root: string) => {
+      const stale = join(root, "sealed-result-earlier")
+      await mkdir(join(stale, "repository.git"), { recursive: true })
+      await writeFile(join(stale, "repository.git", "pack"), "left by a process that ended\n")
+    }
+    await leave(f.scratchRoot)
+    await Effect.runPromise(makeSealedResultGit(options(f).git))
     expect(await readdir(f.scratchRoot)).toEqual([])
+    // A second runner of another root, built later, leaves the first root alone.
+    await leave(f.scratchRoot)
+    const other = join(f.root, "other-root")
+    await Effect.runPromise(makeSealedResultGit(options(f, { scratchRoot: other }).git))
+    expect(await readdir(f.scratchRoot)).toEqual(["sealed-result-earlier"])
+    await rm(join(f.scratchRoot, "sealed-result-earlier"), { recursive: true })
     const sealed = await sealWithResultPy(f, async (workspace) => {
       await writeFile(join(workspace, "result.txt"), "content\n")
     })
     const result = await decode(sealed.json, sealed.bundle)
+    // A root other users can use: the runner is not built.
     await chmod(f.scratchRoot, 0o755)
     try {
       const shared = await publish(result, options(f))
       expect(failure(shared)).toBeInstanceOf(SealedResultFault)
       expect(String(failure(shared))).toContain("Scratch root")
-      expect(
-        failure(await Effect.runPromiseExit(removeSealedResultScratch(f.scratchRoot))),
-      ).toBeInstanceOf(SealedResultFault)
     } finally {
       await chmod(f.scratchRoot, 0o700)
     }
@@ -1162,6 +1363,59 @@ test(
     expect((await lstat(fresh)).mode & 0o777).toBe(0o700)
     expect(await readdir(fresh)).toEqual([])
   }),
+)
+
+test(
+  "the daemon's runner permits https remotes only: a remote on disk is a fault before any object is fetched",
+  withFixture(async (f) => {
+    const sealed = await sealWithResultPy(f, async (workspace) => {
+      await writeFile(join(workspace, "result.txt"), "content\n")
+    })
+    const result = await decode(sealed.json, sealed.bundle)
+    for (const remote of [f.remote, `file://${f.remote}`]) {
+      const exit = await Effect.runPromiseExit(
+        Effect.provide(
+          Effect.scoped(checkSealedResult(result, target, { ...options(f), remote })),
+          SealedResultGitLive(f.scratchRoot),
+        ),
+      )
+      const error = failure(exit)
+      expect(error).toBeInstanceOf(SealedResultFault)
+      expect(error).toMatchObject({ operation: "ls-remote" })
+      expect(String(error)).toContain("transport 'file' not allowed")
+    }
+    expect(await remoteRef(f)).toBe("")
+  }),
+)
+
+test(
+  "a git child that speaks to the remote and gets no bytes ends before the time limit of the check",
+  withFixture(async (f) => {
+    // A server that takes the request of the remote and never answers it.
+    const stub = await githubApiStub((path) =>
+      path.startsWith("/stalled.git/") ? new Promise<Response>(() => {}) : undefined,
+    )
+    try {
+      const sealed = await sealWithResultPy(f, async (workspace) => {
+        await writeFile(join(workspace, "result.txt"), "content\n")
+      })
+      const result = await decode(sealed.json, sealed.bundle)
+      const remote = new URL("/stalled.git", stub.url).toString()
+      const timeLimitMs = 60_000
+      const started = Date.now()
+      const exit = await publish(result, options(f, { remote, protocols: ["http"], timeLimitMs }))
+      const elapsed = Date.now() - started
+      const error = failure(exit)
+      expect(error).toBeInstanceOf(SealedResultFault)
+      expect(String(error)).toContain("Operation too slow")
+      expect(elapsed).toBeGreaterThanOrEqual(sealedResultLimits.lowSpeedSeconds * 1_000)
+      expect(elapsed).toBeLessThan(timeLimitMs)
+      expect(stub.requests.map((request) => request.path)).toEqual(["/stalled.git/info/refs"])
+    } finally {
+      await stub.close()
+    }
+  }),
+  90_000,
 )
 
 test(
