@@ -22,7 +22,7 @@ export function serializePublicStatus(input) {
   if (
     !["setup", "bootstrap", "audit", "transport", "cleanup", "test"].includes(stage) ||
     !["ok", "failed", "cancelled"].includes(outcome) ||
-    !["none", "refused", "unavailable", "timeout", "capacity"].includes(reason) ||
+    !["none", "refused", "unavailable", "timeout", "capacity", "renewal"].includes(reason) ||
     !Number.isSafeInteger(count) ||
     count < 0 ||
     count > 1000000000

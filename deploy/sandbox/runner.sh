@@ -251,7 +251,9 @@ else:
             try: os.kill(pid, 0)
             except ProcessLookupError: break
             time.sleep(1)
-        sys.exit(0)
+        # The relay names a fixed reason when it ended the session on a failed renewal.
+        ended = root / "relay-ended"
+        sys.exit(3 if ended.exists() and ended.read_text() == "renewal\n" else 0)
     heartbeat = root / "heartbeat"
     last_heartbeat = int(time.time())
     while True:

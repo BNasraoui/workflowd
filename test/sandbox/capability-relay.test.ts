@@ -1,7 +1,14 @@
 import { expect, test } from "bun:test"
-import { mkdtemp, rm } from "node:fs/promises"
+import { once } from "node:events"
+import { mkdtemp, readFile, rm } from "node:fs/promises"
+import { request as httpRequest } from "node:http"
+import { createServer as httpsServer } from "node:https"
+import type { AddressInfo } from "node:net"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
+import { pipeline } from "node:stream"
+import { client, processGateway, proof, withGateway } from "../capability-gateway/gateway-process"
+import { renewalRequests } from "../../deploy/sandbox/renewal.mjs"
 import { fixtureExecutable } from "../helpers/fixture-executable.mjs"
 
 /** A self-signed certificate for 127.0.0.1: the gateway's TLS on loopback. */
@@ -199,3 +206,99 @@ test("the relay refuses a gateway that is not an HTTPS origin", async () => {
     await rm(root, { recursive: true, force: true })
   }
 })
+
+function portOf(address: string | AddressInfo | null) {
+  if (address === null || typeof address === "string") throw new Error("front not listening")
+  return address.port
+}
+
+/**
+ * TLS in front of the gateway process. Each renewal that the gateway grants is lost on the way
+ * back: the gateway has replaced the successor, the relay never gets it.
+ */
+async function lossyFront(tls: { key: string; cert: string }, gatewayPort: number) {
+  const renewals: Array<number | undefined> = []
+  const server = httpsServer(
+    { key: await readFile(tls.key), cert: await readFile(tls.cert) },
+    (incoming, outgoing) => {
+      const upstream = httpRequest(
+        {
+          host: "127.0.0.1",
+          port: gatewayPort,
+          path: incoming.url,
+          method: incoming.method,
+          headers: incoming.headers,
+        },
+        (reply) => {
+          if (incoming.url === "/capabilities/v1/renew") {
+            renewals.push(reply.statusCode)
+            if (reply.statusCode === 200) {
+              reply.resume()
+              reply.once("end", () => incoming.socket.destroy())
+              return
+            }
+          }
+          outgoing.writeHead(reply.statusCode ?? 502, reply.headers)
+          pipeline(reply, outgoing, () => {})
+        },
+      )
+      upstream.once("error", () => outgoing.destroy())
+      pipeline(incoming, upstream, () => {})
+    },
+  )
+  server.listen(0, "127.0.0.1")
+  await once(server, "listening")
+  return {
+    port: portOf(server.address()),
+    renewals: () => renewals,
+    close: () => {
+      server.closeAllConnections()
+      server.close()
+    },
+  }
+}
+
+test("the relay asks one renewal no more often than the gateway permits, and its last failure ends the session with a logged reason", async () => {
+  await withGateway(processGateway, async (f, gateway) => {
+    const root = await mkdtemp(join(tmpdir(), "relay-renewals-"))
+    const tls = await loopbackCertificate(root)
+    const front = await lossyFront(tls, gateway.port)
+    const runner = client(gateway.port)
+    try {
+      await f.tokenSeconds(200)
+      const { audience } = await runner.audience()
+      const answer = await runner.session(proof(audience, "jti-relay"))
+      expect(answer.status).toBe(200)
+      const grant = await runner.grant(answer)
+      // Each successor outlives its predecessor, so the gateway grants each permitted renewal.
+      await f.tokenSeconds(300)
+      const child = Bun.spawn(
+        [
+          fixtureExecutable("node"),
+          resolve("test/sandbox/fixtures/capability-job.mjs"),
+          "runner",
+          root,
+        ],
+        {
+          env: { PATH: "/usr/bin:/bin", HOME: root, NODE_EXTRA_CA_CERTS: tls.cert },
+          stdin: new Blob([
+            JSON.stringify({ ...grant, gateway: `https://127.0.0.1:${front.port}` }),
+          ]),
+          stdout: "pipe",
+          stderr: "pipe",
+        },
+      )
+      // The relay ends by itself once its last permitted renewal is lost.
+      const ended = await Promise.race([child.exited, Bun.sleep(25000).then(() => "live")])
+      child.kill("SIGKILL")
+      expect(ended).toBe(0)
+      // The gateway permits one successor and three replacements of it: four renewals, all granted.
+      expect(renewalRequests).toBe(4)
+      expect(front.renewals()).toEqual(Array.from({ length: renewalRequests }, () => 200))
+      expect(await readFile(join(root, "relay-ended"), "utf8")).toBe("renewal\n")
+    } finally {
+      front.close()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+}, 40000)

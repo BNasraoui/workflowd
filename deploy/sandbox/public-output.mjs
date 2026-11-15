@@ -87,6 +87,8 @@ if (import.meta.main) {
     })
     child.once("close", (code) => {
       clearTimeout(timer)
+      // The hold exits 3 when the relay ended the session on its last failed renewal.
+      if (stage === "audit" && code === 3 && reason === "none") reason = "renewal"
       // Join before filtering, so chunk boundaries cannot expose known job
       // credentials. Upstream credentials are never present on this runner.
       let diagnostic = Buffer.concat(captured).toString("utf8")

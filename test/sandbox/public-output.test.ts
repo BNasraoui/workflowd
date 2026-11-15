@@ -10,7 +10,7 @@ const publicReceipt = Schema.Struct({
   version: Schema.Literal(1),
   stage: Schema.Literals(["setup", "bootstrap", "audit", "transport", "cleanup", "test"]),
   outcome: Schema.Literals(["ok", "failed", "cancelled"]),
-  reason: Schema.Literals(["none", "refused", "unavailable", "timeout", "capacity"]),
+  reason: Schema.Literals(["none", "refused", "unavailable", "timeout", "capacity", "renewal"]),
   count: Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 1000000000 })),
   correlationId: Schema.String.check(Schema.isPattern(/^[0-9a-f-]{36}$/)),
 })
