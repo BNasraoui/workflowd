@@ -77,6 +77,14 @@ connection.on("close", () => process.stdout.write(answer.length >= 4 ? answer.su
     assert.equal(code, 0, `the caller as uid ${uid} failed`)
     return output
   }
+  const answer = async (socket: string, uid: number, gid: number) => {
+    const output = await call(socket, uid, gid)
+    try {
+      return JSON.parse(output) as unknown
+    } catch {
+      return output
+    }
+  }
 
   // The deployment's form: the gateway's directory, its control directory and socket.
   const run = join(f.root, "run")
@@ -84,13 +92,13 @@ connection.on("close", () => process.stdout.write(answer.length >= 4 ? answer.su
   const socket = join(run, "control", "gateway.sock")
   const gateway = await start(socket)
   gateways.push(gateway)
-  assert.deepEqual(JSON.parse(await call(socket, daemonUid, groupGid)), { ok: true, value: null })
-  assert.deepEqual(JSON.parse(await call(socket, otherUid, groupGid)), {
+  assert.deepEqual(await answer(socket, daemonUid, groupGid), { ok: true, value: null })
+  assert.deepEqual(await answer(socket, otherUid, groupGid), {
     ok: false,
     error: "caller",
   })
   assert.equal(await call(socket, outsiderUid, outsiderUid), "error EACCES")
-  assert.deepEqual(JSON.parse(await call(socket, gatewayUid, groupGid)), {
+  assert.deepEqual(await answer(socket, gatewayUid, groupGid), {
     ok: false,
     error: "caller",
   })

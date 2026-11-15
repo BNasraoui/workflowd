@@ -331,7 +331,7 @@ export async function startGatewayProcess(
       const part = await reader.read()
       if (part.done) {
         await forwarded
-        throw new Error(`gateway process exited before listening: ${errors}`)
+        throw new Error(`gateway process exited before listening: ${text}${errors}`)
       }
       text += Buffer.from(part.value).toString()
       const listening = /^listening (\d+)\n/m.exec(text)?.[1]

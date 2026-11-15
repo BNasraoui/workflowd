@@ -1,4 +1,4 @@
-import { chmod, chown, lstat, mkdir, realpath, rm } from "node:fs/promises"
+import { chmod, chown, lstat, mkdir, readFile, realpath, rm } from "node:fs/promises"
 import { createServer, type Socket } from "node:net"
 import { dirname } from "node:path"
 import { Cause, Effect, Exit, Schema } from "effect"
@@ -107,17 +107,23 @@ const answer = (target: ControlTarget, text: string) =>
  * the parent up to `/` is owned by root (uid 0) or the gateway's uid, and either lets neither its
  * group nor others write to it (mode & 0o022 is 0) or has the sticky bit (mode & 0o1000). The
  * sticky bit lets only an entry's owner, the directory's owner and root rename or remove the
- * entry, and each entry on the path is owned by root or the gateway.
+ * entry, and each entry on the path is owned by root or the gateway. `/` may also show the
+ * kernel's overflow uid: a user namespace shows it for an owner that it does not map, as the
+ * host's root, and `/` itself cannot be renamed or replaced.
  */
 const checkAncestors = async (directory: string, uid: number) => {
   const parent = dirname(directory)
   if ((await realpath(parent)) !== parent)
     throw new Error("control socket directory must be named by its real path")
+  const overflow = Number(
+    (await readFile("/proc/sys/kernel/overflowuid", "utf8").catch(() => "")).trim() || -1,
+  )
   for (let above = parent; ; above = dirname(above)) {
     const info = await lstat(above)
+    const owners = above === "/" ? [0, uid, overflow] : [0, uid]
     if (
       !info.isDirectory() ||
-      (info.uid !== 0 && info.uid !== uid) ||
+      !owners.includes(info.uid) ||
       ((info.mode & 0o022) !== 0 && (info.mode & 0o1000) === 0)
     )
       throw new Error(`${above} lets another user replace the control socket directory`)
