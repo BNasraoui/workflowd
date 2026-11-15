@@ -1,27 +1,36 @@
 import { expect, test } from "bun:test"
 
-/** The length of each text: 256 Ki characters. */
+/** The length of a text: 256 Ki characters, unless a text names another. */
 const length = 262144
 
-/** A text of `length` characters: `head`, then `fill` repeated, then `tail`. */
-const sized = (head: string, fill: string, tail = "") =>
-  head + fill.repeat((length - head.length - tail.length) / fill.length) + tail
+/** A text of `size` characters: `head`, then `fill` repeated, then `tail`. */
+const sized = (head: string, fill: string, tail = "", size = length) =>
+  head + fill.repeat((size - head.length - tail.length) / fill.length) + tail
 
-const listItem = ["a list item whose marker is followed by spaces", sized("1.", " ", "x")] as const
-const closingKeywords = [
-  "a closing keyword before each of many github.com paths",
-  sized("", "fix:github.com/."),
+const listItem = [
+  "a list item whose marker is followed by spaces",
+  sized("1.", " ", "x"),
+  length,
+] as const
+const closingKeyword = "a closing keyword before each of many github.com paths"
+const closingKeywords = [closingKeyword, sized("", "fix:github.com/."), length] as const
+/** 512 Ki characters: the quadratic check of Node is then far beyond the bound, not near it. */
+const closingKeywordsLong = [
+  closingKeyword,
+  sized("", "fix:github.com/.", "", 2 * length),
+  2 * length,
 ] as const
 /** Python's `.` takes a line separator, so only the Node check reads this run with backtracking. */
 const backticks = [
   "a run of backticks that ends in a line separator",
   sized("", "`", String.fromCharCode(0x2028)),
+  length,
 ] as const
 
 /** The publication check of the publisher (Node) and of the result step (Python), with its texts. */
 const checks = {
   node: [
-    [listItem, closingKeywords, backticks],
+    [listItem, closingKeywordsLong, backticks],
     "node",
     "--input-type=module",
     "-e",
@@ -59,8 +68,8 @@ async function judged(check: ReadonlyArray<string>, text: string, bound: number)
 }
 
 for (const [runtime, [texts, ...check]] of Object.entries(checks))
-  for (const [name, text] of texts)
-    test(`[${runtime}] a publication text of 256 Ki characters that is ${name} is judged within 2 s`, async () => {
-      expect(text.length).toBe(length)
+  for (const [name, text, size] of texts)
+    test(`[${runtime}] a publication text of ${size / 1024} Ki characters that is ${name} is judged within 2 s`, async () => {
+      expect(text.length).toBe(size)
       expect(await judged(check, text, 2000)).toBe("true")
     }, 10000)
