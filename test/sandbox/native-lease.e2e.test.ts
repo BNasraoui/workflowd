@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test"
+import { rm } from "node:fs/promises"
 import { createServer } from "node:net"
 import { Effect, Exit, Logger } from "effect"
 import { controlFrame } from "../../src/capability-control/protocol"
@@ -183,13 +184,15 @@ test("a revoked run's session does not make its lease ready: its acquisition is 
 
 /**
  * A gateway that someone took over, on the control socket: it answers every request `refused`.
- * The control directory is the one the gateway left.
+ * It takes the control directory and the socket path that the killed gateway left.
  */
 async function refusingGateway(socket: string) {
   const server = createServer((connection) => {
     connection.on("data", () => connection.end(controlFrame({ ok: false, error: "refused" })))
     connection.on("error", () => connection.destroy())
   })
+  // The killed gateway left its socket.
+  await rm(socket, { force: true })
   await new Promise<void>((resolve) => server.listen(socket, resolve))
   return () => new Promise<void>((resolve) => server.close(() => resolve()))
 }
@@ -232,12 +235,12 @@ test("a native lease is released when the gateway is down or refuses the revoke,
         gateway = undefined
         down.mutateRun({ status: "completed", conclusion: "cancelled" })
         yield* Effect.exit(downLeases.release("run-d"))
-        expect(["releasing", "released"]).toContain((yield* read("run-d"))?.state)
+        expect(["releasing", "released"]).toContain(String((yield* read("run-d"))?.state))
         // A gateway that refuses the revoke: the release goes on as well.
         const stopRefusing = yield* Effect.promise(() => refusingGateway(f.config.controlSocket))
         refusing.mutateRun({ status: "completed", conclusion: "cancelled" })
         yield* Effect.exit(refusingLeases.release("run-x"))
-        expect(["releasing", "released"]).toContain((yield* read("run-x"))?.state)
+        expect(["releasing", "released"]).toContain(String((yield* read("run-x"))?.state))
         yield* Effect.promise(stopRefusing)
         expect(logs.filter((line) => line.includes("revoke unconfirmed"))).toHaveLength(2)
         // The gateway is back, with the grants it held. workflowd's next reconcile, within its

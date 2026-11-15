@@ -414,11 +414,11 @@ await prepare({
           expect(lease.state).toBe("ready")
           expect(lease.transport).toBeNull()
           if (race === "release-failure") {
-            // The gateway cannot confirm the revoke, so the lease is not released.
+            // The gateway cannot confirm the revoke; the release goes on without it.
             child.kill("SIGKILL")
             yield* Effect.promise(() => child.exited)
-            expect((yield* Effect.exit(leases.release("run")))._tag).toBe("Failure")
-            expect((yield* store.read("run"))?.state).not.toBe("released")
+            yield* Effect.exit(leases.release("run"))
+            expect(["releasing", "released"]).toContain(String((yield* store.read("run"))?.state))
             return
           }
           expect((yield* Effect.promise(() => request("foreign"))).status).toBe(403)
