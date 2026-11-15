@@ -110,7 +110,7 @@ test("gateway image caller cannot inherit secrets, call the publisher or run ano
   expect(() => assertUnprivilegedPrWorkflows(files)).toThrow(
     "Inherited secrets are forbidden in every workflow",
   )
-  files["ci.yml"] = source.replace(caller, caller.replace("gateway-image", "gateway-image-publish"))
+  files["ci.yml"] = source.replace(caller, caller.replace("gateway-image", "agent-image-publish"))
   expect(() => assertUnprivilegedPrWorkflows(files)).toThrow(
     "PR job may not attach secrets, environments, containers or reusable workflows",
   )
