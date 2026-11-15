@@ -6,7 +6,7 @@ import { makeSandboxStore } from "../../src/sandbox/store"
 import { capabilityDigest, makeCapabilityStore } from "../../src/capability-gateway/store"
 import { randomBytes } from "node:crypto"
 import { runGatewayMigrations } from "../../src/capability-gateway/migrations"
-import { liveGrants } from "../../src/capability-gateway/control-client"
+import { liveGrants } from "../../src/sandbox/capability-control"
 import { mkdir, writeFile } from "node:fs/promises"
 import { join, resolve } from "node:path"
 

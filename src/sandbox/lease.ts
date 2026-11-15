@@ -18,7 +18,7 @@ import {
 import { sandboxSshArguments, type SandboxTransport } from "./transport"
 import type { makeSandboxGithub } from "./github"
 import type { SavedSandboxPolicy } from "./saved-policy"
-import type { DaemonCapability } from "../capability-gateway/control-client"
+import type { DaemonCapability } from "./capability-control"
 import { requireNativePublisherActivation, type PublisherContract } from "./publisher-contract"
 
 type Github = Effect.Success<ReturnType<typeof makeSandboxGithub>>

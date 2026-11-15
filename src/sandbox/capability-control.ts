@@ -1,17 +1,18 @@
 import { createConnection } from "node:net"
 import { Effect, Queue, Schema, Semaphore } from "effect"
 import { SqlClient } from "effect/unstable/sql"
-import { runLifetime } from "../store/run-lifetime"
-import { authorizeWorker } from "../worker-identity/access"
 import {
+  CapabilityGrant,
+  ControlAnswer,
   controlFrame,
-  controlVerbs,
+  controlProtocol,
+  gatewayMigrationsTable,
   maxControlFrame,
   type ControlVerb,
-  type ControlVerbEntry,
-} from "./control"
-import { gatewayMigrationsTable } from "./migrations"
-import { CapabilityGrant } from "./store"
+  type ControlVerbSchemas,
+} from "../capability-control/protocol"
+import { runLifetime } from "../store/run-lifetime"
+import { authorizeWorker } from "../worker-identity/access"
 
 /** The gateway did not answer: its socket is missing, refused the connection, or timed out. */
 export class CapabilityGatewayUnavailable extends Schema.TaggedError<CapabilityGatewayUnavailable>()(
@@ -24,16 +25,11 @@ export class CapabilityControlRefused extends Schema.TaggedError<CapabilityContr
   { reason: Schema.String },
 ) {}
 
-const Answer = Schema.Union([
-  Schema.Struct({ ok: Schema.Literal(true), value: Schema.Unknown }),
-  Schema.Struct({ ok: Schema.Literal(false), error: Schema.String }),
-])
-
 /** One request on the control socket and its answer, in at most 10 seconds. */
 const send = <A, I, B, O>(
   socket: string,
   verb: ControlVerb,
-  entry: ControlVerbEntry<A, I, B, O>,
+  entry: ControlVerbSchemas<A, I, B, O>,
   request: A,
 ) =>
   Effect.gen(function* () {
@@ -73,7 +69,7 @@ const send = <A, I, B, O>(
         Effect.fail(new CapabilityGatewayUnavailable({ reason: "timed out" })),
       ),
     )
-    const answer = yield* Schema.decodeUnknownEffect(Schema.fromJsonString(Answer))(text).pipe(
+    const answer = yield* Schema.decodeUnknownEffect(ControlAnswer)(text).pipe(
       Effect.mapError(() => new CapabilityGatewayUnavailable({ reason: "unreadable answer" })),
     )
     if (!answer.ok)
@@ -88,12 +84,12 @@ const send = <A, I, B, O>(
 /** workflowd's calls on the control socket at `socket`, one for each verb. */
 export const controlClient = (socket: string) => ({
   authorize: (grant: CapabilityGrant) =>
-    send(socket, "authorize", controlVerbs.authorize, { grant }),
-  revoke: (runId: string) => send(socket, "revoke", controlVerbs.revoke, { runId }),
+    send(socket, "authorize", controlProtocol.authorize, { grant }),
+  revoke: (runId: string) => send(socket, "revoke", controlProtocol.revoke, { runId }),
   reconcile: (live: ReadonlyArray<CapabilityGrant>) =>
-    send(socket, "reconcile", controlVerbs.reconcile, { live }),
+    send(socket, "reconcile", controlProtocol.reconcile, { live }),
   sessionBound: (runId: string, actionsRunId: number, actionsAttempt: number) =>
-    send(socket, "sessionBound", controlVerbs.sessionBound, {
+    send(socket, "sessionBound", controlProtocol.sessionBound, {
       runId,
       actionsRunId,
       actionsAttempt,

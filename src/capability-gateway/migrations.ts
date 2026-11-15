@@ -1,5 +1,6 @@
 import { Effect } from "effect"
 import { Migrator, SqlClient } from "effect/unstable/sql"
+import { gatewayMigrationsTable } from "../capability-control/protocol"
 
 /**
  * The gateway's own store. A grant is what workflowd authorized for one run, sent on the control
@@ -39,9 +40,6 @@ const capabilityStore = Effect.gen(function* () {
     expires_at INTEGER NOT NULL
   ) STRICT`
 })
-
-/** The migrations table of the gateway's store; workflowd's store never holds it. */
-export const gatewayMigrationsTable = "capability_gateway_migrations"
 
 export const runGatewayMigrations = Migrator.make({})({
   loader: Migrator.fromRecord({ "0001_capability_store": capabilityStore }),

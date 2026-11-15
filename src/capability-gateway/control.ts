@@ -1,16 +1,19 @@
 import { chmod, chown, lstat, mkdir, rm } from "node:fs/promises"
-import { createConnection, createServer, type Socket } from "node:net"
+import { createServer, type Socket } from "node:net"
 import { dirname } from "node:path"
-import { dlopen, FFIType, ptr } from "bun:ffi"
 import { Cause, Effect, Exit, Schema } from "effect"
-import { CapabilityGrant, CapabilityRefused } from "./store"
-
-/**
- * The control socket: workflowd's calls to its gateway. Each connection carries one request and
- * one answer, each a frame of a 4-byte big-endian length and that many bytes of JSON. A request is
- * `{ verb, body }`; an answer is `{ ok: true, value }` or `{ ok: false, error }`.
- */
-export const maxControlFrame = 1 << 20
+import {
+  type CapabilityGrant,
+  ControlRequest,
+  controlFrame,
+  controlProtocol,
+  type ControlError,
+  type ControlVerb,
+  type ControlVerbSchemas,
+  maxControlFrame,
+} from "../capability-control/protocol"
+import { claimSocketPath, peerCredentials } from "../peer-socket"
+import { CapabilityRefused } from "./store"
 
 /** A failure of the gateway's store or a refusal; a refusal is a CapabilityRefused. */
 export interface ControlFailure {
@@ -21,9 +24,7 @@ export interface ControlFailure {
 export interface ControlTarget {
   readonly authorize: (grant: CapabilityGrant) => Effect.Effect<void, ControlFailure>
   readonly revoke: (runId: string) => Effect.Effect<void, ControlFailure>
-  readonly reconcile: (
-    live: ReadonlyArray<CapabilityGrant>,
-  ) => Effect.Effect<ReadonlyArray<string>, ControlFailure>
+  readonly reconcile: (live: ReadonlyArray<CapabilityGrant>) => Effect.Effect<void, ControlFailure>
   readonly sessionBound: (
     runId: string,
     actionsRunId: number,
@@ -37,74 +38,46 @@ class ControlBodyRefused extends Schema.TaggedError<ControlBodyRefused>()(
   {},
 ) {}
 
-export interface ControlVerbEntry<A, I, B, O> {
-  readonly request: Schema.Codec<A, I>
-  readonly response: Schema.Codec<B, O>
-  readonly handle: (target: ControlTarget) => (body: A) => Effect.Effect<B, ControlFailure>
-}
-
 /** An answer's value as it goes on the socket. */
 type Json =
   null | boolean | number | string | ReadonlyArray<Json> | { readonly [key: string]: Json }
 
-/** One verb: its request, its answer, and what the gateway does; `serve` runs all three. */
-const verb = <A, I, B, O extends Json>(entry: ControlVerbEntry<A, I, B, O>) => ({
-  ...entry,
+/** One verb: its protocol entry and what the gateway does; `serve` decodes, runs and encodes. */
+const verb = <A, I, B, O extends Json>(
+  schemas: ControlVerbSchemas<A, I, B, O>,
+  handle: (target: ControlTarget) => (body: A) => Effect.Effect<B, ControlFailure>,
+) => ({
   serve: (
     target: ControlTarget,
     body: unknown,
   ): Effect.Effect<Json, ControlFailure | ControlBodyRefused | Schema.SchemaError> =>
-    Schema.decodeUnknownEffect(entry.request)(body).pipe(
+    Schema.decodeUnknownEffect(schemas.request)(body).pipe(
       Effect.mapError(() => new ControlBodyRefused()),
-      Effect.flatMap(entry.handle(target)),
-      Effect.flatMap((value) => Schema.encodeEffect(entry.response)(value)),
+      Effect.flatMap(handle(target)),
+      Effect.flatMap((value) => Schema.encodeEffect(schemas.response)(value)),
     ),
 })
 
-/** The verbs of the control socket. A new verb is one entry here. */
-export const controlVerbs = {
-  authorize: verb({
-    request: Schema.Struct({ grant: CapabilityGrant }),
-    response: Schema.Null,
-    handle: (target) => (body) => Effect.as(target.authorize(body.grant), null),
-  }),
-  revoke: verb({
-    request: Schema.Struct({ runId: Schema.String }),
-    response: Schema.Null,
-    handle: (target) => (body) => Effect.as(target.revoke(body.runId), null),
-  }),
-  reconcile: verb({
-    request: Schema.Struct({ live: Schema.Array(CapabilityGrant) }),
-    response: Schema.Struct({ revoked: Schema.Array(Schema.String) }),
-    handle: (target) => (body) =>
-      Effect.map(target.reconcile(body.live), (revoked) => ({ revoked })),
-  }),
-  sessionBound: verb({
-    request: Schema.Struct({
-      runId: Schema.String,
-      actionsRunId: Schema.Int,
-      actionsAttempt: Schema.Int,
-    }),
-    response: Schema.Boolean,
-    handle: (target) => (body) =>
-      target.sessionBound(body.runId, body.actionsRunId, body.actionsAttempt),
-  }),
+/** The gateway's handler of each verb of the protocol. */
+const controlVerbs: Record<ControlVerb, ReturnType<typeof verb>> = {
+  authorize: verb(
+    controlProtocol.authorize,
+    (target) => (body) => Effect.as(target.authorize(body.grant), null),
+  ),
+  revoke: verb(
+    controlProtocol.revoke,
+    (target) => (body) => Effect.as(target.revoke(body.runId), null),
+  ),
+  reconcile: verb(
+    controlProtocol.reconcile,
+    (target) => (body) => Effect.as(target.reconcile(body.live), null),
+  ),
+  sessionBound: verb(
+    controlProtocol.sessionBound,
+    (target) => (body) => target.sessionBound(body.runId, body.actionsRunId, body.actionsAttempt),
+  ),
 }
-export type ControlVerb = keyof typeof controlVerbs
 const isControlVerb = (name: string): name is ControlVerb => Object.hasOwn(controlVerbs, name)
-/** Why the gateway refused a request; `unavailable` is a failure the caller may retry. */
-export type ControlError = "length" | "body" | "verb" | "caller" | "refused" | "unavailable"
-
-export const controlFrame = (value: unknown) => {
-  const body = Buffer.from(JSON.stringify(value))
-  const header = Buffer.alloc(4)
-  header.writeUInt32BE(body.length)
-  return Buffer.concat([header, body])
-}
-
-const ControlRequest = Schema.fromJsonString(
-  Schema.Struct({ verb: Schema.String, body: Schema.Unknown }),
-)
 
 /** One request's answer, for a caller that passed the uid check. */
 const answer = (target: ControlTarget, text: string) =>
@@ -126,9 +99,7 @@ const answer = (target: ControlTarget, text: string) =>
  * mode 0710, so only that group reaches the socket. The gateway makes it when it is missing and
  * refuses to start when it is anything else.
  */
-const claimDirectory = async (directory: string, gid: number) => {
-  const uid = process.getuid?.()
-  if (uid === undefined) throw new Error("control socket needs a uid")
+const claimDirectory = async (directory: string, uid: number, gid: number) => {
   const existing = await lstat(directory).catch(() => null)
   if (existing === null) {
     await mkdir(directory, { mode: 0o700 })
@@ -152,40 +123,9 @@ export const serveControl = (options: {
   Effect.acquireRelease(
     Effect.tryPromise(async () => {
       if (process.platform !== "linux") throw new Error("the control socket needs SO_PEERCRED")
-      await claimDirectory(dirname(options.socket), options.daemon.gid)
-      const stale = await lstat(options.socket).catch(() => null)
-      if (stale !== null && !stale.isSocket()) throw new Error("control socket path is taken")
-      if (stale !== null) {
-        const served = await new Promise<boolean>((resolve) => {
-          const probe = createConnection(options.socket)
-          probe.on("connect", () => {
-            probe.destroy()
-            resolve(true)
-          })
-          probe.on("error", () => resolve(false))
-        })
-        if (served) throw new Error("another gateway serves the control socket")
-        await rm(options.socket)
-      }
-      const libc = dlopen("libc.so.6", {
-        getsockopt: {
-          args: [FFIType.i32, FFIType.i32, FFIType.i32, FFIType.ptr, FFIType.ptr],
-          returns: FFIType.i32,
-        },
-      })
-      const peerUid = (socket: Socket) => {
-        // node:net on Bun exposes the accepted native descriptor through _handle.
-        const handle: unknown = Reflect.get(socket, "_handle")
-        const fd: unknown =
-          typeof handle === "object" && handle !== null ? Reflect.get(handle, "fd") : undefined
-        if (typeof fd !== "number") return undefined
-        const credentials = new Int32Array(3)
-        const length = new Uint32Array([12])
-        return libc.symbols.getsockopt(fd, 1, 17, ptr(credentials), ptr(length)) === 0 &&
-          length[0] === 12
-          ? credentials[1]
-          : undefined
-      }
+      const uid = process.getuid!()
+      await claimDirectory(dirname(options.socket), uid, options.daemon.gid)
+      const release = await claimSocketPath(options.socket)
       const sockets = new Set<Socket>()
       const server = createServer((socket) => {
         sockets.add(socket)
@@ -206,7 +146,8 @@ export const serveControl = (options: {
           if (length > maxControlFrame) return reply({ ok: false, error: "length" })
           if (buffer.length < 4 + length) return
           if (buffer.length > 4 + length) return reply({ ok: false, error: "length" })
-          if (peerUid(socket) !== options.daemon.uid) return reply({ ok: false, error: "caller" })
+          if (peerCredentials(socket)?.uid !== options.daemon.uid)
+            return reply({ ok: false, error: "caller" })
           handled = true
           void Effect.runPromise(answer(options.target, buffer.subarray(4).toString("utf8"))).then(
             (value) => socket.end(controlFrame(value)),
@@ -219,23 +160,21 @@ export const serveControl = (options: {
           server.once("error", reject)
           server.listen(options.socket, resolve)
         })
-        await chown(options.socket, process.getuid!(), options.daemon.gid)
+        await chown(options.socket, uid, options.daemon.gid)
         await chmod(options.socket, 0o660)
       } catch (error) {
         server.close()
-        libc.close()
+        await release()
         throw error
       }
-      return { server, sockets, libc }
+      return { server, sockets, release }
     }),
-    ({ server, sockets, libc }) => {
+    ({ server, sockets, release }) => {
       for (const socket of sockets) socket.destroy()
       return Effect.promise(() =>
         new Promise<void>((resolve) => server.close(() => resolve()))
-          .then(() => {
-            libc.close()
-            return rm(options.socket, { force: true })
-          })
+          .then(() => rm(options.socket, { force: true }))
+          .then(release)
           .catch(() => undefined),
       )
     },

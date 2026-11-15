@@ -547,6 +547,7 @@ export const makeCapabilityGateway = (
               for (const runId of revoked) abortRun(runId)
             }),
           ),
+          Effect.asVoid,
         ),
       sessionBound: store.sessionBound,
     }

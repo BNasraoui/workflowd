@@ -30,7 +30,7 @@ import { SqliteClient } from "@effect/sql-sqlite-bun"
 import { SqlClient } from "effect/unstable/sql"
 import { AgentRunStore, AgentRunStoreLive } from ${src("kernel/agent-run-store.ts")}
 import { runStoreMigrations } from ${src("store/migrations.ts")}
-import { makeDaemonCapability } from ${src("capability-gateway/control-client.ts")}
+import { makeDaemonCapability } from ${src("sandbox/capability-control.ts")}
 import { seedLease } from ${JSON.stringify(resolve("test/capability-gateway/gateway-process.ts"))}
 const scope = Effect.runSync(Scope.make())
 const context = await Effect.runPromise(

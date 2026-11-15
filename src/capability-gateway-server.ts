@@ -7,7 +7,8 @@ import { makeCapabilityGateway } from "./capability-gateway/service"
 import { capabilityApi, capabilityHttpServer } from "./capability-gateway/http"
 import type { ClaudeUpstream } from "./capability-gateway/claude"
 import type { githubJobKeys } from "./sandbox/bootstrap"
-import { gatewayMigrationsTable, runGatewayMigrations } from "./capability-gateway/migrations"
+import { gatewayMigrationsTable } from "./capability-control/protocol"
+import { runGatewayMigrations } from "./capability-gateway/migrations"
 import { serveControl } from "./capability-gateway/control"
 import {
   checkLogin,

@@ -10,10 +10,7 @@ import { makeSandboxStore } from "../../src/sandbox/store"
 import { serveCapabilityGateway } from "../../src/capability-gateway-server"
 import { fixtureExecutable } from "../helpers/fixture-executable.mjs"
 import { seedCapabilityRun } from "./fixture"
-import {
-  makeDaemonCapability,
-  type DaemonCapability,
-} from "../../src/capability-gateway/control-client"
+import { makeDaemonCapability, type DaemonCapability } from "../../src/sandbox/capability-control"
 
 const { privateKey, publicKey } = generateKeyPairSync("rsa", { modulusLength: 2048 })
 export const jwks = {

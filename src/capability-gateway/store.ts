@@ -2,6 +2,7 @@ import { createHash, randomBytes } from "node:crypto"
 import { Effect, Schema } from "effect"
 import { SqlClient } from "effect/unstable/sql"
 import { renewalReplacements } from "../../deploy/sandbox/renewal.mjs"
+import { CapabilityGrant, SessionPolicy } from "../capability-control/protocol"
 
 export class CapabilityRefused extends Schema.TaggedError<CapabilityRefused>()(
   "CapabilityRefused",
@@ -40,17 +41,6 @@ const renewalWindowMs = 330000
 const maxReplacements = renewalReplacements
 /** A successor must outlive its predecessor by this much, so renewals near the deadline end. */
 const minimumExtensionMs = 60000
-const SessionPolicy = Schema.Struct({
-  privateBootstrap: Schema.Struct({
-    mode: Schema.Literal("actions-native"),
-    repositoryOwnerId: Schema.Int,
-  }),
-  repository: Schema.String,
-  repositoryId: Schema.Int,
-  appActorId: Schema.Int,
-  workflowSha: Schema.String,
-  toolingSha: Schema.optionalKey(Schema.String),
-})
 export type CapabilityBinding = typeof Binding.Type
 const Challenge = Schema.Struct({ ...Binding.fields, nonce: Digest, recipientId: Schema.String })
 const Row = Schema.Struct({
@@ -63,30 +53,6 @@ const Row = Schema.Struct({
   session: Schema.Int,
   nonce: Schema.NullOr(Digest),
 })
-/**
- * What workflowd authorized for one run, sent on the control socket. workflowd sends a grant only
- * for a live run whose lease has recorded its Actions run; `notAfter` ends the run's authority as
- * workflowd's worker authorization does.
- */
-export const CapabilityGrant = Schema.Struct({
-  runId: Schema.String.check(Schema.isMaxLength(200)),
-  leaseId: Schema.String.check(Schema.isPattern(/^[a-zA-Z0-9-]{1,80}$/)),
-  recipientId: Schema.String,
-  attempt: Schema.Int,
-  repository: Schema.String,
-  repositoryId: Schema.Int,
-  repositoryName: Schema.String,
-  installationId: Schema.Int,
-  sourceSha: Schema.String,
-  providerId: Schema.String,
-  modelId: Schema.String,
-  actionsRunId: Schema.Int,
-  actionsAttempt: Schema.Int,
-  deadline: Schema.Number,
-  notAfter: Schema.Number,
-  policy: SessionPolicy,
-})
-export type CapabilityGrant = typeof CapabilityGrant.Type
 const StoredGrant = Schema.fromJsonString(CapabilityGrant)
 
 /** The gateway's own store: the grants workflowd sent, and the bindings and tokens of each. */
