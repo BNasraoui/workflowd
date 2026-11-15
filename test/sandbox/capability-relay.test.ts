@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { client, processGateway, proof, withGateway } from "../capability-gateway/gateway-process"
-import { renewalRequests } from "../../deploy/sandbox/renewal.mjs"
+import { renewalRequests, renewalWindowMs } from "../../deploy/sandbox/renewal.mjs"
 import { fixtureExecutable } from "../helpers/fixture-executable.mjs"
 import { loopbackCertificate, tlsFront } from "../helpers/loopback-tls"
 
@@ -243,6 +243,97 @@ test("the relay asks one renewal no more often than the gateway permits, and its
       expect(renewalRequests).toBe(4)
       expect(renewals).toEqual(Array.from({ length: renewalRequests }, () => 200))
       expect(await readFile(join(root, "relay-ended"), "utf8")).toBe("renewal\n")
+    } finally {
+      front.close()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+}, 40000)
+
+test("a renewal that the gateway refuses ends the relay at once: it sends no further request and its open stream ends", async () => {
+  await withGateway(processGateway, async (f, gateway) => {
+    const root = await mkdtemp(join(tmpdir(), "relay-refused-"))
+    const tls = await loopbackCertificate(root)
+    const answers: Array<[string | undefined, number | undefined]> = []
+    const streamOpen = Promise.withResolvers<void>()
+    const front = await tlsFront(
+      tls,
+      gateway.port,
+      (path, status) => {
+        answers.push([path, status])
+        return false
+      },
+      // The renewal reaches the gateway only once a client's stream is open through the relay.
+      (path) => (path === "/capabilities/v1/renew" ? streamOpen.promise : undefined),
+    )
+    const runner = client(gateway.port)
+    try {
+      const { audience } = await runner.audience()
+      const answer = await runner.session(proof(audience, "jti-relay"))
+      expect(answer.status).toBe(200)
+      // The token lives 15 minutes, more than the renewal window: the gateway refuses to renew it.
+      const grant = await runner.grant(answer)
+      expect(grant.expiresAt - Date.now()).toBeGreaterThan(renewalWindowMs)
+      f.setStall(true)
+      const child = Bun.spawn(
+        [
+          fixtureExecutable("node"),
+          resolve("test/sandbox/fixtures/capability-job.mjs"),
+          "runner",
+          root,
+        ],
+        {
+          env: { PATH: "/usr/bin:/bin", HOME: root, NODE_EXTRA_CA_CERTS: tls.cert },
+          stdin: new Blob([
+            JSON.stringify({
+              ...grant,
+              renewAt: Date.now(),
+              gateway: `https://127.0.0.1:${front.port}`,
+            }),
+          ]),
+          stdout: "pipe",
+          stderr: "pipe",
+        },
+      )
+      try {
+        const output = child.stdout.getReader()
+        expect(Buffer.from((await output.read()).value ?? []).toString()).toBe("ready\n")
+        output.releaseLock()
+        const stream = await fetch("http://relay/v1/messages", {
+          unix: join(root, "gateway.sock"),
+          method: "POST",
+          headers: {
+            authorization: "Bearer workflowd-local",
+            "content-type": "application/json",
+            "anthropic-version": "2023-06-01",
+            "anthropic-beta": "oauth-2025-04-20",
+          },
+          body: JSON.stringify({ model: "fixture-model", stream: true, messages: [] }),
+        })
+        expect(stream.status).toBe(200)
+        const reader = stream.body!.getReader()
+        const stalledEvent = "event: message_start\ndata: {}\n\n"
+        // The gateway holds back the tail of a stream until it has checked it, so the open stream
+        // has given a first part of the upstream's first event.
+        const first = Buffer.from((await reader.read()).value ?? []).toString()
+        expect(first).not.toBe("")
+        expect(stalledEvent.startsWith(first)).toBe(true)
+        streamOpen.resolve()
+        const next = await reader.read().then(
+          (item) => (item.done ? "ended" : Buffer.from(item.value).toString()),
+          () => "ended",
+        )
+        expect(next).toBe("ended")
+        expect(await child.exited).toBe(0)
+      } finally {
+        child.kill("SIGKILL")
+      }
+      expect(answers).toEqual([
+        ["/capabilities/v1/providers/anthropic/v1/messages", 200],
+        ["/capabilities/v1/renew", 403],
+      ])
+      expect(await readFile(join(root, "relay-ended"), "utf8")).toBe("renewal\n")
+      expect(await f.mints()).toBe(1)
     } finally {
       front.close()
       await rm(root, { recursive: true, force: true })
