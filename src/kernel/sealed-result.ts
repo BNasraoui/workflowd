@@ -631,11 +631,12 @@ const git = (
     ),
   )
 
-const gitOk = (context: GitContext, args: ReadonlyArray<string>, input?: Uint8Array) =>
+/** The output of a git child that succeeded, as bytes. */
+const gitOkBytes = (context: GitContext, args: ReadonlyArray<string>, input?: Uint8Array) =>
   git(context, args, input).pipe(
     Effect.flatMap((run) =>
       run.status === 0
-        ? Effect.succeed(new TextDecoder().decode(run.stdout))
+        ? Effect.succeed(run.stdout)
         : Effect.fail(
             new SealedResultFault({
               operation: args[0] ?? "git",
@@ -647,6 +648,9 @@ const gitOk = (context: GitContext, args: ReadonlyArray<string>, input?: Uint8Ar
           ),
     ),
   )
+
+const gitOk = (context: GitContext, args: ReadonlyArray<string>, input?: Uint8Array) =>
+  gitOkBytes(context, args, input).pipe(Effect.map((stdout) => new TextDecoder().decode(stdout)))
 
 const scratchPrefix = "sealed-result-"
 
@@ -704,31 +708,60 @@ type DiffEntry = {
   readonly oldMode: string
   readonly newMode: string
   readonly blob: string
+  /** The path, with each byte that is not UTF-8 as U+FFFD when `utf8` is false. */
   readonly path: string
+  readonly utf8: boolean
 }
 
-const parseDiff = (raw: string): ReadonlyArray<DiffEntry> => {
-  const fields = raw.split("\0")
+/** The NUL-separated fields of `diff-tree -z`, each as bytes: a path may be any bytes. */
+const nulFields = (raw: Uint8Array) => {
+  const fields: Uint8Array[] = []
+  let start = 0
+  for (let end = raw.indexOf(0, start); end >= 0; end = raw.indexOf(0, start)) {
+    fields.push(raw.subarray(start, end))
+    start = end + 1
+  }
+  return fields
+}
+
+const parseDiff = (raw: Uint8Array): ReadonlyArray<DiffEntry> => {
+  const fields = nulFields(raw)
   const entries: DiffEntry[] = []
   for (let index = 0; index + 1 < fields.length; index += 2) {
-    const [oldMode, newMode, , blob] = fields[index]!.replace(/^:/, "").split(" ")
-    entries.push({ oldMode: oldMode!, newMode: newMode!, blob: blob!, path: fields[index + 1]! })
+    const [oldMode, newMode, , blob] = new TextDecoder()
+      .decode(fields[index])
+      .replace(/^:/, "")
+      .split(" ")
+    const bytes = fields[index + 1]!
+    let path: string
+    let utf8 = true
+    try {
+      path = decoder.decode(bytes)
+    } catch {
+      path = new TextDecoder().decode(bytes)
+      utf8 = false
+    }
+    entries.push({ oldMode: oldMode!, newMode: newMode!, blob: blob!, path, utf8 })
   }
   return entries
 }
+
+// A path holds no control character: C0, DEL and C1, so also no newline or tab.
+const controlCharacter = /\p{Cc}/u
 
 const regularModes = new Set(["000000", "100644", "100755"])
 
 /**
  * Whether a first path component is `.github` or a name that a checkout on Windows
  * or macOS maps to it. The rule refuses more than the exact forms: any `~` (a short
- * name such as GITHUB~1) or `:` (a stream such as `::$INDEX_ALLOCATION`), and any
+ * name such as GITHUB~1), `:` (a stream such as `::$INDEX_ALLOCATION`) or `\` (a
+ * separator of Windows, which an archive tool may make into a directory), and any
  * name that is `.github` in either case after NFKC, after dropping format and
  * default-ignorable characters (which HFS+ ignores), and after dropping trailing
  * dots and spaces (which NTFS ignores).
  */
 const isGithubName = (component: string) => {
-  if (/[~:]/.test(component)) return true
+  if (/[~:\\]/.test(component)) return true
   const name = component
     .normalize("NFKC")
     .replace(/[\p{Cf}\p{Default_Ignorable_Code_Point}]/gu, "")
@@ -737,6 +770,8 @@ const isGithubName = (component: string) => {
 }
 
 const checkEntry = (entry: DiffEntry): SealedResultRefused | undefined => {
+  if (!entry.utf8 || controlCharacter.test(entry.path))
+    return refused("path_name", quoted(entry.path))
   if (!regularModes.has(entry.oldMode) || !regularModes.has(entry.newMode))
     return refused("file_mode", quoted(entry.path))
   if (entry.oldMode !== "000000" && entry.newMode !== "000000" && entry.oldMode !== entry.newMode)
@@ -752,7 +787,7 @@ const checkChanges = (context: GitContext, commits: ReadonlyArray<string>, base:
     const blobs = new Map<string, string>()
     let parent = base
     for (const commit of commits) {
-      const raw = yield* gitOk(context, [
+      const raw = yield* gitOkBytes(context, [
         "diff-tree",
         "-r",
         "--raw",

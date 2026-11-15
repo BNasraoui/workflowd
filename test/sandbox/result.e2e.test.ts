@@ -5,6 +5,7 @@ import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { createHash } from "node:crypto"
 import { command } from "./harness"
+import { pathBytes, sealedTextCases } from "../kernel/sealed-text-cases"
 
 const wording = {
   body: "## Result\n\nReadable agent description.",
@@ -727,3 +728,60 @@ for (const variant of sealVariants)
       await rm(root, { recursive: true, force: true })
     }
   })
+
+// The seal's rules for each text and path, run on the cases that the daemon's check
+// runs on too.
+test("the seal gives each text and path of the shared table its expected result", async () => {
+  const child = Bun.spawn(
+    [
+      "python3",
+      "-I",
+      "-B",
+      "-c",
+      `
+import base64, importlib.util, json, sys
+spec = importlib.util.spec_from_file_location('result', sys.argv[1])
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+rules = {
+    'title': lambda value: m.publication_text(value),
+    'commitMessage': lambda value: m.publication_text(value, True),
+    'body': m.publication_body,
+    'finalMessage': m.final_message,
+    'path': lambda value: m.safe_path(base64.b64decode(value)),
+}
+results = []
+for item in json.load(sys.stdin):
+    try:
+        rules[item['field']](item['value'])
+        results.append(True)
+    except ValueError:
+        results.append(False)
+print(json.dumps(results))
+`,
+      script,
+    ],
+    {
+      stdin: new Blob([
+        JSON.stringify(
+          sealedTextCases.map((item) => ({
+            field: item.field,
+            value: item.field === "path" ? pathBytes(item).toString("base64") : item.value,
+          })),
+        ),
+      ]),
+      stdout: "pipe",
+      stderr: "pipe",
+    },
+  )
+  const [status, stdout, stderr] = await Promise.all([
+    child.exited,
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+  ])
+  expect({ status, stderr }).toEqual({ status: 0, stderr: "" })
+  const results = Schema.decodeUnknownSync(Schema.Array(Schema.Boolean))(JSON.parse(stdout))
+  expect(sealedTextCases.map((item, index) => ({ ...item, accepted: results[index] }))).toEqual([
+    ...sealedTextCases,
+  ])
+})

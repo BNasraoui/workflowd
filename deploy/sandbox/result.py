@@ -157,6 +157,13 @@ def publication_body(value):
     safe_publication(value)
 
 
+def final_message(value):
+    # Data to the caller: newlines and tabs, and no other control or format character.
+    if not isinstance(value, str) or len(value.encode('utf8', errors='strict')) > 65536 or any(
+            unicodedata.category(c) in ('Cc', 'Cf') and c not in '\n\t' for c in value):
+        raise ValueError('Invalid final message')
+
+
 def seal(source):
     # The control entrypoint selects the workspace; no caller-supplied paths.
     repo = 'repository'
@@ -218,7 +225,7 @@ def safe_path(raw):
         raise ValueError('Unsafe path component')
     if name.startswith('deploy/sandbox/') or name == 'deploy/sandbox':
         raise ValueError('Sandbox tooling path is forbidden')
-    if '\\' in name or any(ord(c) < 32 for c in name):
+    if '\\' in name or any(unicodedata.category(c) == 'Cc' for c in name):
         raise ValueError('Invalid path characters')
     if unicodedata.normalize('NFC', name) != name:
         raise ValueError('Path must be NFC normalized')
@@ -274,11 +281,7 @@ def native_seal(source):
     publication_text(completion['title'])
     publication_text(completion['commitMessage'], True)
     publication_body(completion['body'])
-    final = completion['finalMessage']
-    # Data to the caller: newlines and tabs, and no other control or format character.
-    if not isinstance(final, str) or len(final.encode('utf8', errors='strict')) > 65536 or any(
-            unicodedata.category(c) in ('Cc', 'Cf') and c not in '\n\t' for c in final):
-        raise ValueError('Invalid final message')
+    final_message(completion['finalMessage'])
     content_check(json.dumps(completion, ensure_ascii=False).encode(), sensitive)
     if Path('repository').is_symlink() or Path('source.git').is_symlink(): raise ValueError('Unsafe source path')
     with tempfile.TemporaryDirectory(prefix='native-capture-', dir='.') as directory:

@@ -33,6 +33,7 @@ import {
 } from "../../src/kernel/sealed-result"
 import { githubApiStub } from "../sandbox/github-api-stub"
 import { command } from "../sandbox/harness"
+import { pathBytes, sealedTextCases, type SealedTextField } from "./sealed-text-cases"
 
 // The real sealing script of the runner, and a daemon check that pushes into a bare
 // fixture remote on disk. Nothing here reaches GitHub.
@@ -1647,6 +1648,7 @@ const refusals: ReadonlyArray<
     ".g\u0131thub",
     "\uff0egithub",
     ".github::$INDEX_ALLOCATION",
+    ".github\\workflows",
   ].map(
     (name) =>
       [
@@ -1847,6 +1849,75 @@ for (const [name, check, make, detail] of refusals)
       expect(refusal(exit).message).toStartWith(`result_refused: ${check}`)
       if (detail !== undefined) expect(refusal(exit).detail).toContain(detail)
       expect(await remoteRef(f)).toBe("")
+    }),
+    30_000,
+  )
+
+/** A commit on HEAD whose tree holds one file at `path`, a path of any bytes. */
+async function pathCommit(f: Fixture, dir: string, path: Uint8Array) {
+  const hashed = async (type: string, content: Uint8Array) =>
+    run(["git", "hash-object", "-t", type, "-w", "--literally", "--stdin"], dir, content)
+  const components = nulFreeSplit(path)
+  let entry = concat(
+    "100644 ",
+    components.at(-1)!,
+    "\0",
+    Buffer.from(await hashed("blob", Buffer.from("content\n")), "hex"),
+  )
+  for (const component of components.slice(0, -1).reverse()) {
+    const tree = await hashed("tree", entry)
+    entry = concat("40000 ", component, "\0", Buffer.from(tree, "hex"))
+  }
+  const tree = await hashed("tree", entry)
+  const parent = await f.git(dir, "rev-parse", "HEAD")
+  const commit = await hashed(
+    "commit",
+    Buffer.from(
+      `tree ${tree}\nparent ${parent}\nauthor ${agentLine}\ncommitter ${agentLine}\n\nAdd a file\n`,
+    ),
+  )
+  await f.git(dir, "reset", "-q", "--soft", commit)
+}
+
+/** The components of a path, split at each `/` byte. */
+const nulFreeSplit = (path: Uint8Array) => {
+  const parts: Uint8Array[] = []
+  let start = 0
+  for (let end = path.indexOf(0x2f); end >= 0; end = path.indexOf(0x2f, start)) {
+    parts.push(path.subarray(start, end))
+    start = end + 1
+  }
+  parts.push(path.subarray(start))
+  return parts
+}
+
+const textChecks: Record<SealedTextField, ReadonlyArray<SealedResultCheck>> = {
+  title: ["title"],
+  body: ["body"],
+  finalMessage: ["final_message"],
+  commitMessage: ["commit_message"],
+  path: ["path_name", "github_path"],
+}
+
+// The daemon's rules for each text and path, run on the cases that the seal runs on too.
+for (const item of sealedTextCases)
+  test(
+    `the daemon gives the ${item.field} ${shown(item.value.slice(0, 40))} of the shared table its expected result`,
+    withFixture(async (f) => {
+      const manifestText = ["title", "body", "finalMessage"].includes(item.field)
+      const json = manifest(f.sourceSha, manifestText ? { [item.field]: item.value } : {})
+      const bundle = manifestText
+        ? await handBundle(f, (git, dir) => commitFile(git, dir, "a.txt"))
+        : await handBundle(f, (_git, dir) =>
+            item.field === "path"
+              ? pathCommit(f, dir, pathBytes(item))
+              : commitObject(f, dir, "", item.value),
+          )
+      const decoded = await Effect.runPromiseExit(decodeSealedResult(json, bundle))
+      const exit = Exit.isSuccess(decoded) ? await publish(decoded.value, options(f)) : decoded
+      if (item.accepted) {
+        if (Exit.isFailure(exit)) throw Cause.squash(exit.cause)
+      } else expect(textChecks[item.field]).toContain(refusedCheck(exit))
     }),
     30_000,
   )
