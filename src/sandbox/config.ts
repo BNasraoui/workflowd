@@ -48,10 +48,13 @@ export const CapabilityGatewayConfig = Schema.Struct({
   streamIdleMs: Schema.optionalKey(
     Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 600000 })),
   ),
-  /** Where the gateway's own process listens; workflowd ignores it. */
+  /**
+   * Where the gateway's own process listens; workflowd ignores it. The listener is clear text,
+   * so it takes a loopback address only.
+   */
   listen: Schema.optionalKey(
     Schema.Struct({
-      host: Schema.String.check(Schema.isPattern(/^(?:\d{1,3}(?:\.\d{1,3}){3}|[0-9a-f:]+)$/)),
+      host: Schema.Literals(["127.0.0.1", "::1"]),
       // Port 0 asks the kernel for a free port; the process prints the port it bound.
       port: Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 65535 })),
     }),

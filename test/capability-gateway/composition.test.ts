@@ -71,7 +71,7 @@ test("configured live composition settles prior leases, which revokes their gran
     const loaded = await loadConfig(environment, { home: root })
     expect(loaded.agentRuns?.capabilityGateway).toEqual(gateway)
     // The gateway's own process needs a listen address; workflowd accepts and ignores one.
-    const listen = { host: "127.0.0.1", port: 0 }
+    const listen = { host: "127.0.0.1" as const, port: 0 }
     const served = { ...gateway, listen }
     expect(
       (
@@ -181,4 +181,23 @@ test("the gateway config bounds its streams: an idle limit of 1 ms to ten minute
   expect(load({ streamIdleMs: 1 }).streamIdleMs).toBe(1)
   expect(load({ streamIdleMs: 600000 }).streamIdleMs).toBe(600000)
   expect(load({}).streamIdleMs).toBeUndefined()
+})
+
+test("the gateway listens only on a loopback address: 127.0.0.1 or ::1", () => {
+  const gateway = {
+    noscope: { binary: "/fixture/noscope", configHome: "/fixture" },
+    providerId: "anthropic",
+    credentialRole: "fixture",
+    maxStreams: 2,
+    maxStreamsPerRun: 2,
+  }
+  const load = (host: string) =>
+    loadCapabilityGatewayConfig(
+      { WORKFLOWD_CAPABILITY_GATEWAY: JSON.stringify({ ...gateway, listen: { host, port: 0 } }) },
+      "/fixture",
+    ).gateway.listen
+  for (const host of ["10.0.0.1", "0.0.0.0", "gateway.example"])
+    expect(() => load(host)).toThrow('Expected "127.0.0.1" | "::1"\n  at ["listen"]["host"]')
+  expect(load("127.0.0.1")).toEqual({ host: "127.0.0.1", port: 0 })
+  expect(load("::1")).toEqual({ host: "::1", port: 0 })
 })

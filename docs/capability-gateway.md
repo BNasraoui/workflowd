@@ -14,7 +14,7 @@ decode it with the same schema, and a key it does not name is refused.
 | `maxStreamsPerRun` | The most streams open at once for one run: 1 to 4, and at most `maxStreams`. |
 | `streamIdleMs` | Optional. Milliseconds a stream may go without a chunk before the gateway aborts it: 1 to 600000, 120000 when absent. A stream that keeps sending runs to its token's expiry. |
 | `gitRead` | Optional. Whether runs may read their saved repository; false when absent. |
-| `listen.host`, `listen.port` | Where the gateway process listens: port 0 to 65535, where 0 asks for a free port. workflowd accepts the key and does not read it; the gateway process requires it. |
+| `listen.host`, `listen.port` | Where the gateway process listens: `127.0.0.1` or `::1`, since the listener is clear text, and port 0 to 65535, where 0 asks for a free port. workflowd accepts the key and does not read it; the gateway process requires it. |
 
 ## Git reads
 

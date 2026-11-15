@@ -184,7 +184,7 @@ for (const race of [
       credentialRole: "fixture",
       maxStreams: 8,
       maxStreamsPerRun: 2,
-      listen: { host: "127.0.0.1", port: 0 },
+      listen: { host: "127.0.0.1" as const, port: 0 },
     }
     let gateway: Gateway | undefined
     let front: Awaited<ReturnType<typeof tlsFront>> | undefined
