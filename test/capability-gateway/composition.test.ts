@@ -199,7 +199,16 @@ test("the gateway listens only on a loopback address: 127.0.0.1 or ::1", () => {
       { WORKFLOWD_CAPABILITY_GATEWAY: JSON.stringify({ ...gateway, listen: { host, port: 0 } }) },
       "/fixture",
     ).gateway.listen
-  for (const host of ["10.0.0.1", "0.0.0.0", "gateway.example"])
+  for (const host of [
+    "10.0.0.1",
+    "0.0.0.0",
+    "gateway.example",
+    "::",
+    "localhost",
+    "127.0.0.2",
+    "::ffff:127.0.0.1",
+    "::1%lo",
+  ])
     expect(() => load(host)).toThrow('Expected "127.0.0.1" | "::1"\n  at ["listen"]["host"]')
   expect(load("127.0.0.1")).toEqual({ host: "127.0.0.1", port: 0 })
   expect(load("::1")).toEqual({ host: "::1", port: 0 })
