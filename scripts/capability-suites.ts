@@ -13,7 +13,7 @@ const gatewayFiles = [
   ...new Bun.Glob(`${gatewayTestDirectory}/*.test.ts`).scanSync({ cwd: import.meta.dir + "/.." }),
 ]
   .filter((file) => !(file in plainOnly))
-  .sort()
+  .sort((a, b) => a.localeCompare(b))
 
 /** The gateway's end-to-end files: a gateway process or listener on a real socket. */
 const gatewayEndToEnd = gatewayFiles.filter((file) => file.endsWith(".e2e.test.ts"))
