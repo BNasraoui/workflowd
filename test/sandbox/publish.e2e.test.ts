@@ -44,6 +44,52 @@ const metadata = {
   manifestSha256: "e".repeat(64),
 }
 
+test("the publisher refuses an actions-native lease before any approval effect", async () => {
+  const configured = {
+    ...policy,
+    privateBootstrap: { mode: "actions-native" as const, repositoryOwnerId: 1 },
+  }
+  const fixture = await sandboxGithubFixture(configured)
+  const publication = sandboxPublicationFixture(fixture, configured)
+  try {
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* runStoreMigrations
+        const leases = yield* makeSandboxStore
+        yield* leases.request({
+          runId: "run-1",
+          leaseId: "lease-1",
+          policy: configured,
+          sourceSha: metadata.sourceSha,
+          now: Date.now(),
+        })
+        yield* leases.beginStart("run-1")
+        yield* leases.recordRun("run-1", 41, 1)
+        const publications = yield* makePublishStore
+        yield* publications.seal({
+          runId: "run-1",
+          actionsRunId: 41,
+          attempt: 1,
+          metadata,
+          baseRef: "main",
+          deadline: Date.now() + 60000,
+        })
+        const github = yield* makeSandboxGithub(fixture.github, fixture.OctokitClass)
+        const publisher = yield* makeSandboxPublisher(
+          github,
+          yield* makeSandboxLeaseService(github),
+        )
+        const refused = yield* publisher.poll("run-1").pipe(Effect.flip)
+        expect(refused.message).toBe("Actions-native leases do not publish through the publisher")
+        expect(publication.posts).toBe(0)
+        expect(fixture.tokenRequests).toHaveLength(0)
+      }).pipe(Effect.provide(SqliteClient.layer({ filename: ":memory:" }))),
+    )
+  } finally {
+    await fixture.close()
+  }
+})
+
 test("publication policy requires one operator-set co-author identity", () => {
   expect(parseSandboxRepositories(JSON.stringify([policy]))).toEqual([policy])
   for (const coAuthor of [

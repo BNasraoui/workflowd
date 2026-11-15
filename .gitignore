@@ -21,3 +21,7 @@ env
 
 # Local, credential-isolated manual evidence runs
 .scratch/
+
+# Python bytecode
+__pycache__/
+*.pyc

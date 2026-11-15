@@ -18,6 +18,7 @@ import {
 import { sandboxSshArguments, type SandboxTransport } from "./transport"
 import type { makeSandboxGithub } from "./github"
 import type { SavedSandboxPolicy } from "./saved-policy"
+import type { CapabilityRevoke } from "../capability-gateway/service"
 
 type Github = Effect.Success<ReturnType<typeof makeSandboxGithub>>
 
@@ -215,10 +216,41 @@ export const makeSandboxLeaseService = (
   github: Github,
   controlRoot = join(homedir(), ".local/share/workflowd/sandboxes"),
   command = controlCommand,
+  privateAccess?: {
+    readonly native?: {
+      readonly gateway: CapabilityRevoke
+    }
+  },
 ) =>
   Effect.gen(function* () {
     const store = yield* makeSandboxStore
     const publications = yield* makePublishStore
+    /**
+     * A private lease waits for its runner: the runner gets a challenge from the gateway and opens
+     * a session with its OIDC proof. The lease is ready once that session exists; until then this
+     * acquisition commits nothing. If committing fails, the run's binding is revoked.
+     */
+    const privatePeer = Effect.fn("SandboxLease.privatePeer")(function* <E>(
+      lease: NonNullable<Effect.Success<ReturnType<typeof store.read>>>,
+      ready: Effect.Effect<boolean, E>,
+    ) {
+      const native = privateAccess?.native
+      if (lease.policy.privateBootstrap?.mode !== "actions-native" || native === undefined)
+        return yield* Effect.fail(
+          new SandboxError({ message: "Private bootstrap policy unavailable" }),
+        )
+      return yield* ready.pipe(
+        Effect.onError(() =>
+          native.gateway.revoke(lease.run_id).pipe(
+            Effect.catch((error) =>
+              Effect.logError("Capability revoke after a failed session binding failed", {
+                kind: error._tag,
+              }),
+            ),
+          ),
+        ),
+      )
+    })
     const required = Effect.fn("SandboxLease.required")(function* (runId: string) {
       const lease = yield* store.read(runId)
       if (lease === null)
@@ -303,6 +335,10 @@ export const makeSandboxLeaseService = (
     })
     const release = Effect.fn("SandboxLease.release")(function* (runId: string) {
       const lease = yield* required(runId)
+      if (lease.policy.privateBootstrap?.mode === "actions-native" && privateAccess?.native)
+        yield* privateAccess.native.gateway
+          .revoke(runId)
+          .pipe(Effect.tapError((cause) => store.recordError(runId, cause)))
       yield* store.beginRelease(runId)
       yield* Effect.gen(function* () {
         yield* cleanupUnobserved(lease)
@@ -353,6 +389,13 @@ export const makeSandboxLeaseService = (
             if (run !== undefined) {
               yield* commit(store.recordRun(runId, run.id, run.run_attempt))
               if (run.status !== "completed") {
+                if (lease.policy.privateBootstrap !== undefined) {
+                  yield* privatePeer(
+                    lease,
+                    commit(store.bindSession(runId, run.id, run.run_attempt)),
+                  )
+                  return
+                }
                 const ready = yield* github.readiness(
                   lease.policy,
                   lease.lease_id,

@@ -151,36 +151,28 @@ jobs:
           no-cache: true
       - name: Install dependencies
         run: bun install --frozen-lockfile --ignore-scripts
-      - name: Install pinned sandbox OpenCode
-        run: |
-          bun add --global --trust @opencode-ai/cli@0.0.0-beta-19242
-          printf '5e983fb693623f3ea500c63e4da9aa17e90490f120edf612e25c24a34bee405c  %s\n' "$(command -v opencode2)" | sha256sum --check
-      - name: Install pinned native sandbox CLIs
-        run: |
-          bun add --global --trust @openai/codex@0.159.1 @anthropic-ai/claude-code@2.1.296
-          test "$(codex --version)" = 'codex-cli 0.159.1'
-          test "$(claude --version)" = '2.1.296 (Claude Code)'
+      # The tests job and the credential-host job share this setup script, one phase per step.
+      - name: Install pinned sandbox clients
+        run: bash scripts/evidence/credential-host-setup.sh clients
       - name: Pin credential probe runtime
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: 24.11.1
           token: ""
-      - name: Record credential probe runtime
-        run: printf 'WORKFLOWD_AGENT_PROBE_NODE=%s\n' "$(command -v node)" >> "$GITHUB_ENV"
-      - name: Prepare sandbox user namespaces
+      - name: Record credential probe runtime and prepare sandbox user namespaces
+        run: bash scripts/evidence/credential-host-setup.sh namespaces
+      # The gateway tests of the plain run mint through the pinned noscope, as the
+      # capability-security suites do.
+      - name: Prepare pinned fixture-only tools
+        run: node deploy/sandbox/public-output.mjs setup -- bash scripts/evidence/capability-ci-setup.sh tools
+      # The gateway passes only the anthropic-beta values of its list; this records the values
+      # that the pinned Claude Code sends, and fails when one is not on that list. The client
+      # runs as this user in a network namespace whose only interface is loopback.
+      - name: Record the anthropic-beta values of the pinned Claude Code
         run: |
-          # This disposable Ubuntu VM must permit systemd's unprivileged namespaces.
-          # PrivateUsers and filesystem isolation remain required by the E2E tests.
-          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-          sudo loginctl enable-linger "$USER"
-          sudo systemctl start "user@$(id -u).service"
-          export XDG_RUNTIME_DIR="/run/user/$(id -u)"
-          export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
-          printf 'XDG_RUNTIME_DIR=%s\nDBUS_SESSION_BUS_ADDRESS=%s\n' "$XDG_RUNTIME_DIR" "$DBUS_SESSION_BUS_ADDRESS" >> "$GITHUB_ENV"
-          systemd-run --user --wait --pipe --collect \
-            -p PrivateUsers=yes -p PrivateTmp=yes -p ProtectSystem=strict \
-            -p ProtectHome=tmpfs -p NoNewPrivileges=yes \
-            -p MemoryMax=256M -p MemorySwapMax=0 /usr/bin/true
+          sudo /usr/bin/unshare --net /bin/sh -c \
+            'ip link set lo up && exec setpriv --reuid="$1" --regid="$2" --init-groups -- env -i "PATH=$3" "HOME=$4" "WORKFLOWD_FIXTURE_NOSCOPE=$5" bun test --path-ignore-patterns= test/capability-gateway/claude-pinned.launcher.test.ts' \
+            fixture "$(id -u)" "$(id -g)" "$PATH" "$HOME" "$RUNNER_TEMP/capability-tools/bin/noscope"
       - name: Verify credential probe entrypoints
         run: >-
           systemd-run --user --wait --pipe --collect
@@ -188,31 +180,110 @@ jobs:
           --setenv="PATH=$PATH" --setenv="WORKFLOWD_AGENT_PROBE_NODE=$WORKFLOWD_AGENT_PROBE_NODE"
           bun test test/agent-user/client-versions.test.ts
       - name: Prepare disposable credential identities and trusted clients
+        run: bash scripts/evidence/credential-host-setup.sh identities
+      # These simulated-manager/process fixtures must remain namespace PID 1
+      # to reap orphaned UID children. Host resource commands are denied here.
+      - name: Require administrative credential coverage
+        run: |
+          mkdir -p coverage/administrative
+          sudo systemd-run --wait --pipe --collect \
+            -p MemoryMax=6G -p MemorySwapMax=0 --working-directory="$PWD" \
+            --setenv=PATH=/opt/workflowd-credential-fixture/bin:/usr/bin:/bin \
+            --setenv=WORKFLOWD_AGENT_TEST_BEN_UID=61001 \
+            --setenv=WORKFLOWD_AGENT_TEST_AGENT_UID=61002 \
+            --setenv=WORKFLOWD_AGENT_TEST_AUTH_GID=61000 \
+            /usr/bin/unshare --pid --fork --mount-proc --net \
+            /bin/sh -c 'ip link set lo up && export PATH="$PWD/test/resources/forbidden:$PATH" && exec "$@"' fixture \
+            /opt/workflowd-credential-fixture/bin/bun test --coverage \
+            --coverage-dir=coverage/administrative \
+            --test-name-pattern='^(installed|offline migration|a replaced login|missing links|an admission lease|interrupted repair|repair after|the host|relink |a FIFO|host transport|admitted)' \
+            test/agent-user/client-versions.test.ts \
+            test/agent-user/credentials.e2e.test.ts \
+            test/agent-user/credential-dispatch.e2e.test.ts \
+            test/agent-user/native.e2e.test.ts \
+            test/agent-user/opencode-migration.e2e.test.ts
+      - name: Generate Bun LCOV
+        run: |
+          # Migration needs privileged /proc access; refresh probes need network
+          # isolation. The preceding step checks administrative modules with unchanged Bun
+          # thresholds. Every other module is checked here with those thresholds.
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          config = Path("bunfig.toml").read_text()
+          key = "coveragePathIgnorePatterns = ["
+          assert config.count(key) == 1
+          config = config.replace(key, key + '\n  "src/agent-host/opencode-credentials.ts",\n  "src/agent-host/credentials.ts",\n  "src/agent-host/config.ts",\n  "src/agent-host/credential-relink.ts",\n  "src/agent-host/client.ts",\n  "src/agent-host/server.ts",\n  "test/agent-user/harness.ts",', 1)
+          Path(os.environ["RUNNER_TEMP"], "ordinary-coverage.toml").write_text(config)
+          PY
+          WORKFLOWD_FIXTURE_NOSCOPE="$RUNNER_TEMP/capability-tools/bin/noscope" \
+            bun test --config="$RUNNER_TEMP/ordinary-coverage.toml" --coverage
+      - name: Include administrative coverage in shared gates
+        run: |
+          # Use the complete, independently threshold-checked administrative record.
+          # No duplicate file records may mask ordinary-suite coverage.
+          python3 - <<'PY'
+          from pathlib import Path
+          paths = ["src/agent-host/" + name + ".ts" for name in ["opencode-credentials", "credentials", "config", "credential-relink", "client", "server"]] + ["test/agent-user/harness.ts"]
+          administrative = Path("coverage/administrative/lcov.info").read_text()
+          report = Path("coverage/lcov.info")
+          ordinary = report.read_text()
+          for path in paths:
+              marker = f"SF:{path}\n"
+              records = [record for record in administrative.split("end_of_record\n") if marker in record.splitlines(keepends=True)]
+              assert len(records) == 1, f"administrative coverage missing or duplicated: {path}"
+              assert marker not in ordinary.splitlines(keepends=True), f"duplicate coverage: {path}"
+              ordinary += records[0] + "end_of_record\n"
+          report.write_text(ordinary)
+          PY
+      - name: Require 80% changed executable line coverage
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: bun run coverage:changed "$BASE_SHA" "$HEAD_SHA"
+      - name: Fail on CRAP >= 30
+        run: bun run crap:check
+
+  credential-host:
+    name: Credential host (two-UID)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions: {}
+    steps:
+      - name: Anonymous checkout
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
         run: |
           set -euo pipefail
-          sudo groupadd --gid 61000 workflowd-model-auth
-          sudo useradd --uid 61001 --gid 61000 --no-create-home --shell /usr/sbin/nologin ben-fixture
-          sudo useradd --uid 61002 --gid 61000 --no-create-home --shell /usr/sbin/nologin agent-fixture
-          # Fixture children import reviewed source as their real UID. Grant only
-          # read/traverse access to the disposable checkout, preserving private homes.
-          directory="$PWD"
-          while [ "$directory" != / ]; do
-            sudo setfacl -m u:61001:--x,u:61002:--x "$directory"
-            directory=$(dirname "$directory")
-          done
-          sudo setfacl -R -m u:61001:rX,u:61002:rX "$PWD"
-          sudo mkdir -p /opt/workflowd-credential-fixture/bin
-          sudo cp -rf "$HOME/.bun/install/global/node_modules" /opt/workflowd-credential-fixture/
-          sudo chown -R root:root /opt/workflowd-credential-fixture
-          sudo chmod -R go-w /opt/workflowd-credential-fixture
-          sudo install -m 0755 "$(command -v bun)" /opt/workflowd-credential-fixture/bin/bun
-          sudo install -m 0755 "$(command -v node)" /opt/workflowd-credential-fixture/bin/node
-          for client in codex claude opencode2; do
-            source=$(readlink -f "$(command -v "$client")")
-            relative=${source#"$HOME/.bun/install/global/"}
-            test "$relative" != "$source"
-            sudo ln -s "/opt/workflowd-credential-fixture/$relative" "/opt/workflowd-credential-fixture/bin/$client"
-          done
+          [[ "$HEAD_SHA" =~ ^[a-f0-9]{40}$ ]]
+          [[ "$BASE_SHA" =~ ^[a-f0-9]{40}$ ]]
+          export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0
+          git init .
+          git remote add origin https://github.com/BNasraoui/workflowd.git
+          git -c credential.helper= -c http.extraHeader= fetch --no-tags origin "$HEAD_SHA" "$BASE_SHA"
+          git checkout --detach "$HEAD_SHA"
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.3.14
+          token: ""
+          no-cache: true
+      - name: Install dependencies
+        run: bun install --frozen-lockfile --ignore-scripts
+      # The tests job and the credential-host job share this setup script, one phase per step.
+      - name: Install pinned sandbox clients
+        run: bash scripts/evidence/credential-host-setup.sh clients
+      - name: Pin credential probe runtime
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 24.11.1
+          token: ""
+      - name: Record credential probe runtime and prepare sandbox user namespaces
+        run: bash scripts/evidence/credential-host-setup.sh namespaces
+      - name: Prepare disposable credential identities and trusted clients
+        run: bash scripts/evidence/credential-host-setup.sh identities
       - name: Probe two-UID native supervision prerequisites
         run: >-
           sudo systemd-run --wait --pipe --collect
@@ -316,68 +387,59 @@ jobs:
           ]:
               assert sum(case.get('name') == name for case in cases) == 1, f'Missing required test: {name}'
           PYTEST
-      # These simulated-manager/process fixtures must remain namespace PID 1
-      # to reap orphaned UID children. Host resource commands are denied here.
-      - name: Require administrative credential coverage
-        run: |
-          mkdir -p coverage/administrative
-          sudo systemd-run --wait --pipe --collect \
-            -p MemoryMax=6G -p MemorySwapMax=0 --working-directory="$PWD" \
-            --setenv=PATH=/opt/workflowd-credential-fixture/bin:/usr/bin:/bin \
-            --setenv=WORKFLOWD_AGENT_TEST_BEN_UID=61001 \
-            --setenv=WORKFLOWD_AGENT_TEST_AGENT_UID=61002 \
-            --setenv=WORKFLOWD_AGENT_TEST_AUTH_GID=61000 \
-            /usr/bin/unshare --pid --fork --mount-proc --net \
-            /bin/sh -c 'ip link set lo up && export PATH="$PWD/test/resources/forbidden:$PATH" && exec "$@"' fixture \
-            /opt/workflowd-credential-fixture/bin/bun test --coverage \
-            --coverage-dir=coverage/administrative \
-            --test-name-pattern='^(installed|offline migration|a replaced login|missing links|an admission lease|interrupted repair|repair after|the host|relink |a FIFO|host transport|admitted)' \
-            test/agent-user/client-versions.test.ts \
-            test/agent-user/credentials.e2e.test.ts \
-            test/agent-user/credential-dispatch.e2e.test.ts \
-            test/agent-user/native.e2e.test.ts \
-            test/agent-user/opencode-migration.e2e.test.ts
-      - name: Generate Bun LCOV
-        run: |
-          # Migration needs privileged /proc access; refresh probes need network
-          # isolation. The preceding step checks administrative modules with unchanged Bun
-          # thresholds. Every other module is checked here with those thresholds.
-          python3 - <<'PY'
-          import os
-          from pathlib import Path
-          config = Path("bunfig.toml").read_text()
-          key = "coveragePathIgnorePatterns = ["
-          assert config.count(key) == 1
-          config = config.replace(key, key + '\n  "src/agent-host/opencode-credentials.ts",\n  "src/agent-host/credentials.ts",\n  "src/agent-host/config.ts",\n  "src/agent-host/credential-relink.ts",\n  "src/agent-host/client.ts",\n  "src/agent-host/server.ts",\n  "test/agent-user/harness.ts",', 1)
-          Path(os.environ["RUNNER_TEMP"], "ordinary-coverage.toml").write_text(config)
-          PY
-          bun test --config="$RUNNER_TEMP/ordinary-coverage.toml" --coverage
-      - name: Include administrative coverage in shared gates
-        run: |
-          # Use the complete, independently threshold-checked administrative record.
-          # No duplicate file records may mask ordinary-suite coverage.
-          python3 - <<'PY'
-          from pathlib import Path
-          paths = ["src/agent-host/" + name + ".ts" for name in ["opencode-credentials", "credentials", "config", "credential-relink", "client", "server"]] + ["test/agent-user/harness.ts"]
-          administrative = Path("coverage/administrative/lcov.info").read_text()
-          report = Path("coverage/lcov.info")
-          ordinary = report.read_text()
-          for path in paths:
-              marker = f"SF:{path}\n"
-              records = [record for record in administrative.split("end_of_record\n") if marker in record.splitlines(keepends=True)]
-              assert len(records) == 1, f"administrative coverage missing or duplicated: {path}"
-              assert marker not in ordinary.splitlines(keepends=True), f"duplicate coverage: {path}"
-              ordinary += records[0] + "end_of_record\n"
-          report.write_text(ordinary)
-          PY
-      - name: Require 80% changed executable line coverage
-        if: github.event_name == 'pull_request'
+
+  capability-security:
+    name: Capability security (${{ matrix.suite }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions: {}
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [core, gateway, publication-local, final-local]
+    steps:
+      - name: Anonymous checkout
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: bun run coverage:changed "$BASE_SHA" "$HEAD_SHA"
-      - name: Fail on CRAP >= 30
-        run: bun run crap:check
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          set -euo pipefail
+          [[ "$HEAD_SHA" =~ ^[a-f0-9]{40}$ ]]
+          [[ "$BASE_SHA" =~ ^[a-f0-9]{40}$ ]]
+          export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0
+          git init .
+          git remote add origin https://github.com/BNasraoui/workflowd.git
+          git -c credential.helper= -c http.extraHeader= fetch --no-tags origin "$HEAD_SHA" "$BASE_SHA"
+          git checkout --detach "$HEAD_SHA"
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version: 1.3.14
+          token: ""
+          no-cache: true
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 24.11.1
+          token: ""
+      - name: Install dependencies
+        run: node deploy/sandbox/public-output.mjs setup -- bash scripts/evidence/capability-ci-setup.sh dependencies
+      - name: Prepare disposable fixture namespace
+        run: node deploy/sandbox/public-output.mjs setup -- bash scripts/evidence/capability-ci-setup.sh namespace
+      - name: Prepare pinned fixture-only tools
+        run: node deploy/sandbox/public-output.mjs setup -- bash scripts/evidence/capability-ci-setup.sh tools
+      - name: Require every named fixture case
+        env:
+          SUITE: ${{ matrix.suite }}
+        run: |
+          set -euo pipefail
+          export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+          export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
+          tools="$RUNNER_TEMP/capability-tools/bin"
+          export WORKFLOWD_FIXTURE_NOSCOPE="$tools/noscope"
+          # Each prints the number of cases that ran and the name of each case that failed.
+          python3 scripts/evidence/check-isolated-fixture.py
+          python3 scripts/evidence/isolated-fixture.py bun scripts/check-capability-security.ts --suite "$SUITE"
 
   aislop:
     name: AI slop (advisory)
@@ -418,6 +480,8 @@ jobs:
       - repository-validation
       - deployment-validation
       - tests
+      - credential-host
+      - capability-security
     runs-on: ubuntu-24.04
     timeout-minutes: 1
     permissions: {}
@@ -428,12 +492,16 @@ jobs:
           REPOSITORY_RESULT: ${{ needs.repository-validation.result }}
           DEPLOYMENT_RESULT: ${{ needs.deployment-validation.result }}
           TESTS_RESULT: ${{ needs.tests.result }}
+          CREDENTIAL_HOST_RESULT: ${{ needs.credential-host.result }}
+          CAPABILITY_RESULT: ${{ needs.capability-security.result }}
         run: |
           if [[ "$QUALITY_RESULT" != "success" || \
                 "$REPOSITORY_RESULT" != "success" || \
                 "$DEPLOYMENT_RESULT" != "success" || \
-                "$TESTS_RESULT" != "success" ]]; then
-            printf 'Quality: %s\nRepository integrity: %s\nDeployment: %s\nTests: %s\n' \
-              "$QUALITY_RESULT" "$REPOSITORY_RESULT" "$DEPLOYMENT_RESULT" "$TESTS_RESULT"
+                "$TESTS_RESULT" != "success" || \
+                "$CREDENTIAL_HOST_RESULT" != "success" || \
+                "$CAPABILITY_RESULT" != "success" ]]; then
+            printf 'Quality: %s\nRepository integrity: %s\nDeployment: %s\nTests: %s\nCredential host: %s\nCapability security: %s\n' \
+              "$QUALITY_RESULT" "$REPOSITORY_RESULT" "$DEPLOYMENT_RESULT" "$TESTS_RESULT" "$CREDENTIAL_HOST_RESULT" "$CAPABILITY_RESULT"
             exit 1
           fi

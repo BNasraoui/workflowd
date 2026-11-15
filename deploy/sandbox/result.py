@@ -14,6 +14,7 @@ import tempfile
 from pathlib import Path
 import subprocess
 import sys
+import urllib.parse
 
 if sys.flags.optimize:
     raise RuntimeError('Python optimization is not supported')
@@ -63,7 +64,33 @@ INVISIBLE = re.compile('[' + UNICODE['forbidden'] + ']')
 LETTERS = re.compile('[' + UNICODE['letters'] + ']')
 STACKED_MARKS = re.compile('[' + UNICODE['marks'] + ']{3}')
 LANGUAGES = {'', 'text', 'diff', 'ts', 'typescript', 'tsx', 'js', 'json', 'sh', 'bash', 'python', 'rust', 'go', 'sql', 'yaml', 'toml'}
-CLOSING = re.compile(r'(?=(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)(?::\s*|\s+)(?:#[0-9]|gh-[0-9]|[a-z0-9_.-]+/[a-z0-9_.-]+#|https?://|github\.com/[^\s]*/(?:issues|pull)/))')
+KEYWORD = r'(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)(?::\s*|\s+)'
+CLOSING = re.compile(r'(?=' + KEYWORD + r'(?:#[0-9]|gh-[0-9]|[a-z0-9_.-]+/[a-z0-9_.-]+#|https?://))')
+GITHUB_CLOSING = re.compile(r'(?=(' + KEYWORD + r'github\.com/))')
+WHITESPACE = re.compile(r'\s')
+GITHUB_PATH = re.compile(r'/(?:issues|pull)/')
+
+
+def keyword_starts(pattern, text):
+    # Each match of `pattern` whose keyword does not follow a letter.
+    return (m for m in pattern.finditer(text) if m.start() == 0 or not LETTERS.fullmatch(text[m.start() - 1]))
+
+
+def closes_github_path(text):
+    # A closing keyword names a github.com path that holds /issues/ or /pull/ before the next
+    # white space. One pass: a later keyword reuses the searches of the one before it.
+    space = path = -1
+    for m in keyword_starts(GITHUB_CLOSING, text):
+        end = m.end(1)
+        if space < end:
+            found = WHITESPACE.search(text, end)
+            space = found.start() if found else len(text)
+        if path < end:
+            found = GITHUB_PATH.search(text, end)
+            path = found.start() if found else len(text)
+        if path < space:
+            return True
+    return False
 
 
 def safe_publication(value):
@@ -78,7 +105,7 @@ def safe_publication(value):
     normalized = ''.join(CASEFOLD.get(c, c) for c in unicodedata.normalize('NFKC', value))
     for separator in ('', ' '):
         folded = re.sub(r'[*_~`\[\]()]', separator, normalized)
-        if any(m.start() == 0 or not LETTERS.fullmatch(folded[m.start() - 1]) for m in CLOSING.finditer(folded)):
+        if any(keyword_starts(CLOSING, folded)) or closes_github_path(folded):
             raise ValueError('Closing issue reference')
     fence = None
     blank = True
@@ -92,7 +119,7 @@ def safe_publication(value):
         else:
             if ']:' in line:
                 raise ValueError('Link reference definition')
-            if re.match(r'^ {0,3}(?:> ?|(?:[-+*]|[0-9]+[.)]) +).*(?:`{3,}|~{3,})', line):
+            if re.match(r'^ {0,3}(?:>|(?:[-+*]|[0-9]+[.)]) ).*(?:`{3}|~{3})', line):
                 raise ValueError('Nested fence')
             opener = re.fullmatch(r'(`{3,}|~{3,})(.*)', line)
             if opener:
@@ -197,7 +224,21 @@ def safe_path(raw):
     return name.casefold()
 
 
-def inspect_changes(repo, source, result):
+def content_check(data, sensitive):
+    # Defined encodings only; this is not general DLP. Scan complete bounded values,
+    # including whitespace-fragmented forms, rather than independent output lines.
+    compact = re.sub(rb'\s+', b'', data)
+    if re.search(rb'(?:gh[pousr]_|github_pat_|sk-ant-)[A-Za-z0-9_-]{16,}|-----BEGIN(?:RSA|EC|OPENSSH)?PRIVATEKEY-----', compact):
+        raise ValueError('Credential-shaped public content')
+    for value in sensitive:
+        raw = value.encode('utf8')
+        forms = [raw, base64.b64encode(raw), base64.urlsafe_b64encode(raw).rstrip(b'='),
+                 raw.hex().encode(), raw.hex().upper().encode(), urllib.parse.quote(value, safe='').encode()]
+        if any(re.sub(rb'\s+', b'', form) in compact for form in forms):
+            raise ValueError('Sensitive public content')
+
+
+def inspect_changes(repo, source, result, sensitive=()):
     commits = git(repo, 'rev-list', '--reverse', source + '..' + result).decode().splitlines()
     if not (1 <= len(commits) <= 100):
         raise ValueError('Commit count exceeded bound')
@@ -209,6 +250,7 @@ def inspect_changes(repo, source, result):
         total += int(git(repo, 'cat-file', '-s', obj.split(b' ')[0].decode()))
         if total > 64 * 1024 * 1024:
             raise ValueError('Object bytes exceeded bound')
+        content_check(git(repo, 'cat-file', '-p', obj.split(b' ')[0].decode()), sensitive)
     parent = source
     content = 0
     changed = set()
@@ -228,6 +270,7 @@ def inspect_changes(repo, source, result):
             old, new, _, blob, _ = fields
             old = old.removeprefix(':')
             path = entries[i + 1]
+            content_check(path, sensitive)
             safe_path(path)
             changed.add(path)
             if len(changed) > 100:
@@ -300,6 +343,7 @@ def validate(source_url):
     manifest = json.loads(raw)
     if set(manifest) != {'sourceSha', 'resultSha', 'treeSha', 'branch', 'bundleSha256', 'title', 'commitMessage', 'body'}:
         raise ValueError('Invalid manifest fields')
+    content_check(json.dumps(manifest, ensure_ascii=False).encode('utf8'), [])
     if not isinstance(manifest['branch'], str):
         raise ValueError('Invalid manifest branch')
     publication_text(manifest['title'])

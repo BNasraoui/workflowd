@@ -120,6 +120,16 @@ PY
     sudo install -m 755 "$0" /usr/local/bin/runner-control
     cp -f /run/workflowd-sandbox/identity.json /run/workflowd-sandbox/ready.json
     ;;
+  prepare-private)
+    # The OIDC-capable helper runs before any agent/tooling container exists.
+    directory=$(cd "$(dirname "$0")" && pwd)
+    sudo install -d -o runner -g runner -m 700 /run/workflowd-sandbox
+    sudo install -d -m 755 /usr/local/lib/workflowd-sandbox
+    sudo cp -rf "$directory/." /usr/local/lib/workflowd-sandbox/
+    sudo install -m 755 "$0" /usr/local/bin/runner-control
+    sudo install -m 755 "$0" /usr/local/bin/container-use
+    exec node /usr/local/lib/workflowd-sandbox/bootstrap.mjs prepare
+    ;;
   initialize)
     request=$(python3 -c '
 import json, re, sys
@@ -232,6 +242,21 @@ if mode == "audit":
     if receipt < target: sys.exit("Sandbox audit emission unconfirmed")
     print(json.dumps({"emittedThrough": receipt}), flush=True)
 else:
+    mode_file = root / "execution-mode"
+    if mode_file.exists() and mode_file.read_text() == "actions-native":
+        # The hold lasts while the relay holds the session, up to the deadline of the run. Each end
+        # is a failure: 3 a failed renewal, 4 the expiry of the token, 5 the deadline, 6 a relay
+        # that ended with no reason.
+        pid = int((root / "relay.pid").read_text())
+        deadline = int((root / "native-deadline").read_text()) / 1000
+        while time.time() < deadline:
+            try: os.kill(pid, 0)
+            except ProcessLookupError: break
+            time.sleep(1)
+        ended = root / "relay-ended"
+        reason = ended.read_text() if ended.exists() else ""
+        codes = {"renewal\n": 3, "expiry\n": 4, "deadline\n": 5}
+        sys.exit(codes.get(reason, 5 if time.time() >= deadline else 6))
     heartbeat = root / "heartbeat"
     last_heartbeat = int(time.time())
     while True:
@@ -249,7 +274,7 @@ else:
             while str(data["emittedThrough"] + 1) in data["records"]:
                 record = data["records"][str(data["emittedThrough"] + 1)]
                 validate(record)
-                print("workflowd.audit " + json.dumps(record, ensure_ascii=True, separators=(",", ":")), flush=True)
+                print("workflowd.audit " + json.dumps({"sequence": record["sequence"], "tool": record["tool"], "outcome": record["outcome"]}, separators=(",", ":")), flush=True)
                 data["emittedThrough"] += 1
                 changed = True
             if changed: save(data)
@@ -271,7 +296,9 @@ else:
     if docker network inspect workflowd-sandbox >/dev/null 2>&1; then
       docker network rm workflowd-sandbox >/dev/null
     fi
-    docker volume rm -f workflowd-sandbox-socket >/dev/null
+    if docker volume inspect workflowd-sandbox-socket >/dev/null 2>&1; then
+      docker volume rm -f workflowd-sandbox-socket >/dev/null
+    fi
     sudo bash "$(dirname "$0")/network.sh" stop
     ;;
   *)

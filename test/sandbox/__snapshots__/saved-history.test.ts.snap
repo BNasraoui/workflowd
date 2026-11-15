@@ -1,6 +1,6 @@
 // Bun Snapshot v1, https://bun.sh/docs/test/snapshots
 
-exports[`current saved policy round-trips every field; schema changes require a new frozen fixture 1`] = `
+exports[`current saved policy round-trips every field; schema changes require a new frozen fixture: capability-v1 1`] = `
 {
   "definitions": {},
   "dialect": "draft-2020-12",
@@ -22,6 +22,26 @@ exports[`current saved policy round-trips every field; schema changes require a 
       "installationId": {
         "exclusiveMinimum": 0,
         "type": "integer",
+      },
+      "privateBootstrap": {
+        "additionalProperties": false,
+        "properties": {
+          "mode": {
+            "enum": [
+              "actions-native",
+            ],
+            "type": "string",
+          },
+          "repositoryOwnerId": {
+            "exclusiveMinimum": 0,
+            "type": "integer",
+          },
+        },
+        "required": [
+          "repositoryOwnerId",
+          "mode",
+        ],
+        "type": "object",
       },
       "publish": {
         "additionalProperties": false,
@@ -63,11 +83,11 @@ exports[`current saved policy round-trips every field; schema changes require a 
         "type": "integer",
       },
       "tailscaleAudience": {
-        "minLength": 1,
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9:/._-]{0,255}$",
         "type": "string",
       },
       "tailscaleClientId": {
-        "minLength": 1,
+        "pattern": "^[A-Za-z0-9_-]{1,128}$",
         "type": "string",
       },
       "toolingSha": {

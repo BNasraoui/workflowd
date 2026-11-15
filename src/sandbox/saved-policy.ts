@@ -1,9 +1,11 @@
 import { Schema } from "effect"
+import { PrivateBootstrapPolicy } from "./config"
 
 // Persistence contract, deliberately independent of dispatch validation. Fields added
 // after the first lease must remain optional here; never invent historical identity.
 const positiveId = Schema.Int.check(Schema.isGreaterThan(0))
 export const SavedSandboxPolicy = Schema.Struct({
+  privateBootstrap: Schema.optionalKey(PrivateBootstrapPolicy),
   alias: Schema.String.check(Schema.isPattern(/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$/)),
   repository: Schema.String.check(Schema.isPattern(/^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+$/)),
   repositoryId: positiveId,

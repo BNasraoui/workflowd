@@ -10,6 +10,11 @@ import {
 import { Migrator, SqlClient } from "effect/unstable/sql"
 import { Effect } from "effect"
 import { agentDirectory } from "./0038-agent-directory"
+import { capabilityGateway } from "./0039-capability-gateway"
+import { capabilitySession } from "./0040-capability-session"
+import { sessionLeaseReady } from "./0041-session-lease-ready"
+import { capabilityRenewal } from "./0042-capability-renewal"
+import { capabilityReplacements } from "./0043-capability-replacements"
 import { MAX_AGENT_LAUNCH_INTENT_BYTES, MAX_AGENT_OUTPUT_BYTES } from "../agent-payload"
 
 const initialSchema = Effect.gen(function* () {
@@ -1497,5 +1502,10 @@ export const runStoreMigrations = Migrator.make({})({
       yield* sql`ALTER TABLE resident_inbox ADD COLUMN not_before INTEGER NOT NULL DEFAULT 0`
     }),
     "0038_agent_directory": agentDirectory,
+    "0039_capability_gateway": capabilityGateway,
+    "0040_capability_session": capabilitySession,
+    "0041_session_lease_ready": sessionLeaseReady,
+    "0042_capability_renewal": capabilityRenewal,
+    "0043_capability_replacements": capabilityReplacements,
   }),
 })

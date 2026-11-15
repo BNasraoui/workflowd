@@ -12,6 +12,9 @@ import {
   sandboxCreationMigration,
 } from "../../src/sandbox/migration"
 import { makeSandboxStore } from "../../src/sandbox/store"
+import { makeCapabilityStore } from "../../src/capability-gateway/store"
+import { AgentRunStoreLive } from "../../src/kernel/agent-run-store"
+import { seedCapabilityRun } from "../capability-gateway/fixture"
 
 const policy = {
   alias: "workflowd",
@@ -1069,4 +1072,83 @@ test("session cleanup uncertainty fences release despite deadline expiry and inv
   } finally {
     await fixture.close()
   }
+})
+
+test("an actions-native lease becomes ready on its runner's gateway session, and not before", async () => {
+  const now = Date.now()
+  await Effect.runPromise(
+    Effect.gen(function* () {
+      const { sql, leases } = yield* seedCapabilityRun(now, true)
+      const gateway = yield* makeCapabilityStore
+      const state = () =>
+        sql`SELECT state,peer_id AS peerId,transport FROM sandbox_leases WHERE run_id='run'`
+      // Migration 0041 rebuilt the table with its index and triggers.
+      expect(
+        yield* sql`SELECT type,name FROM sqlite_master WHERE tbl_name='sandbox_leases' AND type!='table' AND sql IS NOT NULL ORDER BY name`,
+      ).toEqual([
+        { type: "trigger", name: "capability_lease_revoke" },
+        { type: "index", name: "sandbox_actions_run" },
+        { type: "trigger", name: "sandbox_immutable_intent" },
+        { type: "trigger", name: "sandbox_lease_custody_fence" },
+      ])
+      expect(
+        (yield* Effect.result(sql`UPDATE sandbox_leases SET source_sha=${"e".repeat(40)}`))._tag,
+      ).toBe("Failure")
+      // No binding, then a challenge without a session: the lease stays starting.
+      expect(yield* leases.bindSession("run", 78, 1)).toBe(false)
+      const challenge = yield* gateway.leaseChallenge("lease", now)
+      expect(yield* leases.bindSession("run", 78, 1)).toBe(false)
+      yield* gateway.bindSession(
+        { ...challenge, runId: "run", recipientId: "managed:fixture-controller:run" },
+        "jti-1",
+        "a".repeat(64),
+        now + 60000,
+        now,
+        now + 610000,
+      )
+      // Another Actions run or attempt does not take the session.
+      expect(yield* leases.bindSession("run", 79, 1)).toBe(false)
+      expect(yield* leases.bindSession("run", 78, 2)).toBe(false)
+      expect(yield* state()).toEqual([{ state: "starting", peerId: null, transport: null }])
+      expect(yield* leases.bindSession("run", 78, 1)).toBe(true)
+      expect(yield* state()).toEqual([{ state: "ready", peerId: null, transport: null }])
+      expect(yield* leases.bindSession("run", 78, 1)).toBe(false)
+      // Without actions-native bootstrap, a ready lease still needs an SSH peer and transport.
+      const ready = (id: string, policy: string) =>
+        Effect.result(sql`INSERT INTO sandbox_leases(run_id,lease_id,policy,source_sha,state,actions_run_id,actions_attempt,created_at,heartbeat_at,deadline)
+          VALUES(${id},${id},${policy},${"d".repeat(40)},'ready',90,1,${now},${now},${now + 60000})`)
+      expect((yield* ready("plain", "{}"))._tag).toBe("Failure")
+      expect((yield* ready("native", '{"privateBootstrap":{"mode":"actions-native"}}'))._tag).toBe(
+        "Success",
+      )
+    }).pipe(
+      Effect.provide(AgentRunStoreLive),
+      Effect.provide(SqliteClient.layer({ filename: ":memory:" })),
+    ),
+  )
+})
+
+test("a revoked gateway binding does not make its lease ready", async () => {
+  const now = Date.now()
+  await Effect.runPromise(
+    Effect.gen(function* () {
+      const { leases } = yield* seedCapabilityRun(now, true)
+      const gateway = yield* makeCapabilityStore
+      const challenge = yield* gateway.leaseChallenge("lease", now)
+      yield* gateway.bindSession(
+        { ...challenge, runId: "run", recipientId: "managed:fixture-controller:run" },
+        "jti-1",
+        "a".repeat(64),
+        now + 60000,
+        now,
+        now + 610000,
+      )
+      yield* gateway.revoke("run")
+      expect(yield* leases.bindSession("run", 78, 1)).toBe(false)
+      expect((yield* leases.read("run"))?.state).toBe("starting")
+    }).pipe(
+      Effect.provide(AgentRunStoreLive),
+      Effect.provide(SqliteClient.layer({ filename: ":memory:" })),
+    ),
+  )
 })

@@ -350,8 +350,12 @@ export const makeSandboxDispatch = (options: {
       }).pipe((effect) => sandboxStage("dispatch.finishNative", effect))
     const prepareNative: NonNullable<SandboxDispatchPort["prepareNative"]> = (run) =>
       Effect.gen(function* () {
-        const cli = yield* Effect.try(() => nativeCli(run))
         const policy = options.policies.find((entry) => entry.alias === run.repository)
+        // A runner of an actions-native repository opens a gateway session and has no SSH peer
+        // to start the harness through, so such a run is refused before any lease or GitHub call.
+        if (policy?.privateBootstrap?.mode === "actions-native")
+          return yield* Effect.fail(failure(new Error("Actions-native harness start unavailable")))
+        const cli = yield* Effect.try(() => nativeCli(run))
         if (
           policy === undefined ||
           run.agent !== "sandbox" ||
@@ -431,7 +435,8 @@ export const makeSandboxDispatch = (options: {
     const launch = (run: AgentRunRecord, model: OpenCodeModel) =>
       Effect.gen(function* () {
         const policy = options.policies.find((entry) => entry.alias === run.repository)
-        if (policy === undefined) return yield* Effect.fail(failure())
+        if (policy === undefined || policy.privateBootstrap?.mode === "actions-native")
+          return yield* Effect.fail(failure())
         if (
           run.agent !== "sandbox" ||
           (run.resolvedSelection != null && run.resolvedSelection.executor !== options.executorId)

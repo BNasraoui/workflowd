@@ -371,6 +371,12 @@ export const makeSandboxPublisher = (
     const poll = Effect.fn("SandboxPublisher.poll")(function* (runId: string, directory?: string) {
       const saved = yield* store.read(runId)
       const lease = yield* leases.read(runId)
+      if (lease?.policy.privateBootstrap?.mode === "actions-native")
+        return yield* Effect.fail(
+          new SandboxError({
+            message: "Actions-native leases do not publish through the publisher",
+          }),
+        )
       if (
         saved === null ||
         lease === null ||

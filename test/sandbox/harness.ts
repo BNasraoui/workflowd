@@ -201,7 +201,7 @@ cd /workspace/repository
 if [ "$1 $2 $3" = "config base-image set" ] && [ "$4" = "ghcr.io/bnasraoui/workflowd-agent-base@sha256:${"f".repeat(64)}" ]; then
   set -- config base-image set ubuntu:24.04
 fi
-exec env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=/home/runner _EXPERIMENTAL_DAGGER_RUNNER_HOST=unix:///run/workflowd-engine/engine.sock /usr/local/bin/container-use-real "$@"
+exec env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=/home/runner GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/home/runner/.gitconfig _EXPERIMENTAL_DAGGER_RUNNER_HOST=unix:///run/workflowd-engine/engine.sock /usr/local/bin/container-use-real "$@"
 `,
       { mode: 0o755 },
     )
@@ -863,7 +863,7 @@ export async function leaseRunnerFixture(repositoryName: string) {
     const adapter = join(runner.root, "docker")
     await writeFile(
       adapter,
-      '#!/bin/sh\nset -eu\nif [ "$1" = cp ]; then cp -rf /workspace/result/. /run/workflowd-sandbox/result/; exit; fi\ntest "$1" = exec\nshift\nif [ "$1" = -i ]; then shift; fi\nworkdir=/workspace/repository\nif [ "$1" = -w ]; then workdir="$2"; shift 2; fi\ntest "$1" = workflowd-sandbox-tooling\nshift\ncd "$workdir"\nexport PATH=/usr/local/lib/tooling-bin:$PATH\nexec "$@"\n',
+      '#!/bin/sh\nset -eu\nif [ "$1" = cp ]; then cp -rf /workspace/result/. /run/workflowd-sandbox/result/; exit; fi\ntest "$1" = exec\nshift\nif [ "$1" = -i ]; then shift; fi\nworkdir=/workspace/repository\nif [ "$1" = -w ]; then workdir="$2"; shift 2; fi\ntest "$1" = workflowd-sandbox-tooling\nshift\ncd "$workdir"\nexport PATH=/usr/local/lib/tooling-bin:$PATH GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/home/runner/.gitconfig\nexec "$@"\n',
       { mode: 0o755 },
     )
     await runner.docker("cp", adapter, `${runner.name}-runner:/usr/local/bin/docker`)
