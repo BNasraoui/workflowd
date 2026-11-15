@@ -130,9 +130,6 @@ PY
     sudo install -m 755 "$0" /usr/local/bin/container-use
     exec node /usr/local/lib/workflowd-sandbox/bootstrap.mjs prepare
     ;;
-  native-initialize|native-execute|native-stop|native-result|native-cleanup|native-evidence)
-    exec env -i PATH=/usr/bin:/bin HOME=/nonexistent node /usr/local/lib/workflowd-sandbox/native-runner.mjs "$1"
-    ;;
   initialize)
     request=$(python3 -c '
 import json, re, sys
@@ -286,9 +283,6 @@ else:
       /usr/local/bin/container-use stdio
     ;;
   stop)
-    if [[ -f /run/workflowd-sandbox/native/invocation.json ]]; then
-      node /usr/local/lib/workflowd-sandbox/native-runner.mjs native-cleanup
-    fi
     for container in workflowd-sandbox-tooling workflowd-sandbox-engine; do
       if docker container inspect "$container" >/dev/null 2>&1; then
         docker rm -f "$container" >/dev/null

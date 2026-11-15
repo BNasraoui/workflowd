@@ -4,7 +4,6 @@ import { publisherHttpCase } from "./publisher-http-case"
 // The approved-pin cases need the launcher's pinned publisher: publisher-pinned.e2e.launcher.test.ts.
 for (const fault of [
   "none",
-  "native capture",
   "closing references",
   "closing references recovered",
   "closing delayed references",

@@ -75,9 +75,9 @@ export async function publisherHttpCase(fault: string) {
   await git("rm", "base")
   await git("add", ".")
   await git("commit", "-m", "second result")
-  let treeSha = await git("rev-parse", "HEAD^{tree}")
-  let result = await git("rev-parse", "HEAD")
-  let manifest = {
+  const treeSha = await git("rev-parse", "HEAD^{tree}")
+  const result = await git("rev-parse", "HEAD")
+  const manifest = {
     sourceSha: source,
     resultSha: result,
     treeSha,
@@ -92,30 +92,10 @@ export async function publisherHttpCase(fault: string) {
     branch,
     bundleSha256: "d".repeat(64),
   }
-  let rawManifest = JSON.stringify(manifest)
-  let archiveDigest = "sha256:" + "f".repeat(64)
-  if (fault === "native capture") {
-    const { nativePublicationArtifact } = await import("./native-publication-fixture")
-    const captured = await nativePublicationArtifact(root, source, {
-      branch,
-      title,
-      commitMessage,
-      body: manifest.body,
-    })
-    treeSha = captured.metadata.treeSha
-    result = captured.metadata.resultSha
-    manifest = {
-      ...manifest,
-      resultSha: result,
-      treeSha,
-      bundleSha256: captured.metadata.bundleSha256,
-    }
-    rawManifest = captured.rawManifest
-    archiveDigest = captured.archiveDigest
-  } else {
-    await mkdir(join(work, "validated"), { recursive: true })
-    await command(["git", "clone", "--bare", join(root, "source"), objects])
-  }
+  const rawManifest = JSON.stringify(manifest)
+  const archiveDigest = "sha256:" + "f".repeat(64)
+  await mkdir(join(work, "validated"), { recursive: true })
+  await command(["git", "clone", "--bare", join(root, "source"), objects])
   const { createHash } = await import("node:crypto")
   const binding = {
     v: 4,
@@ -454,7 +434,7 @@ export async function publisherHttpCase(fault: string) {
   try {
     const published = await invoke("publish")
     expect(published.code).toBe(
-      ["none", "approved pin", "native capture", "maximum metadata", "lost PR reply"].includes(
+      ["none", "approved pin", "maximum metadata", "lost PR reply"].includes(
         fault,
       )
         ? 0
@@ -507,7 +487,7 @@ export async function publisherHttpCase(fault: string) {
     }
     if (fault === "wrong tree") expect(receipt.cause).toBe("commit validation failed")
     if (
-      ["none", "approved pin", "native capture", "maximum metadata", "lost PR reply"].includes(
+      ["none", "approved pin", "maximum metadata", "lost PR reply"].includes(
         fault,
       )
     ) {

@@ -8,7 +8,7 @@ case "$1" in
     ;;
   namespace)
     sudo apt-get update -qq
-    sudo apt-get install -y bubblewrap openssh-server iproute2
+    sudo apt-get install -y bubblewrap iproute2
     sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
     sudo loginctl enable-linger "$USER"
     sudo systemctl start "user@$(id -u).service"

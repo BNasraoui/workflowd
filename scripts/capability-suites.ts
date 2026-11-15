@@ -16,22 +16,13 @@ export const coreCases = [
 ] as const
 
 export const nativeCases = [
-  ["N1", "test/sandbox/interactive-claude.e2e.launcher.test.ts"],
   ["N2", "test/sandbox/native-execution.e2e.test.ts"],
-  ["N2b", "test/sandbox/native-execution-ssh.e2e.launcher.test.ts"],
   ["N3", "test/sandbox/native-lifecycle.test.ts"],
-  ["N4", "test/sandbox/native-supervisor.test.ts"],
-  ["N5", "test/sandbox/native-capture.test.ts"],
-  ["N6", "test/sandbox/native-result.e2e.test.ts"],
   ["N7", "test/capability-gateway/result.test.ts"],
   ["N8", "test/kernel/actions-native-routing.test.ts"],
-  ["N9", "test/sandbox/native-capture-recovery.test.ts"],
   ["N10", "test/execution/config.test.ts"],
-  ["N12", "test/sandbox/native-command.test.ts"],
   ["N13", "test/sandbox/native-control.test.ts"],
-  ["N14", "test/sandbox/native-progress.e2e.launcher.test.ts"],
   ["N15", "test/capability-gateway/native-observation.test.ts"],
-  ["N16", "test/sandbox/native-recovery.launcher.test.ts"],
 ] as const
 
 export const publicationCases = [
@@ -51,13 +42,10 @@ export const adapterCases = [
   ["P3-C4", "test/agent-host/provider-https.launcher.test.ts"],
   ["P3-D1", "test/capability-gateway/transport-security.test.ts"],
   ["P3-D2", "test/sandbox/capability-relay.test.ts"],
-  ["P3-G1", "test/sandbox/native-harnesses.e2e.launcher.test.ts"],
   ["P3-G2", "test/kernel/actions-native-routing.test.ts"],
   ["P3-G3", "test/sandbox/native-lifecycle.test.ts"],
   ["P3-G4", "test/sandbox/native-execution.e2e.test.ts"],
-  ["P3-G4b", "test/sandbox/native-execution-ssh.e2e.launcher.test.ts"],
   ["P3-G5", "test/kernel/actions-session-custody.test.ts"],
-  ["P3-G6", "test/sandbox/native-client-custody.launcher.test.ts"],
 ] as const
 
 export const finalCases = [
@@ -68,7 +56,6 @@ export const finalCases = [
   ["P4-E", "test/sandbox/process-environment.test.ts"],
   ["P4-F", "test/sandbox/publication-parity.test.ts"],
   ["P4-G1", "test/sandbox/reconciliation.test.ts"],
-  ["P4-G2", "test/sandbox/native-recovery.launcher.test.ts"],
   ["P4-G3", "test/sandbox/native-lifecycle.test.ts"],
   ["P4-G4", "test/runtime-startup.test.ts"],
   ["P4-G5", "test/sandbox/reconciliation-dispatch.test.ts"],
