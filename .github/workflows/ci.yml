@@ -181,6 +181,10 @@ jobs:
             -p PrivateUsers=yes -p PrivateTmp=yes -p ProtectSystem=strict \
             -p ProtectHome=tmpfs -p NoNewPrivileges=yes \
             -p MemoryMax=256M -p MemorySwapMax=0 /usr/bin/true
+      # The gateway tests of the plain run mint through the pinned noscope, as the
+      # capability-security suites do.
+      - name: Prepare pinned fixture-only tools
+        run: node deploy/sandbox/public-output.mjs setup -- bash scripts/evidence/capability-ci-setup.sh tools
       - name: Verify credential probe entrypoints
         run: >-
           systemd-run --user --wait --pipe --collect
@@ -353,7 +357,8 @@ jobs:
           config = config.replace(key, key + '\n  "src/agent-host/opencode-credentials.ts",\n  "src/agent-host/credentials.ts",\n  "src/agent-host/config.ts",\n  "src/agent-host/credential-relink.ts",\n  "src/agent-host/client.ts",\n  "src/agent-host/server.ts",\n  "test/agent-user/harness.ts",', 1)
           Path(os.environ["RUNNER_TEMP"], "ordinary-coverage.toml").write_text(config)
           PY
-          bun test --config="$RUNNER_TEMP/ordinary-coverage.toml" --coverage
+          WORKFLOWD_FIXTURE_NOSCOPE="$RUNNER_TEMP/capability-tools/bin/noscope" \
+            bun test --config="$RUNNER_TEMP/ordinary-coverage.toml" --coverage
       - name: Include administrative coverage in shared gates
         run: |
           # Use the complete, independently threshold-checked administrative record.

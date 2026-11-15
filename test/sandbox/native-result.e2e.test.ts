@@ -22,7 +22,19 @@ test("native source/export keeps Git custody private and restores only bounded r
     await command(["git", "init", "-b", "main"], source)
     await writeFile(join(source, "file.txt"), "source\n")
     await command(["git", "add", "."], source)
-    await command(["git", "commit", "-m", "source"], source)
+    await command(
+      [
+        "git",
+        "-c",
+        "user.name=fixture",
+        "-c",
+        "user.email=fixture@example.invalid",
+        "commit",
+        "-m",
+        "source",
+      ],
+      source,
+    )
     const sha = await command(["git", "rev-parse", "HEAD"], source)
     await command(["python3", "-I", script, "native-source", sha], root)
     const entries = await command(["tar", "-tvf", "source.tar"], root)
@@ -66,7 +78,19 @@ for (const variant of ["ignored", "selected", "tracked despite ignore", "negativ
         await command(["git", "add", "-f", "cache/link"], source)
       }
       await command(["git", "add", "."], source)
-      await command(["git", "commit", "-m", "source"], source)
+      await command(
+        [
+          "git",
+          "-c",
+          "user.name=fixture",
+          "-c",
+          "user.email=fixture@example.invalid",
+          "commit",
+          "-m",
+          "source",
+        ],
+        source,
+      )
       const sha = await command(["git", "rev-parse", "HEAD"], source)
       await writeFile(join(root, "outside"), "untouched\n")
       if (variant === "tracked despite ignore") await rm(join(source, "cache/link"))
@@ -133,7 +157,11 @@ for (const variant of [
     const root = await mkdtemp(join(tmpdir(), "native-result-"))
     const repo = join(root, "repository")
     await mkdir(repo)
-    const git = (...args: string[]) => command(["git", ...args], repo)
+    const git = (...args: string[]) =>
+      command(
+        ["git", "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", ...args],
+        repo,
+      )
     try {
       await git("init", "-b", "main")
       await writeFile(join(repo, "base.txt"), "base\n")

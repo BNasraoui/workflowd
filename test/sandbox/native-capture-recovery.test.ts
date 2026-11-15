@@ -68,7 +68,19 @@ for (const interrupted of [false, true]) {
       await command(["git", "init", "-b", "main"], source)
       await writeFile(join(source, "file.txt"), "source\n")
       await command(["git", "add", "."], source)
-      await command(["git", "commit", "-m", "source"], source)
+      await command(
+        [
+          "git",
+          "-c",
+          "user.name=fixture",
+          "-c",
+          "user.email=fixture@example.invalid",
+          "commit",
+          "-m",
+          "source",
+        ],
+        source,
+      )
       await writeFile(join(root, "source.sha"), await command(["git", "rev-parse", "HEAD"], source))
       await writeFile(join(workspace, "file.txt"), "intended public result\n")
       await expect(capture({ ...request, nonce: "foreign" })).rejects.toThrow()

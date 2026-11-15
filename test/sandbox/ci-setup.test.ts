@@ -3,6 +3,7 @@ import { Schema } from "effect"
 import { chmod, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises"
 import { join, resolve } from "node:path"
 import { tmpdir } from "node:os"
+import { fixtureExecutable } from "../helpers/fixture-executable.mjs"
 
 test("actual capability CI setup paths contain success, failure and debug workflow-command output", async () => {
   const workflow = Schema.decodeUnknownSync(
@@ -52,6 +53,8 @@ if name=='systemd-run': sys.exit(subprocess.run(sys.argv[sys.argv.index('cargo')
     await chmod(shim, 0o700)
     for (const name of ["bun", "sudo", "git", "systemd-run", "cargo", "curl", "sha256sum", "tar"])
       await symlink(shim, join(bin, name))
+    // The setup steps run behind public-output.mjs, so they need the real Node on PATH.
+    await symlink(fixtureExecutable("node"), join(bin, "node"))
     for (const [index, step] of steps.entries())
       for (const fail of [false, true]) {
         const directory = join(root, `${index}-${fail}`)
