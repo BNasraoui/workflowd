@@ -6,15 +6,6 @@ import { makeSandboxStore } from "../../src/sandbox/store"
 import { capabilityDigest, makeCapabilityStore } from "../../src/capability-gateway/store"
 import { randomBytes } from "node:crypto"
 
-export const transport = {
-  leaseId: "lease",
-  peerId: "peer",
-  address: "100.64.0.1",
-  port: 22,
-  repositoryPath: "/workspace/repository" as const,
-  knownHostsFile: "/fixture/known_hosts",
-  identityFile: "/dev/null",
-}
 export const seedCapabilityRun = (
   now: number,
   native = false,

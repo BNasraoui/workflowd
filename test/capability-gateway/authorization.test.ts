@@ -4,7 +4,7 @@ import { SqliteClient } from "@effect/sql-sqlite-bun"
 import { SqlClient } from "effect/unstable/sql"
 import { AgentRunStoreLive, AgentRunStore } from "../../src/kernel/agent-run-store"
 import { makeCapabilityStore } from "../../src/capability-gateway/store"
-import { bindRunSession, seedCapabilityRun, transport } from "./fixture"
+import { bindRunSession, seedCapabilityRun } from "./fixture"
 import { capabilitySession } from "../../src/store/0040-capability-session"
 
 const now = Date.now()
@@ -270,10 +270,6 @@ test("a new session ends every token of the earlier one, and a proof opens one s
         { runId: "run", session: 1 },
         { runId: "gone", session: 1 },
       ])
-      // An SSH challenge cannot replace a session binding.
-      expect((yield* Effect.result(store.challenge("run", transport, now + 6)))._tag).toBe(
-        "Failure",
-      )
       yield* store.revoke("run")
       expect(yield* store.staleAmong([{ runId: "run", session: 2 }])).toEqual([
         { runId: "run", session: 2 },

@@ -1,7 +1,6 @@
 import { Cache, Context, Duration, Effect, Exit, Redacted, Schema } from "effect"
 import { SqlClient } from "effect/unstable/sql"
 import { randomInt } from "node:crypto"
-import type { SandboxTransport } from "../sandbox/transport"
 import { mintCapability, type NoscopeConfiguration } from "./noscope"
 import { claudeRequest, readRequestBody, type ClaudeUpstream } from "./claude"
 import { CapabilityRefused, capabilityDigest, makeCapabilityStore } from "./store"
@@ -148,23 +147,6 @@ export const makeCapabilityGateway = (
             : Duration.zero,
       },
     )
-    const challenge = Effect.fn("CapabilityGateway.challenge")(
-      (runId: string, transport: SandboxTransport) => store.challenge(runId, transport, Date.now()),
-    )
-    const bind = Effect.fn("CapabilityGateway.bind")(function* (
-      job: Effect.Success<ReturnType<typeof challenge>>,
-      jti: string,
-    ) {
-      const token = yield* issue(job.deadline)
-      const binding = yield* authority.withPermit(
-        store.bind(job, jti, capabilityDigest(token.token), token.expiresAt, Date.now()),
-      )
-      return {
-        binding,
-        ...token,
-        renewAt: Math.min(token.expiresAt, Date.now() + renewIn()),
-      }
-    })
     const sessionChallenge = Effect.fn("CapabilityGateway.sessionChallenge")((lease: string) =>
       store.leaseChallenge(lease, Date.now()),
     )
@@ -502,7 +484,7 @@ export const makeCapabilityGateway = (
       },
       Effect.catch(() => Effect.succeed(unavailable())),
     )
-    return { challenge, bind, sessionChallenge, session, revoke, handle }
+    return { sessionChallenge, session, revoke, handle }
   })
 
 export const CapabilityGateway = Context.Service<

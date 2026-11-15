@@ -128,107 +128,15 @@ export const makeCapabilityStore = Effect.gen(function* () {
       if (row.authority[key] !== value[key]) return yield* Effect.fail(new CapabilityRefused())
     return { row, value }
   })
-  /** The SSH exchange's challenge: one per lease, bound to the peer and transport it names. */
-  const challenge = Effect.fn("CapabilityStore.challenge")(function* (
-    runId: string,
-    transport: SandboxTransport,
-    now: number,
-  ) {
-    const encodedTransport = yield* Schema.encodeEffect(Schema.fromJsonString(SandboxTransport))(
-      transport,
-    )
-    return yield* sql.withTransaction(
-      Effect.gen(function* () {
-        const value = yield* current(runId, now)
-        if (value.leaseState !== "starting") return yield* Effect.fail(new CapabilityRefused())
-        const authority = yield* Schema.decodeUnknownEffect(Authority)({
-          ...value,
-          peerId: transport.peerId,
-        })
-        const channel = randomBytes(32).toString("hex")
-        const nonce = randomBytes(32).toString("hex")
-        // A fresh challenge may replace only an unconsumed bootstrap, never a revoked grant.
-        const kept =
-          yield* sql`SELECT 1 FROM capability_bindings WHERE run_id=${runId} AND (jti_digest IS NOT NULL OR revoked=1 OR session>0)`
-        if (kept.length > 0) return yield* Effect.fail(new CapabilityRefused())
-        yield* sql`DELETE FROM capability_bindings WHERE run_id=${runId} AND jti_digest IS NULL AND revoked=0`
-        yield* sql`INSERT INTO capability_bindings(run_id,channel,challenge,challenge_expires,authority,transport_digest)
-        VALUES(${runId},${channel},${capabilityDigest(nonce)},${Math.min(now + 60000, authority.deadline)},${JSON.stringify(authority)},${capabilityDigest(encodedTransport)})`
-        return {
-          runId,
-          channel,
-          nonce,
-          recipientId: authority.recipientId,
-          deadline: authority.deadline,
-          expiresAt: Math.min(now + 60000, authority.deadline),
-        }
-      }),
-    )
-  })
-  const consume = Effect.fn("CapabilityStore.consume")(function* (
-    challenge: typeof Challenge.Type,
-    jti: string,
-    now: number,
-  ) {
-    yield* Schema.decodeUnknownEffect(Challenge)(challenge)
-    const { row } = yield* read(challenge, now)
-    if (
-      row.jti_digest !== null ||
-      row.challenge !== capabilityDigest(challenge.nonce) ||
-      row.challenge_expires <= now ||
-      row.authority.recipientId !== challenge.recipientId ||
-      !jti ||
-      jti.length > 256
-    )
-      return yield* Effect.fail(new CapabilityRefused())
-    yield* sql`UPDATE capability_bindings SET jti_digest=${capabilityDigest(jti)} WHERE run_id=${row.run_id}`
-    return row
-  })
-  const acceptProof = Effect.fn("CapabilityStore.acceptProof")(
-    (challenge: typeof Challenge.Type, jti: string, now: number) =>
-      sql.withTransaction(consume(challenge, jti, now)).pipe(Effect.asVoid),
-  )
-  const bind = Effect.fn("CapabilityStore.bind")(function* (
-    challenge: typeof Challenge.Type,
-    jti: string,
-    digest: string,
-    expiresAt: number,
-    now: number,
-  ) {
-    yield* Schema.decodeUnknownEffect(Digest)(digest)
-    return yield* sql.withTransaction(
-      Effect.gen(function* () {
-        const row = yield* consume(challenge, jti, now)
-        if (
-          !Number.isSafeInteger(expiresAt) ||
-          expiresAt <= now ||
-          expiresAt > row.authority.deadline
-        )
-          return yield* Effect.fail(new CapabilityRefused())
-        yield* sql`INSERT INTO capability_tokens(digest,run_id,expires_at) VALUES(${digest},${row.run_id},${expiresAt})`
-        return { runId: row.run_id, channel: row.channel }
-      }),
-    )
-  })
   const validateBinding = Effect.fn("CapabilityStore.validateBinding")(function* (
     binding: CapabilityBinding,
     now: number,
   ) {
-    const { row, value } = yield* read(binding, now)
-    // A session binding has no SSH peer to compare; the lease must still be live (current()).
-    if (row.transport_digest === null)
-      return row.session > 0
-        ? { ...row.authority, session: row.session }
-        : yield* Effect.fail(new CapabilityRefused())
-    if (row.jti_digest === null) return yield* Effect.fail(new CapabilityRefused())
-    if (
-      value.leaseState !== "ready" ||
-      value.peerId !== row.authority.peerId ||
-      value.transport === null ||
-      capabilityDigest(JSON.stringify(value.transport)) !== row.transport_digest
-    )
-      return yield* Effect.fail(new CapabilityRefused())
-    return { ...row.authority, session: row.session }
+    const { row } = yield* read(binding, now)
+    // Only a runner's session opens a binding; the lease must still be live (read() checks it).
+    return row.session > 0
+      ? { ...row.authority, session: row.session }
+      : yield* Effect.fail(new CapabilityRefused())
   })
   const authorize = Effect.fn("CapabilityStore.authorize")(function* (
     binding: CapabilityBinding,
@@ -395,13 +303,10 @@ export const makeCapabilityStore = Effect.gen(function* () {
     })
   })
   return {
-    challenge,
     leaseChallenge,
     sessionContext,
     bindingFor,
     staleAmong,
-    acceptProof,
-    bind,
     bindSession,
     authorize,
     validateBinding,
