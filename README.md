@@ -331,10 +331,11 @@ Install, but do not enable or start, the Workflowd unit:
 
 ```bash
 install -Dm0644 deploy/systemd/workflowd.service "$HOME/.config/systemd/user/workflowd.service"
+install -Dm0644 deploy/systemd/workflowd.service.d/20-opencode2.conf "$HOME/.config/systemd/user/workflowd.service.d/20-opencode2.conf"
 systemctl --user daemon-reload
 ```
 
-The unit requires `opencode-server.service`, loads both credentials into a protected runtime directory, starts only after OpenCode startup validation succeeds, and uses `UMask=0077`. Fix Work remains disabled by default and is enabled through `WORKFLOWD_FIX_WORK_ENABLED=true` for trusted agent-owned pull requests.
+The unit and its `20-opencode2.conf` drop-in want `opencode-server.service` and `opencode2-server.service` and start after them, but never require them: a stop or restart of an OpenCode server (for example by its watchdog) leaves workflowd running. When workflowd starts, it checks the OpenCode server that runs reviews (`WORKFLOWD_REVIEW_OPENCODE_URL`, or `OPENCODE_SERVER_URL` with an agent host); if that server does not answer, the check retries for 30 seconds, then the process exits with an error and systemd starts it again after `RestartSec`. The unit loads both credentials into a protected runtime directory, accepts webhooks only after OpenCode startup validation succeeds, and uses `UMask=0077`. Fix Work remains disabled by default and is enabled through `WORKFLOWD_FIX_WORK_ENABLED=true` for trusted agent-owned pull requests.
 
 Two optional units ship beside it:
 
