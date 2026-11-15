@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test"
+import { SqlClient } from "effect/unstable/sql"
 import { Effect } from "effect"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
 import { mkdtemp, mkdir, writeFile, rm, readFile } from "node:fs/promises"
@@ -7,7 +8,7 @@ import { join, resolve } from "node:path"
 import { AgentRunStoreLive } from "../../src/kernel/agent-run-store"
 import { makeCapabilityGateway } from "../../src/capability-gateway/service"
 import { makeTokenBroker } from "../../src/worker-identity/broker"
-import { bindRunSession, seedCapabilityRun } from "./fixture"
+import { bindRunSession, grantLiveRuns, seedCapabilityRun } from "./fixture"
 import { fixtureExecutable } from "../helpers/fixture-executable.mjs"
 
 const secret = "synthetic-git-read-credential"
@@ -316,13 +317,15 @@ for (const authenticated of [false, true]) {
           ))._tag,
         ).toBe("Failure")
         yield* sql`UPDATE kernel_agent_runs SET repository='foreign' WHERE run_id='run'`
+        // workflowd's reconcile names no grant for a run that no longer matches its lease.
+        yield* grantLiveRuns(Date.now()).pipe(Effect.provideService(SqlClient.SqlClient, sql))
         expect((yield* call(direct())).status).toBe(403)
         expect(state.attempts).toBe(0)
       }),
     ))
 
   test(`G6: redirects, reflection and slow streams stay inside run authority (authenticated=${authenticated})`, () =>
-    withGitGateway(authenticated, ({ state, runs, direct, call }) =>
+    withGitGateway(authenticated, ({ state, runs, sql, direct, call }) =>
       Effect.gen(function* () {
         state.fault = "redirect"
         const redirected = yield* call(direct())
@@ -341,6 +344,7 @@ for (const authenticated of [false, true]) {
         expect((yield* Effect.promise(() => reader.read())).value?.length).toBeGreaterThan(0)
         expect((yield* call(direct())).status).toBe(429)
         yield* runs.cancel({ runId: "run", now: new Date() })
+        yield* grantLiveRuns(Date.now()).pipe(Effect.provideService(SqlClient.SqlClient, sql))
         expect(
           yield* Effect.promise(() =>
             reader.read().then(

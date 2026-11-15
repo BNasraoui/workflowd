@@ -5,14 +5,33 @@ import { AgentRunStore } from "../../src/kernel/agent-run-store"
 import { makeSandboxStore } from "../../src/sandbox/store"
 import { capabilityDigest, makeCapabilityStore } from "../../src/capability-gateway/store"
 import { randomBytes } from "node:crypto"
+import { runGatewayMigrations } from "../../src/capability-gateway/migrations"
+import { liveGrants } from "../../src/capability-gateway/control-client"
 
+/**
+ * workflowd grants each of its live native runs to the gateway store, as its control client does
+ * on the socket. In-process tests keep both stores in one database for brevity; the processes
+ * never do (control.e2e.test.ts).
+ */
+export const grantLiveRuns = (now: number) =>
+  Effect.gen(function* () {
+    const live = yield* liveGrants(null, now)
+    return yield* (yield* makeCapabilityStore).reconcileGrants(live)
+  })
+
+/**
+ * The fixture run and its lease in workflowd's store. With `gatewayStore` (the default) the same
+ * database also gets the gateway's tables, and a native run is granted to them.
+ */
 export const seedCapabilityRun = (
   now: number,
   native = false,
   selection?: { modelId: string; sourceSha: string },
+  { gatewayStore = true } = {},
 ) =>
   Effect.gen(function* () {
     yield* runStoreMigrations
+    if (gatewayStore) yield* runGatewayMigrations
     const sql = yield* SqlClient.SqlClient
     yield* sql`INSERT INTO directory_local_identity(singleton,host_id) VALUES(1,'fixture-controller')`
     const runs = yield* AgentRunStore
@@ -56,6 +75,7 @@ export const seedCapabilityRun = (
     })
     yield* leases.beginStart("run")
     yield* leases.recordRun("run", 78, 1)
+    if (gatewayStore) yield* grantLiveRuns(now)
     return { sql, runs, leases }
   })
 
@@ -80,7 +100,8 @@ export const bindRunSession = (
       expiresAt,
       now,
     )
-    yield* (yield* makeSandboxStore).bindSession("run", 78, 1)
+    if (yield* store.sessionBound("run", 78, 1))
+      yield* (yield* makeSandboxStore).bindSession("run", 78, 1)
     // The session answer names when to renew; production picks 10 to 12 minutes in.
     return { binding: { runId, channel }, token, expiresAt, renewAt: now + 600000 }
   })

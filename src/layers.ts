@@ -61,7 +61,7 @@ import { reviewServerId } from "./review-harness"
 import { SandboxDispatch, makeSandboxDispatch } from "./sandbox/dispatch"
 import { makeSandboxGithub } from "./sandbox/github"
 import { makeSandboxLeaseService } from "./sandbox/lease"
-import { makeCapabilityGateway } from "./capability-gateway/service"
+import { makeDaemonCapability } from "./capability-gateway/control-client"
 import { routeSandboxHandoffs, routeSandboxProvider } from "./sandbox/provider"
 import { WorkflowStoreLive } from "./store"
 import { WorkflowStore } from "./store/contracts"
@@ -359,11 +359,11 @@ const makeAutomationLayer = (config: Extract<AppConfig, { readonly mode?: "autom
           Effect.gen(function* () {
             const github = yield* makeSandboxGithub(config.github)
             const controlRoot = join(dirname(config.storage.databasePath), "sandboxes")
-            const gatewayConfig = config.agentRuns?.capabilityGateway
+            const control = config.agentRuns?.capabilityControl
             const native =
-              gatewayConfig === undefined
+              control === undefined
                 ? undefined
-                : { gateway: yield* makeCapabilityGateway(gatewayConfig) }
+                : { gateway: yield* makeDaemonCapability({ socket: control.socket }) }
             const leases = yield* makeSandboxLeaseService(
               github,
               controlRoot,

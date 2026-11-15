@@ -459,8 +459,8 @@ export const makeSandboxStore = Effect.gen(function* () {
       )
   })
   /**
-   * An actions-native lease is ready once its runner holds a gateway session: the binding has a
-   * session and is not revoked. One statement checks and sets it, so a revoke cannot interleave.
+   * An actions-native lease is ready once the gateway answered that its runner holds a session
+   * for this Actions run and attempt; the lease must still be starting with that run.
    */
   const bindSession = Effect.fn("SandboxStore.bindSession")(function* (
     runId: string,
@@ -469,9 +469,7 @@ export const makeSandboxStore = Effect.gen(function* () {
   ) {
     const rows = yield* sql`UPDATE sandbox_leases SET state='ready'
       WHERE run_id=${runId} AND state='starting' AND actions_run_id=${actionsRunId} AND actions_attempt=${attempt}
-      AND json_extract(policy,'$.privateBootstrap.mode')='actions-native'
-      AND EXISTS(SELECT 1 FROM capability_bindings b WHERE b.run_id=${runId} AND b.session>0
-        AND b.revoked=0) RETURNING run_id`
+      AND json_extract(policy,'$.privateBootstrap.mode')='actions-native' RETURNING run_id`
     return rows.length === 1
   })
   const adopt = Effect.fn("SandboxStore.adopt")(function* (

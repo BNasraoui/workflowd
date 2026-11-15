@@ -39,6 +39,7 @@ for (const [mode, start] of gateways) {
       ]
       for (const { lease, run } of runs.slice(1))
         await f.store(seedLease(`run-${run}`, lease, Number(run)))
+      await f.reconcile()
       const runner = client(gateway.port)
       const proofs = await Promise.all(
         runs.map(async ({ lease, run }) =>

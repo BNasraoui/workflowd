@@ -1,10 +1,9 @@
 import { expect, test } from "bun:test"
 import { connect } from "node:net"
 import { Effect, Exit, Schema } from "effect"
-import { SqlClient } from "effect/unstable/sql"
 import { AgentRunStore } from "../../src/kernel/agent-run-store"
-import { capabilityDigest, makeCapabilityStore } from "../../src/capability-gateway/store"
-import { makeCapabilityGateway } from "../../src/capability-gateway/service"
+import { join } from "node:path"
+import { capabilityDigest } from "../../src/capability-gateway/store"
 import { makeSandboxStore } from "../../src/sandbox/store"
 import { serveCapabilityGateway } from "../../src/capability-gateway-server"
 import {
@@ -62,9 +61,8 @@ async function scenario(start: (f: Fixture) => Promise<Gateway>) {
     }
     const Renewed = (response: Response) => at().grant(response)
     const sessionOfRun = () =>
-      f.store(
-        Effect.gen(function* () {
-          const sql = yield* SqlClient.SqlClient
+      f.gatewaySql(
+        Effect.fnUntraced(function* (sql) {
           const rows = yield* sql`SELECT session FROM capability_bindings WHERE run_id='run'`
           return rows[0]?.session
         }),
@@ -131,12 +129,9 @@ async function scenario(start: (f: Fixture) => Promise<Gateway>) {
 
     // A token with more than 330 seconds left is not renewed; in its last minutes it is.
     expect((await renew(grant.token)).status).toBe(403)
-    await f.store(
-      Effect.gen(function* () {
-        const sql = yield* SqlClient.SqlClient
-        yield* sql`UPDATE capability_tokens SET expires_at=${Date.now() + 300000}
-          WHERE digest=${capabilityDigest(grant.token)}`
-      }),
+    await f.gatewaySql(
+      (sql) => sql`UPDATE capability_tokens SET expires_at=${Date.now() + 300000}
+          WHERE digest=${capabilityDigest(grant.token)}`,
     )
     const renewed = await renew(grant.token)
     expect(renewed.status).toBe(200)
@@ -150,8 +145,8 @@ async function scenario(start: (f: Fixture) => Promise<Gateway>) {
     gateway = await start(f)
     expect(await (await call(next.token)).text()).toBe(sse)
 
-    // workflowd builds its own gateway on the same store when it starts; that revokes nothing.
-    await f.store(makeCapabilityGateway(f.config).pipe(Effect.andThen(Effect.sleep("10 millis"))))
+    // workflowd reconciles when it starts; a live run stays granted.
+    await f.reconcile()
     expect(await (await call(next.token)).text()).toBe(sse)
 
     // (e) A new session, opened through another gateway on the same store, ends a live stream
@@ -161,7 +156,17 @@ async function scenario(start: (f: Fixture) => Promise<Gateway>) {
     expect(live.status).toBe(200)
     const reader = live.body!.getReader()
     expect((await reader.read()).done).toBe(false)
-    other = await start(f)
+    other = await start({
+      ...f,
+      env: {
+        ...f.env,
+        WORKFLOWD_CAPABILITY_GATEWAY: JSON.stringify({
+          ...f.config,
+          controlSocket: join(f.root, "control-2", "gateway.sock"),
+        }),
+      },
+      reconcile: async () => undefined,
+    })
     const third = await session(proof(await audienceOf("lease", other.port), "jti-3"), other.port)
     expect(third.status).toBe(200)
     const current = await Grant(third)
@@ -192,21 +197,18 @@ async function scenario(start: (f: Fixture) => Promise<Gateway>) {
         yield* (yield* AgentRunStore).cancel({ runId: "run-c", now: new Date() })
       }),
     )
+    await f.reconcile()
     expect((await challenge("lease-b")).status).toBe(403)
     expect((await challenge("lease-c")).status).toBe(403)
 
-    // A revoke written by another process aborts a live stream.
+    // workflowd's revoke on the control socket aborts a live stream at once.
     f.setStall(true)
     const stream = await call(current.token)
     expect(stream.status).toBe(200)
     const streamed = stream.body!.getReader()
     expect((await streamed.read()).done).toBe(false)
-    await f.store(
-      Effect.gen(function* () {
-        yield* (yield* makeCapabilityStore).revoke("run")
-      }),
-    )
-    expect(await ended(streamed, 5000)).toBe("ended")
+    await f.daemon((capability) => capability.revoke("run"))
+    expect(await ended(streamed, 2000)).toBe("ended")
     expect((await call(current.token)).status).toBe(403)
   } finally {
     await other?.stop()

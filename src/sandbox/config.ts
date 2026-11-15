@@ -30,27 +30,37 @@ export const PrivateBootstrapPolicy = Schema.Struct({
   repositoryOwnerId: positiveId,
   mode: Schema.Literal("actions-native"),
 })
+const AbsolutePath = Schema.String.check(Schema.isPattern(/^\/[A-Za-z0-9/_.-]+$/))
+const Id = Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 4294967294 }))
+/** The gateway process's own section. It names the gateway's store, never workflowd's. */
 export const CapabilityGatewayConfig = Schema.Struct({
   gitRead: Schema.optionalKey(Schema.Boolean),
-  nodeBinary: Schema.String.check(Schema.isPattern(/^\/[A-Za-z0-9/_.-]+$/)),
+  nodeBinary: AbsolutePath,
   noscope: Schema.Struct({
-    binary: Schema.String.check(Schema.isPattern(/^\/[A-Za-z0-9/_.-]+$/)),
-    configHome: Schema.String.check(Schema.isPattern(/^\/[A-Za-z0-9/_.-]+$/)),
+    binary: AbsolutePath,
+    configHome: AbsolutePath,
   }),
+  /** The gateway's own database. */
+  storePath: AbsolutePath,
+  /** The control socket; the gateway owns its directory, mode 0710 with the daemon's group. */
+  controlSocket: AbsolutePath,
+  /** The only caller the control socket answers, and the group that may reach the socket. */
+  daemon: Schema.Struct({ uid: Id, gid: Id }),
   providerId: Schema.NonEmptyString,
   credentialRole: Schema.String.check(Schema.isPattern(/^[A-Za-z0-9_.-]{1,128}$/)),
   maxStreams: Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 512 })),
   maxStreamsPerRun: Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 4 })),
-  /** Where the gateway's own process listens; workflowd ignores it. */
-  listen: Schema.optionalKey(
-    Schema.Struct({
-      host: Schema.String.check(Schema.isPattern(/^(?:\d{1,3}(?:\.\d{1,3}){3}|[0-9a-f:]+)$/)),
-      // Port 0 asks the kernel for a free port; the process prints the port it bound.
-      port: Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 65535 })),
-    }),
-  ),
+  /** Where the gateway's process listens. */
+  listen: Schema.Struct({
+    host: Schema.String.check(Schema.isPattern(/^(?:\d{1,3}(?:\.\d{1,3}){3}|[0-9a-f:]+)$/)),
+    // Port 0 asks the kernel for a free port; the process prints the port it bound.
+    port: Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 65535 })),
+  }),
 })
 export type CapabilityGatewayConfig = typeof CapabilityGatewayConfig.Type
+/** workflowd's side of the gateway: only the control socket, never the gateway's store. */
+export const CapabilityControlConfig = Schema.Struct({ socket: AbsolutePath })
+export type CapabilityControlConfig = typeof CapabilityControlConfig.Type
 export const SandboxPolicy = Schema.Struct({
   privateBootstrap: Schema.optionalKey(PrivateBootstrapPolicy),
   alias: Schema.String.check(Schema.isPattern(/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$/)),

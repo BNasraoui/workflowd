@@ -13,7 +13,7 @@ import { Effect } from "effect"
 import { SqlClient } from "effect/unstable/sql"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
 import { Octokit } from "@octokit/rest"
-import { makeCapabilityGateway } from "../../src/capability-gateway/service"
+import { makeDaemonCapability } from "../../src/capability-gateway/control-client"
 import { makeSandboxGithub } from "../../src/sandbox/github"
 import { makeSandboxLeaseService } from "../../src/sandbox/lease"
 import { makeSandboxStore } from "../../src/sandbox/store"
@@ -270,8 +270,24 @@ for (const race of [
       credentialRole: "fixture",
       maxStreams: 8,
       maxStreamsPerRun: 2,
+      storePath: join(root, "gateway.db"),
+      controlSocket: join(root, "control", "gateway.sock"),
+      daemon: { uid: process.getuid!(), gid: process.getgid!() },
       listen: { host: "127.0.0.1", port: 0 },
     }
+    /** A query on the gateway's own store, which the gateway process holds. */
+    const gatewayStore = <A>(query: (sql: SqlClient.SqlClient) => Effect.Effect<A, unknown>) =>
+      Effect.promise(() =>
+        Effect.runPromise(
+          Effect.scoped(
+            Effect.gen(function* () {
+              const sql = yield* SqlClient.SqlClient
+              yield* sql`PRAGMA busy_timeout = 5000`
+              return yield* query(sql)
+            }),
+          ).pipe(Effect.provide(SqliteClient.layer({ filename: config.storePath }))),
+        ),
+      )
     let gateway: ReturnType<typeof Bun.spawn> | undefined
     let front: Awaited<ReturnType<typeof tlsFront>> | undefined
     const relayPid = () =>
@@ -332,8 +348,11 @@ for (const race of [
             sourceSha: "d".repeat(40),
             now: now.getTime(),
           })
-          // workflowd's side: its own gateway (for revocation) and the lease service.
-          const local = yield* makeCapabilityGateway(config)
+          // workflowd's side: its control client of the gateway and the lease service.
+          const local = yield* makeDaemonCapability({
+            socket: config.controlSocket,
+            reconcileEveryMs: 3600000,
+          })
           const api = yield* makeSandboxGithub(
             { appId: 1, privateKeyPath: join(root, "app.pem") },
             Octokit.defaults({
@@ -350,9 +369,6 @@ for (const race of [
               publicationContract: { reference: "fixture-only:worktree", receipt: "fixed-v1" },
             },
           )
-          // The run is recorded before the runner asks; with no session the lease stays starting.
-          expect((yield* leases.acquire("run")).state).toBe("starting")
-
           // The gateway as its own process, behind TLS; then the real bootstrap and relay.
           const child = Bun.spawn(
             [
@@ -370,7 +386,6 @@ Effect.runFork(runCapabilityGatewayServer(process.env, {
               env: {
                 PATH: process.env.PATH,
                 HOME: root,
-                WORKFLOWD_DATABASE_PATH: database,
                 WORKFLOWD_CAPABILITY_GATEWAY: JSON.stringify(config),
               },
               stdout: "pipe",
@@ -389,6 +404,9 @@ Effect.runFork(runCapabilityGatewayServer(process.env, {
             reader.releaseLock()
             return Number(/^listening (\d+)$/m.exec(text)?.[1])
           })
+          // The run is recorded and granted before the runner asks; with no session the lease
+          // stays starting.
+          expect((yield* leases.acquire("run")).state).toBe("starting")
           const tlsGateway = yield* Effect.promise(() => tlsFront(tls, listening))
           front = tlsGateway
           const bootstrap = Bun.spawn(
@@ -429,8 +447,10 @@ await prepare({
           // opened nothing. Two proofs opened sessions; the runner holds the second.
           expect(tlsGateway.dropped()).toBe(1)
           expect(
-            yield* sql`SELECT (SELECT count(*) FROM capability_proofs) AS proofs,
+            yield* gatewayStore(
+              (gateway) => gateway`SELECT (SELECT count(*) FROM capability_proofs) AS proofs,
               (SELECT session FROM capability_bindings) AS session`,
+            ),
           ).toEqual([{ proofs: 2, session: 2 }])
           const hostileFirst = typeof race === "string" && (race in hostileClaims || race === "key")
           expect(proofs).toBe(hostileFirst ? 3 : 2)
@@ -451,16 +471,19 @@ await prepare({
             })
           if (race === true || race === "revoke-failure") {
             if (race === "revoke-failure")
-              yield* sql`CREATE TRIGGER fixture_revoke_failure BEFORE UPDATE OF revoked ON capability_bindings BEGIN SELECT RAISE(FAIL,'fixture revoke failure'); END`
+              yield* gatewayStore(
+                (gateway) =>
+                  gateway`CREATE TRIGGER fixture_revoke_failure BEFORE UPDATE OF revoked ON capability_bindings BEGIN SELECT RAISE(FAIL,'fixture revoke failure'); END`,
+              )
             // A second acquirer takes the operation after this one records the run, before it
             // commits the session.
             yield* sql`CREATE TRIGGER fixture_owner_race AFTER UPDATE OF actions_run_id ON sandbox_leases
               BEGIN UPDATE sandbox_lease_operations SET owner='fixture-new-owner',generation=generation+1; END`
             expect((yield* Effect.exit(leases.acquire("run")))._tag).toBe("Failure")
             expect((yield* store.read("run"))?.state).toBe("starting")
-            expect(yield* sql`SELECT revoked FROM capability_bindings`).toEqual([
-              { revoked: race === true ? 1 : 0 },
-            ])
+            expect(
+              yield* gatewayStore((gateway) => gateway`SELECT revoked FROM capability_bindings`),
+            ).toEqual([{ revoked: race === true ? 1 : 0 }])
             if (race === true)
               expect((yield* Effect.promise(() => request("workflowd-local"))).status).toBe(403)
             expect(upstreamEffects).toBe(0)
@@ -472,10 +495,11 @@ await prepare({
           expect(lease.state).toBe("ready")
           expect(lease.transport).toBeNull()
           if (race === "release-failure") {
-            yield* sql`CREATE TRIGGER fixture_revoke_failure BEFORE UPDATE OF revoked ON capability_bindings BEGIN SELECT RAISE(FAIL,'fixture revoke failure'); END`
+            // The gateway cannot confirm the revoke, so the lease is not released.
+            child.kill("SIGKILL")
+            yield* Effect.promise(() => child.exited)
             expect((yield* Effect.exit(leases.release("run")))._tag).toBe("Failure")
             expect((yield* store.read("run"))?.state).not.toBe("released")
-            yield* sql`DROP TRIGGER fixture_revoke_failure`
             return
           }
           expect((yield* Effect.promise(() => request("foreign"))).status).toBe(403)

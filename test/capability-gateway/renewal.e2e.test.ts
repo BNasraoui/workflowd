@@ -75,6 +75,7 @@ for (const [mode, start] of gateways) {
     await withGateway(start, async (f, gateway) => {
       // Near the run's deadline a successor cannot outlive its predecessor.
       await f.store(seedLease("run-n", "lease-n", 79, true, Date.now() - 285 * 60000 + 250000))
+      await f.reconcile()
       const relay = client(gateway.port)
       const grant = await opened(f, gateway, null, { lease: "lease-n", run: "79" })
       expect(grant.expiresAt - Date.now()).toBeLessThan(250000)
@@ -160,22 +161,22 @@ test("the gateway deletes the rows of expired run tokens and of expired used pro
     await first.stop()
     const expired = "e".repeat(64)
     const following = "f".repeat(64)
-    await f.sql(
+    await f.gatewaySql(
       (sql) => sql`INSERT INTO capability_tokens(digest,run_id,expires_at,session)
         VALUES(${expired},'run',${Date.now() - 1000},1)`,
     )
-    await f.sql(
+    await f.gatewaySql(
       (sql) => sql`INSERT INTO capability_tokens(digest,run_id,predecessor,expires_at,session)
         VALUES(${following},'run',${expired},${Date.now() + 600000},1)`,
     )
-    await f.sql(
+    await f.gatewaySql(
       (sql) => sql`INSERT INTO capability_proofs(jti_digest,run_id,expires_at)
         VALUES(${"d".repeat(64)},'run',${Date.now() - 1000})`,
     )
     const second = await processGateway(f)
     try {
       const rows = () =>
-        f.sql(
+        f.gatewaySql(
           (sql) => sql`SELECT (SELECT count(*) FROM capability_tokens) AS tokens,
             (SELECT count(*) FROM capability_proofs) AS proofs,
             (SELECT count(*) FROM capability_tokens WHERE predecessor IS NOT NULL) AS linked`,

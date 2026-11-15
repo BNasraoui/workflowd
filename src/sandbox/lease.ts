@@ -18,7 +18,7 @@ import {
 import { sandboxSshArguments, type SandboxTransport } from "./transport"
 import type { makeSandboxGithub } from "./github"
 import type { SavedSandboxPolicy } from "./saved-policy"
-import type { CapabilityGateway } from "../capability-gateway/service"
+import type { DaemonCapability } from "../capability-gateway/control-client"
 import { requireNativePublisherActivation, type PublisherContract } from "./publisher-contract"
 
 type Github = Effect.Success<ReturnType<typeof makeSandboxGithub>>
@@ -220,7 +220,7 @@ export const makeSandboxLeaseService = (
   privateAccess?: {
     readonly publicationContract?: PublisherContract
     readonly native?: {
-      readonly gateway: typeof CapabilityGateway.Service
+      readonly gateway: Pick<DaemonCapability, "authorize" | "revoke" | "sessionBound">
     }
   },
 ) =>
@@ -230,12 +230,16 @@ export const makeSandboxLeaseService = (
     const cleanupGate = yield* Semaphore.make(1)
     const discoveryCursor = new Map<string, string>()
     /**
-     * A private lease waits for its runner: the runner gets a challenge from the gateway and opens
-     * a session with its OIDC proof. The lease is ready once that session exists; until then this
-     * acquisition commits nothing. If committing fails, the run's binding is revoked.
+     * A private lease waits for its runner. workflowd grants the run to the gateway on its control
+     * socket; the runner gets a challenge from the gateway and opens a session with its OIDC proof.
+     * The lease is ready once the gateway answers that the session exists; until then this
+     * acquisition commits nothing. If any step fails, workflowd asks the gateway to revoke the run;
+     * a gateway that is down gets that revoke from the next reconcile.
      */
     const privatePeer = Effect.fn("SandboxLease.privatePeer")(function* <E>(
       lease: NonNullable<Effect.Success<ReturnType<typeof store.read>>>,
+      actionsRunId: number,
+      actionsAttempt: number,
       ready: Effect.Effect<boolean, E>,
     ) {
       const native = privateAccess?.native
@@ -243,8 +247,10 @@ export const makeSandboxLeaseService = (
         return yield* Effect.fail(
           new SandboxError({ message: "Private bootstrap policy unavailable" }),
         )
-      return yield* ready.pipe(
-        Effect.onError(() => native.gateway.revoke(lease.run_id).pipe(Effect.orDie)),
+      return yield* native.gateway.authorize(lease.run_id).pipe(
+        Effect.andThen(native.gateway.sessionBound(lease.run_id, actionsRunId, actionsAttempt)),
+        Effect.andThen((bound) => (bound ? ready : Effect.succeed(false))),
+        Effect.onError(() => native.gateway.revoke(lease.run_id).pipe(Effect.ignore)),
       )
     })
     const required = Effect.fn("SandboxLease.required")(function* (runId: string) {
@@ -399,6 +405,7 @@ export const makeSandboxLeaseService = (
     const release = Effect.fn("SandboxLease.release")(function* (runId: string) {
       const lease = yield* required(runId)
       if (lease.policy.privateBootstrap?.mode === "actions-native" && privateAccess?.native) {
+        // A lease is released only after the gateway confirms the revoke; until then it retries.
         yield* privateAccess.native.gateway
           .revoke(runId)
           .pipe(Effect.tapError((cause) => store.recordError(runId, cause)))
@@ -470,6 +477,8 @@ export const makeSandboxLeaseService = (
                 if (lease.policy.privateBootstrap !== undefined) {
                   yield* privatePeer(
                     lease,
+                    run.id,
+                    run.run_attempt,
                     commit(store.bindSession(runId, run.id, run.run_attempt)),
                   )
                   return

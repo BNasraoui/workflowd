@@ -10,6 +10,10 @@ import { makeSandboxStore } from "../../src/sandbox/store"
 import { serveCapabilityGateway } from "../../src/capability-gateway-server"
 import { fixtureExecutable } from "../helpers/fixture-executable.mjs"
 import { seedCapabilityRun } from "./fixture"
+import {
+  makeDaemonCapability,
+  type DaemonCapability,
+} from "../../src/capability-gateway/control-client"
 
 const { privateKey, publicKey } = generateKeyPairSync("rsa", { modulusLength: 2048 })
 export const jwks = {
@@ -100,8 +104,9 @@ export interface UpstreamRequest {
 }
 
 /**
- * A store, a noscope configuration and the servers a gateway reaches: a key server and a model
- * upstream, each in this process. The run token provider records each start in `mints`, the
+ * workflowd's store and the gateway's, as two files; a noscope configuration and the servers a
+ * gateway reaches: a key server and a model upstream, each in this process. `daemon` runs
+ * workflowd's side of the control socket on workflowd's store. The run token provider records each start in `mints`, the
  * most it saw running at once in `peaks`, waits while `slow` exists, and gives a token that
  * lives `ttl` seconds when that file names fewer than asked. The model upstream records each
  * request it receives.
@@ -172,6 +177,7 @@ try {
     },
   })
   const database = join(root, "workflowd.db")
+  const controlSocket = join(root, "control", "gateway.sock")
   const config = {
     nodeBinary: fixtureExecutable("node"),
     noscope: { binary: fixtureExecutable("noscope"), configHome: root },
@@ -179,12 +185,14 @@ try {
     credentialRole: "fixture",
     maxStreams: 8,
     maxStreamsPerRun: 2,
+    storePath: join(root, "gateway.db"),
+    controlSocket,
+    daemon: { uid: process.getuid!(), gid: process.getgid!() },
     listen: { host: "127.0.0.1", port: 0 },
   }
   const env = {
     PATH: process.env.PATH,
     HOME: root,
-    WORKFLOWD_DATABASE_PATH: database,
     WORKFLOWD_CAPABILITY_GATEWAY: JSON.stringify(config),
   }
   const store = <A, E>(
@@ -200,14 +208,25 @@ try {
         Effect.provide(SqliteClient.layer({ filename: database })),
       ),
     )
-  await store(seedCapabilityRun(Date.now(), true))
+  await store(seedCapabilityRun(Date.now(), true, undefined, { gatewayStore: false }))
   const lines = async (name: string) =>
     (await readFile(join(root, name), "utf8").catch(() => "")).split("\n").filter(Boolean)
+  const daemon = <A, E>(use: (capability: DaemonCapability) => Effect.Effect<A, E>) =>
+    store(
+      Effect.flatMap(
+        makeDaemonCapability({ socket: controlSocket, reconcileEveryMs: 3600000 }),
+        use,
+      ),
+    )
   return {
     root,
     env,
     config,
     store,
+    database,
+    daemon,
+    /** workflowd grants each of its live runs to the gateway and has it revoke the others. */
+    reconcile: () => daemon((capability) => capability.reconcile()),
     keysUrl: `http://127.0.0.1:${keyServer.port}/`,
     upstreamUrl: `http://127.0.0.1:${upstream.port}`,
     keyFetches: () => keyFetches,
@@ -225,6 +244,17 @@ try {
     setStall: (value: boolean) => {
       stall = value
     },
+    /** A query on the gateway's own store, as a test that sets its rows directly needs. */
+    gatewaySql: <A>(query: (sql: SqlClient.SqlClient) => Effect.Effect<A, unknown>) =>
+      Effect.runPromise(
+        Effect.scoped(
+          Effect.gen(function* () {
+            const sql = yield* SqlClient.SqlClient
+            yield* sql`PRAGMA busy_timeout = 5000`
+            return yield* query(sql)
+          }),
+        ).pipe(Effect.provide(SqliteClient.layer({ filename: config.storePath }))),
+      ),
     sql: <A>(query: (sql: SqlClient.SqlClient) => Effect.Effect<A, unknown>) =>
       store(
         Effect.gen(function* () {
@@ -267,13 +297,15 @@ Effect.runFork(runCapabilityGatewayServer(process.env, {
     text += Buffer.from(part.value).toString()
   }
   reader.releaseLock()
-  return {
-    port: Number(/^listening (\d+)$/m.exec(text)?.[1]),
-    stop: async () => {
-      child.kill("SIGKILL")
-      await child.exited
-    },
+  const stop = async () => {
+    child.kill("SIGKILL")
+    await child.exited
   }
+  await f.reconcile().catch(async (error: unknown) => {
+    await stop()
+    throw error
+  })
+  return { port: Number(/^listening (\d+)$/m.exec(text)?.[1]), stop }
 }
 
 /** The same server and listener in this process, so its routes count toward coverage. */
@@ -285,7 +317,12 @@ export async function inProcessGateway(f: Fixture): Promise<Gateway> {
       upstream: (url, init) => fetch(url.replace("https://api.anthropic.com", f.upstreamUrl), init),
     }).pipe(Scope.provide(scope)),
   )
-  return { port: served.port, stop: () => Effect.runPromise(Scope.close(scope, Exit.void)) }
+  const stop = () => Effect.runPromise(Scope.close(scope, Exit.void))
+  await f.reconcile().catch(async (error: unknown) => {
+    await stop()
+    throw error
+  })
+  return { port: served.port, stop }
 }
 
 export const gateways = [

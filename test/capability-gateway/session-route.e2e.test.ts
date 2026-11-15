@@ -55,6 +55,7 @@ test("a lease that does not exist and a lease whose Actions run is not recorded 
       (sql) =>
         sql`UPDATE sandbox_leases SET actions_run_id=84,actions_attempt=1 WHERE lease_id='lease-u'`,
     )
+    await f.reconcile()
     expect((await runner.challenge("lease-u")).status).toBe(200)
   })
 }, 60000)
@@ -66,7 +67,7 @@ for (const [mode, start] of gateways)
       const live = await runner.audience()
       const other = `workflowd:${live.channel}:${randomBytes(32).toString("hex")}`
       expect((await runner.session(proof(other, "jti-other"))).status).toBe(403)
-      await f.sql(
+      await f.gatewaySql(
         (sql) => sql`UPDATE capability_bindings SET challenge_expires=${Date.now() - 1000}`,
       )
       expect((await runner.session(proof(live.audience, "jti-expired"))).status).toBe(403)

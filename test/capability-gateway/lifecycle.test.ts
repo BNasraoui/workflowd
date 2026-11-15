@@ -8,7 +8,7 @@ import { join, resolve } from "node:path"
 import { createServer, type Socket } from "node:net"
 import { AgentRunStoreLive } from "../../src/kernel/agent-run-store"
 import { makeCapabilityGateway } from "../../src/capability-gateway/service"
-import { bindRunSession, seedCapabilityRun } from "./fixture"
+import { bindRunSession, grantLiveRuns, seedCapabilityRun } from "./fixture"
 
 for (const [ending, phase] of [
   ["interrupt", "setup"],
@@ -176,6 +176,8 @@ for (const [ending, phase] of [
           } else if (ending === "interrupt") yield* Fiber.interrupt(pending)
           else if (ending === "cancel") yield* runs.cancel({ runId: "run", now: new Date() })
           else yield* leases.beginRelease("run")
+          // workflowd follows the change with a reconcile on the control socket.
+          if (ending !== "interrupt") yield* grantLiveRuns(Date.now())
           if (phase === "mint") {
             yield* Effect.promise(() => closed.promise)
             if (ending !== "interrupt") yield* Fiber.join(pending)

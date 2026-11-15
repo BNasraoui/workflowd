@@ -13,9 +13,11 @@ import {
 
 /**
  * The gateway image under Docker, against the session fixtures. The preload holds the run under
- * the test resource guard, as test/resources/run.ts does: the fixture's store, noscope
- * providers, key server and model upstream, with the image's own Bun, modules and noscope.
- * Each container runs as the image's own user.
+ * the test resource guard, as test/resources/run.ts does: workflowd's store and the gateway's,
+ * the noscope providers, key server and model upstream, with the image's own Bun, modules and
+ * noscope. Each container runs as the image's own user. This process is workflowd: it grants the
+ * fixture run on the gateway's control socket, which the container serves for the runner's uid
+ * and group.
  */
 const image = "workflowd-gateway:local"
 const imageUser = "10001"
@@ -29,9 +31,10 @@ function runnerGroup() {
 }
 
 /**
- * The image's user reaches the fixture through the runner's group: it writes the store, the mint
- * records and their directories, and reads the noscope providers, which noscope accepts with
- * group read and no access for others. The providers start their scripts with the image's Bun.
+ * The image's user reaches the fixture through the runner's group: it writes its store, makes its
+ * control directory, writes the mint records and their directories, and reads the noscope
+ * providers, which noscope accepts with group read and no access for others. The providers start
+ * their scripts with the image's Bun.
  */
 async function fixtureForImageUser(f: Fixture) {
   for (const name of ["run-capability", "provider-access"]) {
@@ -73,8 +76,12 @@ async function gatewayIds(name: string) {
  */
 async function imageGateway(f: Fixture, entrypoint: boolean): Promise<Gateway> {
   const name = `workflowd-gateway-image-${process.pid}-${++started}`
-  const config = { ...f.config, noscope: { binary: "/bin/noscope", configHome: f.root } }
   const group = runnerGroup()
+  const config = {
+    ...f.config,
+    noscope: { binary: "/bin/noscope", configHome: f.root },
+    daemon: { uid: process.getuid!(), gid: Number(group) },
+  }
   const inject = `import { runCapabilityGatewayServer } from "/app/src/capability-gateway-server.ts"
 import { Effect } from "effect"
 Effect.runFork(runCapabilityGatewayServer(process.env, {
@@ -102,15 +109,12 @@ Effect.runFork(runCapabilityGatewayServer(process.env, {
       "--volume",
       `${f.root}:${f.root}`,
       "--env",
-      "WORKFLOWD_DATABASE_PATH",
-      "--env",
       "WORKFLOWD_CAPABILITY_GATEWAY",
       ...(entrypoint ? [image] : ["--entrypoint", "/bin/bun", image, "-e", inject]),
     ],
     {
       env: {
         PATH: process.env.PATH,
-        WORKFLOWD_DATABASE_PATH: f.env.WORKFLOWD_DATABASE_PATH,
         WORKFLOWD_CAPABILITY_GATEWAY: JSON.stringify(config),
       },
       stdout: "pipe",
@@ -142,6 +146,10 @@ Effect.runFork(runCapabilityGatewayServer(process.env, {
     await stop()
     throw error
   }
+  await f.reconcile().catch(async (error: unknown) => {
+    await stop()
+    throw error
+  })
   return { port: Number(/^listening (\d+)$/m.exec(text)?.[1]), stop }
 }
 

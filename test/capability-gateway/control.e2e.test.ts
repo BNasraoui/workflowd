@@ -4,8 +4,18 @@ import { chmod, mkdir, stat } from "node:fs/promises"
 import { join, resolve } from "node:path"
 import { Effect } from "effect"
 import { AgentRunStore } from "../../src/kernel/agent-run-store"
-import { loadCapabilityGatewayConfig, loadConfig } from "../../src/config"
-import { client, fixture, processGateway, proof, seedLease, sse, type Fixture } from "./gateway-process"
+import { Schema } from "effect"
+import { loadCapabilityGatewayConfig } from "../../src/config"
+import { CapabilityControlConfig } from "../../src/sandbox/config"
+import {
+  client,
+  fixture,
+  processGateway,
+  proof,
+  seedLease,
+  sse,
+  type Fixture,
+} from "./gateway-process"
 
 /**
  * The gateway and the daemon as two processes with two database files. The daemon side is a real
@@ -43,7 +53,7 @@ const commands = {
   seed: (runId, leaseId, actions, native) => seedLease(runId, leaseId, Number(actions), native !== "plain"),
   authorize: (runId) => capability.authorize(runId),
   bound: (runId, actions) => capability.sessionBound(runId, Number(actions), 1),
-  settle: (runId) => Effect.flatMap(AgentRunStore.asEffect(), (runs) => runs.cancel({ runId, now: new Date() })),
+  settle: (runId) => Effect.gen(function* () { yield* (yield* AgentRunStore).cancel({ runId, now: new Date() }) }),
   reconcile: () => capability.reconcile(),
 }
 for await (const line of createInterface({ input: process.stdin })) {
@@ -54,6 +64,14 @@ for await (const line of createInterface({ input: process.stdin })) {
     : { ok: false, tag: exit.cause.reasons.map((r) => r.error?._tag ?? r._tag).join(",") }) + "\\n")
 }
 `
+
+const DaemonAnswer = Schema.fromJsonString(
+  Schema.Struct({
+    ok: Schema.Boolean,
+    value: Schema.optionalKey(Schema.Unknown),
+    tag: Schema.optionalKey(Schema.String),
+  }),
+)
 
 interface Daemon {
   readonly ready: boolean
@@ -88,7 +106,7 @@ async function startDaemon(database: string, socket: string): Promise<Daemon> {
     send: async (command) => {
       void child.stdin.write(`${command}\n`)
       void child.stdin.flush()
-      return JSON.parse(await line()) as { ok: boolean; value?: unknown; tag?: string }
+      return Schema.decodeUnknownSync(DaemonAnswer)(await line())
     },
     stop: async () => {
       child.kill("SIGKILL")
@@ -105,10 +123,16 @@ const gatewayConfig = (f: Fixture, daemonUid = process.getuid!()) => ({
   daemon: { uid: daemonUid, gid: process.getgid!() },
 })
 
+/** The gateway process alone: here the daemon process, not this one, makes every control call. */
 const startGateway = (f: Fixture, config: object = gatewayConfig(f)) =>
   processGateway({
     ...f,
-    env: { PATH: process.env.PATH, HOME: f.root, WORKFLOWD_CAPABILITY_GATEWAY: JSON.stringify(config) },
+    env: {
+      PATH: process.env.PATH,
+      HOME: f.root,
+      WORKFLOWD_CAPABILITY_GATEWAY: JSON.stringify(config),
+    },
+    reconcile: async () => undefined,
   })
 
 const daemonDatabase = (f: Fixture) => join(f.root, "workflowd.db")
@@ -140,7 +164,7 @@ function rawFrame(socket: string, frame: Buffer) {
     let answer = Buffer.alloc(0)
     connection.on("connect", () => connection.write(frame))
     connection.on("data", (chunk) => {
-      answer = Buffer.concat([answer, chunk])
+      answer = Buffer.concat([answer, Buffer.from(chunk)])
     })
     connection.on("error", () => done("error"))
     connection.on("close", () =>
@@ -156,7 +180,10 @@ const framed = (body: string | Buffer, length?: number) => {
 }
 
 async function withProcesses(
-  body: (f: Fixture, parts: { gateway: Awaited<ReturnType<typeof startGateway>>; daemon: Daemon }) => Promise<void>,
+  body: (
+    f: Fixture,
+    parts: { gateway: Awaited<ReturnType<typeof startGateway>>; daemon: Daemon },
+  ) => Promise<void>,
 ) {
   const f = await fixture()
   const stops: Array<() => Promise<void>> = []
@@ -204,7 +231,10 @@ test("a lease that the daemon did not authorize gets no challenge, and the daemo
     expect((await daemon.send("seed run-b lease-b 79")).ok).toBe(true)
     expect((await client(gateway.port).challenge("lease-b")).status).not.toBe(200)
     expect((await daemon.send("settle run-b")).ok).toBe(true)
-    expect(await daemon.send("authorize run-b")).toEqual({ ok: false, tag: "CapabilityControlRefused" })
+    expect(await daemon.send("authorize run-b")).toEqual({
+      ok: false,
+      tag: "CapabilityControlRefused",
+    })
     expect((await client(gateway.port).challenge("lease-b")).status).not.toBe(200)
   })
 })
@@ -220,7 +250,9 @@ test("a restart of the daemon reconciles a run that settled while it was down", 
     await f.store(seedLease("run-n", "lease-n", 90))
     expect((await client(gateway.port).challenge("lease-n")).status).not.toBe(200)
     await f.store(
-      Effect.flatMap(AgentRunStore.asEffect(), (runs) => runs.cancel({ runId: "run", now: new Date() })),
+      Effect.gen(function* () {
+        yield* (yield* AgentRunStore).cancel({ runId: "run", now: new Date() })
+      }),
     )
     const again = await startDaemon(daemonDatabase(f), socketOf(f))
     try {
@@ -258,13 +290,20 @@ test("a run that settled while the gateway was down is revoked when the gateway 
 test("the control socket refuses an unknown verb, a frame that is too long and a body that does not parse", async () => {
   await withProcesses(async (f) => {
     const socket = socketOf(f)
-    expect(JSON.parse(await rawFrame(socket, framed(JSON.stringify({ verb: "events", body: {} }))))).toEqual({
+    expect(
+      JSON.parse(await rawFrame(socket, framed(JSON.stringify({ verb: "events", body: {} })))),
+    ).toEqual({
       ok: false,
       error: "verb",
     })
-    expect(JSON.parse(await rawFrame(socket, framed("{not json")))).toEqual({ ok: false, error: "body" })
+    expect(JSON.parse(await rawFrame(socket, framed("{not json")))).toEqual({
+      ok: false,
+      error: "body",
+    })
     expect(
-      JSON.parse(await rawFrame(socket, framed(JSON.stringify({ verb: "revoke", body: { runId: 7 } })))),
+      JSON.parse(
+        await rawFrame(socket, framed(JSON.stringify({ verb: "revoke", body: { runId: 7 } }))),
+      ),
     ).toEqual({ ok: false, error: "body" })
     expect(JSON.parse(await rawFrame(socket, framed("{}", 4 * 1024 * 1024)))).toEqual({
       ok: false,
@@ -285,11 +324,19 @@ test("the gateway refuses a caller whose uid is not the daemon's", async () => {
   const gateway = await startGateway(f, gatewayConfig(f, process.getuid!() + 1))
   try {
     expect(
-      JSON.parse(await rawFrame(socketOf(f), framed(JSON.stringify({ verb: "reconcile", body: { live: [] } })))),
+      JSON.parse(
+        await rawFrame(
+          socketOf(f),
+          framed(JSON.stringify({ verb: "reconcile", body: { live: [] } })),
+        ),
+      ),
     ).toEqual({ ok: false, error: "caller" })
     const daemon = await startDaemon(daemonDatabase(f), socketOf(f))
     try {
-      expect(await daemon.send("authorize run")).toEqual({ ok: false, tag: "CapabilityControlRefused" })
+      expect(await daemon.send("authorize run")).toEqual({
+        ok: false,
+        tag: "CapabilityControlRefused",
+      })
     } finally {
       await daemon.stop()
     }
@@ -311,17 +358,19 @@ test("neither process can name the other's database", async () => {
     expect(JSON.stringify(loaded)).not.toContain(daemonDatabase(f))
     expect(() =>
       loadCapabilityGatewayConfig({
-        WORKFLOWD_CAPABILITY_GATEWAY: JSON.stringify({ ...config, databasePath: daemonDatabase(f) }),
+        WORKFLOWD_CAPABILITY_GATEWAY: JSON.stringify({
+          ...config,
+          databasePath: daemonDatabase(f),
+        }),
       }),
     ).toThrow()
-    // The daemon's section names only the control socket.
-    const daemonEnv = (control: object) => ({
-      WORKFLOWD_AGENT_RUN_TOKEN: "x".repeat(32),
-      WORKFLOWD_AGENT_RUN_REPOSITORIES: JSON.stringify([{ name: "fixture", path: "/fixture" }]),
-      WORKFLOWD_CAPABILITY_CONTROL: JSON.stringify(control),
-      WORKFLOWD_DATABASE_PATH: daemonDatabase(f),
+    // The daemon's section names only the control socket, as workflowd's config decodes it.
+    const daemonSection = Schema.decodeUnknownSync(CapabilityControlConfig, {
+      onExcessProperty: "error",
     })
-    expect(() => loadConfig(daemonEnv({ socket: socketOf(f), storePath: config.storePath }))).toThrow()
+    expect(daemonSection({ socket: socketOf(f) })).toEqual({ socket: socketOf(f) })
+    expect(() => daemonSection({ socket: socketOf(f), storePath: config.storePath })).toThrow()
+    expect(config.storePath).not.toBe(daemonDatabase(f))
     // A gateway given the daemon's file, and a daemon given the gateway's, each refuse to start.
     await expect(startGateway(f, { ...config, storePath: daemonDatabase(f) })).rejects.toThrow()
     const gateway = await startGateway(f)

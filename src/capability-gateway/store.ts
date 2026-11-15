@@ -1,8 +1,6 @@
 import { createHash, randomBytes } from "node:crypto"
 import { Effect, Schema } from "effect"
 import { SqlClient } from "effect/unstable/sql"
-import { SandboxTransport } from "../sandbox/transport"
-import { authorizeWorker } from "../worker-identity/access"
 
 export class CapabilityRefused extends Schema.TaggedError<CapabilityRefused>()(
   "CapabilityRefused",
@@ -64,8 +62,14 @@ const Row = Schema.Struct({
   session: Schema.Int,
   nonce: Schema.NullOr(Digest),
 })
-const Current = Schema.Struct({
-  runId: Schema.String,
+/**
+ * What workflowd authorized for one run, sent on the control socket. workflowd sends a grant only
+ * for a live run whose lease has recorded its Actions run; `notAfter` ends the run's authority as
+ * workflowd's worker authorization does.
+ */
+export const CapabilityGrant = Schema.Struct({
+  runId: Schema.String.check(Schema.isMaxLength(200)),
+  leaseId: Schema.String.check(Schema.isPattern(/^[a-zA-Z0-9-]{1,80}$/)),
   recipientId: Schema.String,
   attempt: Schema.Int,
   repository: Schema.String,
@@ -78,36 +82,97 @@ const Current = Schema.Struct({
   actionsRunId: Schema.Int,
   actionsAttempt: Schema.Int,
   deadline: Schema.Number,
-  state: Schema.String,
-  createdAt: Schema.String,
-  leaseState: Schema.String,
-  peerId: Schema.NullOr(Schema.String),
-  transport: Schema.NullOr(Schema.fromJsonString(SandboxTransport)),
+  notAfter: Schema.Number,
+  policy: SessionPolicy,
 })
+export type CapabilityGrant = typeof CapabilityGrant.Type
+const StoredGrant = Schema.fromJsonString(CapabilityGrant)
 
-/** Durable authority joins the existing managed recipient/run/lease; it creates no new identity. */
+/** The gateway's own store: the grants workflowd sent, and the bindings and tokens of each. */
 export const makeCapabilityStore = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient
   const current = Effect.fn("CapabilityStore.current")(function* (runId: string, now: number) {
-    const rows = yield* sql`SELECT a.run_id AS runId,d.recipient_id AS recipientId,a.attempt,
-      a.repository,a.provider_id AS providerId,a.model_id AS modelId,a.state,a.created_at AS createdAt,
-      json_extract(l.policy,'$.repositoryId') AS repositoryId,l.source_sha AS sourceSha,
-      json_extract(l.policy,'$.repository') AS repositoryName,
-      json_extract(l.policy,'$.installationId') AS installationId,
-      l.actions_run_id AS actionsRunId,l.actions_attempt AS actionsAttempt,l.deadline,
-      l.state AS leaseState,l.peer_id AS peerId,l.transport
-      FROM kernel_agent_runs a JOIN sandbox_leases l ON l.run_id=a.run_id
-      JOIN directory_managed d ON d.run_id=a.run_id
-      WHERE a.run_id=${runId} AND a.repository=json_extract(l.policy,'$.alias')`
-    if (rows.length !== 1) return yield* Effect.fail(new CapabilityRefused())
-    const value = yield* Schema.decodeUnknownEffect(Current)(rows[0])
-    if (
-      !authorizeWorker({ state: value.state, createdAt: new Date(value.createdAt) }, now) ||
-      value.deadline <= now ||
-      !["starting", "ready"].includes(value.leaseState)
-    )
+    const rows = yield* sql<{
+      readonly grant_json: string
+    }>`SELECT grant_json FROM capability_grants WHERE run_id=${runId} AND revoked=0`
+    if (rows.length !== 1 || rows[0] === undefined)
+      return yield* Effect.fail(new CapabilityRefused())
+    const value = yield* Schema.decodeUnknownEffect(StoredGrant)(rows[0].grant_json)
+    if (value.deadline <= now || value.notAfter <= now)
       return yield* Effect.fail(new CapabilityRefused())
     return value
+  })
+  /** Ends a run: its grant and its binding. A revoked run is never granted again. */
+  const revokeRun = (runId: string) =>
+    Effect.gen(function* () {
+      yield* sql`UPDATE capability_grants SET revoked=1 WHERE run_id=${runId}`
+      yield* sql`UPDATE capability_bindings SET revoked=1 WHERE run_id=${runId}`
+    })
+  /**
+   * Holds a grant. A new run is recorded; the same grant again changes nothing. A grant that
+   * differs from the one held (a new attempt, another Actions run) revokes the run, as does a
+   * lease that another run holds; a revoked run stays revoked.
+   */
+  const hold = (grant: CapabilityGrant) =>
+    Effect.gen(function* () {
+      const encoded = yield* Schema.encodeEffect(StoredGrant)(grant)
+      const rows = yield* sql<{
+        readonly run_id: string
+        readonly grant_json: string
+        readonly revoked: number
+      }>`SELECT run_id,grant_json,revoked FROM capability_grants
+        WHERE run_id=${grant.runId} OR lease_id=${grant.leaseId}`
+      if (rows.length === 0) {
+        yield* sql`INSERT INTO capability_grants(run_id,lease_id,grant_json)
+          VALUES(${grant.runId},${grant.leaseId},${encoded})`
+        return "held" as const
+      }
+      const row = rows[0]
+      if (rows.length === 1 && row?.revoked === 0 && row.grant_json === encoded) return "held"
+      for (const { run_id } of rows) yield* revokeRun(run_id)
+      return "revoked" as const
+    })
+  const authorizeGrant = Effect.fn("CapabilityStore.authorizeGrant")(function* (grant: unknown) {
+    const value = yield* Schema.decodeUnknownEffect(CapabilityGrant)(grant)
+    return { runId: value.runId, held: (yield* sql.withTransaction(hold(value))) === "held" }
+  })
+  /**
+   * Brings the gateway to workflowd's live runs: each grant is held as `authorizeGrant` holds
+   * it, and every held run that workflowd did not name is revoked. Returns the revoked runs.
+   */
+  const reconcileGrants = Effect.fn("CapabilityStore.reconcileGrants")(function* (
+    live: ReadonlyArray<unknown>,
+  ) {
+    const grants = yield* Schema.decodeUnknownEffect(Schema.Array(CapabilityGrant))(live)
+    return yield* sql.withTransaction(
+      Effect.gen(function* () {
+        const before = yield* sql<{
+          readonly run_id: string
+        }>`SELECT run_id FROM capability_grants WHERE revoked=0`
+        const named = new Set(grants.map((grant) => grant.runId))
+        const revoked = new Set<string>()
+        for (const grant of grants) if ((yield* hold(grant)) === "revoked") revoked.add(grant.runId)
+        for (const { run_id } of before)
+          if (!named.has(run_id)) {
+            yield* revokeRun(run_id)
+            revoked.add(run_id)
+          }
+        return [...revoked]
+      }),
+    )
+  })
+  /** Whether the runner of this Actions run holds a live session for the run. */
+  const sessionBound = Effect.fn("CapabilityStore.sessionBound")(function* (
+    runId: string,
+    actionsRunId: number,
+    actionsAttempt: number,
+  ) {
+    const rows = yield* sql`SELECT 1 FROM capability_bindings b
+      JOIN capability_grants g ON g.run_id=b.run_id
+      WHERE b.run_id=${runId} AND b.session>0 AND b.revoked=0 AND g.revoked=0
+      AND json_extract(g.grant_json,'$.actionsRunId')=${actionsRunId}
+      AND json_extract(g.grant_json,'$.actionsAttempt')=${actionsAttempt}`
+    return rows.length === 1
   })
   const read = Effect.fn("CapabilityStore.read")(function* (
     binding: CapabilityBinding,
@@ -234,8 +299,8 @@ export const makeCapabilityStore = Effect.gen(function* () {
   /**
    * A runner's challenge for its lease. While an unused challenge is alive, every request gets
    * that same nonce and expiry back, so asking again costs the run nothing; otherwise a new nonce
-   * replaces it. A lease that does not exist and a lease whose Actions run is not recorded yet get
-   * the same answer: the runner may ask before the daemon records its run.
+   * replaces it. A lease that workflowd has not granted gets the same answer whether or not it
+   * exists: the runner may ask before workflowd records its Actions run and sends the grant.
    */
   const leaseChallenge = Effect.fn("CapabilityStore.leaseChallenge")(function* (
     leaseId: string,
@@ -245,16 +310,10 @@ export const makeCapabilityStore = Effect.gen(function* () {
     return yield* sql.withTransaction(
       Effect.gen(function* () {
         const rows = yield* sql<{
-          readonly run_id: unknown
-          readonly actions_run_id: unknown
-        }>`SELECT run_id,actions_run_id FROM sandbox_leases
-          WHERE lease_id=${leaseId} AND json_extract(policy,'$.privateBootstrap.mode')='actions-native'`
+          readonly run_id: string
+        }>`SELECT run_id FROM capability_grants WHERE lease_id=${leaseId}`
         const runId = rows[0]?.run_id
-        if (
-          rows.length !== 1 ||
-          typeof runId !== "string" ||
-          typeof rows[0]?.actions_run_id !== "number"
-        )
+        if (rows.length !== 1 || runId === undefined)
           return yield* Effect.fail(new CapabilityNotReady())
         const value = yield* current(runId, now)
         const bound = yield* sql`SELECT * FROM capability_bindings WHERE run_id=${runId}`
@@ -328,9 +387,10 @@ export const makeCapabilityStore = Effect.gen(function* () {
     proof: { readonly channel: string; readonly nonce: string; readonly jti: string },
     now: number,
   ) {
-    const rows = yield* sql`SELECT b.run_id AS runId,l.lease_id AS leaseId,l.policy,
+    const rows = yield* sql`SELECT b.run_id AS runId,g.lease_id AS leaseId,
+      json_extract(g.grant_json,'$.policy') AS policy,
       b.challenge_expires AS challengeExpires,json_extract(b.authority,'$.recipientId') AS recipientId
-      FROM capability_bindings b JOIN sandbox_leases l ON l.run_id=b.run_id
+      FROM capability_bindings b JOIN capability_grants g ON g.run_id=b.run_id
       WHERE b.channel=${proof.channel} AND b.challenge=${capabilityDigest(proof.nonce)}
       AND b.session<${maxSessions} AND b.revoked=0`
     if (rows.length !== 1) return yield* Effect.fail(new CapabilityRefused())
@@ -406,8 +466,11 @@ export const makeCapabilityStore = Effect.gen(function* () {
     renewable,
     renew,
     sweep,
+    authorizeGrant,
+    reconcileGrants,
+    sessionBound,
     revoke: Effect.fn("CapabilityStore.revoke")((runId: string) =>
-      sql`UPDATE capability_bindings SET revoked=1 WHERE run_id=${runId}`.pipe(Effect.asVoid),
+      sql.withTransaction(revokeRun(runId)),
     ),
   }
 })

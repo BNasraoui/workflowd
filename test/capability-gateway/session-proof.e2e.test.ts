@@ -67,6 +67,7 @@ test("the runner's helper waits while the gateway answers 503 for its first minu
             yield* (yield* makeSandboxStore).recordRun("run-w", 79, 1)
           }),
         )
+        await f.reconcile()
       }
     }
     let proofs = 0

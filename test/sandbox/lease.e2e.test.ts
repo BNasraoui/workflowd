@@ -1080,13 +1080,22 @@ test("an actions-native lease becomes ready on its runner's gateway session, and
     Effect.gen(function* () {
       const { sql, leases } = yield* seedCapabilityRun(now, true)
       const gateway = yield* makeCapabilityStore
+      // As the lease service does: the lease is ready only when the gateway answers that the
+      // runner of this Actions run holds a session.
+      const bindSession = (runId: string, actionsRunId: number, attempt: number) =>
+        gateway
+          .sessionBound(runId, actionsRunId, attempt)
+          .pipe(
+            Effect.flatMap((bound) =>
+              bound ? leases.bindSession(runId, actionsRunId, attempt) : Effect.succeed(false),
+            ),
+          )
       const state = () =>
         sql`SELECT state,peer_id AS peerId,transport FROM sandbox_leases WHERE run_id='run'`
-      // Migration 0041 rebuilt the table with its index and triggers.
+      // Migration 0041 rebuilt the table with its index and triggers; 0044 took the gateway's out.
       expect(
         yield* sql`SELECT type,name FROM sqlite_master WHERE tbl_name='sandbox_leases' AND type!='table' AND sql IS NOT NULL ORDER BY name`,
       ).toEqual([
-        { type: "trigger", name: "capability_lease_revoke" },
         { type: "index", name: "sandbox_actions_run" },
         { type: "trigger", name: "sandbox_immutable_intent" },
         { type: "trigger", name: "sandbox_lease_custody_fence" },
@@ -1095,9 +1104,9 @@ test("an actions-native lease becomes ready on its runner's gateway session, and
         (yield* Effect.result(sql`UPDATE sandbox_leases SET source_sha=${"e".repeat(40)}`))._tag,
       ).toBe("Failure")
       // No binding, then a challenge without a session: the lease stays starting.
-      expect(yield* leases.bindSession("run", 78, 1)).toBe(false)
+      expect(yield* bindSession("run", 78, 1)).toBe(false)
       const challenge = yield* gateway.leaseChallenge("lease", now)
-      expect(yield* leases.bindSession("run", 78, 1)).toBe(false)
+      expect(yield* bindSession("run", 78, 1)).toBe(false)
       yield* gateway.bindSession(
         { ...challenge, runId: "run", recipientId: "managed:fixture-controller:run" },
         "jti-1",
@@ -1106,12 +1115,12 @@ test("an actions-native lease becomes ready on its runner's gateway session, and
         now,
       )
       // Another Actions run or attempt does not take the session.
-      expect(yield* leases.bindSession("run", 79, 1)).toBe(false)
-      expect(yield* leases.bindSession("run", 78, 2)).toBe(false)
+      expect(yield* bindSession("run", 79, 1)).toBe(false)
+      expect(yield* bindSession("run", 78, 2)).toBe(false)
       expect(yield* state()).toEqual([{ state: "starting", peerId: null, transport: null }])
-      expect(yield* leases.bindSession("run", 78, 1)).toBe(true)
+      expect(yield* bindSession("run", 78, 1)).toBe(true)
       expect(yield* state()).toEqual([{ state: "ready", peerId: null, transport: null }])
-      expect(yield* leases.bindSession("run", 78, 1)).toBe(false)
+      expect(yield* bindSession("run", 78, 1)).toBe(false)
       // Without actions-native bootstrap, a ready lease still needs an SSH peer and transport.
       const ready = (id: string, policy: string) =>
         Effect.result(sql`INSERT INTO sandbox_leases(run_id,lease_id,policy,source_sha,state,actions_run_id,actions_attempt,created_at,heartbeat_at,deadline)
@@ -1142,7 +1151,7 @@ test("a revoked gateway binding does not make its lease ready", async () => {
         now,
       )
       yield* gateway.revoke("run")
-      expect(yield* leases.bindSession("run", 78, 1)).toBe(false)
+      expect(yield* gateway.sessionBound("run", 78, 1)).toBe(false)
       expect((yield* leases.read("run"))?.state).toBe("starting")
     }).pipe(
       Effect.provide(AgentRunStoreLive),

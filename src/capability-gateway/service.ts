@@ -8,6 +8,7 @@ import { githubJobKeys, verifyJobProof } from "../sandbox/bootstrap"
 import { runLifetime } from "../store/run-lifetime"
 import { ownedPromise } from "./owned"
 import { gitReadRequest, type GitUpstream } from "./git"
+import type { ControlTarget } from "./control"
 import type { makeTokenBroker } from "../worker-identity/broker"
 
 export interface GatewayConfiguration {
@@ -143,8 +144,8 @@ export const makeCapabilityGateway = (
         for (const [controller, owner] of active.get(runId) ?? [])
           if (owner.session === session && owner.digest === digest) controller.abort()
     }
-    // Bindings outlive this process: a restart revokes nothing. Another process (workflowd, or a
-    // second gateway) revokes or opens a new session through the store, so live streams follow it.
+    // Bindings outlive this process: a restart revokes nothing. A stream whose binding moved to a
+    // later session, or whose run token a renewal replaced, ends within a second.
     yield* Effect.suspend(() => store.staleAmong(streams())).pipe(
       Effect.tap((stale) => Effect.sync(() => abortStale(stale))),
       Effect.ignore,
@@ -513,7 +514,32 @@ export const makeCapabilityGateway = (
       },
       Effect.catch(() => Effect.succeed(unavailable())),
     )
-    return { sessionChallenge, session, revoke, handle }
+    /** workflowd's calls on the control socket. Each revoked run's open streams end at once. */
+    const control: ControlTarget = {
+      authorize: (grant) =>
+        store
+          .authorizeGrant(grant)
+          .pipe(
+            Effect.flatMap(({ runId, held }) =>
+              held
+                ? Effect.void
+                : Effect.sync(() => abortRun(runId)).pipe(
+                    Effect.andThen(Effect.fail(new CapabilityRefused())),
+                  ),
+            ),
+          ),
+      revoke,
+      reconcile: (live) =>
+        store.reconcileGrants(live).pipe(
+          Effect.tap((revoked) =>
+            Effect.sync(() => {
+              for (const runId of revoked) abortRun(runId)
+            }),
+          ),
+        ),
+      sessionBound: store.sessionBound,
+    }
+    return { sessionChallenge, session, revoke, control, handle }
   })
 
 export const CapabilityGateway = Context.Service<

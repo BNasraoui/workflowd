@@ -4,8 +4,7 @@ import { SqliteClient } from "@effect/sql-sqlite-bun"
 import { SqlClient } from "effect/unstable/sql"
 import { AgentRunStoreLive, AgentRunStore } from "../../src/kernel/agent-run-store"
 import { makeCapabilityStore } from "../../src/capability-gateway/store"
-import { bindRunSession, seedCapabilityRun } from "./fixture"
-import { capabilitySession } from "../../src/store/0040-capability-session"
+import { bindRunSession, grantLiveRuns, seedCapabilityRun } from "./fixture"
 
 const now = Date.now()
 const seed = Effect.gen(function* () {
@@ -52,6 +51,8 @@ test("a session proof is single-use and tokens bind existing run, recipient and 
         "Failure",
       )
       yield* sql`UPDATE directory_managed SET recipient_id='other-recipient' WHERE run_id='run'`
+      // workflowd sends the changed grant; the gateway revokes the run.
+      yield* grantLiveRuns(now)
       expect((yield* Effect.result(store.authorize(binding, "a".repeat(64), now)))._tag).toBe(
         "Failure",
       )
@@ -85,6 +86,7 @@ test("renewal cannot resurrect expiry or survive durable revocation and restart"
         ))._tag,
       ).toBe("Failure")
       yield* runs.cancel({ runId: "run", now: new Date(now + 3) })
+      yield* grantLiveRuns(now + 3)
       expect((yield* Effect.result(store.authorize(binding, "c".repeat(64), now + 4)))._tag).toBe(
         "Failure",
       )
@@ -123,6 +125,8 @@ test("accepted grant rejects each durable identity/context swap with adjacent ro
           .withTransaction(
             Effect.gen(function* () {
               yield* swap
+              // workflowd sends the changed grant, or none for a run that is no longer live.
+              yield* grantLiveRuns(now)
               expect(
                 (yield* Effect.result(store.authorize(binding, "a".repeat(64), now)))._tag,
               ).toBe("Failure")
@@ -173,42 +177,6 @@ test("accepted grant rejects each durable identity/context swap with adjacent ro
         expect(
           (yield* Effect.result(store.authorize(binding, digest.repeat(64), now + 3)))._tag,
         ).toBe("Failure")
-    }),
-  )
-})
-
-test("the session migration keeps bindings, their tokens and revocation", async () => {
-  await run(
-    Effect.gen(function* () {
-      const { store, leases, sql } = yield* seed
-      yield* sql`PRAGMA foreign_keys = ON`
-      const { binding } = yield* bindRunSession(now, {
-        digest: "a".repeat(64),
-        expiresAt: now + 60000,
-      })
-      yield* store.renew(binding, "a".repeat(64), "b".repeat(64), now + 200000, now + 1)
-      const count = () =>
-        sql`SELECT (SELECT count(*) FROM capability_tokens) AS tokens,
-          (SELECT count(*) FROM sqlite_master WHERE name='capability_tokens_run') AS indexes`
-      expect(yield* count()).toEqual([{ tokens: 2, indexes: 1 }])
-      // Back to the schema before 0040's columns, then migrate again over a bound row and a
-      // renewal chain.
-      yield* sql`DROP TABLE capability_proofs`
-      yield* sql`ALTER TABLE capability_tokens DROP COLUMN session`
-      yield* sql`ALTER TABLE capability_bindings DROP COLUMN session`
-      yield* sql`ALTER TABLE capability_bindings DROP COLUMN nonce`
-      yield* sql.withTransaction(capabilitySession)
-      expect(yield* count()).toEqual([{ tokens: 2, indexes: 1 }])
-      expect(yield* sql`SELECT session FROM capability_bindings`).toEqual([{ session: 0 }])
-      expect(yield* sql`SELECT DISTINCT session FROM capability_tokens`).toEqual([{ session: 0 }])
-      expect(yield* sql`SELECT count(*) AS proofs FROM capability_proofs`).toEqual([{ proofs: 0 }])
-      // A binding from before the session columns has no session, so it authorizes nothing.
-      expect((yield* Effect.result(store.authorize(binding, "b".repeat(64), now + 2)))._tag).toBe(
-        "Failure",
-      )
-      expect(yield* sql`PRAGMA foreign_key_check`).toEqual([])
-      yield* leases.beginRelease("run")
-      expect(yield* sql`SELECT revoked FROM capability_bindings`).toEqual([{ revoked: 1 }])
     }),
   )
 })
