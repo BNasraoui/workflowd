@@ -185,6 +185,12 @@ jobs:
       # capability-security suites do.
       - name: Prepare pinned fixture-only tools
         run: node deploy/sandbox/public-output.mjs setup -- bash scripts/evidence/capability-ci-setup.sh tools
+      # The gateway passes only the anthropic-beta values of its list; this records the values
+      # that the pinned Claude Code sends, and fails when one is not on that list.
+      - name: Record the anthropic-beta values of the pinned Claude Code
+        run: |
+          WORKFLOWD_FIXTURE_NOSCOPE="$RUNNER_TEMP/capability-tools/bin/noscope" \
+            bun test test/capability-gateway/claude-pinned.test.ts
       - name: Verify credential probe entrypoints
         run: >-
           systemd-run --user --wait --pipe --collect

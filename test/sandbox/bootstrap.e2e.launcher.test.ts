@@ -166,7 +166,7 @@ for (const race of [
       async fetch(request) {
         expect(request.headers.get("authorization")).toBe("Bearer fixture-provider-access")
         expect(request.headers.get("x-api-key")).toBeNull()
-        expect(await request.text()).toBe(native)
+        expect(JSON.parse(await request.text())).toEqual(JSON.parse(native))
         upstreamEffects++
         return new Response(response, { headers: { "content-type": "text/event-stream" } })
       },

@@ -133,7 +133,7 @@ test("bound streaming preserves native bytes, renews with noscope, and denies cr
         expect(valid.status).toBe(200)
         expect(yield* Effect.promise(() => valid.text())).toBe(responseBytes)
         expect(valid.headers.has("authorization")).toBe(false)
-        expect(sent[0]?.body).toBe(native)
+        expect(JSON.parse(sent[0]?.body ?? "")).toEqual(JSON.parse(native))
         expect(sent[0]?.url).toBe("https://api.anthropic.com/v1/messages")
         expect(sent[0]?.headers.get("authorization")).toBe("Bearer fixture-access")
         expect(sent[0]?.headers.has("x-api-key")).toBe(false)

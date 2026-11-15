@@ -67,13 +67,44 @@ export const proof = (
   return `${input}.${sign("RSA-SHA256", Buffer.from(input), privateKey).toString("base64url")}`
 }
 
-export const sse = "event: message_start\ndata: {}\n\nevent: message_stop\ndata: {}\n\n"
+const event = (type: string, value: object) =>
+  `event: ${type}\ndata: ${JSON.stringify({ type, ...value })}\n\n`
+/** A complete Anthropic message stream, so a real client finishes its call on it. */
+export const sse =
+  event("message_start", {
+    message: {
+      id: "msg_fixture",
+      type: "message",
+      role: "assistant",
+      model: "fixture-model",
+      content: [],
+      stop_reason: null,
+      stop_sequence: null,
+      usage: { input_tokens: 1, output_tokens: 1 },
+    },
+  }) +
+  event("content_block_start", { index: 0, content_block: { type: "text", text: "" } }) +
+  event("content_block_delta", { index: 0, delta: { type: "text_delta", text: "ok" } }) +
+  event("content_block_stop", { index: 0 }) +
+  event("message_delta", {
+    delta: { stop_reason: "end_turn", stop_sequence: null },
+    usage: { output_tokens: 1 },
+  }) +
+  event("message_stop", {})
+
+/** A request that reached the model upstream: its path and query, headers and body text. */
+export interface UpstreamRequest {
+  readonly path: string
+  readonly headers: Record<string, string>
+  readonly body: string
+}
 
 /**
  * A store, a noscope configuration and the servers a gateway reaches: a key server and a model
  * upstream, each in this process. The run token provider records each start in `mints`, the
  * most it saw running at once in `peaks`, waits while `slow` exists, and gives a token that
- * lives `ttl` seconds when that file names fewer than asked.
+ * lives `ttl` seconds when that file names fewer than asked. The model upstream records each
+ * request it receives.
  */
 export async function fixture() {
   const root = await mkdtemp(join(tmpdir(), "wfd-gateway-process-"))
@@ -108,11 +139,18 @@ try {
       { mode: 0o600 },
     )
   let stall = false
+  const received: UpstreamRequest[] = []
   const upstream = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
-    fetch: () =>
-      new Response(
+    fetch: async (request) => {
+      const url = new URL(request.url)
+      received.push({
+        path: url.pathname + url.search,
+        headers: Object.fromEntries(request.headers),
+        body: await request.text(),
+      })
+      return new Response(
         stall
           ? new ReadableStream({
               start(controller) {
@@ -121,7 +159,8 @@ try {
             })
           : sse,
         { headers: { "content-type": "text/event-stream" } },
-      ),
+      )
+    },
   })
   let keyFetches = 0
   const keyServer = Bun.serve({
@@ -181,6 +220,8 @@ try {
       seconds === null
         ? rm(join(root, "ttl"), { force: true })
         : writeFile(join(root, "ttl"), String(seconds)),
+    /** Each request that reached the model upstream, in order. */
+    upstreamRequests: (): ReadonlyArray<UpstreamRequest> => received,
     setStall: (value: boolean) => {
       stall = value
     },
@@ -335,7 +376,8 @@ export const client = (port: number) => {
         deadline: Schema.optionalKey(Schema.Number),
       }),
     )(await response.json())
-  const call = (token: string) =>
+  /** A Claude messages call with `body` as its exact text; `headers` add to or replace the usual. */
+  const provider = (token: string, body: string, headers: Record<string, string> = {}) =>
     fetch(url("/capabilities/v1/providers/anthropic/v1/messages"), {
       method: "POST",
       headers: {
@@ -343,16 +385,19 @@ export const client = (port: number) => {
         "content-type": "application/json",
         "anthropic-version": "2023-06-01",
         "anthropic-beta": "oauth-2025-04-20",
+        ...headers,
       },
-      body: JSON.stringify({ model: "fixture-model", stream: true, messages: [] }),
+      body,
     })
+  const call = (token: string) =>
+    provider(token, JSON.stringify({ model: "fixture-model", stream: true, messages: [] }))
   const renew = (token: string) =>
     fetch(url("/capabilities/v1/renew"), {
       method: "POST",
       headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
       body: "{}",
     })
-  return { url, challenge, audience, session, grant, call, renew }
+  return { url, challenge, audience, session, grant, provider, call, renew }
 }
 
 /** Starts a gateway with `start`, runs `body` against it, and always stops both. */
