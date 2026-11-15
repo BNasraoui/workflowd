@@ -7,6 +7,24 @@ import { claudeBetas } from "../../src/capability-gateway/claude"
 import { fixtureExecutable } from "../helpers/fixture-executable.mjs"
 import { client, processGateway, proof, sse, withGateway } from "./gateway-process"
 
+/**
+ * The network interfaces of this process's network namespace: the names of /proc/self/net/dev.
+ * CI runs this file in a namespace of its own, with loopback up and no other interface.
+ */
+const interfaces = () =>
+  readFileSync("/proc/self/net/dev", "utf8")
+    .split("\n")
+    .slice(2)
+    .map((line) => line.split(":")[0]!.trim())
+    .filter(Boolean)
+
+/** Fails unless loopback is the only network here, so the client can reach nothing else. */
+function requireLoopbackOnly() {
+  const names = interfaces()
+  if (names.length !== 1 || names[0] !== "lo")
+    throw new Error("the pinned client runs only in a network namespace with only loopback")
+}
+
 /** The one Claude Code version of the repository, which CI installs. */
 const pinned = `${readFileSync("test/resources/claude-code-version", "utf8").trim()} (Claude Code)`
 const claude = fixtureExecutable("claude")
@@ -19,13 +37,15 @@ interface Sent {
 
 /**
  * Runs the pinned client once, in print mode, against `baseUrl` with `token` as its OAuth token.
- * `forward` answers each request it sends; the run has its own home and no other network use.
+ * `forward` answers each request it sends; the run has its own home, and loopback is its only
+ * network.
  */
 async function runPinned(
   model: string,
   token: string,
   forward: (request: Request, body: string) => Promise<Response>,
 ) {
+  requireLoopbackOnly()
   const home = await mkdtemp(join(tmpdir(), "wfd-pinned-claude-"))
   const sent: Sent[] = []
   const recorder = Bun.serve({
@@ -64,7 +84,16 @@ async function runPinned(
   }
 }
 
+test("this file runs in a network namespace whose only interface is loopback", () => {
+  const names = interfaces()
+  expect({ interfaces: names.length, loopback: names.includes("lo") }).toEqual({
+    interfaces: 1,
+    loopback: true,
+  })
+})
+
 test("the pinned Claude Code is the one CI installs", async () => {
+  requireLoopbackOnly()
   const version = Bun.spawn([claude, "--version"], { stdout: "pipe", stderr: "ignore" })
   expect((await new Response(version.stdout).text()).trim()).toBe(pinned)
 })

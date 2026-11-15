@@ -1,4 +1,4 @@
-import { maxProofLength } from "./capability-limits.mjs"
+import { maxProofLength, providerIdPattern } from "./capability-limits.mjs"
 /** The gateway's origin: HTTPS only, with no credentials, path, query or fragment. */
 export function gatewayOrigin(value) {
   const url = new URL(value)
@@ -37,13 +37,15 @@ const pause = (milliseconds, signal) =>
   })
 
 /**
- * Network failures that can clear by a wait: a refused connection, a reset, a timeout, and a
- * name that does not resolve yet (the first seconds after the runner joins the tailnet), by the
- * codes of Node's fetch and of Bun's. Bun 1.3 reports a name that does not resolve as
- * ConnectionRefused or FailedToOpenSocket.
+ * Network failures that can clear by a wait: a refused connection, a reset, a timeout, a name
+ * that does not resolve yet, and a route that is not up yet (the first seconds after the runner
+ * joins the tailnet), by the codes of Node's fetch and of Bun's. Bun 1.3 reports a name that does
+ * not resolve as ConnectionRefused or FailedToOpenSocket.
  */
 const passing = new Set([
   "ECONNREFUSED",
+  "EHOSTUNREACH",
+  "ENETUNREACH",
   "ConnectionRefused",
   "FailedToOpenSocket",
   "ConnectionClosed",
@@ -70,9 +72,9 @@ const passes = (error) =>
 /**
  * Opens the run's gateway session: a challenge for the lease, an OIDC proof for that challenge,
  * and the session post. A challenge that is not ready (503, a refused connection, a reset, a
- * timeout or a name that does not resolve yet) uses no attempt: the helper waits, with backoff up
- * to 10 seconds, for at most `wait` milliseconds in all, since the daemon may record the Actions
- * run after the runner first asks.
+ * timeout, a name that does not resolve yet or a route that is not up yet) uses no attempt: the
+ * helper waits, with backoff up to 10 seconds, for at most `wait` milliseconds in all, since the
+ * daemon may record the Actions run after the runner first asks.
  * Any other failure of the challenge ends the exchange at once: a refused challenge (a lease id
  * that is not well formed), another status, and a certificate that the runner does not trust,
  * which no wait can clear. An answer can be lost after the gateway sent it, so a lost or refused
@@ -165,13 +167,16 @@ async function postSession(send, origin, token, bounded) {
     if (
       /^[A-Za-z0-9_-]{43}$/.test(grant.token) &&
       [grant.expiresAt, grant.renewAt, grant.deadline].every(Number.isSafeInteger) &&
-      grant.expiresAt <= grant.deadline
+      grant.expiresAt <= grant.deadline &&
+      typeof grant.providerId === "string" &&
+      providerIdPattern.test(grant.providerId)
     )
       return {
         token: grant.token,
         expiresAt: grant.expiresAt,
         renewAt: grant.renewAt,
         deadline: grant.deadline,
+        providerId: grant.providerId,
       }
     return undefined
   } catch (error) {

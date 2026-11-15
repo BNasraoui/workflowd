@@ -1,13 +1,23 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
-import { createServer } from "node:https"
+import { Agent, createServer } from "node:https"
 import { once } from "node:events"
 import { mkdtemp, readFile, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { serveRunnerRelay } from "../../../deploy/sandbox/capability-relay.mjs"
 
-test("a renewal answered after stop sends no further request", async (t) => {
+/** Runs the event loop for `cycles` turns; the mocked timers do not move. */
+const turns = async (cycles) => {
+  for (let cycle = 0; cycle < cycles; cycle++)
+    await new Promise((resolve) => globalThis.setImmediate(resolve))
+}
+
+/**
+ * A relay whose renewal is in flight at a gateway that has not answered it yet. `body` gets the
+ * relay, the gateway's pending response and request, and the count of renewal requests.
+ */
+async function renewalInFlight(t, body) {
   const root = await mkdtemp(join(tmpdir(), "relay-stop-"))
   const server = createServer({
     key: await readFile(process.env.RELAY_CLOCK_KEY),
@@ -19,7 +29,7 @@ test("a renewal answered after stop sends no further request", async (t) => {
     request.resume()
     request.once("end", () => {
       attempts++
-      first.resolve(response)
+      first.resolve({ request, response })
     })
   })
   server.listen(0, "127.0.0.1")
@@ -32,13 +42,42 @@ test("a renewal answered after stop sends no further request", async (t) => {
       expiresAt: now + 3600000,
       renewAt: now + 2700000,
       deadline: now + 7200000,
+      providerId: "anthropic",
       gateway: `https://127.0.0.1:${server.address().port}`,
     },
     root,
   )
   try {
     t.mock.timers.tick(2700000)
-    const response = await first.promise
+    const { request, response } = await first.promise
+    await body({ relay, request, response, now, attempts: () => attempts })
+  } finally {
+    relay.close()
+    server.closeAllConnections()
+    server.close()
+    t.mock.timers.reset()
+    await rm(root, { recursive: true, force: true })
+  }
+}
+
+test("stop cuts the connection of a renewal in flight", async (t) => {
+  await renewalInFlight(t, async ({ relay, request }) => {
+    let cut = false
+    request.socket.once("close", () => {
+      cut = true
+    })
+    relay.close()
+    for (let cycle = 0; cycle < 200 && !cut; cycle++) await turns(1)
+    assert.equal(cut, true)
+  })
+})
+
+test("a renewal answered after stop sends no further request, also when the agent keeps its connection", async (t) => {
+  // An agent whose destroy cuts nothing: the stop must not depend on the agent's internals.
+  t.mock.method(Agent.prototype, "destroy", function () {
+    return this
+  })
+  await renewalInFlight(t, async ({ relay, response, now, attempts }) => {
     relay.close()
     response.writeHead(200, { "content-type": "application/json" })
     response.end(
@@ -49,18 +88,11 @@ test("a renewal answered after stop sends no further request", async (t) => {
       }),
     )
     await once(response, "finish")
-    for (let cycle = 0; cycle < 50; cycle++)
-      await new Promise((resolve) => globalThis.setImmediate(resolve))
+    await turns(50)
     for (let step = 0; step < 10; step++) {
       t.mock.timers.tick(600000)
-      await new Promise((resolve) => globalThis.setImmediate(resolve))
+      await turns(1)
     }
-    assert.equal(attempts, 1)
-  } finally {
-    relay.close()
-    server.closeAllConnections()
-    server.close()
-    t.mock.timers.reset()
-    await rm(root, { recursive: true, force: true })
-  }
+    assert.equal(attempts(), 1)
+  })
 })

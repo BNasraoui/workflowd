@@ -4,7 +4,7 @@ import { Cause, Effect, Exit, Schema } from "effect"
 import { SqlClient } from "effect/unstable/sql"
 import { AgentRunStore } from "../../src/kernel/agent-run-store"
 import { capabilityDigest, makeCapabilityStore } from "../../src/capability-gateway/store"
-import { makeCapabilityGateway } from "../../src/capability-gateway/service"
+import { makeCapabilityRevoke } from "../../src/capability-gateway/service"
 import { makeSandboxStore } from "../../src/sandbox/store"
 import { serveCapabilityGateway } from "../../src/capability-gateway-server"
 import {
@@ -111,11 +111,13 @@ async function scenario(start: (f: Fixture) => Promise<Gateway>) {
     expect(granted.status).toBe(200)
     const grant = await Grant(granted)
     expect(grant.token).toMatch(/^[A-Za-z0-9_-]{43}$/)
-    // A run token lives at most 15 minutes and is renewed 10 to 12 minutes in.
+    expect(grant.providerId).toBe("anthropic")
+    // A run token lives at most 15 minutes, and the relay asks for its renewal between 180 and
+    // 300 seconds before its end.
     expect(grant.expiresAt - Date.now()).toBeLessThanOrEqual(900000)
     expect(grant.expiresAt - Date.now()).toBeGreaterThan(840000)
-    expect(grant.renewAt - Date.now()).toBeGreaterThan(10 * 60000 - 10000)
-    expect(grant.renewAt - Date.now()).toBeLessThanOrEqual(12 * 60000)
+    expect(grant.expiresAt - grant.renewAt).toBeGreaterThanOrEqual(180000)
+    expect(grant.expiresAt - grant.renewAt).toBeLessThanOrEqual(300000)
     expect(grant.renewAt).toBeLessThanOrEqual(grant.deadline)
 
     const answer = await call(grant.token)
@@ -136,7 +138,8 @@ async function scenario(start: (f: Fixture) => Promise<Gateway>) {
     expect(renewed.status).toBe(200)
     const next = await Renewed(renewed)
     expect(next.token).not.toBe(grant.token)
-    expect(next.renewAt - Date.now()).toBeLessThanOrEqual(12 * 60000)
+    expect(next.expiresAt - next.renewAt).toBeGreaterThanOrEqual(180000)
+    expect(next.expiresAt - next.renewAt).toBeLessThanOrEqual(300000)
     expect(await (await call(next.token)).text()).toBe(sse)
 
     // The gateway restarts; the run's next call succeeds on the same binding.
@@ -144,8 +147,9 @@ async function scenario(start: (f: Fixture) => Promise<Gateway>) {
     gateway = await start(f)
     expect(await (await call(next.token)).text()).toBe(sse)
 
-    // workflowd builds its own gateway on the same store when it starts; that revokes nothing.
-    await f.store(makeCapabilityGateway(f.config).pipe(Effect.andThen(Effect.sleep("10 millis"))))
+    // When it starts, workflowd builds only the revoke of the capability store, on the same
+    // store; building it revokes nothing.
+    await f.store(makeCapabilityRevoke.pipe(Effect.andThen(Effect.sleep("10 millis"))))
     expect(await (await call(next.token)).text()).toBe(sse)
 
     // (e) A new session, opened through another gateway on the same store, ends a live stream

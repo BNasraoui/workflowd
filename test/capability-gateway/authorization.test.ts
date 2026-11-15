@@ -4,7 +4,6 @@ import { SqliteClient } from "@effect/sql-sqlite-bun"
 import { SqlClient } from "effect/unstable/sql"
 import { AgentRunStoreLive, AgentRunStore } from "../../src/kernel/agent-run-store"
 import { CapabilityRefused, makeCapabilityStore } from "../../src/capability-gateway/store"
-import { renewalWindowMs } from "../../deploy/sandbox/renewal.mjs"
 import { bindRunSession, seedCapabilityRun } from "./fixture"
 import { capabilitySession } from "../../src/store/0040-capability-session"
 import { capabilityRenewal } from "../../src/store/0042-capability-renewal"
@@ -330,12 +329,12 @@ test("a new session ends every token of the earlier one, and a proof opens one s
   )
 })
 
-test("a run token is renewed with exactly the renewal window left, and refused one millisecond earlier", async () => {
+test("a run token with exactly 330 seconds left is renewed, and one with 330 seconds and 1 ms left is refused", async () => {
   await run(
     Effect.gen(function* () {
       const { store } = yield* seed
       const { binding, expiresAt } = yield* bindRunSession(now, { digest: "a".repeat(64) })
-      const opens = expiresAt - renewalWindowMs
+      const opens = expiresAt - 330000
       const early = yield* Effect.result(
         store.renew(binding, "a".repeat(64), "b".repeat(64), expiresAt + 600000, opens - 1),
       )

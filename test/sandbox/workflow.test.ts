@@ -298,9 +298,9 @@ test("a private runner gets the gateway URL, waits at most five minutes for its 
     }),
   )(Bun.YAML.parse(await Bun.file(`${root}/.github/workflows/agent-sandbox.yml`).text()))
   const step = (name: string) => workflow.jobs.runner.steps.find((entry) => entry.name === name)
-  expect(step("Prepare private first contact")?.env?.SANDBOX_GATEWAY_URL).toBe(
-    "${{ inputs.gateway-url }}",
-  )
+  expect(step("Prepare private first contact")?.env).toEqual({
+    SANDBOX_GATEWAY_URL: "${{ inputs.gateway-url }}",
+  })
   expect(step("Prepare private first contact")?.["timeout-minutes"]).toBe(5)
   expect(step("Join the restricted tailnet")?.env?.SANDBOX_BOOTSTRAP_MODE).toBe(
     "${{ inputs.bootstrap-mode }}",

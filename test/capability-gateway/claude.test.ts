@@ -4,7 +4,6 @@ import { claudeRequest, type ClaudeRequest } from "../../src/capability-gateway/
 const native = JSON.stringify({ model: "claude-opus-4-6" })
 const session = "6f1c2a3b-4d5e-4f60-8a7b-9c0d1e2f3a4b"
 const headers = {
-  host: "capability.invalid",
   authorization: "Bearer gateway-sentinel",
   "content-type": "application/json",
   "anthropic-version": "2023-06-01",
@@ -58,7 +57,7 @@ test("Claude requests forward only bounded native headers and replace authorizat
 })
 
 test.each([
-  ["foreign host", { host: "api.anthropic.com" }],
+  ["host header", { host: "capability.invalid" }],
   ["unlisted header", { "x-api-key": "direct" }],
   ["foreign session", { "x-claude-code-session-id": "other-session" }],
   ["oversized value", { "user-agent": "x".repeat(2049) }],

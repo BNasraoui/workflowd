@@ -71,7 +71,7 @@ test("configured live composition settles prior leases, which revokes their gran
     const loaded = await loadConfig(environment, { home: root })
     expect(loaded.agentRuns?.capabilityGateway).toEqual(gateway)
     // The gateway's own process needs a listen address; workflowd accepts and ignores one.
-    const listen = { host: "127.0.0.1", port: 0 }
+    const listen = { host: "127.0.0.1" as const, port: 0 }
     const served = { ...gateway, listen }
     expect(
       (
@@ -149,4 +149,55 @@ test("configured live composition settles prior leases, which revokes their gran
   } finally {
     await rm(root, { recursive: true, force: true })
   }
+})
+
+test("the gateway config bounds its streams: an idle limit of 1 ms to ten minutes, and at most maxStreams for a run", () => {
+  const gateway = {
+    noscope: { binary: "/fixture/noscope", configHome: "/fixture" },
+    providerId: "anthropic",
+    credentialRole: "fixture",
+    maxStreams: 2,
+    maxStreamsPerRun: 2,
+    listen: { host: "127.0.0.1", port: 0 },
+  }
+  const load = (keys: Record<string, unknown>) =>
+    loadCapabilityGatewayConfig(
+      { WORKFLOWD_CAPABILITY_GATEWAY: JSON.stringify({ ...gateway, ...keys }) },
+      "/fixture",
+    ).gateway
+  for (const [keys, reason] of [
+    [{ streamIdleMs: 0 }, 'Expected a value between 1 and 600000\n  at ["streamIdleMs"]'],
+    [{ streamIdleMs: -1 }, 'Expected a value between 1 and 600000\n  at ["streamIdleMs"]'],
+    [{ streamIdleMs: 600001 }, 'Expected a value between 1 and 600000\n  at ["streamIdleMs"]'],
+    [{ streamIdleMs: 1.5 }, 'Expected an integer\n  at ["streamIdleMs"]'],
+    [{ streamIdleMs: "1000" }, 'Expected number\n  at ["streamIdleMs"]'],
+    [{ maxStreams: 513 }, 'Expected a value between 1 and 512\n  at ["maxStreams"]'],
+    [
+      { maxStreams: 1, maxStreamsPerRun: 2 },
+      'Expected a value of at most maxStreams\n  at ["maxStreamsPerRun"]',
+    ],
+  ] as const)
+    expect(() => load(keys)).toThrow(reason)
+  expect(load({ streamIdleMs: 1 }).streamIdleMs).toBe(1)
+  expect(load({ streamIdleMs: 600000 }).streamIdleMs).toBe(600000)
+  expect(load({}).streamIdleMs).toBeUndefined()
+})
+
+test("the gateway listens only on a loopback address: 127.0.0.1 or ::1", () => {
+  const gateway = {
+    noscope: { binary: "/fixture/noscope", configHome: "/fixture" },
+    providerId: "anthropic",
+    credentialRole: "fixture",
+    maxStreams: 2,
+    maxStreamsPerRun: 2,
+  }
+  const load = (host: string) =>
+    loadCapabilityGatewayConfig(
+      { WORKFLOWD_CAPABILITY_GATEWAY: JSON.stringify({ ...gateway, listen: { host, port: 0 } }) },
+      "/fixture",
+    ).gateway.listen
+  for (const host of ["10.0.0.1", "0.0.0.0", "gateway.example"])
+    expect(() => load(host)).toThrow('Expected "127.0.0.1" | "::1"\n  at ["listen"]["host"]')
+  expect(load("127.0.0.1")).toEqual({ host: "127.0.0.1", port: 0 })
+  expect(load("::1")).toEqual({ host: "::1", port: 0 })
 })

@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { client, processGateway, proof, withGateway } from "../capability-gateway/gateway-process"
-import { renewalRequests, renewalWindowMs } from "../../deploy/sandbox/renewal.mjs"
+import { renewalRequests } from "../../deploy/sandbox/renewal.mjs"
 import { fixtureExecutable } from "../helpers/fixture-executable.mjs"
 import { loopbackCertificate, tlsFront } from "../helpers/loopback-tls"
 
@@ -43,7 +43,7 @@ for (const scenario of ["headers", "renewal", "git-refs", "git-upload"] as const
           `Bearer ${scenario === "renewal" ? next : first}`,
         )
         expect(request.method).toBe(scenario === "git-refs" ? "GET" : "POST")
-        expect(target).toBe(gitPath ?? "/capabilities/v1/providers/anthropic/v1/messages")
+        expect(target).toBe(gitPath ?? "/capabilities/v1/providers/fixture-provider/v1/messages")
         requests++
         return new Response("fixture-stream")
       },
@@ -63,6 +63,7 @@ for (const scenario of ["headers", "renewal", "git-refs", "git-upload"] as const
             expiresAt: expiry,
             renewAt: scenario === "renewal" ? now + 100 : expiry - 1000,
             deadline: expiry,
+            providerId: "fixture-provider",
             gateway: `https://127.0.0.1:${gateway.port}`,
           }),
         ]),
@@ -130,7 +131,7 @@ test("after a clock jump past its expiry, the relay sends no renewal of the expi
   }
 }, 10000)
 
-test("after stop, the answer of a renewal in flight sends no further request", async () => {
+test("stop cuts a renewal in flight, and its answer after stop sends no further request even when the agent keeps the connection", async () => {
   const root = await mkdtemp(join(tmpdir(), "relay-stop-tls-"))
   try {
     const tls = await loopbackCertificate(root)
@@ -154,6 +155,45 @@ test("after stop, the answer of a renewal in flight sends no further request", a
   }
 }, 10000)
 
+test("the relay refuses a config whose provider id is missing or not of the form", async () => {
+  const root = await mkdtemp(join(tmpdir(), "relay-provider-"))
+  try {
+    for (const providerId of [undefined, "", "Anthropic", "../x", "a/b", 1]) {
+      const child = Bun.spawn(
+        [fixtureExecutable("node"), resolve("deploy/sandbox/capability-relay.mjs"), "runner", root],
+        {
+          env: { PATH: "/usr/bin:/bin" },
+          stdin: new Blob([
+            JSON.stringify({
+              token: "a".repeat(43),
+              expiresAt: Date.now() + 1000,
+              renewAt: Date.now() + 500,
+              deadline: Date.now() + 2000,
+              providerId,
+              gateway: "https://127.0.0.1:1",
+            }),
+          ]),
+          stdout: "pipe",
+          stderr: "pipe",
+        },
+      )
+      const [code, stdout, stderr] = await Promise.all([
+        child.exited,
+        new Response(child.stdout).text(),
+        new Response(child.stderr).text(),
+      ])
+      expect({ providerId, code, stdout, stderr }).toEqual({
+        providerId,
+        code: 1,
+        stdout: "",
+        stderr: "capability relay unavailable\n",
+      })
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 test("the relay refuses a gateway that is not an HTTPS origin", async () => {
   const root = await mkdtemp(join(tmpdir(), "relay-origin-"))
   try {
@@ -173,6 +213,7 @@ test("the relay refuses a gateway that is not an HTTPS origin", async () => {
               expiresAt: Date.now() + 1000,
               renewAt: Date.now() + 500,
               deadline: Date.now() + 2000,
+              providerId: "anthropic",
               gateway,
             }),
           ]),
@@ -271,9 +312,9 @@ test("a renewal that the gateway refuses ends the relay at once: it sends no fur
       const { audience } = await runner.audience()
       const answer = await runner.session(proof(audience, "jti-relay"))
       expect(answer.status).toBe(200)
-      // The token lives 15 minutes, more than the renewal window: the gateway refuses to renew it.
+      // The token lives 15 minutes, more than the renewal window of 330 s: the gateway refuses to renew it.
       const grant = await runner.grant(answer)
-      expect(grant.expiresAt - Date.now()).toBeGreaterThan(renewalWindowMs)
+      expect(grant.expiresAt - Date.now()).toBeGreaterThan(330000)
       f.setStall(true)
       const child = Bun.spawn(
         [

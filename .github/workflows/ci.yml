@@ -166,11 +166,13 @@ jobs:
       - name: Prepare pinned fixture-only tools
         run: node deploy/sandbox/public-output.mjs setup -- bash scripts/evidence/capability-ci-setup.sh tools
       # The gateway passes only the anthropic-beta values of its list; this records the values
-      # that the pinned Claude Code sends, and fails when one is not on that list.
+      # that the pinned Claude Code sends, and fails when one is not on that list. The client
+      # runs as this user in a network namespace whose only interface is loopback.
       - name: Record the anthropic-beta values of the pinned Claude Code
         run: |
-          WORKFLOWD_FIXTURE_NOSCOPE="$RUNNER_TEMP/capability-tools/bin/noscope" \
-            bun test test/capability-gateway/claude-pinned.test.ts
+          sudo /usr/bin/unshare --net /bin/sh -c \
+            'ip link set lo up && exec setpriv --reuid="$1" --regid="$2" --init-groups -- env -i "PATH=$3" "HOME=$4" "WORKFLOWD_FIXTURE_NOSCOPE=$5" bun test --path-ignore-patterns= test/capability-gateway/claude-pinned.launcher.test.ts' \
+            fixture "$(id -u)" "$(id -g)" "$PATH" "$HOME" "$RUNNER_TEMP/capability-tools/bin/noscope"
       - name: Verify credential probe entrypoints
         run: >-
           systemd-run --user --wait --pipe --collect
