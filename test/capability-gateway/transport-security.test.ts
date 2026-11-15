@@ -6,18 +6,12 @@ import { SqliteClient } from "@effect/sql-sqlite-bun"
 import { mkdtemp, mkdir, writeFile, readFile, rm } from "node:fs/promises"
 import { resolve, join } from "node:path"
 import { tmpdir } from "node:os"
-import { connect, type AddressInfo } from "node:net"
+import { connect } from "node:net"
 import { once } from "node:events"
 import { AgentRunStoreLive } from "../../src/kernel/agent-run-store"
 import { makeCapabilityGateway } from "../../src/capability-gateway/service"
-import { bindRunSession, seedCapabilityRun } from "./fixture"
-
-/** The bound port of a listening TCP server. */
-function portOf(server: { address(): string | AddressInfo | null }) {
-  const address = server.address()
-  if (address === null || typeof address === "string") throw new Error("listener unavailable")
-  return address.port
-}
+import { bindRunSession, seedCapabilityRun, writeNoscopeProviders } from "./fixture"
+import { portOf } from "../helpers/loopback-tls"
 
 test("bound streaming preserves native bytes, renews with noscope, and denies cross-run or proxy authority", async () => {
   const root = await mkdtemp(join(tmpdir(), "wfd-gateway-"))
@@ -269,21 +263,7 @@ const streamThroughGateway = async (
   silentAfter = Number.POSITIVE_INFINITY,
 ) => {
   const root = await mkdtemp(join(tmpdir(), "wfd-gateway-idle-"))
-  await mkdir(join(root, "noscope/providers"), { recursive: true, mode: 0o700 })
-  await writeFile(
-    join(root, "noscope/providers/run-capability.toml"),
-    `contract_version = 1\n[commands]\nmint = "${process.execPath} ${resolve("src/capability-gateway/noscope-provider.ts")} run {ttl}"\n`,
-    { mode: 0o600 },
-  )
-  await writeFile(
-    join(root, "access.mjs"),
-    `process.stdout.write(JSON.stringify({token:"fixture-access",token_id:"fixture",expires_at:new Date(Date.now()+3600000).toISOString()}))`,
-  )
-  await writeFile(
-    join(root, "noscope/providers/provider-access.toml"),
-    `contract_version = 1\n[commands]\nmint = "${process.execPath} ${join(root, "access.mjs")}"\n`,
-    { mode: 0o600 },
-  )
+  await writeNoscopeProviders(root, 3600000)
   let upstreamCancelled = false
   let timer: ReturnType<typeof setTimeout> | undefined
   try {

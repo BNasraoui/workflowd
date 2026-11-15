@@ -1,11 +1,7 @@
 import { expect, test } from "bun:test"
 import { fixtureExecutable } from "../helpers/fixture-executable.mjs"
+import { loopbackCertificate, tlsFront } from "../helpers/loopback-tls"
 import { generateKeyPairSync, sign } from "node:crypto"
-import { once } from "node:events"
-import { createServer as httpsServer } from "node:https"
-import { request as httpRequest } from "node:http"
-import type { AddressInfo } from "node:net"
-import { pipeline } from "node:stream"
 import { mkdtemp, mkdir, writeFile, rm, readFile } from "node:fs/promises"
 import { join, resolve } from "node:path"
 import { tmpdir } from "node:os"
@@ -19,13 +15,6 @@ import { makeSandboxLeaseService } from "../../src/sandbox/lease"
 import { makeSandboxStore } from "../../src/sandbox/store"
 import { AgentRunStore, AgentRunStoreLive } from "../../src/kernel/agent-run-store"
 import { runStoreMigrations } from "../../src/store/migrations"
-
-/** The bound port of a listening TCP server. */
-function portOf(server: { address(): string | AddressInfo | null }) {
-  const address = server.address()
-  if (address === null || typeof address === "string") throw new Error("listener unavailable")
-  return address.port
-}
 
 const hostileClaims: Record<string, Record<string, unknown>> = {
   fork: { repository: "fork/repo", repository_id: "99" },
@@ -41,85 +30,6 @@ const hostileClaims: Record<string, Record<string, unknown>> = {
   runner: { runner_environment: "self-hosted" },
   expired: { exp: 1 },
   attempt: { run_attempt: "2" },
-}
-
-/** A self-signed certificate for 127.0.0.1: the gateway's TLS on loopback. */
-async function loopbackCertificate(root: string) {
-  const key = join(root, "tls.key")
-  const cert = join(root, "tls.pem")
-  const child = Bun.spawn(
-    [
-      "/usr/bin/openssl",
-      "req",
-      "-x509",
-      "-newkey",
-      "ec",
-      "-pkeyopt",
-      "ec_paramgen_curve:prime256v1",
-      "-nodes",
-      "-keyout",
-      key,
-      "-out",
-      cert,
-      "-days",
-      "1",
-      "-subj",
-      "/CN=127.0.0.1",
-      "-addext",
-      "subjectAltName=IP:127.0.0.1",
-    ],
-    { stdin: "ignore", stdout: "ignore", stderr: "pipe" },
-  )
-  if ((await child.exited) !== 0) throw new Error(await new Response(child.stderr).text())
-  return { key, cert }
-}
-
-/**
- * TLS in front of the gateway process, as Tailscale Serve is in production. It drops the first
- * session answer that the gateway grants: the gateway sends it, the runner never gets it.
- */
-async function tlsFront(tls: { key: string; cert: string }, gatewayPort: number) {
-  let dropped = 0
-  const server = httpsServer(
-    { key: await readFile(tls.key), cert: await readFile(tls.cert) },
-    (incoming, outgoing) => {
-      const upstream = httpRequest(
-        {
-          host: "127.0.0.1",
-          port: gatewayPort,
-          path: incoming.url,
-          method: incoming.method,
-          headers: incoming.headers,
-        },
-        (reply) => {
-          if (
-            incoming.url === "/capabilities/v1/session" &&
-            reply.statusCode === 200 &&
-            dropped === 0
-          ) {
-            dropped++
-            reply.resume()
-            reply.once("end", () => incoming.socket.destroy())
-            return
-          }
-          outgoing.writeHead(reply.statusCode ?? 502, reply.headers)
-          pipeline(reply, outgoing, () => {})
-        },
-      )
-      upstream.once("error", () => outgoing.destroy())
-      pipeline(incoming, upstream, () => {})
-    },
-  )
-  server.listen(0, "127.0.0.1")
-  await once(server, "listening")
-  return {
-    port: portOf(server),
-    dropped: () => dropped,
-    close: () => {
-      server.closeAllConnections()
-      server.close()
-    },
-  }
 }
 
 // One key pair serves every case: the job keys, and the GitHub App key of the fixture.
@@ -389,7 +299,16 @@ Effect.runFork(runCapabilityGatewayServer(process.env, {
             reader.releaseLock()
             return Number(/^listening (\d+)$/m.exec(text)?.[1])
           })
-          const tlsGateway = yield* Effect.promise(() => tlsFront(tls, listening))
+          // The front drops the first session answer that the gateway grants: the gateway
+          // sends it, the runner never gets it.
+          let dropped = 0
+          const tlsGateway = yield* Effect.promise(() =>
+            tlsFront(tls, listening, (path, status) => {
+              if (path !== "/capabilities/v1/session" || status !== 200 || dropped > 0) return false
+              dropped++
+              return true
+            }),
+          )
           front = tlsGateway
           const bootstrap = Bun.spawn(
             [
@@ -427,7 +346,7 @@ await prepare({
           expect({ code, diagnostic }).toEqual({ code: 0, diagnostic: "" })
           // The gateway sent the first session and the runner lost it; a hostile first proof
           // opened nothing. Two proofs opened sessions; the runner holds the second.
-          expect(tlsGateway.dropped()).toBe(1)
+          expect(dropped).toBe(1)
           expect(
             yield* sql`SELECT (SELECT count(*) FROM capability_proofs) AS proofs,
               (SELECT session FROM capability_bindings) AS session`,
