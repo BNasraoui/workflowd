@@ -6,6 +6,11 @@ import { Schema } from "effect"
 import { observationUnavailable } from "../../src/kernel/cli-process-contract"
 import {
   decodeRecordIndex,
+  readEventRecord,
+  recordEventParser,
+  type RecordSource,
+} from "../../src/kernel/event-record"
+import {
   encodeRecordIndex,
   eventRecordLimits,
   eventRecordPaths,
@@ -13,11 +18,8 @@ import {
   lineDroppedMarker,
   localRecordSource,
   openEventRecord,
-  readEventRecord,
-  recordEventParser,
   type EventRecordWriter,
-  type RecordSource,
-} from "../../src/kernel/event-record"
+} from "../../src/kernel/event-record-files"
 import { parseClaudeDispatchEvent } from "../../src/kernel/claude-dispatch"
 
 const withRoot = async (body: (root: string) => Promise<void>) => {
@@ -394,7 +396,7 @@ test(
       const head = join(root, "events.jsonl")
       const lines = 4000
       const script = join(root, "writer.ts")
-      const module = new URL("../../src/kernel/event-record.ts", import.meta.url).pathname
+      const module = new URL("../../src/kernel/event-record-files.ts", import.meta.url).pathname
       await writeFile(
         script,
         `import { openEventRecord } from ${JSON.stringify(module)}

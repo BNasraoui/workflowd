@@ -6,7 +6,7 @@ import { CodexRetryTurn } from "./codex-retry"
 import { constants } from "node:fs"
 import { open, readFile, rename, stat, writeFile } from "node:fs/promises"
 import { nativeSandboxArguments } from "../sandbox/native"
-import { EVENT_RECORD_LIMITS, openEventRecord, type EventRecordWriter } from "./event-record"
+import { EVENT_RECORD_LIMITS, openEventRecord, type EventRecordWriter } from "./event-record-files"
 import { codexProjectArguments } from "../execution/project-config"
 
 export type CliWorkerOptions = {
