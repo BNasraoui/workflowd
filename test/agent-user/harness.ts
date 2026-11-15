@@ -3,6 +3,7 @@ import { checkCredentialAdmission } from "../../src/agent-host/credentials"
 import { relinkCredentials } from "../../src/agent-host/credential-relink"
 import { credentialReason } from "../../src/agent-host/protocol"
 import { spawnSync } from "node:child_process"
+import { readFileSync } from "node:fs"
 import {
   chmod,
   chown,
@@ -83,12 +84,18 @@ function runtimePath() {
   return `${dirname(node)}:/usr/bin:/bin`
 }
 
+/** The one Claude Code version of the repository, which CI installs. */
+export const pinnedClaude = `${readFileSync(
+  join(import.meta.dir, "../resources/claude-code-version"),
+  "utf8",
+).trim()} (Claude Code)`
+
 /** Only allow-listed metadata leaves the version subprocess; never raw CLI output. */
 export async function probeClientVersions() {
   const root = await mkdtemp(join(tmpdir(), "workflowd-client-versions-"))
   const clients = [
     ["codex", "codex-cli 0.159.1", /^codex-cli \d+\.\d+\.\d+$/],
-    ["claude", "2.1.296 (Claude Code)", /^\d+\.\d+\.\d+ \(Claude Code\)$/],
+    ["claude", pinnedClaude, /^\d+\.\d+\.\d+ \(Claude Code\)$/],
     ["opencode2", "opencode2 v0.0.0-beta-19242", /^opencode2 v\d+\.\d+\.\d+-beta-\d+$/],
   ] as const
   try {

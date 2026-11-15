@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test"
+import { readFileSync } from "node:fs"
 import { claudeBetas } from "../../src/capability-gateway/claude"
 import { client, gateways, proof, sse, withGateway, type Fixture } from "./gateway-process"
 
@@ -18,7 +19,7 @@ const pinnedHeaders = {
   accept: "application/json",
   "anthropic-beta": [...claudeBetas].join(","),
   "anthropic-dangerous-direct-browser-access": "true",
-  "user-agent": "claude-cli/2.1.296 (external, sdk-cli)",
+  "user-agent": `claude-cli/${readFileSync("test/resources/claude-code-version", "utf8").trim()} (external, sdk-cli)`,
   "x-app": "cli",
   "x-claude-code-session-id": "3f2b8c1e-4a5d-4e6f-8a7b-9c0d1e2f3a4b",
   "x-stainless-arch": "x64",
