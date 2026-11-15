@@ -8,7 +8,7 @@ import { SqliteClient } from "@effect/sql-sqlite-bun"
 import { loadCapabilityGatewayConfig, loadConfig } from "../../src/config"
 import { makeLiveLayer } from "../../src/layers"
 import { SandboxDispatch } from "../../src/sandbox/dispatch"
-import { seedCapabilityRun, transport } from "./fixture"
+import { bindRunSession, seedCapabilityRun } from "./fixture"
 import { makeCapabilityStore } from "../../src/capability-gateway/store"
 import { requiredEnvironment } from "../helpers/config"
 import { AgentRunStoreLive } from "../../src/kernel/agent-run-store"
@@ -101,18 +101,14 @@ test("configured live composition settles prior leases, which revokes their gran
     const { executionCapabilities: _discovery, ...config } = loaded
     await Effect.runPromise(
       Effect.gen(function* () {
-        const { sql, runs, leases } = yield* seedCapabilityRun(Date.now())
+        const { sql, runs } = yield* seedCapabilityRun(Date.now(), true)
         const authority = yield* makeCapabilityStore
         const now = Date.now()
-        const challenge = yield* authority.challenge("run", transport, now)
-        const binding = yield* authority.bind(
-          challenge,
-          "composition-jti",
-          "a".repeat(64),
-          now + 60000,
-          now,
-        )
-        yield* leases.bind("run", 78, 1, transport)
+        const { binding } = yield* bindRunSession(now, {
+          jti: "composition-jti",
+          digest: "a".repeat(64),
+          expiresAt: now + 60000,
+        })
         const run = yield* runs.read("run")
         if (!run) throw new Error("fixture run missing")
         yield* sql`UPDATE kernel_agent_runs SET directory=${join(root, "run")} WHERE run_id='run'`

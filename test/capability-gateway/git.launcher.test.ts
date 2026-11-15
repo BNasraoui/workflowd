@@ -7,7 +7,7 @@ import { join, resolve } from "node:path"
 import { AgentRunStoreLive } from "../../src/kernel/agent-run-store"
 import { makeCapabilityGateway } from "../../src/capability-gateway/service"
 import { makeTokenBroker } from "../../src/worker-identity/broker"
-import { seedCapabilityRun, transport } from "./fixture"
+import { bindRunSession, seedCapabilityRun } from "./fixture"
 import { fixtureExecutable } from "../helpers/fixture-executable.mjs"
 import { capabilityApi, capabilityHttpServer } from "../../src/capability-gateway/http"
 import { connect, createServer, type AddressInfo } from "node:net"
@@ -141,7 +141,7 @@ for (const authenticated of [false, true])
     try {
       await Effect.runPromise(
         Effect.gen(function* () {
-          const { leases } = yield* seedCapabilityRun(Date.now())
+          yield* seedCapabilityRun(Date.now(), true)
           const broker = yield* makeTokenBroker(async (input) => {
             expect(input).toEqual({
               installation_id: 1,
@@ -169,8 +169,7 @@ for (const authenticated of [false, true])
               return fetch(`${backend.url.href}repo.git/${url.split("repo.git/")[1]}`, input)
             },
           })
-          const grant = yield* gateway.bind(yield* gateway.challenge("run", transport), "git-jti")
-          yield* leases.bind("run", 78, 1, transport)
+          const grant = yield* bindRunSession(Date.now(), { jti: "git-jti" })
           // The gateway's network listener, behind TLS on loopback.
           const served = capabilityHttpServer(capabilityApi(gateway), true)
           listener = served

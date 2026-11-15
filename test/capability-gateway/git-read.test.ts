@@ -7,7 +7,7 @@ import { join, resolve } from "node:path"
 import { AgentRunStoreLive } from "../../src/kernel/agent-run-store"
 import { makeCapabilityGateway } from "../../src/capability-gateway/service"
 import { makeTokenBroker } from "../../src/worker-identity/broker"
-import { seedCapabilityRun, transport } from "./fixture"
+import { bindRunSession, seedCapabilityRun } from "./fixture"
 import { fixtureExecutable } from "../helpers/fixture-executable.mjs"
 
 const secret = "synthetic-git-read-credential"
@@ -136,7 +136,7 @@ const setup = (authenticated: boolean) =>
       Effect.sync(() => gitBackend(root, state.seen)),
       (backend) => Effect.promise(() => backend.stop(true)),
     )
-    const { runs, sql, leases } = yield* seedCapabilityRun(Date.now())
+    const { runs, sql } = yield* seedCapabilityRun(Date.now(), true)
     const broker = yield* makeTokenBroker(async (input) => {
       state.minted++
       expect(input).toEqual({
@@ -186,8 +186,7 @@ const setup = (authenticated: boolean) =>
         },
       },
     )
-    const grant = yield* gateway.bind(yield* gateway.challenge("run", transport), "git-jti")
-    yield* leases.bind("run", 78, 1, transport)
+    const grant = yield* bindRunSession(Date.now(), { jti: "git-jti" })
     const shim = yield* Effect.acquireRelease(
       Effect.sync(() =>
         Bun.serve({

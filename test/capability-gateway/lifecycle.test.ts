@@ -8,7 +8,7 @@ import { join, resolve } from "node:path"
 import { createServer, type Socket } from "node:net"
 import { AgentRunStoreLive } from "../../src/kernel/agent-run-store"
 import { makeCapabilityGateway } from "../../src/capability-gateway/service"
-import { seedCapabilityRun, transport } from "./fixture"
+import { bindRunSession, seedCapabilityRun } from "./fixture"
 
 for (const [ending, phase] of [
   ["interrupt", "setup"],
@@ -77,7 +77,7 @@ for (const [ending, phase] of [
     try {
       await Effect.runPromise(
         Effect.gen(function* () {
-          const { runs, leases } = yield* seedCapabilityRun(Date.now())
+          const { runs, leases } = yield* seedCapabilityRun(Date.now(), true)
           const gateway = yield* makeCapabilityGateway(
             {
               noscope: { binary: fixtureExecutable("noscope"), configHome: root },
@@ -118,11 +118,7 @@ for (const [ending, phase] of [
               )
             },
           )
-          const grant = yield* gateway.bind(
-            yield* gateway.challenge("run", transport),
-            "fixture-jti",
-          )
-          yield* leases.bind("run", 78, 1, transport)
+          const grant = yield* bindRunSession(Date.now())
           const request = () => {
             const body =
               firstRequest && phase === "upload"

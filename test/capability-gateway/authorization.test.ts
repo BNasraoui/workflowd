@@ -4,12 +4,12 @@ import { SqliteClient } from "@effect/sql-sqlite-bun"
 import { SqlClient } from "effect/unstable/sql"
 import { AgentRunStoreLive, AgentRunStore } from "../../src/kernel/agent-run-store"
 import { makeCapabilityStore } from "../../src/capability-gateway/store"
-import { seedCapabilityRun, transport } from "./fixture"
+import { bindRunSession, seedCapabilityRun, transport } from "./fixture"
 import { capabilitySession } from "../../src/store/0040-capability-session"
 
 const now = Date.now()
 const seed = Effect.gen(function* () {
-  return { ...(yield* seedCapabilityRun(now)), store: yield* makeCapabilityStore }
+  return { ...(yield* seedCapabilityRun(now, true)), store: yield* makeCapabilityStore }
 })
 const run = <A, E>(
   effect: Effect.Effect<A, E, SqlClient.SqlClient | typeof AgentRunStore.Identifier>,
@@ -21,24 +21,26 @@ const run = <A, E>(
     ),
   )
 
-test("a challenge is single-use and tokens bind existing run, recipient, attempt and transport", async () => {
+test("a session proof is single-use and tokens bind existing run, recipient and attempt", async () => {
   await run(
     Effect.gen(function* () {
-      const { store, leases, sql } = yield* seed
-      const challenge = yield* store.challenge("run", transport, now)
-      expect(challenge.recipientId).toBe("managed:fixture-controller:run")
-      const binding = yield* store.bind(
-        challenge,
-        "fixture-jti",
-        "a".repeat(64),
-        now + 3600000,
-        now,
-      )
-      yield* leases.bind("run", 78, 1, transport)
+      const { store, sql } = yield* seed
+      const { binding } = yield* bindRunSession(now, {
+        digest: "a".repeat(64),
+        expiresAt: now + 3600000,
+      })
       expect((yield* store.authorize(binding, "a".repeat(64), now)).modelId).toBe("fixture-model")
+      const again = yield* store.leaseChallenge("lease", now)
+      expect(again.channel).toBe(binding.channel)
       expect(
         (yield* Effect.result(
-          store.bind(challenge, "fixture-jti", "b".repeat(64), now + 3600000, now),
+          store.bindSession(
+            { ...again, runId: "run", recipientId: "managed:fixture-controller:run" },
+            "fixture-jti",
+            "b".repeat(64),
+            now + 3600000,
+            now,
+          ),
         ))._tag,
       ).toBe("Failure")
       expect(
@@ -60,10 +62,11 @@ test("a challenge is single-use and tokens bind existing run, recipient, attempt
 test("renewal cannot resurrect expiry or survive durable revocation and restart", async () => {
   await run(
     Effect.gen(function* () {
-      const { store, leases, runs } = yield* seed
-      const challenge = yield* store.challenge("run", transport, now)
-      const binding = yield* store.bind(challenge, "fixture-jti", "a".repeat(64), now + 60000, now)
-      yield* leases.bind("run", 78, 1, transport)
+      const { store, runs } = yield* seed
+      const { binding } = yield* bindRunSession(now, {
+        digest: "a".repeat(64),
+        expiresAt: now + 60000,
+      })
       yield* store.renew(binding, "a".repeat(64), "b".repeat(64), now + 3600000, now + 1)
       expect((yield* store.authorize(binding, "b".repeat(64), now + 2)).expiresAt).toBe(
         now + 3600000,
@@ -94,10 +97,12 @@ test("renewal cannot resurrect expiry or survive durable revocation and restart"
 test("accepted grant rejects each durable identity/context swap with adjacent rollback controls", async () => {
   await run(
     Effect.gen(function* () {
-      const { store, leases, sql } = yield* seed
-      const challenge = yield* store.challenge("run", transport, now)
-      const binding = yield* store.bind(challenge, "abac-jti", "a".repeat(64), now + 60000, now)
-      yield* leases.bind("run", 78, 1, transport)
+      const { store, sql } = yield* seed
+      const { binding } = yield* bindRunSession(now, {
+        jti: "abac-jti",
+        digest: "a".repeat(64),
+        expiresAt: now + 60000,
+      })
       const swaps = [
         sql`UPDATE kernel_agent_runs SET provider_id='other' WHERE run_id='run'`,
         sql`UPDATE kernel_agent_runs SET model_id='other' WHERE run_id='run'`,
@@ -107,8 +112,6 @@ test("accepted grant rejects each durable identity/context swap with adjacent ro
         sql`UPDATE sandbox_leases SET actions_run_id=79 WHERE run_id='run'`,
         sql`UPDATE sandbox_leases SET actions_attempt=2 WHERE run_id='run'`,
         sql`UPDATE sandbox_leases SET source_sha=${"e".repeat(40)} WHERE run_id='run'`,
-        sql`UPDATE sandbox_leases SET peer_id='other' WHERE run_id='run'`,
-        sql`UPDATE sandbox_leases SET transport=json_set(transport,'$.knownHostsFile','/other') WHERE run_id='run'`,
         sql`UPDATE sandbox_leases SET deadline=deadline+1 WHERE run_id='run'`,
         sql`UPDATE sandbox_leases SET policy=json_set(policy,'$.repositoryId',99) WHERE run_id='run'`,
       ]
@@ -163,19 +166,15 @@ test("accepted grant rejects each durable identity/context swap with adjacent ro
   )
 })
 
-test("the session migration keeps live bindings, their tokens and revocation triggers", async () => {
+test("the session migration keeps bindings, their tokens and revocation triggers", async () => {
   await run(
     Effect.gen(function* () {
       const { store, leases, sql } = yield* seed
       yield* sql`PRAGMA foreign_keys = ON`
-      const binding = yield* store.bind(
-        yield* store.challenge("run", transport, now),
-        "fixture-jti",
-        "a".repeat(64),
-        now + 60000,
-        now,
-      )
-      yield* leases.bind("run", 78, 1, transport)
+      const { binding } = yield* bindRunSession(now, {
+        digest: "a".repeat(64),
+        expiresAt: now + 60000,
+      })
       yield* store.renew(binding, "a".repeat(64), "b".repeat(64), now + 60000, now + 1)
       const count = () =>
         sql`SELECT (SELECT count(*) FROM capability_tokens) AS tokens,
@@ -194,7 +193,10 @@ test("the session migration keeps live bindings, their tokens and revocation tri
       ])
       expect(yield* sql`SELECT DISTINCT session FROM capability_tokens`).toEqual([{ session: 0 }])
       expect(yield* sql`SELECT count(*) AS proofs FROM capability_proofs`).toEqual([{ proofs: 0 }])
-      expect((yield* store.authorize(binding, "b".repeat(64), now + 2)).runId).toBe("run")
+      // A binding from before the session columns has no session, so it authorizes nothing.
+      expect((yield* Effect.result(store.authorize(binding, "b".repeat(64), now + 2)))._tag).toBe(
+        "Failure",
+      )
       expect(yield* sql`PRAGMA foreign_key_check`).toEqual([])
       yield* leases.beginRelease("run")
       expect(yield* sql`SELECT revoked FROM capability_bindings`).toEqual([{ revoked: 1 }])

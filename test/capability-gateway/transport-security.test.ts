@@ -10,7 +10,7 @@ import { connect, type AddressInfo } from "node:net"
 import { once } from "node:events"
 import { AgentRunStoreLive } from "../../src/kernel/agent-run-store"
 import { makeCapabilityGateway } from "../../src/capability-gateway/service"
-import { seedCapabilityRun, transport } from "./fixture"
+import { bindRunSession, seedCapabilityRun } from "./fixture"
 
 /** The bound port of a listening TCP server. */
 function portOf(server: { address(): string | AddressInfo | null }) {
@@ -46,7 +46,7 @@ test("bound streaming preserves native bytes, renews with noscope, and denies cr
   try {
     await Effect.runPromise(
       Effect.gen(function* () {
-        const { leases } = yield* seedCapabilityRun(Date.now())
+        yield* seedCapabilityRun(Date.now(), true)
         const gateway = yield* makeCapabilityGateway(
           {
             noscope: { binary: fixtureExecutable("noscope"), configHome: root },
@@ -110,9 +110,7 @@ test("bound streaming preserves native bytes, renews with noscope, and denies cr
             )
           },
         )
-        const challenge = yield* gateway.challenge("run", transport)
-        const issued = yield* gateway.bind(challenge, "fixture-jti")
-        yield* leases.bind("run", 78, 1, transport)
+        const issued = yield* bindRunSession(Date.now())
         const request = (
           path = "/capabilities/v1/providers/anthropic/v1/messages",
           token = issued.token,
@@ -294,7 +292,7 @@ const streamThroughGateway = async (
   try {
     return await Effect.runPromise(
       Effect.gen(function* () {
-        const { leases } = yield* seedCapabilityRun(Date.now())
+        yield* seedCapabilityRun(Date.now(), true)
         const gateway = yield* makeCapabilityGateway(
           {
             noscope: { binary: fixtureExecutable("noscope"), configHome: root },
@@ -325,11 +323,7 @@ const streamThroughGateway = async (
             )
           },
         )
-        const issued = yield* gateway.bind(
-          yield* gateway.challenge("run", transport),
-          "fixture-jti",
-        )
-        yield* leases.bind("run", 78, 1, transport)
+        const issued = yield* bindRunSession(Date.now())
         const request = () =>
           new Request("http://capability.invalid/capabilities/v1/providers/anthropic/v1/messages", {
             method: "POST",
