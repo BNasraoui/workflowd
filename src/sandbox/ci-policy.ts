@@ -15,10 +15,10 @@ const setupNode = "actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020"
 // restricted to main pushes.
 // Any dependency, permission, input or script edit requires a fresh review.
 // gateway-image.yml: the same checkout, Nix, Bun and main-only upload, plus a second build of
-// the commit and a job that requires equal digests.
+// the commit and a job that requires equal digests and the recorded noscope output hash.
 const imageWorkflowSha256 = new Map([
   ["agent-image.yml", "5cbed263784fda5a91137a9c935d7f1ba4ccb809b31d479b329a76aa9a79a857"],
-  ["gateway-image.yml", "162bcf5aac1c8a5ae27762aed82feef53a0fe630c392936ba08c421e3f280825"],
+  ["gateway-image.yml", "523c23e8f814f80c2d93be552847dcb668deac0aaa2115a5d1656dc11fb0c6bf"],
 ])
 const head = "${{ github.event.pull_request.head.sha || github.sha }}"
 const base = "${{ github.event.pull_request.base.sha || github.event.before }}"

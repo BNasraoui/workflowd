@@ -1,5 +1,6 @@
 { pkgs }:
-# noscope at the revision that CI installs for the capability suites.
+# noscope at the revision that CI installs for the capability suites. The NAR hash of its output
+# is recorded in .github/workflows/gateway-image.yml, where the comparison job requires it.
 let
   src = builtins.fetchGit {
     url = "https://github.com/BNasraoui/noscope.git";
