@@ -3,7 +3,10 @@ import { Schema } from "effect"
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { openSession, takeJobIdentity } from "../../deploy/sandbox/bootstrap-helper.mjs"
-import { join } from "node:path"
+import { join, resolve } from "node:path"
+import { once } from "node:events"
+import { createServer } from "node:net"
+import { fixtureExecutable } from "../helpers/fixture-executable.mjs"
 
 const channel = "c".repeat(64)
 const grant = {
@@ -108,7 +111,8 @@ test("a refused challenge ends the exchange, and refused sessions end it after f
   ).rejects.toThrow("lease refused")
 })
 
-test("the runner is admitted over HTTPS by a gateway it trusts, and not by one it does not", async () => {
+/** A gateway over HTTPS with a self-signed certificate for 127.0.0.1; it records each proof. */
+async function tlsGateway() {
   const root = await mkdtemp(join(tmpdir(), "wfd-bootstrap-tls-"))
   const key = join(root, "tls.key")
   const cert = join(root, "tls.pem")
@@ -155,25 +159,133 @@ test("the runner is admitted over HTTPS by a gateway it trusts, and not by one i
       return Response.json(grant)
     },
   })
+  return {
+    url: `https://127.0.0.1:${server.port}`,
+    ca: await Bun.file(cert).text(),
+    proofs,
+    close: async () => {
+      await server.stop(true)
+      await rm(root, { recursive: true, force: true })
+    },
+  }
+}
+
+test("the runner is admitted over HTTPS by a gateway it trusts; a certificate it does not trust ends the exchange at once", async () => {
+  const gateway = await tlsGateway()
   try {
-    const ca = await Bun.file(cert).text()
+    const waits: number[] = []
     const admit = (trusted: boolean) =>
       openSession({
-        gateway: `https://127.0.0.1:${server.port}`,
+        gateway: gateway.url,
         leaseId: "lease",
         issue: async (audience) => `proof-for-${audience}`,
-        send: (url, init) => fetch(url, { ...init, tls: trusted ? { ca } : {} }),
-        attempts: 1,
-        // An untrusted gateway is a network error: the helper does not wait for it here.
-        wait: 0,
+        send: (url, init) => fetch(url, { ...init, tls: trusted ? { ca: gateway.ca } : {} }),
+        clock: () => waits.reduce((sum, wait) => sum + wait, 0),
+        sleep: async (milliseconds) => {
+          waits.push(milliseconds)
+        },
       })
-    await expect(admit(false)).rejects.toThrow("gateway session unavailable")
-    expect(proofs).toEqual([])
+    await expect(admit(false)).rejects.toThrow(
+      "gateway certificate not trusted (DEPTH_ZERO_SELF_SIGNED_CERT)",
+    )
+    expect(waits).toEqual([])
+    expect(gateway.proofs).toEqual([])
     expect(await admit(true)).toEqual(grant)
-    expect(proofs).toEqual([`proof-for-workflowd:${channel}:${"d".repeat(64)}`])
+    expect(gateway.proofs).toEqual([`proof-for-workflowd:${channel}:${"d".repeat(64)}`])
   } finally {
-    await server.stop(true)
-    await rm(root, { recursive: true, force: true })
+    await gateway.close()
+  }
+})
+
+test("the runner's bootstrap names an untrusted gateway certificate and stops at once", async () => {
+  const gateway = await tlsGateway()
+  const directory = await mkdtemp(join(tmpdir(), "wfd-bootstrap-untrusted-"))
+  try {
+    const started = Date.now()
+    const child = Bun.spawn(
+      [
+        fixtureExecutable("node"),
+        "--input-type=module",
+        "-e",
+        `import { prepare, failure } from ${JSON.stringify(resolve("deploy/sandbox/bootstrap.mjs"))}
+await prepare({
+  directory: ${JSON.stringify(directory)},
+  identity: async () => Response.json({ value: "fixture-proof" }),
+}).catch((error) => { process.stderr.write(failure(error)); process.exitCode = 1 })`,
+      ],
+      {
+        env: {
+          PATH: "/usr/bin:/bin",
+          SANDBOX_AGENT_IMAGE: `ghcr.io/bnasraoui/workflowd-agent-base@sha256:${"b".repeat(64)}`,
+          GITHUB_SHA: "a".repeat(40),
+          GITHUB_REF: "refs/heads/workflowd/leases/lease",
+          GITHUB_REPOSITORY: "fixture/repo",
+          SANDBOX_GATEWAY_URL: gateway.url,
+          ACTIONS_ID_TOKEN_REQUEST_URL: "https://fixture.actions.githubusercontent.com/token",
+          ACTIONS_ID_TOKEN_REQUEST_TOKEN: "fixture-request",
+        },
+        stdout: "ignore",
+        stderr: "pipe",
+      },
+    )
+    const [code, text] = await Promise.all([child.exited, new Response(child.stderr).text()])
+    expect({ code, text }).toEqual({
+      code: 1,
+      text: "private bootstrap unavailable: gateway certificate not trusted (DEPTH_ZERO_SELF_SIGNED_CERT)\n",
+    })
+    expect(Date.now() - started).toBeLessThan(10000)
+    expect(gateway.proofs).toEqual([])
+  } finally {
+    await gateway.close()
+    await rm(directory, { recursive: true, force: true })
+  }
+}, 30000)
+
+test("a challenge is waited for after a 503, a refused connection, a reset and a timeout, and after nothing else", async () => {
+  const closed = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response() })
+  const refusedUrl = `http://127.0.0.1:${closed.port}/`
+  await closed.stop(true)
+  const reset = createServer((socket) => socket.destroy())
+  reset.listen(0, "127.0.0.1")
+  await once(reset, "listening")
+  const address = reset.address()
+  if (address === null || typeof address === "string") throw new Error("listener unavailable")
+  const resetUrl = `http://127.0.0.1:${address.port}/`
+  try {
+    const gateway = scriptedGateway(["challenge", "grant"])
+    const faults: Array<() => Promise<Response>> = [
+      () => fetch(refusedUrl),
+      () => fetch(resetUrl),
+      () => Promise.reject(new DOMException("The operation timed out.", "TimeoutError")),
+      async () => new Response(null, { status: 503 }),
+    ]
+    const waits: number[] = []
+    let proofs = 0
+    const open = (send: (url: URL, init: RequestInit) => Promise<Response>) =>
+      openSession({
+        gateway: "https://gateway.fixture.invalid",
+        leaseId: "lease",
+        issue: async () => `proof-${++proofs}`,
+        send,
+        clock: () => waits.reduce((sum, wait) => sum + wait, 0),
+        sleep: async (milliseconds) => {
+          waits.push(milliseconds)
+        },
+      })
+    expect(await open((url, init) => faults.shift()?.() ?? gateway.send(url, init))).toEqual(grant)
+    expect(waits).toHaveLength(4)
+    expect(proofs).toBe(1)
+    waits.length = 0
+    for (const answer of [
+      async () => new Response(null, { status: 500 }),
+      async () => new Response(null, { status: 429 }),
+      () => Promise.reject(new TypeError("fetch failed")),
+    ])
+      await expect(open(answer)).rejects.toThrow("gateway unavailable")
+    expect(waits).toEqual([])
+    expect(proofs).toBe(1)
+  } finally {
+    reset.close()
   }
 })
 

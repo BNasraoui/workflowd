@@ -74,12 +74,16 @@ export async function prepare({
   await writeFile(`${directory}/execution-mode`, "actions-native", { mode: 0o600 })
 }
 
+/** The runner's log line for a failed bootstrap: it names the cause only when its text is fixed. */
+export const failure = (error) =>
+  `private bootstrap unavailable${error?.reported ? `: ${error.message}` : ""}\n`
+
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   try {
     if (process.argv[2] !== "prepare") throw new Error()
     await prepare()
-  } catch {
-    process.stderr.write("private bootstrap unavailable\n")
+  } catch (error) {
+    process.stderr.write(failure(error))
     process.exitCode = 1
   }
 }

@@ -35,13 +35,39 @@ const pause = (milliseconds, signal) =>
     )
   })
 
+/** Network failures that can clear by a wait: a refused connection, a reset and a timeout. */
+const passing = new Set([
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "ETIMEDOUT",
+  "UND_ERR_SOCKET",
+  "UND_ERR_CONNECT_TIMEOUT",
+  "UND_ERR_HEADERS_TIMEOUT",
+])
+
+/** A failure that may be shown in the runner's log: its text names only the cause. */
+const reported = (message) => Object.assign(new Error(message), { reported: true })
+
+/** The code of a certificate that the runner does not trust: no wait can clear it. */
+function untrustedCertificate(error) {
+  const code = error?.cause?.code ?? error?.code
+  return typeof code === "string" && /CERT|SELF_SIGNED|UNABLE_TO_(?:GET|VERIFY)|ALTNAME/.test(code)
+    ? reported(`gateway certificate not trusted (${code})`)
+    : undefined
+}
+
+const passes = (error) =>
+  error?.name === "TimeoutError" || passing.has(error?.cause?.code ?? error?.code)
+
 /**
  * Opens the run's gateway session: a challenge for the lease, an OIDC proof for that challenge,
- * and the session post. A challenge that is not ready (503, or a network error) uses no attempt:
- * the helper waits, with backoff up to 10 seconds, for at most `wait` milliseconds in all, since
- * the daemon may record the Actions run after the runner first asks. An answer can be lost after
- * the gateway sent it, so a lost or refused session costs a new proof, at most `attempts` times.
- * A refused challenge ends the exchange: the lease is not open to this runner.
+ * and the session post. A challenge that is not ready (503, a refused connection, a reset or a
+ * timeout) uses no attempt: the helper waits, with backoff up to 10 seconds, for at most `wait`
+ * milliseconds in all, since the daemon may record the Actions run after the runner first asks.
+ * Any other failure of the challenge ends the exchange at once: a refused challenge (the lease is
+ * not open to this runner), another status, and a certificate that the runner does not trust,
+ * which no wait can clear. An answer can be lost after the gateway sent it, so a lost or refused
+ * session costs a new proof, at most `attempts` times.
  */
 export async function openSession({
   gateway,
@@ -62,17 +88,21 @@ export async function openSession({
   let waited = 0
   const bounded = () => AbortSignal.any([AbortSignal.timeout(30000), ...(signal ? [signal] : [])])
   const challenge = async () => {
+    let response
     try {
-      const response = await send(new URL(`/capabilities/v1/challenge?lease=${leaseId}`, origin), {
+      response = await send(new URL(`/capabilities/v1/challenge?lease=${leaseId}`, origin), {
         redirect: "error",
         signal: bounded(),
       })
-      if (response.status === 403) throw Object.assign(new Error("lease refused"), { final: true })
-      return response.status === 200 ? await boundedJson(response, 4096) : undefined
     } catch (error) {
-      if (error?.final) throw error
-      return undefined
+      signal?.throwIfAborted()
+      if (passes(error)) return undefined
+      throw untrustedCertificate(error) ?? reported("gateway unavailable")
     }
+    if (response.status === 503) return undefined
+    if (response.status === 403) throw reported("lease refused")
+    if (response.status !== 200) throw reported("gateway unavailable")
+    return await boundedJson(response, 4096)
   }
   for (let attempt = 0; attempt < attempts; ) {
     const issued = await challenge()
@@ -109,12 +139,15 @@ export async function openSession({
             deadline: grant.deadline,
           }
       }
-    } catch {
-      // The answer is lost; the next attempt proves the runner again.
+    } catch (error) {
+      // The answer is lost; the next attempt proves the runner again. An untrusted
+      // certificate does not change by a new proof.
+      const untrusted = untrustedCertificate(error)
+      if (untrusted) throw untrusted
     }
     if (attempt < attempts) await sleep(backoff(attempt), signal)
   }
-  throw new Error("gateway session unavailable")
+  throw reported("gateway session unavailable")
 }
 
 /**
