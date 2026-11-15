@@ -5,7 +5,7 @@ import { SqlClient } from "effect/unstable/sql"
 import { AgentRunStoreLive, AgentRunStore } from "../../src/kernel/agent-run-store"
 import { makeCapabilityStore } from "../../src/capability-gateway/store"
 import { seedCapabilityRun, transport } from "./fixture"
-import { capabilitySession } from "../../src/store/0041-capability-session"
+import { capabilitySession } from "../../src/store/0040-capability-session"
 
 const now = Date.now()
 const seed = Effect.gen(function* () {
@@ -181,7 +181,7 @@ test("the session migration keeps live bindings, their tokens and revocation tri
         sql`SELECT (SELECT count(*) FROM capability_tokens) AS tokens,
           (SELECT count(*) FROM sqlite_master WHERE name='capability_tokens_run') AS indexes`
       expect(yield* count()).toEqual([{ tokens: 2, indexes: 1 }])
-      // Back to the schema before 0041's columns, then rebuild again, with foreign keys on, over
+      // Back to the schema before 0040's columns, then rebuild again, with foreign keys on, over
       // a bound row and a renewal chain.
       yield* sql`DROP TABLE capability_proofs`
       yield* sql`ALTER TABLE capability_tokens DROP COLUMN session`

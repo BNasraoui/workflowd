@@ -1082,7 +1082,7 @@ test("an actions-native lease becomes ready on its runner's gateway session, and
       const gateway = yield* makeCapabilityStore
       const state = () =>
         sql`SELECT state,peer_id AS peerId,transport FROM sandbox_leases WHERE run_id='run'`
-      // Migration 0042 rebuilt the table with its index and triggers.
+      // Migration 0041 rebuilt the table with its index and triggers.
       expect(
         yield* sql`SELECT type,name FROM sqlite_master WHERE tbl_name='sandbox_leases' AND type!='table' AND sql IS NOT NULL ORDER BY name`,
       ).toEqual([
