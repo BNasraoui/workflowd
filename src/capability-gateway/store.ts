@@ -27,6 +27,9 @@ const Authority = Schema.Struct({
   deadline: Schema.Number,
 })
 const Binding = Schema.Struct({ runId: Schema.String, channel: Digest })
+const SessionBinding = Schema.Struct({ ...Binding.fields, session: Schema.Int })
+/** A run gets at most this many challenges; a ninth is refused. */
+const maxChallenges = 8
 const SessionPolicy = Schema.Struct({
   privateBootstrap: Schema.Struct({
     mode: Schema.Literal("actions-native"),
@@ -49,6 +52,8 @@ const Row = Schema.Struct({
   transport_digest: Schema.NullOr(Digest),
   jti_digest: Schema.NullOr(Digest),
   revoked: Schema.Int,
+  session: Schema.Int,
+  challenges: Schema.Int,
 })
 const Current = Schema.Struct({
   runId: Schema.String,
@@ -123,33 +128,32 @@ export const makeCapabilityStore = Effect.gen(function* () {
       if (row.authority[key] !== value[key]) return yield* Effect.fail(new CapabilityRefused())
     return { row, value }
   })
-  /** A null transport is the gateway's own session: the run token alone carries the binding. */
+  /** The SSH exchange's challenge: one per lease, bound to the peer and transport it names. */
   const challenge = Effect.fn("CapabilityStore.challenge")(function* (
     runId: string,
-    transport: SandboxTransport | null,
+    transport: SandboxTransport,
     now: number,
   ) {
-    const encodedTransport =
-      transport === null
-        ? null
-        : yield* Schema.encodeEffect(Schema.fromJsonString(SandboxTransport))(transport)
+    const encodedTransport = yield* Schema.encodeEffect(Schema.fromJsonString(SandboxTransport))(
+      transport,
+    )
     return yield* sql.withTransaction(
       Effect.gen(function* () {
         const value = yield* current(runId, now)
         if (value.leaseState !== "starting") return yield* Effect.fail(new CapabilityRefused())
         const authority = yield* Schema.decodeUnknownEffect(Authority)({
           ...value,
-          peerId: transport?.peerId ?? "",
+          peerId: transport.peerId,
         })
         const channel = randomBytes(32).toString("hex")
         const nonce = randomBytes(32).toString("hex")
         // A fresh challenge may replace only an unconsumed bootstrap, never a revoked grant.
         const kept =
-          yield* sql`SELECT 1 FROM capability_bindings WHERE run_id=${runId} AND (jti_digest IS NOT NULL OR revoked=1)`
+          yield* sql`SELECT 1 FROM capability_bindings WHERE run_id=${runId} AND (jti_digest IS NOT NULL OR revoked=1 OR session>0)`
         if (kept.length > 0) return yield* Effect.fail(new CapabilityRefused())
         yield* sql`DELETE FROM capability_bindings WHERE run_id=${runId} AND jti_digest IS NULL AND revoked=0`
         yield* sql`INSERT INTO capability_bindings(run_id,channel,challenge,challenge_expires,authority,transport_digest)
-        VALUES(${runId},${channel},${capabilityDigest(nonce)},${Math.min(now + 60000, authority.deadline)},${JSON.stringify(authority)},${encodedTransport === null ? null : capabilityDigest(encodedTransport)})`
+        VALUES(${runId},${channel},${capabilityDigest(nonce)},${Math.min(now + 60000, authority.deadline)},${JSON.stringify(authority)},${capabilityDigest(encodedTransport)})`
         return {
           runId,
           channel,
@@ -211,9 +215,12 @@ export const makeCapabilityStore = Effect.gen(function* () {
     now: number,
   ) {
     const { row, value } = yield* read(binding, now)
-    if (row.jti_digest === null) return yield* Effect.fail(new CapabilityRefused())
     // A session binding has no SSH peer to compare; the lease must still be live (current()).
-    if (row.transport_digest === null) return row.authority
+    if (row.transport_digest === null)
+      return row.session > 0
+        ? { ...row.authority, session: row.session }
+        : yield* Effect.fail(new CapabilityRefused())
+    if (row.jti_digest === null) return yield* Effect.fail(new CapabilityRefused())
     if (
       value.leaseState !== "ready" ||
       value.peerId !== row.authority.peerId ||
@@ -221,7 +228,7 @@ export const makeCapabilityStore = Effect.gen(function* () {
       capabilityDigest(JSON.stringify(value.transport)) !== row.transport_digest
     )
       return yield* Effect.fail(new CapabilityRefused())
-    return row.authority
+    return { ...row.authority, session: row.session }
   })
   const authorize = Effect.fn("CapabilityStore.authorize")(function* (
     binding: CapabilityBinding,
@@ -231,7 +238,7 @@ export const makeCapabilityStore = Effect.gen(function* () {
     yield* Schema.decodeUnknownEffect(Digest)(digest)
     const authority = yield* validateBinding(binding, now)
     const tokens =
-      yield* sql`SELECT expires_at FROM capability_tokens WHERE digest=${digest} AND run_id=${binding.runId} AND expires_at>${now}`
+      yield* sql`SELECT expires_at FROM capability_tokens WHERE digest=${digest} AND run_id=${binding.runId} AND expires_at>${now} AND session=${authority.session}`
     if (tokens.length !== 1) return yield* Effect.fail(new CapabilityRefused())
     const token = yield* Schema.decodeUnknownEffect(Schema.Struct({ expires_at: Schema.Number }))(
       tokens[0],
@@ -251,22 +258,84 @@ export const makeCapabilityStore = Effect.gen(function* () {
         const authority = yield* authorize(binding, predecessor, now)
         if (!Number.isSafeInteger(expiresAt) || expiresAt <= now || expiresAt > authority.deadline)
           return yield* Effect.fail(new CapabilityRefused())
-        yield* sql`INSERT INTO capability_tokens(digest,run_id,predecessor,expires_at) VALUES(${successor},${binding.runId},${predecessor},${expiresAt})`
+        yield* sql`INSERT INTO capability_tokens(digest,run_id,predecessor,expires_at,session) VALUES(${successor},${binding.runId},${predecessor},${expiresAt},${authority.session})`
       }),
     )
   })
+  /**
+   * A runner's challenge for its lease. The binding's channel stays (the native tables name it);
+   * each challenge sets a new nonce and replaces an unused earlier one, at most `maxChallenges`
+   * times for one run.
+   */
   const leaseChallenge = Effect.fn("CapabilityStore.leaseChallenge")(function* (
     leaseId: string,
     now: number,
   ) {
     if (!/^[a-zA-Z0-9-]{1,80}$/.test(leaseId)) return yield* Effect.fail(new CapabilityRefused())
-    const rows = yield* sql`SELECT run_id FROM sandbox_leases WHERE lease_id=${leaseId}
-      AND json_extract(policy,'$.privateBootstrap.mode')='actions-native'`
-    const runId = rows[0]?.run_id
-    if (rows.length !== 1 || typeof runId !== "string")
-      return yield* Effect.fail(new CapabilityRefused())
-    const issued = yield* challenge(runId, null, now)
-    return { channel: issued.channel, nonce: issued.nonce, expiresAt: issued.expiresAt }
+    return yield* sql.withTransaction(
+      Effect.gen(function* () {
+        const rows = yield* sql<{ readonly run_id: unknown }>`SELECT run_id FROM sandbox_leases
+          WHERE lease_id=${leaseId} AND json_extract(policy,'$.privateBootstrap.mode')='actions-native'`
+        const runId = rows[0]?.run_id
+        if (rows.length !== 1 || typeof runId !== "string")
+          return yield* Effect.fail(new CapabilityRefused())
+        const value = yield* current(runId, now)
+        const nonce = randomBytes(32).toString("hex")
+        const expiresAt = Math.min(now + 60000, value.deadline)
+        const updated = yield* sql<{ readonly channel: unknown }>`UPDATE capability_bindings
+          SET challenge=${capabilityDigest(nonce)},challenge_expires=${expiresAt},challenges=challenges+1
+          WHERE run_id=${runId} AND revoked=0 AND transport_digest IS NULL
+          AND challenges<${maxChallenges} RETURNING channel`
+        const kept = updated[0]?.channel
+        if (typeof kept === "string") return { channel: kept, nonce, expiresAt }
+        const existing = yield* sql`SELECT 1 FROM capability_bindings WHERE run_id=${runId}`
+        if (existing.length > 0) return yield* Effect.fail(new CapabilityRefused())
+        const authority = yield* Schema.decodeUnknownEffect(Authority)({ ...value, peerId: "" })
+        const channel = randomBytes(32).toString("hex")
+        yield* sql`INSERT INTO capability_bindings(run_id,channel,challenge,challenge_expires,authority,challenges)
+          VALUES(${runId},${channel},${capabilityDigest(nonce)},${expiresAt},${JSON.stringify(authority)},1)`
+        return { channel, nonce, expiresAt }
+      }),
+    )
+  })
+  /**
+   * A verified proof for the current unused challenge opens the run's next session: the jti is
+   * recorded once, the challenge is used, and every token of an earlier session stops being valid.
+   */
+  const bindSession = Effect.fn("CapabilityStore.bindSession")(function* (
+    challenge: typeof Challenge.Type,
+    jti: string,
+    digest: string,
+    expiresAt: number,
+    now: number,
+  ) {
+    yield* Schema.decodeUnknownEffect(Challenge)(challenge)
+    yield* Schema.decodeUnknownEffect(Digest)(digest)
+    return yield* sql.withTransaction(
+      Effect.gen(function* () {
+        const { row } = yield* read(challenge, now)
+        const proof = capabilityDigest(jti)
+        const used = yield* sql`SELECT 1 FROM capability_proofs WHERE jti_digest=${proof}`
+        if (
+          used.length > 0 ||
+          row.transport_digest !== null ||
+          row.challenge !== capabilityDigest(challenge.nonce) ||
+          row.challenge_expires <= now ||
+          row.authority.recipientId !== challenge.recipientId ||
+          !jti ||
+          jti.length > 256 ||
+          !Number.isSafeInteger(expiresAt) ||
+          expiresAt <= now ||
+          expiresAt > row.authority.deadline
+        )
+          return yield* Effect.fail(new CapabilityRefused())
+        const session = row.session + 1
+        yield* sql`INSERT INTO capability_proofs(jti_digest,run_id) VALUES(${proof},${row.run_id})`
+        yield* sql`UPDATE capability_bindings SET session=${session},challenge_expires=0 WHERE run_id=${row.run_id}`
+        yield* sql`INSERT INTO capability_tokens(digest,run_id,expires_at,session) VALUES(${digest},${row.run_id},${expiresAt},${session})`
+        return { runId: row.run_id, channel: row.channel, session }
+      }),
+    )
   })
   /** What a session proof must match. The channel comes from an unverified audience: it only selects. */
   const sessionContext = Effect.fn("CapabilityStore.sessionContext")(function* (
@@ -276,7 +345,7 @@ export const makeCapabilityStore = Effect.gen(function* () {
     const rows = yield* sql`SELECT b.run_id AS runId,l.lease_id AS leaseId,l.policy,
       b.challenge_expires AS challengeExpires,json_extract(b.authority,'$.recipientId') AS recipientId
       FROM capability_bindings b JOIN sandbox_leases l ON l.run_id=b.run_id
-      WHERE b.channel=${channel} AND b.revoked=0 AND b.jti_digest IS NULL AND b.transport_digest IS NULL`
+      WHERE b.channel=${channel} AND b.revoked=0 AND b.transport_digest IS NULL`
     if (rows.length !== 1) return yield* Effect.fail(new CapabilityRefused())
     const row = yield* Schema.decodeUnknownEffect(
       Schema.Struct({
@@ -296,34 +365,44 @@ export const makeCapabilityStore = Effect.gen(function* () {
       deadline: value.deadline,
     }
   })
+  /** The binding of a valid run token, with the session that token belongs to. */
   const bindingFor = Effect.fn("CapabilityStore.bindingFor")(function* (
     digest: string,
     now: number,
   ) {
     yield* Schema.decodeUnknownEffect(Digest)(digest)
-    const rows = yield* sql`SELECT b.run_id AS runId,b.channel FROM capability_tokens t
-      JOIN capability_bindings b ON b.run_id=t.run_id
+    const rows = yield* sql`SELECT b.run_id AS runId,b.channel,b.session FROM capability_tokens t
+      JOIN capability_bindings b ON b.run_id=t.run_id AND b.session=t.session
       WHERE t.digest=${digest} AND t.expires_at>${now} AND b.revoked=0`
     if (rows.length !== 1) return yield* Effect.fail(new CapabilityRefused())
-    return yield* Schema.decodeUnknownEffect(Binding)(rows[0])
+    return yield* Schema.decodeUnknownEffect(SessionBinding)(rows[0])
   })
-  /** Of these runs, those whose binding another process revoked. */
-  const revokedAmong = Effect.fn("CapabilityStore.revokedAmong")(function* (
-    runIds: ReadonlyArray<string>,
+  /** Of these streams, those whose binding is revoked or has moved to a later session. */
+  const staleAmong = Effect.fn("CapabilityStore.staleAmong")(function* (
+    streams: ReadonlyArray<{ readonly runId: string; readonly session: number }>,
   ) {
-    if (runIds.length === 0) return []
-    const rows = yield* sql`SELECT run_id FROM capability_bindings
-      WHERE revoked=1 AND run_id IN ${sql.in(runIds)}`
-    return rows.flatMap((row) => (typeof row.run_id === "string" ? [row.run_id] : []))
+    if (streams.length === 0) return []
+    const rows = yield* sql`SELECT run_id AS runId,session,revoked FROM capability_bindings
+      WHERE run_id IN ${sql.in([...new Set(streams.map((stream) => stream.runId))])}`
+    const bindings = yield* Schema.decodeUnknownEffect(
+      Schema.Array(
+        Schema.Struct({ runId: Schema.String, session: Schema.Int, revoked: Schema.Int }),
+      ),
+    )(rows)
+    return streams.filter((stream) => {
+      const binding = bindings.find((row) => row.runId === stream.runId)
+      return binding === undefined || binding.revoked === 1 || binding.session !== stream.session
+    })
   })
   return {
     challenge,
     leaseChallenge,
     sessionContext,
     bindingFor,
-    revokedAmong,
+    staleAmong,
     acceptProof,
     bind,
+    bindSession,
     authorize,
     validateBinding,
     renew,

@@ -53,6 +53,8 @@ const proofAudience = (token: string) => {
     return null
   }
 }
+/** A run token lives 15 minutes; its holder renews it 10 to 12 minutes in. */
+const renewIn = () => randomInt(10 * 60000, 12 * 60000)
 const denied = () => new Response(null, { status: 403 })
 const unavailable = () => new Response(null, { status: 503, headers: { "retry-after": "5" } })
 
@@ -85,15 +87,27 @@ export const makeCapabilityGateway = (
     const native = yield* makeNativeExecutionStore
     const sql = yield* SqlClient.SqlClient
     const authority = runLifetime(sql)
-    const active = new Map<string, Set<AbortController>>()
+    // Each live stream, by run, with the session of the token that opened it.
+    const active = new Map<string, Map<AbortController, number>>()
     let count = 0
     const abortRun = (runId: string) => {
-      for (const controller of active.get(runId) ?? []) controller.abort()
+      for (const controller of active.get(runId)?.keys() ?? []) controller.abort()
+    }
+    const streams = () =>
+      [...active].flatMap(([runId, owned]) =>
+        [...new Set(owned.values())].map((session) => ({ runId, session })),
+      )
+    const abortStale = (
+      stale: ReadonlyArray<{ readonly runId: string; readonly session: number }>,
+    ) => {
+      for (const { runId, session } of stale)
+        for (const [controller, owner] of active.get(runId) ?? [])
+          if (owner === session) controller.abort()
     }
     // Bindings outlive this process: a restart revokes nothing. Another process (workflowd, or a
-    // second gateway) revokes through the store, so live streams follow the durable flag.
-    yield* Effect.suspend(() => store.revokedAmong([...active.keys()])).pipe(
-      Effect.tap((runIds) => Effect.sync(() => runIds.forEach(abortRun))),
+    // second gateway) revokes or opens a new session through the store, so live streams follow it.
+    yield* Effect.suspend(() => store.staleAmong(streams())).pipe(
+      Effect.tap((stale) => Effect.sync(() => abortStale(stale))),
       Effect.ignore,
       Effect.andThen(Effect.sleep("1 second")),
       Effect.forever,
@@ -110,7 +124,7 @@ export const makeCapabilityGateway = (
           config.noscope,
           "run-capability",
           "run",
-          Math.min(3600, Math.floor((deadline - Date.now()) / 1000)),
+          Math.min(900, Math.floor((deadline - Date.now()) / 1000)),
           signal,
         ),
       )
@@ -131,7 +145,7 @@ export const makeCapabilityGateway = (
           )
           return {
             ...next,
-            renewAt: Math.min(next.expiresAt, Date.now() + randomInt(45 * 60000, 55 * 60000)),
+            renewAt: Math.min(next.expiresAt, Date.now() + renewIn()),
             predecessorExpiresAt: previous.expiresAt,
           }
         }),
@@ -157,13 +171,17 @@ export const makeCapabilityGateway = (
       return {
         binding,
         ...token,
-        renewAt: Math.min(token.expiresAt, Date.now() + randomInt(45 * 60000, 55 * 60000)),
+        renewAt: Math.min(token.expiresAt, Date.now() + renewIn()),
       }
     })
     const sessionChallenge = Effect.fn("CapabilityGateway.sessionChallenge")((lease: string) =>
       store.leaseChallenge(lease, Date.now()),
     )
-    /** The runner's OIDC proof for `workflowd:<channel>:<nonce>` becomes its run token once. */
+    /**
+     * The runner's OIDC proof for `workflowd:<channel>:<nonce>` opens the run's next session. The
+     * answer can be lost after it is sent; the runner then proves itself again for a new challenge,
+     * and that session ends every token of this one. Nothing here depends on seeing the client.
+     */
     const session = Effect.fn("CapabilityGateway.session")(function* (proof: unknown) {
       const { token } = yield* Schema.decodeUnknownEffect(SessionProof)(proof, {
         onExcessProperty: "error",
@@ -200,17 +218,22 @@ export const makeCapabilityGateway = (
             Date.now(),
           ),
       })
-      const grant = yield* bind(
-        {
-          runId: job.runId,
-          channel: audience[1],
-          nonce: audience[2],
-          recipientId: job.recipientId,
-          deadline: job.deadline,
-          expiresAt: job.challengeExpires,
-        },
-        verified.jti,
+      const issued = yield* issue(job.deadline)
+      yield* authority.withPermit(
+        store.bindSession(
+          {
+            runId: job.runId,
+            channel: audience[1],
+            nonce: audience[2],
+            recipientId: job.recipientId,
+          },
+          verified.jti,
+          capabilityDigest(issued.token),
+          issued.expiresAt,
+          Date.now(),
+        ),
       )
+      const grant = { ...issued, renewAt: Math.min(issued.expiresAt, Date.now() + renewIn()) }
       return {
         token: grant.token,
         expiresAt: grant.expiresAt,
@@ -232,7 +255,7 @@ export const makeCapabilityGateway = (
         // The run token alone selects its binding; no route reads a body before this check.
         const found = yield* Effect.result(store.bindingFor(digest, Date.now()))
         if (found._tag === "Failure") return denied()
-        const binding = found.success
+        const { session, ...binding } = found.success
         const checked = yield* Effect.result(
           authority.withPermit(store.authorize(binding, digest, Date.now())),
         )
@@ -285,10 +308,10 @@ export const makeCapabilityGateway = (
               const invocation = yield* native.read(binding.runId)
               if (invocation && !["launching", "running"].includes(invocation.state))
                 return yield* Effect.fail(new Error("Native invocation inactive"))
-              const owned = active.get(binding.runId) ?? new Set<AbortController>()
+              const owned = active.get(binding.runId) ?? new Map<AbortController, number>()
               if (count >= config.maxStreams || owned.size >= config.maxStreamsPerRun) return null
               const controller = new AbortController()
-              owned.add(controller)
+              owned.set(controller, session)
               active.set(binding.runId, owned)
               count++
               const unlisten = authority.listen(binding.runId, () => controller.abort())

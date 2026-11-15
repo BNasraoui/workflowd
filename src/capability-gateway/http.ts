@@ -1,4 +1,4 @@
-import { createServer } from "node:http"
+import { createServer, type ServerResponse } from "node:http"
 import { Readable } from "node:stream"
 import { pipeline } from "node:stream/promises"
 import type { Socket } from "node:net"
@@ -22,7 +22,9 @@ const refusedOr = (exit: Exit.Exit<unknown, unknown>) =>
 
 /**
  * The gateway's API. A runner gets a challenge for its lease and posts its OIDC proof for that
- * challenge; every other route is a run's call and carries its run token.
+ * challenge; every other route is a run's call and carries its run token. A challenge or session
+ * runs to its end whether or not the client is still there: a lost answer costs the runner a new
+ * challenge and proof, never the run.
  */
 export const capabilityApi =
   (gateway: typeof CapabilityGateway.Service) =>
@@ -32,9 +34,7 @@ export const capabilityApi =
       const lease = url.searchParams.get("lease")
       if (request.method !== "GET" || lease === null || [...url.searchParams].length !== 1)
         return new Response(null, { status: 403 })
-      const exit = await Effect.runPromiseExit(gateway.sessionChallenge(lease), {
-        signal: request.signal,
-      })
+      const exit = await Effect.runPromiseExit(gateway.sessionChallenge(lease))
       return Exit.isSuccess(exit) ? Response.json(exit.value, noStore) : refusedOr(exit)
     }
     if (url.pathname === "/capabilities/v1/session") {
@@ -52,7 +52,7 @@ export const capabilityApi =
         .then((body): unknown => JSON.parse(body.toString("utf8")))
         .catch(() => undefined)
       if (proof === undefined) return new Response(null, { status: 403 })
-      const exit = await Effect.runPromiseExit(gateway.session(proof), { signal: request.signal })
+      const exit = await Effect.runPromiseExit(gateway.session(proof))
       return Exit.isSuccess(exit) ? Response.json(exit.value, noStore) : refusedOr(exit)
     }
     return Effect.runPromise(gateway.handle(request), { signal: request.signal })
@@ -66,7 +66,9 @@ export function capabilityHttpServer(
 ) {
   const sockets = new Set<Socket>()
   const pending = new Set<Promise<void>>()
+  const responses = new Set<ServerResponse>()
   const server = createServer({ maxHeaderSize: 8192 }, (incoming, outgoing) => {
+    responses.add(outgoing)
     const lifetime = new AbortController()
     const abort = () => lifetime.abort()
     incoming.socket.once("close", abort)
@@ -100,7 +102,10 @@ export function capabilityHttpServer(
       }
     })()
     pending.add(work)
-    void work.finally(() => pending.delete(work))
+    void work.finally(() => {
+      pending.delete(work)
+      responses.delete(outgoing)
+    })
   })
   server.requestTimeout = 120000
   server.headersTimeout = 15000
@@ -112,6 +117,8 @@ export function capabilityHttpServer(
   const close = async () => {
     const stopped = new Promise<void>((resolve) => server.close(() => resolve()))
     for (const socket of sockets) socket.destroy()
+    // A client that left may never be reported (Bun 1.3.14); its unfinished answer ends here.
+    for (const response of responses) response.destroy()
     await Promise.all([stopped, ...pending])
   }
   return { server, close }

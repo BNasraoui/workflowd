@@ -184,13 +184,102 @@ test("the session migration keeps live bindings, their tokens and revocation tri
           (SELECT count(*) FROM sandbox_native_executions) AS executions,
           (SELECT count(*) FROM sqlite_master WHERE name='capability_tokens_run') AS indexes`
       expect(yield* count()).toEqual([{ tokens: 2, executions: 1, indexes: 1 }])
-      // Rebuild again, with foreign keys on, over a bound row, a renewal chain and an execution.
+      // Back to the schema before 0041's columns, then rebuild again, with foreign keys on, over
+      // a bound row, a renewal chain and an execution.
+      yield* sql`DROP TABLE capability_proofs`
+      yield* sql`ALTER TABLE capability_tokens DROP COLUMN session`
+      yield* sql`ALTER TABLE capability_bindings DROP COLUMN session`
+      yield* sql`ALTER TABLE capability_bindings DROP COLUMN challenges`
       yield* sql.withTransaction(capabilitySession)
       expect(yield* count()).toEqual([{ tokens: 2, executions: 1, indexes: 1 }])
+      expect(yield* sql`SELECT session,challenges FROM capability_bindings`).toEqual([
+        { session: 0, challenges: 0 },
+      ])
+      expect(yield* sql`SELECT DISTINCT session FROM capability_tokens`).toEqual([{ session: 0 }])
+      expect(yield* sql`SELECT count(*) AS proofs FROM capability_proofs`).toEqual([{ proofs: 0 }])
       expect((yield* store.authorize(binding, "b".repeat(64), now + 2)).runId).toBe("run")
       expect(yield* sql`PRAGMA foreign_key_check`).toEqual([])
       yield* leases.beginRelease("run")
       expect(yield* sql`SELECT revoked FROM capability_bindings`).toEqual([{ revoked: 1 }])
+    }),
+  )
+})
+
+test("a new session ends every token of the earlier one, and a proof opens one session", async () => {
+  await run(
+    Effect.gen(function* () {
+      yield* seedCapabilityRun(now, true)
+      const store = yield* makeCapabilityStore
+      const recipientId = "managed:fixture-controller:run"
+      const first = yield* store.leaseChallenge("lease", now)
+      const binding = yield* store.bindSession(
+        { runId: "run", channel: first.channel, nonce: first.nonce, recipientId },
+        "jti-1",
+        "a".repeat(64),
+        now + 60000,
+        now,
+      )
+      expect(binding).toEqual({ runId: "run", channel: first.channel, session: 1 })
+      const { session: _, ...run } = binding
+      yield* store.renew(run, "a".repeat(64), "b".repeat(64), now + 60000, now + 1)
+      expect((yield* store.authorize(run, "b".repeat(64), now + 2)).session).toBe(1)
+      // The used challenge, and the used proof on a new challenge, open nothing.
+      expect(
+        (yield* Effect.result(
+          store.bindSession(
+            { runId: "run", channel: first.channel, nonce: first.nonce, recipientId },
+            "jti-2",
+            "c".repeat(64),
+            now + 60000,
+            now + 3,
+          ),
+        ))._tag,
+      ).toBe("Failure")
+      const second = yield* store.leaseChallenge("lease", now + 3)
+      expect(second.channel).toBe(first.channel)
+      const challenge = { runId: "run", channel: second.channel, nonce: second.nonce, recipientId }
+      expect(
+        (yield* Effect.result(
+          store.bindSession(challenge, "jti-1", "c".repeat(64), now + 60000, now + 4),
+        ))._tag,
+      ).toBe("Failure")
+      expect(
+        (yield* store.bindSession(challenge, "jti-2", "c".repeat(64), now + 60000, now + 4))
+          .session,
+      ).toBe(2)
+      for (const digest of ["a", "b"]) {
+        expect((yield* Effect.result(store.authorize(run, digest.repeat(64), now + 5)))._tag).toBe(
+          "Failure",
+        )
+        expect((yield* Effect.result(store.bindingFor(digest.repeat(64), now + 5)))._tag).toBe(
+          "Failure",
+        )
+      }
+      expect(
+        (yield* Effect.result(
+          store.renew(run, "b".repeat(64), "d".repeat(64), now + 60000, now + 5),
+        ))._tag,
+      ).toBe("Failure")
+      expect((yield* store.bindingFor("c".repeat(64), now + 5)).session).toBe(2)
+      expect(
+        yield* store.staleAmong([
+          { runId: "run", session: 1 },
+          { runId: "run", session: 2 },
+          { runId: "gone", session: 1 },
+        ]),
+      ).toEqual([
+        { runId: "run", session: 1 },
+        { runId: "gone", session: 1 },
+      ])
+      // An SSH challenge cannot replace a session binding.
+      expect((yield* Effect.result(store.challenge("run", transport, now + 6)))._tag).toBe(
+        "Failure",
+      )
+      yield* store.revoke("run")
+      expect(yield* store.staleAmong([{ runId: "run", session: 2 }])).toEqual([
+        { runId: "run", session: 2 },
+      ])
+      expect((yield* Effect.result(store.leaseChallenge("lease", now + 7)))._tag).toBe("Failure")
     }),
   )
 })

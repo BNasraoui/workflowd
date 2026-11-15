@@ -6,7 +6,8 @@ const children = ["capability_tokens", "sandbox_native_executions", "sandbox_nat
 
 /**
  * A binding made by the gateway's own session has no SSH transport, so its transport digest is
- * absent. SQLite cannot relax a column in place, and with foreign keys on it rewrites a child's
+ * absent. It counts its sessions and challenges; each run token belongs to one session, and each
+ * proof (by jti) opens at most one. SQLite cannot relax a column in place, and with foreign keys on it rewrites a child's
  * reference on any rename and counts the rows a dropped parent still has. So the parent and its
  * children are copied aside, dropped children first, recreated parent first (the children from
  * their stored definitions) and refilled, all inside the migration's transaction.
@@ -47,6 +48,13 @@ export const capabilitySession = Effect.gen(function* () {
     yield* sql.unsafe(`INSERT INTO ${table} SELECT * FROM session_copy_${table}`)
     yield* sql.unsafe(`DROP TABLE session_copy_${table}`)
   }
+  yield* sql`ALTER TABLE capability_bindings ADD COLUMN session INTEGER NOT NULL DEFAULT 0 CHECK(session>=0)`
+  yield* sql`ALTER TABLE capability_bindings ADD COLUMN challenges INTEGER NOT NULL DEFAULT 0 CHECK(challenges>=0)`
+  yield* sql`ALTER TABLE capability_tokens ADD COLUMN session INTEGER NOT NULL DEFAULT 0 CHECK(session>=0)`
+  yield* sql`CREATE TABLE capability_proofs (
+    jti_digest TEXT PRIMARY KEY CHECK(length(jti_digest)=64),
+    run_id TEXT NOT NULL REFERENCES capability_bindings(run_id)
+  ) STRICT`
   yield* sql`CREATE TRIGGER capability_run_revoke AFTER UPDATE OF state,attempt ON kernel_agent_runs
     WHEN NEW.state NOT IN ('spawning','spawned','verified') OR NEW.attempt != OLD.attempt
     BEGIN UPDATE capability_bindings SET revoked=1 WHERE run_id=NEW.run_id; END`
