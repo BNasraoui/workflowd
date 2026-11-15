@@ -981,7 +981,9 @@ test(
 
 /**
  * Runs the check of a bundle in a process of its own, and gives the refusal and the
- * peak resident memory of that process in bytes.
+ * peak resident memory of that process in bytes, read from Linux's VmHWM: the
+ * maxRSS of a process started by the test process keeps the peak of the test
+ * process across exec.
  */
 async function checkInOwnProcess(f: Fixture, bundle: Uint8Array) {
   const input = join(f.root, `check-${crypto.randomUUID()}.json`)
@@ -1009,7 +1011,10 @@ const exit = await Effect.runPromiseExit(Effect.scoped(Effect.gen(function* () {
   return yield* checkSealedResult(result, input.target, options)
 })).pipe(Effect.provide(Layer.effect(SealedResultGit, makeSealedResultGit(input.settings)))))
 const error = Exit.isFailure(exit) ? Cause.squash(exit.cause) : undefined
-console.log(JSON.stringify({ check: error?.check ?? null, peak: process.resourceUsage().maxRSS * 1024 }))`,
+// VmHWM is the peak of this process since it started; maxRSS would also hold its parent's.
+const status = await Bun.file("/proc/self/status").text()
+const peak = Number(/^VmHWM:\\s+(\\d+) kB$/m.exec(status)[1]) * 1024
+console.log(JSON.stringify({ check: error?.check ?? null, peak }))`,
     ],
     {
       cwd: resolve("."),
