@@ -470,6 +470,63 @@ test(
 )
 
 test(
+  "a git child gets the fixed environment and no variable of the daemon process",
+  withFixture(async (f) => {
+    const recorder = await recordingGit(f)
+    const trace = join(f.root, "trace.log")
+    const sealed = await sealWithResultPy(f, async (workspace) => {
+      await writeFile(join(workspace, "result.txt"), "content\n")
+    })
+    const result = await decode(sealed.json, sealed.bundle)
+    const daemon = {
+      GIT_DIR: join(f.root, "elsewhere.git"),
+      GIT_SSH_COMMAND: `touch ${join(f.root, "executed")}`,
+      GIT_EXEC_PATH: join(f.root, "exec-path"),
+      GIT_ALTERNATE_OBJECT_DIRECTORIES: join(f.work, ".git", "objects"),
+      GIT_CONFIG_COUNT: "1",
+      GIT_CONFIG_KEY_0: "core.hooksPath",
+      GIT_CONFIG_VALUE_0: join(f.root, "hooks"),
+      GIT_TRACE: trace,
+      https_proxy: "http://127.0.0.1:9",
+    }
+    const saved = Object.fromEntries(Object.keys(daemon).map((key) => [key, process.env[key]]))
+    try {
+      Object.assign(process.env, daemon)
+      const exit = await publish(result, options(f, { gitBinary: recorder.path }))
+      if (Exit.isFailure(exit)) throw Cause.squash(exit.cause)
+    } finally {
+      for (const [key, value] of Object.entries(saved))
+        if (value === undefined) delete process.env[key]
+        else process.env[key] = value
+    }
+    const calls = await recorder.calls()
+    expect(calls.length).toBeGreaterThan(5)
+    for (const call of calls) {
+      // PWD is set by the shell of the recording git, not by the daemon.
+      expect(Object.keys(call.env).sort()).toEqual([
+        "GIT_ALLOW_PROTOCOL",
+        "GIT_CONFIG_COUNT",
+        "GIT_CONFIG_GLOBAL",
+        "GIT_CONFIG_KEY_0",
+        "GIT_CONFIG_NOSYSTEM",
+        "GIT_CONFIG_SYSTEM",
+        "GIT_CONFIG_VALUE_0",
+        "GIT_NO_REPLACE_OBJECTS",
+        "GIT_TERMINAL_PROMPT",
+        "HOME",
+        "LC_ALL",
+        "PATH",
+        "PWD",
+      ])
+      expect(call.env.GIT_CONFIG_COUNT).toBe("1")
+      expect(call.env.GIT_CONFIG_KEY_0).toBe(`http.${f.remote}.extraHeader`)
+    }
+    expect(await Bun.file(trace).exists()).toBe(false)
+    expect(await Bun.file(join(f.root, "executed")).exists()).toBe(false)
+  }),
+)
+
+test(
   "the push token of the installation is asked for contents only, and reaches git as a header",
   withFixture(async (f) => {
     const { generateKeyPairSync } = await import("node:crypto")
