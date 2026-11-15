@@ -1057,6 +1057,29 @@ await until("release")`,
     }
   }, 20_000)
 
+test("a record that stays unreadable after the worker ended is a lost observation, not a stall", async () => {
+  const h = await harness("claude", { retryLimit: 2, progressWindowMs: STALL_WINDOW_MS })
+  try {
+    await h.dispatch()
+    // The worker keeps writing to the file it has open; the reader finds a
+    // directory in its place, which it cannot read.
+    const head = join(h.root, "custody", RUN_ID, "events.jsonl")
+    await rm(head)
+    await mkdir(head)
+    await h.release(0)
+    const terminals = await h.settle()
+    expect(terminals).toHaveLength(1)
+    expect(terminals[0]).toMatchObject({
+      kind: "operator_required",
+      diagnostic: expect.stringMatching(
+        /^claude_observation_lost: observation unavailable after 2 re-attach attempts: event record cannot be read after the run stopped/,
+      ),
+    })
+  } finally {
+    await h.cleanup()
+  }
+}, 20_000)
+
 for (const kind of ["claude", "codex"] as const)
   test(`a restarted controller recovers a live ${kind} worker whose record already rotated`, async () => {
     const h = await harness(kind, {

@@ -61,6 +61,9 @@ export const decodeRecordIndex = (text: string): RecordIndex => {
   return { first: index.first, last: index.last }
 }
 
+/** Polls a file that cannot be read is tried again after the run stopped. */
+export const STOPPED_READ_POLLS = 50
+
 /**
  * Yields the complete lines of a record in the order the worker wrote them.
  * It reads the head, then each segment from the first one that still exists.
@@ -151,6 +154,7 @@ export const readEventRecord = <A>(options: {
       }
     }
     let stopped = false
+    let stoppedRetries = 0
     for (;;) {
       deferred = false
       yield* drain()
@@ -158,6 +162,12 @@ export const readEventRecord = <A>(options: {
         if (options.flushPartialAtEnd === true && buffered !== "") yield options.parse(buffered)
         return
       }
+      // The worker has ended, so a file that still cannot be read will not
+      // become readable by waiting: the observation is lost, not stalled.
+      if (stopped && ++stoppedRetries >= STOPPED_READ_POLLS)
+        throw new Error(
+          `event record cannot be read after the run stopped (${STOPPED_READ_POLLS} polls)`,
+        )
       // Completion can publish its final bytes while shouldStop is awaiting
       // the manager. Drain once more after observing the terminal boundary.
       if (!stopped) stopped = await options.shouldStop()

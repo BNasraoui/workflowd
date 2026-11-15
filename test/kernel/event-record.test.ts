@@ -11,6 +11,7 @@ import {
   readEventRecord,
   recordEventParser,
   type RecordSource,
+  STOPPED_READ_POLLS,
 } from "../../src/kernel/event-record"
 import {
   encodeRecordIndex,
@@ -135,6 +136,42 @@ test("an index that cannot be read is read again, not taken as a record without 
     await writeFile(paths.segment(1), "s1\n")
     const source = unreadableUntil(head, paths.index, encodeRecordIndex({ first: 1, last: 1 }), 3)
     expect(await readAll(source)).toEqual(["h1", "s1"])
+  }))
+
+test("a file that stays unreadable after the run stopped ends the read as a lost observation after a bounded number of polls", async () =>
+  withRoot(async (root) => {
+    const head = join(root, "events.jsonl")
+    const paths = eventRecordPaths(head)
+    await writeFile(head, "h1\n")
+    await mkdir(paths.segment(1))
+    await writeFile(paths.index, encodeRecordIndex({ first: 1, last: 1 }))
+    // It becomes readable only long after the bound, so a reader without the
+    // bound gives the lines instead of failing.
+    const unreadable = unreadableUntil(head, paths.segment(1), "s1\n", 3 * STOPPED_READ_POLLS)
+    let segmentReads = 0
+    const source: RecordSource = (file, offset) => {
+      if (file.kind === "segment") segmentReads += 1
+      return unreadable(file, offset)
+    }
+    const failure = await readAll(source).then(
+      () => null,
+      (error: unknown) => error,
+    )
+    expect(failure).toBeInstanceOf(Error)
+    expect(observationUnavailable(failure)).toBe(true)
+    expect(segmentReads).toBeLessThanOrEqual(STOPPED_READ_POLLS + 2)
+  }))
+
+test("before the stop, an unreadable file is read again at each poll for as long as the run goes on", async () =>
+  withRoot(async (root) => {
+    const head = join(root, "events.jsonl")
+    const paths = eventRecordPaths(head)
+    await writeFile(head, "h1\n")
+    await mkdir(paths.segment(1))
+    await writeFile(paths.index, encodeRecordIndex({ first: 1, last: 1 }))
+    const polls = 3 * STOPPED_READ_POLLS
+    const source = unreadableUntil(head, paths.segment(1), "s1\n", polls - 1)
+    expect(await readAll(source, { stops: polls })).toEqual(["h1", "s1"])
   }))
 
 test("the reader reads the head, then each kept segment in order", async () =>
