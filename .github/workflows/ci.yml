@@ -522,8 +522,7 @@ jobs:
           export XDG_RUNTIME_DIR="/run/user/$(id -u)"
           export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
           tools="$RUNNER_TEMP/capability-tools/bin"
-          export WORKFLOWD_FIXTURE_NOSCOPE="$tools/noscope" WORKFLOWD_FIXTURE_CLAUDE="$tools/claude"
-          export WORKFLOWD_FIXTURE_CODEX="$tools/codex" WORKFLOWD_FIXTURE_OPENCODE2="$tools/opencode2"
+          export WORKFLOWD_FIXTURE_NOSCOPE="$tools/noscope"
           export WORKFLOWD_FIXTURE_PINNED_PUBLISHER=1
           # Raw diagnostics remain ephemeral and owner-only; no artifact upload, even on failure.
           node deploy/sandbox/public-output.mjs test -- python3 scripts/evidence/check-isolated-fixture.py

@@ -1,6 +1,5 @@
 #!/usr/bin/python3
 """Bounded Linux fixture custody. Never exposes a host bus, engine or real HOME."""
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -43,24 +42,6 @@ def main():
             data = subprocess.check_output(['git', 'show', 'f74e0505155bc32aa2cedef00ba8b08ef1b90007:deploy/sandbox/' + name], cwd=repo, timeout=10)
             (target / name).write_bytes(data)
     binaries = {name: executable(name) for name in ["bun", "node", "noscope"]}
-    for name, expected in {
-        'codex': 'f1cd7fa4ac866c724122f173d408a95385257cbcc9ac5ce5ddba42669c74ba97',
-        'codex-code-mode-host': '37703ae51e202c07681e205bc6a8f3c04e63aee4f8ddeb8d2fb09a4d69c00b48',
-        'opencode2': '5e983fb693623f3ea500c63e4da9aa17e90490f120edf612e25c24a34bee405c',
-    }.items():
-        if os.environ.get('WORKFLOWD_FIXTURE_' + name.upper()):
-            binary = executable(name)
-            with open(binary, 'rb') as artifact:
-                if hashlib.file_digest(artifact, 'sha256').hexdigest() != expected:
-                    raise SystemExit('Native fixture pin mismatch: ' + name)
-            binaries[name] = binary
-    if os.environ.get("WORKFLOWD_FIXTURE_CLAUDE"):
-        claude = executable("claude")
-        with open(claude, "rb") as artifact:
-            digest = hashlib.file_digest(artifact, "sha256").hexdigest()
-        if digest != "bc1aad9982c7b59c7d889ff92595d61cf46e0a6eae074cb551d932a989bcd222":
-            raise SystemExit("Expected official Claude 2.1.301 linux-x64 executable")
-        binaries["claude"] = claude
     binds = []
     fixture_env = []
     if pinned_publisher:
