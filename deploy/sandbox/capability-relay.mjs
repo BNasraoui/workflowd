@@ -58,11 +58,7 @@ export async function serveRunnerRelay(config, directory = root) {
         !(
           gitReadRoute(request.method, request.url) ||
           (request.method === "POST" &&
-            (request.url === "/capabilities/v1/result" ||
-              /^\/v1\/messages(?:\/count_tokens)?(?:\?beta=true)?$/.test(request.url ?? "") ||
-              /^\/capabilities\/v1\/providers\/[A-Za-z0-9_-]{1,128}\/(?:responses|chat\/completions)$/.test(
-                request.url ?? "",
-              )))
+            /^\/v1\/messages(?:\/count_tokens)?(?:\?beta=true)?$/.test(request.url ?? ""))
         ) ||
         request.headers.authorization !== "Bearer workflowd-local" ||
         request.headers["x-api-key"] !== undefined ||
