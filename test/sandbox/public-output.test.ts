@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test"
 import { Schema } from "effect"
 import { serializePublicStatus } from "../../src/sandbox/public-output"
-import { publicBootstrapConfiguration } from "../../deploy/sandbox/public-output.mjs"
+import { publicBootstrapConfiguration } from "../../deploy/sandbox/public-status.mjs"
 import { join, resolve } from "node:path"
 import { tmpdir } from "node:os"
 import { mkdtemp, readdir, rm, readFile, stat } from "node:fs/promises"
@@ -24,7 +24,8 @@ test("Bun, Node and compiled imports stay inert with CLI-shaped arguments and pr
     const binary = `${root}/compiled`
     await Bun.write(
       entry,
-      `import { serializePublicStatus } from ${JSON.stringify(resolve("deploy/sandbox/public-output.mjs"))};
+      `import ${JSON.stringify(resolve("deploy/sandbox/public-output.mjs"))};
+import { serializePublicStatus } from ${JSON.stringify(resolve("deploy/sandbox/public-status.mjs"))};
 if (typeof serializePublicStatus !== "function") throw new Error("missing export");
 process.exitCode = 23;`,
     )

@@ -4,8 +4,9 @@ preload = ["./test/resources/preload.ts"]
 coverageThreshold = { lines = 0.6, functions = 0.6, statements = 0.6 }
 coverageReporter = ["text", "lcov"]
 # Launcher-only tests run in the isolated fixture of scripts/check-capability-security.ts,
-# which derives its own config without this key. test/capability-suites.test.ts checks
-# that each such file belongs to a suite.
+# which clears this key per listed file with --path-ignore-patterns=. Coverage gates
+# belong to this plain run. test/capability-suites.test.ts checks that each such file
+# belongs to a suite.
 pathIgnorePatterns = ["**/*.launcher.test.ts"]
 coveragePathIgnorePatterns = [
   # The launcher re-execs before tests and verifies cleanup after coverage is emitted.

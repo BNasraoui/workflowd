@@ -1,7 +1,7 @@
 import { Schema } from "effect"
 import { safePublication } from "../../deploy/sandbox/publication.mjs"
 import skills from "../../deploy/sandbox/skills/catalog.json"
-import { publicBootstrapFields } from "../../deploy/sandbox/public-output.mjs"
+import { publicBootstrapFields } from "../../deploy/sandbox/public-status.mjs"
 
 const PublicationCoAuthor = Schema.String.check(
   Schema.makeFilter(

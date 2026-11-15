@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test"
 import { resolve } from "node:path"
-import { serveBootstrap } from "../../deploy/sandbox/bootstrap.mjs"
+import { readlink } from "node:fs/promises"
+import { serveBootstrap } from "../../deploy/sandbox/bootstrap-helper.mjs"
 import { exchangeJobProof } from "../../src/sandbox/bootstrap"
 import { fixtureExecutable } from "../helpers/fixture-executable.mjs"
 import { disposableSsh } from "./fixtures/ssh.mjs"
@@ -48,5 +49,28 @@ test("private bootstrap waits for asynchronous admission before ending its input
   } finally {
     server.close()
     await ssh.close()
+  }
+})
+
+test("fixture namespace guard refuses missing, malformed and equal host namespace before SSH startup", async () => {
+  const original = process.env.WORKFLOWD_FIXTURE_HOST_NETNS
+  try {
+    for (const value of [
+      undefined,
+      "net:[]",
+      "net:[1]garbage",
+      await readlink("/proc/self/ns/net"),
+    ]) {
+      if (value === undefined) delete process.env.WORKFLOWD_FIXTURE_HOST_NETNS
+      else process.env.WORKFLOWD_FIXTURE_HOST_NETNS = value
+      await expect(
+        disposableSsh(() => {
+          throw new Error("SSH configuration reached")
+        }),
+      ).rejects.toThrow("SSH fixture requires isolated netns")
+    }
+  } finally {
+    if (original === undefined) delete process.env.WORKFLOWD_FIXTURE_HOST_NETNS
+    else process.env.WORKFLOWD_FIXTURE_HOST_NETNS = original
   }
 })

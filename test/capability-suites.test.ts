@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test"
 import { readdir } from "node:fs/promises"
 import { Schema } from "effect"
-import { launcherConfig, launcherTestPattern, suites } from "../scripts/check-capability-security"
+import { launcherTestPattern, suites } from "../scripts/capability-suites"
 
 const listed = Object.values(suites).flatMap((cases) => cases.map(([, file]) => file))
 
@@ -39,12 +39,4 @@ const testSection = (text: string) =>
 test("the plain run leaves out exactly the launcher pattern", async () => {
   const plain = testSection(await Bun.file("bunfig.toml").text())
   expect(plain["pathIgnorePatterns"]).toEqual([launcherTestPattern])
-})
-
-test("the suites' config keeps every key except the exclusion and the thresholds", async () => {
-  const bunfig = await Bun.file("bunfig.toml").text()
-  const { pathIgnorePatterns, coverageThreshold, ...rest } = testSection(bunfig)
-  expect([pathIgnorePatterns, coverageThreshold]).not.toContain(undefined)
-  expect(testSection(launcherConfig(bunfig))).toEqual(rest)
-  expect(() => launcherConfig("[test]\n")).toThrow("bunfig.toml launcher keys changed")
 })

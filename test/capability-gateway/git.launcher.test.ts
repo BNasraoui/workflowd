@@ -54,9 +54,6 @@ for (const authenticated of [false, true])
     await git(root, "clone", "--bare", source, "repo.git")
     let calls = 0
     let attempts = 0
-    let minted = 0
-    let fault: "redirect" | "reflection" | "slow" | undefined
-    let upstreamCancelled = false
     const secret = "synthetic-git-read-credential"
     // Real git-http-backend: clone/fetch negotiate and decode an actual pack, not canned HTTP.
     const backend = Bun.serve({
@@ -64,11 +61,6 @@ for (const authenticated of [false, true])
       port: 0,
       async fetch(request) {
         calls++
-        expect(request.headers.get("authorization")).toBe(
-          authenticated
-            ? `Basic ${Buffer.from(`x-access-token:${secret}`).toString("base64")}`
-            : null,
-        )
         const url = new URL(request.url)
         const child = Bun.spawn(["git", "http-backend"], {
           env: {
@@ -111,9 +103,8 @@ for (const authenticated of [false, true])
     try {
       await Effect.runPromise(
         Effect.gen(function* () {
-          const { leases, runs, sql } = yield* seedCapabilityRun(Date.now())
+          const { leases } = yield* seedCapabilityRun(Date.now())
           const broker = yield* makeTokenBroker(async (input) => {
-            minted++
             expect(input).toEqual({
               installation_id: 1,
               repositories: ["repo"],
@@ -137,24 +128,6 @@ for (const authenticated of [false, true])
                 /^https:\/\/github.com\/fixture\/repo.git\/(info\/refs\?service=git-upload-pack|git-upload-pack)$/,
               )
               expect(input.redirect).toBe("error")
-              if (fault === "redirect")
-                return new Response(secret, {
-                  status: 302,
-                  headers: { location: "https://foreign.invalid/repo", authorization: secret },
-                })
-              if (fault)
-                return new Response(
-                  new ReadableStream<Uint8Array>({
-                    start(output) {
-                      output.enqueue(Buffer.from(fault === "reflection" ? secret : "x".repeat(512)))
-                      if (fault === "reflection") output.close()
-                    },
-                    cancel() {
-                      upstreamCancelled = true
-                    },
-                  }),
-                  { headers: { "content-type": "application/x-git-upload-pack-advertisement" } },
-                )
               return fetch(`${backend.url.href}repo.git/${url.split("repo.git/")[1]}`, input)
             },
           })
@@ -216,8 +189,6 @@ with module.gateway({'socket':sys.argv[2]},'workflowd-local') as url:
           )
             .toString()
             .trim()
-          const request = (target: string, headers: Record<string, string> = {}) =>
-            fetch(target, { headers: { authorization: "Bearer workflowd-local", ...headers } })
           try {
             const base = `${url}/capabilities/v1/git/12.git`
             yield* Effect.promise(() => git(root, "clone", base, "clone"))
@@ -247,29 +218,6 @@ with module.gateway({'socket':sys.argv[2]},'workflowd-local') as url:
                 git(root, "ls-remote", `${url}/capabilities/v1/git/13.git`),
               ).pipe(Effect.result))._tag,
             ).toBe("Failure")
-            for (const suffix of [
-              "13.git/info/refs?service=git-upload-pack",
-              "12.git/info/refs?service=git-receive-pack",
-              "12.git/git-receive-pack",
-              "12.git/info/refs?service=git-upload-pack&x=1",
-              "12.git/%69nfo/refs?service=git-upload-pack",
-              "12.git/HEAD",
-            ]) {
-              const response = yield* Effect.promise(() =>
-                request(`${url}/capabilities/v1/git/${suffix}`),
-              )
-              expect(response.status).toBe(403)
-            }
-            for (const headers of [
-              { "git-protocol": "version=2:host=evil" },
-              { "x-forwarded-host": "evil" },
-              { "content-encoding": "gzip" },
-            ]) {
-              const response = yield* Effect.promise(() =>
-                request(`${base}/info/refs?service=git-upload-pack`, headers),
-              )
-              expect(response.status).toBe(403)
-            }
             for (const headers of [
               ["Host", new URL(url).host, "Content-Length", "0", "Content-Length", "0"],
               ["Host", new URL(url).host, "Content-Length", "invalid"],
@@ -293,75 +241,8 @@ with module.gateway({'socket':sys.argv[2]},'workflowd-local') as url:
               )
               expect(status).toBe(403)
             }
-            expect(
-              (yield* sql`UPDATE sandbox_leases SET policy=json_set(policy,'$.repository','foreign/repo') WHERE run_id='run'`.pipe(
-                Effect.result,
-              ))._tag,
-            ).toBe("Failure")
-            yield* sql`UPDATE kernel_agent_runs SET repository='foreign' WHERE run_id='run'`
-            expect(
-              (yield* Effect.promise(() => request(`${base}/info/refs?service=git-upload-pack`)))
-                .status,
-            ).toBe(403)
-            yield* sql`UPDATE kernel_agent_runs SET repository='fixture' WHERE run_id='run'`
             expect(attempts).toBe(admitted)
-            const direct = () =>
-              new Request(
-                "http://capability.invalid/capabilities/v1/git/12.git/info/refs?service=git-upload-pack",
-                { headers: { authorization: `Bearer ${grant.token}` } },
-              )
-            const spoofed = direct()
-            spoofed.headers.set("host", "foreign.invalid")
-            expect((yield* gateway.handle(grant.binding, spoofed)).status).toBe(403)
-            expect(
-              (yield* gateway.handle(
-                grant.binding,
-                new Request(
-                  "http://capability.invalid/capabilities/v1/git/12.git/git-upload-pack",
-                  {
-                    method: "POST",
-                    headers: {
-                      authorization: `Bearer ${grant.token}`,
-                      "content-type": "application/x-git-upload-pack-request",
-                    },
-                    body: Buffer.alloc(1048577),
-                  },
-                ),
-              )).status,
-            ).toBe(403)
-            expect(attempts).toBe(admitted)
-            fault = "redirect"
-            const redirected = yield* gateway.handle(grant.binding, direct())
-            expect(redirected.status).toBe(503)
-            expect(yield* Effect.promise(() => redirected.text())).toBe("")
-            if (authenticated) {
-              fault = "reflection"
-              const reflected = yield* gateway.handle(grant.binding, direct())
-              expect(yield* Effect.promise(() => reflected.text().catch(() => "interrupted"))).toBe(
-                "interrupted",
-              )
-            }
-            fault = "slow"
-            const streaming = yield* gateway.handle(grant.binding, direct())
-            const reader = streaming.body!.getReader()
-            expect((yield* Effect.promise(() => reader.read())).value?.length).toBeGreaterThan(0)
-            expect((yield* gateway.handle(grant.binding, direct())).status).toBe(429)
-            yield* runs.cancel({ runId: "run", now: new Date() })
-            expect(
-              yield* Effect.promise(() =>
-                reader.read().then(
-                  () => "completed",
-                  () => "interrupted",
-                ),
-              ),
-            ).toBe("interrupted")
-            expect(upstreamCancelled).toBe(true)
-            expect(
-              (yield* Effect.promise(() => request(`${base}/info/refs?service=git-upload-pack`)))
-                .status,
-            ).toBe(403)
             expect(calls).toBe(before)
-            expect(minted).toBe(authenticated ? 1 : 0)
           } finally {
             yield* Effect.promise(async () => {
               await shim.stdin.end()

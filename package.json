@@ -16,7 +16,6 @@
     "test:coverage": "bun test --coverage",
     "coverage:changed": "bun scripts/check-changed-line-coverage.ts",
     "coverage:istanbul": "bun scripts/lcov-to-istanbul.ts",
-    "coverage:merge": "bun scripts/merge-lcov.ts",
     "crap": "bun scripts/crap-report.ts",
     "crap:full": "bun run test:coverage && bun scripts/crap-report.ts",
     "crap:check": "bun scripts/check-crap.ts",

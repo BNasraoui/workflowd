@@ -1,1 +1,1 @@
-export { serializePublicStatus } from "../../deploy/sandbox/public-output.mjs"
+export { serializePublicStatus } from "../../deploy/sandbox/public-status.mjs"

@@ -2,9 +2,7 @@ import { expect, test } from "bun:test"
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { connect } from "node:net"
-import { serveBootstrap, takeJobIdentity } from "../../deploy/sandbox/bootstrap.mjs"
-import { disposableSsh } from "./fixtures/ssh.mjs"
-import { readlink } from "node:fs/promises"
+import { serveBootstrap, takeJobIdentity } from "../../deploy/sandbox/bootstrap-helper.mjs"
 import { join } from "node:path"
 import { fixtureExecutable } from "../helpers/fixture-executable.mjs"
 
@@ -114,29 +112,6 @@ test("capability job fixture fails visibly when its socket is absent", async () 
     expect(stderr).toContain("capability fixture connect failed")
   } finally {
     await rm(root, { recursive: true, force: true })
-  }
-})
-
-test("fixture namespace guard refuses missing, malformed and equal host namespace before SSH startup", async () => {
-  const original = process.env.WORKFLOWD_FIXTURE_HOST_NETNS
-  try {
-    for (const value of [
-      undefined,
-      "net:[]",
-      "net:[1]garbage",
-      await readlink("/proc/self/ns/net"),
-    ]) {
-      if (value === undefined) delete process.env.WORKFLOWD_FIXTURE_HOST_NETNS
-      else process.env.WORKFLOWD_FIXTURE_HOST_NETNS = value
-      await expect(
-        disposableSsh(() => {
-          throw new Error("SSH configuration reached")
-        }),
-      ).rejects.toThrow("SSH fixture requires isolated netns")
-    }
-  } finally {
-    if (original === undefined) delete process.env.WORKFLOWD_FIXTURE_HOST_NETNS
-    else process.env.WORKFLOWD_FIXTURE_HOST_NETNS = original
   }
 })
 
