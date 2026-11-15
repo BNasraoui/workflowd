@@ -5,13 +5,24 @@ let
   modules = import ./workflowd-modules.nix { inherit pkgs bun; };
   source = pkgs.lib.fileset.toSource {
     root = ../.;
-    fileset = pkgs.lib.fileset.unions [ ../src ../package.json ../tsconfig.json ];
+    fileset = pkgs.lib.fileset.unions [
+      ../src
+      ../package.json
+      ../tsconfig.json
+      # The files of deploy/ that src imports.
+      ../deploy/opencode/sandbox.json
+      ../deploy/sandbox/publication.mjs
+      ../deploy/sandbox/casefold.json
+      ../deploy/sandbox/publication-unicode.json
+      ../deploy/sandbox/public-status.mjs
+      ../deploy/sandbox/skills/catalog.json
+    ];
   };
   # The gateway's source beside its modules. Bun resolves each package from its real path, so
   # node_modules stays one directory of the modules output.
   app = pkgs.runCommand "workflowd-gateway-app" { } ''
     mkdir $out
-    cp -r ${source}/src ${source}/package.json ${source}/tsconfig.json $out/
+    cp -r ${source}/src ${source}/deploy ${source}/package.json ${source}/tsconfig.json $out/
     ln -s ${modules}/node_modules $out/node_modules
   '';
   home = "/var/lib/workflowd-gateway";
