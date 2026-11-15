@@ -1,5 +1,5 @@
 import { readlink } from "node:fs/promises"
-import { suites } from "./capability-suites"
+import { suiteReport, suites } from "./capability-suites"
 
 /**
  * Runs each test file of one suite in its own `bun test`, and prints the number of cases that
@@ -16,7 +16,7 @@ async function main() {
   if (!host || !/^net:\[[0-9]+\]$/.test(host) || host === (await readlink("/proc/self/ns/net")))
     throw new Error("fixture namespace required")
   const failed: string[] = []
-  for (const [id, file] of cases) {
+  for (const file of cases) {
     // The empty pattern clears bunfig.toml's launcher exclusion for this one listed file.
     const child = Bun.spawn([process.execPath, "test", "--path-ignore-patterns=", file], {
       stdin: "ignore",
@@ -55,11 +55,11 @@ async function main() {
       Number(/\n\s*(\d+) pass\b/.exec(output)?.[1] ?? 0) > 0 &&
       /\n\s*0 fail\b/.test(output) &&
       !/\n\s*[1-9]\d* (?:skip|todo|filtered out)\b/.test(output)
-    if (!ok) failed.push(`${id} ${file}`)
+    if (!ok) failed.push(file)
   }
-  process.stdout.write(`${suite}: ${cases.length} cases ran, ${failed.length} failed\n`)
-  for (const name of failed) process.stdout.write(`failed: ${name}\n`)
-  if (failed.length > 0) process.exitCode = 1
+  const report = suiteReport(suite, cases, failed)
+  for (const line of report.lines) process.stdout.write(`${line}\n`)
+  process.exitCode = report.exitCode
 }
 
 if (import.meta.main)

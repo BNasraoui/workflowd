@@ -1,12 +1,12 @@
 import { expect, test } from "bun:test"
 import { readdir } from "node:fs/promises"
 import { Schema } from "effect"
-import { suites } from "../scripts/capability-suites"
+import { gatewayTestDirectory, plainOnly, suiteReport, suites } from "../scripts/capability-suites"
 
 /** Test files that only a suite runs; bunfig.toml keeps them out of the plain run. */
 const launcherTestPattern = "**/*.launcher.test.ts"
 
-const listed = Object.values(suites).flatMap((cases) => cases.map(([, file]) => file))
+const listed = Object.values(suites).flat()
 
 test("each launcher test file belongs to a capability suite", async () => {
   // Bun's test discovery skips node_modules; the scratch and VCS trees hold no sources.
@@ -26,12 +26,39 @@ test("each launcher test file belongs to a capability suite", async () => {
   for (const file of launcherFiles) expect(listed).toContain(file)
 })
 
-test("each suite entry names an existing test file under a unique id", async () => {
-  for (const file of listed) expect(await Bun.file(file).exists()).toBe(true)
-  const ids = Object.values(suites).flatMap((cases) => cases.map(([id]) => id))
-  for (const cases of Object.values(suites))
-    expect(new Set(cases.map(([id]) => id)).size).toBe(cases.length)
-  expect(ids.length).toBeGreaterThan(0)
+test("each gateway test file belongs to exactly one suite, or names the job that runs it instead", async () => {
+  const files = (await readdir(gatewayTestDirectory))
+    .filter((name) => name.endsWith(".test.ts"))
+    .map((name) => `${gatewayTestDirectory}/${name}`)
+  expect(files.length).toBeGreaterThan(10)
+  for (const file of files)
+    expect({ file, suites: listed.filter((entry) => entry === file).length }).toEqual({
+      file,
+      suites: file in plainOnly ? 0 : 1,
+    })
+  expect(suites["gateway"]).toEqual(files.filter((file) => file.endsWith(".e2e.test.ts")).sort())
+})
+
+test("each suite names existing test files, and no file runs in two suites", async () => {
+  for (const cases of Object.values(suites)) expect(cases.length).toBeGreaterThan(0)
+  for (const file of listed)
+    expect({ file, exists: await Bun.file(file).exists() }).toEqual({ file, exists: true })
+  expect(new Set(listed).size).toBe(listed.length)
+})
+
+test("a suite report counts its cases and names each failed one; a suite of no case fails", () => {
+  expect(suiteReport("core", ["a.test.ts", "b.test.ts"], [])).toEqual({
+    lines: ["core: 2 cases ran, 0 failed"],
+    exitCode: 0,
+  })
+  expect(suiteReport("core", ["a.test.ts", "b.test.ts"], ["b.test.ts"])).toEqual({
+    lines: ["core: 2 cases ran, 1 failed", "failed: b.test.ts"],
+    exitCode: 1,
+  })
+  expect(suiteReport("gateway", [], [])).toEqual({
+    lines: ["gateway: 0 cases ran, 0 failed", "failed: gateway holds no case"],
+    exitCode: 1,
+  })
 })
 
 const testSection = (text: string) =>
@@ -42,4 +69,12 @@ const testSection = (text: string) =>
 test("the plain run leaves out exactly the launcher pattern", async () => {
   const plain = testSection(await Bun.file("bunfig.toml").text())
   expect(plain["pathIgnorePatterns"]).toEqual([launcherTestPattern])
+})
+
+test("the capability security job runs each suite", async () => {
+  const workflow = await Bun.file(".github/workflows/ci.yml").text()
+  const matrix = /\n {4}name: Capability security[\s\S]*?\n {8}suite: \[([^\]]*)\]/.exec(
+    workflow,
+  )?.[1]
+  expect(matrix?.split(",").map((suite) => suite.trim())).toEqual(Object.keys(suites))
 })
