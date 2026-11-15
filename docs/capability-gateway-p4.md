@@ -14,17 +14,11 @@ HTTP, redirects, compressed requests/responses and extra queries are refused.
 Git shares the gateway's stream admission, request/response byte budgets, timeout,
 revocation and cancellation fences.
 
-In a native container, use the existing loopback shim and its local sentinel:
-
-```sh
-git -c credential.helper= \
-  -c 'http.extraHeader=Authorization: Bearer workflowd-local' \
-  clone http://127.0.0.1:31741/capabilities/v1/git/12.git repository
-```
-
-The numeric ID must match the run's repository. Supply the same local header to
-subsequent fetches. The sentinel is not an upstream credential. The runner relay
-adds the current run bearer outside the container.
+On the runner, the relay listens on the private socket `gateway.sock` in its state
+directory. It accepts only the local sentinel `Authorization: Bearer workflowd-local`,
+which is not an upstream credential, and adds the current run bearer before it
+forwards the request to the gateway over HTTPS. The numeric ID must match the run's
+repository.
 
 Production composition currently uses anonymous reads. The authenticated adapter
 accepts the existing internal `makeTokenBroker` service and requests only the saved
@@ -38,8 +32,8 @@ Native production publication still requires a separately reviewed fixed-v1 pin.
 
 ## Lifecycle and cleanup
 
-Native executions use their process/SSH lifecycle and absolute deadline. They do
-not send per-container heartbeat RPCs. Sandbox sweeps wait for existing work
+An actions-native lease is bounded by its absolute deadline. It receives no
+per-container heartbeat RPC. Sandbox sweeps wait for existing work
 signals or a poll deadline; lifecycle wakeups cannot repeat repository inventory
 more often than once per minute in a lease-service instance. Release and reconcile
 share admission, including failed attempts. Cached failure stays uncertainty;
@@ -77,12 +71,11 @@ The discovery cursor resets on controller restart; durable custody does not.
 ## Fixture and CI boundary
 
 `scripts/check-capability-security.ts --suite final-local --upstream fixture
---evidence <private-directory>` adds the real Git/SSH/HTTP2/loopback protocol,
-partition/reconciliation, native restart/finalization, output, process-environment
-and publication parity cases. Core, native-local, publication-local and adapters
-remain separately named suites. Every listed case must run and pass; skips and
-timeouts fail the driver. These local suites complement the retained exact-owner
-container/network/Dagger and native publication evidence.
+--evidence <private-directory>` runs the Git read, reconciliation, process-environment,
+publication-parity, public-output, CI-setup and startup cases that
+`scripts/capability-suites.ts` lists. Core, publication-local and adapters are
+separately named suites. Every listed case must run and pass; skips and timeouts
+fail the driver.
 
 CI runs each named suite through the checked-in systemd/bubblewrap launcher with
 6 GiB, no swap, two CPUs, a PID bound, private network/HOME/TMPDIR and no host bus
@@ -95,26 +88,14 @@ The launcher creates an absent checkout scratch mountpoint and refuses symlinks.
 A real clean-copy launch regression precedes the named suites. Required checks
 include the named security jobs.
 
-The launch audit distinguishes real PTY fixtures from legacy argv-only tests:
-`native-permissions`, `interactive-project-config`, credential dispatch, native
-host supervision and GitHub Claude publication use the interactive helpers.
-Legacy worker arguments are inspected without executing print mode. Simulated
-manager tests launch inert children; `github-host.ts` executes only its Codex
-profile. The standard resource preload, guardian, backend and reaper remain active.
-Their isolated user-bus warning does not replace the outer systemd custody.
-Privileged two-UID/system-manager and Docker tests require their own disposable
-backend; a plain local `bun test` or `bun run check` is not an authorized substitute.
-
-Private bootstrap frames its grant with a newline and waits for admission acknowledgement
-before sending input EOF. The controller's private HTTP backend uses explicit response
-destruction on stream failure: a revoked response must fail on the wire, even on runtimes
-where an errored Fetch response ends with a clean HTTP terminator. Socket-close custody,
-upstream abort, response backpressure and transport shutdown joins remain required.
+The gateway's HTTP server destroys a response on stream failure: a revoked response
+fails on the wire, even on runtimes where an errored Fetch response ends with a clean
+HTTP terminator.
 
 Changed-line coverage, unchanged per-file coverage/CRAP thresholds and full CI
 remain separate merge gates. A named local pass does not establish full CI or
 deployed policy. Final source-qualified results and retained failures belong in
 the sealed implementation handoff. Live provider/Actions entitlement, effective
-Tailscale ACL/federation, credential-owner activation, HTTPS service opt-in and
-production restart/drain policy remain separate operator gates. No 500-agent
+Tailscale ACL/federation and production restart/drain policy remain separate
+operator gates. No 500-agent
 capacity demonstration or capacity soak is required.
