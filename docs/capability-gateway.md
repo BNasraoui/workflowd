@@ -33,14 +33,17 @@ a lease. Writes go through protected publication with the pinned publisher
 
 ## Fixture suites in CI
 
-`scripts/capability-suites.ts` names four suites of test files: `core`,
-`publication-local`, `adapters` and `final-local`. The `Capability security` jobs run
+`scripts/capability-suites.ts` names four suites of test files: `core`, `gateway`,
+`publication-local` and `final-local`. Each test file of `test/capability-gateway` belongs
+to one of them: the end-to-end files to `gateway`, the others to `core`, except the pinned
+Claude Code test, which the Tests job runs. No file is in two suites, and
+`test/capability-suites.test.ts` fails when one is. The `Capability security` jobs run
 each suite through `scripts/evidence/isolated-fixture.py`: a systemd user unit with
 6 GiB of memory, no swap, two CPUs and a task limit, and inside it bubblewrap with a
 private network, home and temporary directory and no host bus or Docker socket.
 `scripts/check-capability-security.ts --suite <name>` runs each listed file in its own
 `bun test` and prints the number of cases that ran and the name of each case that
-failed. A case fails when it does not pass a test, or reports a failed, skipped or todo
+failed. A suite with no case fails. A case fails when it does not pass a test, or reports a failed, skipped or todo
 test, or passes its time or output limit.
 
 Test files named `*.launcher.test.ts` run only in these suites; `bunfig.toml` keeps
