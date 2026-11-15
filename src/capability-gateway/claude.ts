@@ -19,7 +19,7 @@ const forwarded = new Set([
 ])
 /**
  * The anthropic-beta values the pinned Claude Code (test/resources/claude-code-version) sends on a messages call, for each
- * model family it knows. test/capability-gateway/claude-pinned.test.ts records them in CI and
+ * model family it knows. test/capability-gateway/claude-pinned.launcher.test.ts records them in CI and
  * fails when the pinned client sends a value this list does not hold.
  */
 export const claudeBetas: ReadonlySet<string> = new Set([

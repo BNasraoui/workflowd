@@ -1,18 +1,21 @@
 // Named local slices only. None establishes container or deployed-policy acceptance.
 
-/** The directory whose every test file belongs to a suite, or to `plainOnly`. */
+/** The directory whose every test file belongs to a suite, or to `ownStep`. */
 export const gatewayTestDirectory = "test/capability-gateway"
 
-/** Gateway test files that need what the isolated fixture does not hold, and where they run. */
-export const plainOnly: Readonly<Record<string, string>> = {
-  "test/capability-gateway/claude-pinned.test.ts":
-    "the pinned Claude Code client; the Tests job runs it",
+/**
+ * Launcher test files that need what the isolated fixture does not hold: one CI step of their
+ * own runs each of them, and no suite does.
+ */
+export const ownStep: Readonly<Record<string, string>> = {
+  "test/capability-gateway/claude-pinned.launcher.test.ts":
+    "the pinned Claude Code client; a step of the Tests job runs it with loopback as its only network",
 }
 
 const gatewayFiles = [
   ...new Bun.Glob(`${gatewayTestDirectory}/*.test.ts`).scanSync({ cwd: import.meta.dir + "/.." }),
 ]
-  .filter((file) => !(file in plainOnly))
+  .filter((file) => !(file in ownStep))
   .sort((a, b) => a.localeCompare(b))
 
 /** The gateway's end-to-end files: a gateway process or listener on a real socket. */

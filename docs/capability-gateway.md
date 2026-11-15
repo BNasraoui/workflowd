@@ -52,8 +52,10 @@ a lease. Writes go through protected publication with the pinned publisher
 `scripts/capability-suites.ts` names four suites of test files: `core`, `gateway`,
 `publication-local` and `final-local`. Each test file of `test/capability-gateway` belongs
 to one of them: the end-to-end files to `gateway`, the others to `core`, except the pinned
-Claude Code test, which the Tests job runs. No file is in two suites, and
-`test/capability-suites.test.ts` fails when one is. The `Capability security` jobs run
+Claude Code test, `claude-pinned.launcher.test.ts`. One step of the Tests job runs that file,
+as the runner's user, in a network namespace whose only interface is loopback; the file fails
+when it runs anywhere else. No file is in two suites, and `test/capability-suites.test.ts`
+fails when one is. The `Capability security` jobs run
 each suite through `scripts/evidence/isolated-fixture.py`: a systemd user unit with
 6 GiB of memory, no swap, two CPUs and a task limit, and inside it bubblewrap with a
 private network, home and temporary directory and no host bus or Docker socket.
