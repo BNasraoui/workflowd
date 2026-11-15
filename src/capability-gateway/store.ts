@@ -60,8 +60,6 @@ const Row = Schema.Struct({
   challenge: Digest,
   challenge_expires: Schema.Number,
   authority: Schema.fromJsonString(Authority),
-  transport_digest: Schema.NullOr(Digest),
-  jti_digest: Schema.NullOr(Digest),
   revoked: Schema.Int,
   session: Schema.Int,
   nonce: Schema.NullOr(Digest),
@@ -264,8 +262,7 @@ export const makeCapabilityStore = Effect.gen(function* () {
         const expiresAt = Math.min(now + 60000, value.deadline)
         if (bound.length > 0) {
           const row = yield* Schema.decodeUnknownEffect(Row)(bound[0])
-          if (row.revoked !== 0 || row.transport_digest !== null)
-            return yield* Effect.fail(new CapabilityRefused())
+          if (row.revoked !== 0) return yield* Effect.fail(new CapabilityRefused())
           if (row.nonce !== null && row.challenge_expires > now)
             return { channel: row.channel, nonce: row.nonce, expiresAt: row.challenge_expires }
           yield* sql`UPDATE capability_bindings
@@ -303,7 +300,6 @@ export const makeCapabilityStore = Effect.gen(function* () {
         const used = yield* sql`SELECT 1 FROM capability_proofs WHERE jti_digest=${proof}`
         if (
           used.length > 0 ||
-          row.transport_digest !== null ||
           row.challenge !== capabilityDigest(challenge.nonce) ||
           row.challenge_expires <= now ||
           row.session >= maxSessions ||
@@ -336,7 +332,7 @@ export const makeCapabilityStore = Effect.gen(function* () {
       b.challenge_expires AS challengeExpires,json_extract(b.authority,'$.recipientId') AS recipientId
       FROM capability_bindings b JOIN sandbox_leases l ON l.run_id=b.run_id
       WHERE b.channel=${proof.channel} AND b.challenge=${capabilityDigest(proof.nonce)}
-      AND b.session<${maxSessions} AND b.revoked=0 AND b.transport_digest IS NULL`
+      AND b.session<${maxSessions} AND b.revoked=0`
     if (rows.length !== 1) return yield* Effect.fail(new CapabilityRefused())
     const used =
       yield* sql`SELECT 1 FROM capability_proofs WHERE jti_digest=${capabilityDigest(proof.jti)}`

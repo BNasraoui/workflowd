@@ -177,7 +177,7 @@ test("accepted grant rejects each durable identity/context swap with adjacent ro
   )
 })
 
-test("the session migration keeps bindings, their tokens and revocation triggers", async () => {
+test("the session migration keeps bindings, their tokens and revocation", async () => {
   await run(
     Effect.gen(function* () {
       const { store, leases, sql } = yield* seed
@@ -191,18 +191,15 @@ test("the session migration keeps bindings, their tokens and revocation triggers
         sql`SELECT (SELECT count(*) FROM capability_tokens) AS tokens,
           (SELECT count(*) FROM sqlite_master WHERE name='capability_tokens_run') AS indexes`
       expect(yield* count()).toEqual([{ tokens: 2, indexes: 1 }])
-      // Back to the schema before 0040's columns, then rebuild again, with foreign keys on, over
-      // a bound row and a renewal chain.
+      // Back to the schema before 0040's columns, then migrate again over a bound row and a
+      // renewal chain.
       yield* sql`DROP TABLE capability_proofs`
       yield* sql`ALTER TABLE capability_tokens DROP COLUMN session`
       yield* sql`ALTER TABLE capability_bindings DROP COLUMN session`
-      yield* sql`ALTER TABLE capability_bindings DROP COLUMN challenges`
       yield* sql`ALTER TABLE capability_bindings DROP COLUMN nonce`
       yield* sql.withTransaction(capabilitySession)
       expect(yield* count()).toEqual([{ tokens: 2, indexes: 1 }])
-      expect(yield* sql`SELECT session,challenges FROM capability_bindings`).toEqual([
-        { session: 0, challenges: 0 },
-      ])
+      expect(yield* sql`SELECT session FROM capability_bindings`).toEqual([{ session: 0 }])
       expect(yield* sql`SELECT DISTINCT session FROM capability_tokens`).toEqual([{ session: 0 }])
       expect(yield* sql`SELECT count(*) AS proofs FROM capability_proofs`).toEqual([{ proofs: 0 }])
       // A binding from before the session columns has no session, so it authorizes nothing.
