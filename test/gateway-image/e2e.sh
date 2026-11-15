@@ -28,6 +28,7 @@ docker rm -v "$name" >/dev/null
 mkdir "$root/fs"
 tar -xf "$root/image.tar" -C "$root/fs" --no-same-owner --no-same-permissions
 chmod -R u+rwX "$root/fs"
+chmod 000 "$root/fs/etc"
 # A scan that cannot read the whole image fails the test as a match does: find exits above 0 on
 # an error, and grep exits 0 on a match, 1 on none and above 1 on an error.
 status=0
