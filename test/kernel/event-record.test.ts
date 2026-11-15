@@ -389,6 +389,64 @@ test("a late reader whose segments are removed between two index reads goes on a
     expect(new Set(seqs).size).toBe(seqs.length)
   }))
 
+/**
+ * A reader that is far behind the writer when the worker ends: the segment it
+ * stands on, at its start, is removed before its last read. `behind` puts the
+ * reader there; the worker then writes past its whole tail, writes the final
+ * message and ends.
+ */
+const readBehindToTheEnd = async (behind: "open segment" | "lapped") =>
+  withRoot(async (root) => {
+    const head = join(root, "events.jsonl")
+    const writer = await openEventRecord(head, LIMIT)
+    let seq = 0
+    const more = (lines: number) =>
+      writeChunked(writer, Array.from({ length: lines }, () => message(seq++)).join(""))
+    await more(behind === "open segment" ? 10 : 96)
+    const local = localRecordSource(head)
+    let segmentReads = 0
+    const standing: number[] = []
+    const source: RecordSource = async (file, offset) => {
+      if (file.kind === "segment" && ++segmentReads === 1) {
+        standing.push(file.n)
+        // The reader comes between the creation of the open segment and its first line.
+        if (behind === "open segment") return new Uint8Array()
+        // The worker removes the first kept segment before the reader reads it.
+        await more(48)
+      }
+      return local(file, offset)
+    }
+    let stops = 0
+    const texts: string[] = []
+    for await (const event of readEventRecord({
+      source,
+      pollIntervalMs: 1,
+      shouldStop: async () => {
+        stops += 1
+        await more((3 * LIMIT) / 2048)
+        await writeChunked(writer, message(-1, 2048, "final answer"))
+        await writer.close()
+        return true
+      },
+      parse: parseClaudeDispatchEvent,
+    })) {
+      if (event.type === "agent_message") texts.push(event.text)
+    }
+    expect(stops).toBe(1)
+    expect(standing).toHaveLength(1)
+    expect(texts.at(-1)).toBe("final answer")
+    const seqs = texts.slice(0, -1).map((text) => Number(text.slice(1)))
+    expect(seqs[0]).toBe(0)
+    expect(seqs.at(-1)).toBe(seq - 1)
+    for (let i = 1; i < seqs.length; i++) expect(seqs[i]!).toBeGreaterThan(seqs[i - 1]!)
+  })
+
+test("a reader at the start of the open segment when the worker writes past its tail and ends gives the final message", async () =>
+  readBehindToTheEnd("open segment"))
+
+test("a reader lapped by the writer when the worker ends gives the final message", async () =>
+  readBehindToTheEnd("lapped"))
+
 test(
   "a reader beside a live writer gets whole lines in order, never twice, and only whole indexes",
   async () =>

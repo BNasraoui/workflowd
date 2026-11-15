@@ -103,13 +103,16 @@ export const readEventRecord = <A>(options: {
         const sealed = current.kind === "head" || current.n < index.last
         if (!sealed) return
         yield* readAvailable()
-        const empty = entered === 0 && offset === 0
+        // A file that never held a byte and that the index still names is not
+        // progress (a forged range): wait a poll before the next. A segment the
+        // worker removed is not such a file; its successors hold the newest lines.
+        const idle =
+          entered === 0 && offset === 0 && (current.kind === "head" || current.n >= index.first)
         move({
           kind: "segment",
           n: current.kind === "head" ? index.first : Math.max(current.n + 1, index.first),
         })
-        // A file that never held a byte is not progress: wait a poll before the next.
-        if (empty) return
+        if (idle) return
       }
     }
     let stopped = false
