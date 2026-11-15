@@ -218,6 +218,11 @@ def seal(source):
     print(json.dumps({**manifest, 'manifestSha256': sha(encoded)}, separators=(',', ':')))
 
 
+# Characters that change what a reviewer of a pushed path sees: the bidi controls,
+# the line and paragraph separators and the byte order mark (as the daemon's check).
+PATH_MARKS = re.compile('[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069\u2028\u2029\ufeff]')
+
+
 def safe_path(raw):
     name = raw.decode('utf8', errors='strict')
     parts = name.split('/')
@@ -225,7 +230,7 @@ def safe_path(raw):
         raise ValueError('Unsafe path component')
     if name.startswith('deploy/sandbox/') or name == 'deploy/sandbox':
         raise ValueError('Sandbox tooling path is forbidden')
-    if '\\' in name or any(unicodedata.category(c) == 'Cc' for c in name):
+    if '\\' in name or PATH_MARKS.search(name) or any(unicodedata.category(c) == 'Cc' for c in name):
         raise ValueError('Invalid path characters')
     if unicodedata.normalize('NFC', name) != name:
         raise ValueError('Path must be NFC normalized')

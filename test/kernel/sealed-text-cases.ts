@@ -5,8 +5,8 @@
  * only fails a test.
  *
  * The seal refuses more paths than the daemon on purpose (any component that starts
- * with `.git`, a path below deploy/sandbox, a name that is not NFC, any `\`); those
- * rules are the seal's own and are not here. The daemon refuses a first path
+ * with `.git`, a path below deploy/sandbox, a name that is not NFC); those rules are
+ * the seal's own and are not here. The daemon refuses a first path
  * component with `~` or `:`, which the seal accepts; that rule is not here either.
  */
 export type SealedTextField = "title" | "commitMessage" | "body" | "finalMessage" | "path"
@@ -147,6 +147,33 @@ export const sealedTextCases: ReadonlyArray<SealedTextCase> = [
     [...c0Controls, "\u007f", ...c1Controls].map((character) => hostilePath(character)),
   ),
   ...cases("path", false, [`src/\u009b2J${"x".repeat(3000)}.txt`]),
+  // What a reviewer of the pushed result reads differently: a bidi control, a line or
+  // paragraph separator, a byte order mark, or a backslash in any component.
+  ...cases("path", false, [
+    ...[...bidiControls, "\u2028", "\u2029", "\ufeff"].map((character) => hostilePath(character)),
+    "src/a\\b.txt",
+    "x/..\\.github\\workflows\\y.yml",
+  ]),
+  // A joiner is no such character: a name with an emoji sequence holds it.
+  ...cases("path", true, ["docs/\u{1f469}\u200d\u{1f4bb}.md"]),
+  {
+    field: "path",
+    value: "not UTF-8 (an encoded surrogate)",
+    pathHex: "7372632feda0802e747874",
+    accepted: false,
+  },
+  {
+    field: "path",
+    value: "not UTF-8 (an overlong /)",
+    pathHex: "7372632fc0af2e747874",
+    accepted: false,
+  },
+  {
+    field: "path",
+    value: "not UTF-8 (above U+10FFFF)",
+    pathHex: "7372632ff49080802e747874",
+    accepted: false,
+  },
   { field: "path", value: "not UTF-8 (0xff)", pathHex: "6e6f74ff2e747874", accepted: false },
   {
     field: "path",

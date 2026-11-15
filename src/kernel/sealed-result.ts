@@ -768,22 +768,28 @@ const parseDiff = (raw: Uint8Array): ReadonlyArray<DiffEntry> => {
   return entries
 }
 
-// A path holds no control character: C0, DEL and C1, so also no newline or tab.
-const controlCharacter = /\p{Cc}/u
+/**
+ * What a path may not hold: a control character (C0, DEL and C1, so also no newline or
+ * tab), a backslash in any component, and the characters that change what a reviewer
+ * of the pushed result sees: the bidi controls, U+2028, U+2029 and U+FEFF. The seal
+ * has the same rule (result.py safe_path).
+ */
+const unsafePathCharacter =
+  /[\p{Cc}\\\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069\u2028\u2029\ufeff]/u
 
 const regularModes = new Set(["000000", "100644", "100755"])
 
 /**
  * Whether a first path component is `.github` or a name that a checkout on Windows
  * or macOS maps to it. The rule refuses more than the exact forms: any `~` (a short
- * name such as GITHUB~1), `:` (a stream such as `::$INDEX_ALLOCATION`) or `\` (a
- * separator of Windows, which an archive tool may make into a directory), and any
+ * name such as GITHUB~1) or `:` (a stream such as `::$INDEX_ALLOCATION`), and any
  * name that is `.github` in either case after NFKC, after dropping format and
  * default-ignorable characters (which HFS+ ignores), and after dropping trailing
- * dots and spaces (which NTFS ignores).
+ * dots and spaces (which NTFS ignores). A `\`, which an archive tool may make into a
+ * directory, is refused in any component before this rule (`unsafePathCharacter`).
  */
 const isGithubName = (component: string) => {
-  if (/[~:\\]/.test(component)) return true
+  if (/[~:]/.test(component)) return true
   const name = component
     .normalize("NFKC")
     .replace(/[\p{Cf}\p{Default_Ignorable_Code_Point}]/gu, "")
@@ -792,7 +798,7 @@ const isGithubName = (component: string) => {
 }
 
 const checkEntry = (entry: DiffEntry): SealedResultRefused | undefined => {
-  if (!entry.utf8 || controlCharacter.test(entry.path))
+  if (!entry.utf8 || unsafePathCharacter.test(entry.path))
     return refused("path_name", quoted(entry.path))
   if (!regularModes.has(entry.oldMode) || !regularModes.has(entry.newMode))
     return refused("file_mode", quoted(entry.path))

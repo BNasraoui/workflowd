@@ -1829,11 +1829,10 @@ const refusals: ReadonlyArray<
     "GI3F2A~1",
     ".git\u200chub",
     ".github\u200d",
-    "\ufeff.github",
+    "\u2060.github",
     ".g\u0131thub",
     "\uff0egithub",
     ".github::$INDEX_ALLOCATION",
-    ".github\\workflows",
   ].map(
     (name) =>
       [
