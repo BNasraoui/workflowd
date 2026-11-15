@@ -2,6 +2,7 @@ import { expect, test } from "bun:test"
 import { randomBytes } from "node:crypto"
 import { Effect } from "effect"
 import { AgentRunStore } from "../../src/kernel/agent-run-store"
+import { makeSandboxStore } from "../../src/sandbox/store"
 import {
   client,
   gateways,
@@ -77,9 +78,10 @@ test("a lease that does not exist and a lease whose Actions run is not recorded 
     expect(answers[1]).toEqual(answers[0])
     expect(answers[2]).toEqual(answers[0])
     // Once the daemon records the run, the same lease gets its challenge.
-    await f.sql(
-      (sql) =>
-        sql`UPDATE sandbox_leases SET actions_run_id=84,actions_attempt=1 WHERE lease_id='lease-u'`,
+    await f.store(
+      Effect.gen(function* () {
+        yield* (yield* makeSandboxStore).recordRun("run-u", 84, 1)
+      }),
     )
     expect((await runner.challenge("lease-u")).status).toBe(200)
   })
