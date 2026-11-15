@@ -186,7 +186,9 @@ test("the relay asks one renewal no more often than the gateway permits, and its
     })
     const runner = client(gateway.port)
     try {
-      await f.tokenSeconds(200)
+      // A token that lives 180 seconds is due for renewal at once: renewAt is 180 to 300 seconds
+      // before its expiry, and never later.
+      await f.tokenSeconds(180)
       const { audience } = await runner.audience()
       const answer = await runner.session(proof(audience, "jti-relay"))
       expect(answer.status).toBe(200)
