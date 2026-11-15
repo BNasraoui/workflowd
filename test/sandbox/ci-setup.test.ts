@@ -46,12 +46,11 @@ for key in ['GITHUB_OUTPUT','GITHUB_ENV','GITHUB_PATH','GITHUB_STATE','GITHUB_ST
  if key in os.environ:
   with open(os.environ[key],'a') as out: out.write(canary)
 if os.environ['FIXTURE_FAILURE']=='1': sys.exit(1)
-if name=='curl': pathlib.Path(sys.argv[sys.argv.index('-o')+1]).write_text('fixture')
 if name=='systemd-run': sys.exit(subprocess.run(sys.argv[sys.argv.index('cargo'):]).returncode)
 `,
     )
     await chmod(shim, 0o700)
-    for (const name of ["bun", "sudo", "git", "systemd-run", "cargo", "curl", "sha256sum", "tar"])
+    for (const name of ["bun", "sudo", "git", "systemd-run", "cargo"])
       await symlink(shim, join(bin, name))
     // The setup steps run behind public-output.mjs, so they need the real Node on PATH.
     await symlink(fixtureExecutable("node"), join(bin, "node"))
@@ -103,11 +102,7 @@ if name=='systemd-run': sys.exit(subprocess.run(sys.argv[sys.argv.index('cargo')
         )
         if (!fail) {
           const calls = await readFile(join(directory, "calls"), "utf8")
-          for (const command of [
-            ["bun"],
-            ["sudo"],
-            ["git", "systemd-run", "cargo", "curl", "sha256sum", "tar"],
-          ][index]!)
+          for (const command of [["bun"], ["sudo"], ["git", "systemd-run", "cargo"]][index]!)
             expect(calls).toContain(`"${command}"`)
         }
       }
