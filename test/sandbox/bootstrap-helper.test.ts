@@ -396,15 +396,16 @@ test("OIDC authority issues at most its limit of proofs, and none after clear", 
 })
 
 /**
- * Opens a session with the runtime's own fetch at a gateway name under `.invalid`, which no
- * resolver answers: the lookup fails on the host, and in a network namespace with no resolver,
- * with no request leaving it. Each wait advances a clock that only the waits move.
+ * Opens a session with the runtime's own fetch at `gateway`, and prints the outcome, each wait
+ * and the number of proofs. Each wait advances a clock that only the waits move.
  */
-const unresolvedSession = `import { openSession } from ${JSON.stringify(resolve("deploy/sandbox/bootstrap-helper.mjs"))}
+const sessionAt = (
+  gateway: string,
+) => `import { openSession } from ${JSON.stringify(resolve("deploy/sandbox/bootstrap-helper.mjs"))}
 const waits = []
 let proofs = 0
 const outcome = await openSession({
-  gateway: "https://gateway.fixture.invalid",
+  gateway: ${JSON.stringify(gateway)},
   leaseId: "lease",
   issue: async () => \`proof-\${++proofs}\`,
   wait: 1000,
@@ -418,11 +419,12 @@ test("a gateway name that does not resolve is waited for, within the total limit
   const root = await mkdtemp(join(tmpdir(), "helper-lookup-"))
   try {
     for (const runtime of [process.execPath, fixtureExecutable("node")]) {
-      const child = Bun.spawn([runtime, "--input-type=module", "-e", unresolvedSession], {
-        env: { PATH: process.env.PATH, HOME: root },
-        stdout: "pipe",
-        stderr: "pipe",
-      })
+      // No resolver answers a name under `.invalid`: the lookup fails on the host, and in a
+      // network namespace with no resolver, with no request leaving it.
+      const child = Bun.spawn(
+        [runtime, "--input-type=module", "-e", sessionAt("https://gateway.fixture.invalid")],
+        { env: { PATH: process.env.PATH, HOME: root }, stdout: "pipe", stderr: "pipe" },
+      )
       const [output, errors, exit] = await Promise.all([
         new Response(child.stdout).text(),
         new Response(child.stderr).text(),
@@ -432,6 +434,64 @@ test("a gateway name that does not resolve is waited for, within the total limit
         runtime,
         errors: "",
         exit: 0,
+        result: waited,
+      })
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+}, 30000)
+
+/**
+ * Prints the code of Node's fetch for `gateway` in a namespace of its own, then runs `sessionAt`
+ * there. The namespace has loopback only, so an address outside it has no route (ENETUNREACH),
+ * and an unreachable route covers 198.51.100.0/24 (EHOSTUNREACH); no packet leaves it.
+ */
+const unroutedSession = (gateway: string) => [
+  "unshare",
+  "--user",
+  "--map-current-user",
+  "--keep-caps",
+  "--net",
+  "/bin/sh",
+  "-c",
+  'ip link set lo up && ip route add unreachable 198.51.100.0/24 && exec "$@"',
+  "fixture",
+  fixtureExecutable("node"),
+  "--input-type=module",
+  "-e",
+  `const code = await fetch(${JSON.stringify(gateway)}).then(() => "none", (error) => error.cause?.code)
+console.log(JSON.stringify(code))
+${sessionAt(gateway)}`,
+]
+
+test("under Node, a gateway address with no route or an unreachable one is waited for, within the total limit", async () => {
+  const waited = { outcome: "gateway session unavailable", waits: [500, 500], proofs: 0 }
+  const root = await mkdtemp(join(tmpdir(), "helper-route-"))
+  try {
+    for (const [code, gateway] of [
+      ["ENETUNREACH", "https://192.0.2.1"],
+      ["EHOSTUNREACH", "https://198.51.100.1"],
+    ] as const) {
+      const child = Bun.spawn(unroutedSession(gateway), {
+        env: { PATH: process.env.PATH, HOME: root },
+        stdout: "pipe",
+        stderr: "pipe",
+      })
+      const [output, errors, exit] = await Promise.all([
+        new Response(child.stdout).text(),
+        new Response(child.stderr).text(),
+        child.exited,
+      ])
+      const [given, result] = output
+        .trim()
+        .split("\n")
+        .map((line): unknown => JSON.parse(line))
+      expect({ code, errors, exit, given, result }).toEqual({
+        code,
+        errors: "",
+        exit: 0,
+        given: code,
         result: waited,
       })
     }
