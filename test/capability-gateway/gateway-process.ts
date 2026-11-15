@@ -290,11 +290,11 @@ export const gatewaySource = (
   entry = resolve("src/capability-gateway-server.ts"),
 ) =>
   `import { runCapabilityGatewayServer } from ${JSON.stringify(entry)}
-import { Effect } from "effect"
+import { Cause, Effect } from "effect"
 Effect.runFork(runCapabilityGatewayServer(process.env, {
   keys: async (signal) => (await fetch(${JSON.stringify(servers.keysUrl)}, { signal })).json(),
   upstream: (url, init) => fetch(url.replace("https://api.anthropic.com", ${JSON.stringify(servers.upstreamUrl)}), init),
-}))`
+}).pipe(Effect.tapCause((cause) => Effect.sync(() => process.stderr.write(Cause.pretty(cause) + "\\n")))))`
 
 /**
  * Starts a gateway process from `argv` and `env`, in the repository root, and returns once its
@@ -329,7 +329,10 @@ export async function startGatewayProcess(
   try {
     while (port === undefined) {
       const part = await reader.read()
-      if (part.done) throw new Error("gateway process exited before listening")
+      if (part.done) {
+        await forwarded
+        throw new Error(`gateway process exited before listening: ${errors}`)
+      }
       text += Buffer.from(part.value).toString()
       const listening = /^listening (\d+)\n/m.exec(text)?.[1]
       if (listening !== undefined) port = Number(listening)

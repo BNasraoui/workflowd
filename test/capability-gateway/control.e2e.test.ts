@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test"
 import { createConnection } from "node:net"
-import { chmod, mkdir, stat } from "node:fs/promises"
+import { chmod, mkdir, stat, symlink, writeFile } from "node:fs/promises"
 import { dirname, join, resolve } from "node:path"
 import { Effect } from "effect"
 import { AgentRunStore } from "../../src/kernel/agent-run-store"
@@ -158,20 +158,33 @@ async function within(ms: number, check: () => Promise<boolean>) {
   return performance.now() - start
 }
 
-/** One raw frame on the control socket: a 4-byte length, then the bytes. */
-function rawFrame(socket: string, frame: Buffer) {
-  return new Promise<string>((done) => {
-    const connection = createConnection(socket)
-    let answer = Buffer.alloc(0)
-    connection.on("connect", () => connection.write(frame))
-    connection.on("data", (chunk) => {
-      answer = Buffer.concat([answer, Buffer.from(chunk)])
-    })
+/**
+ * A connection to the control socket that sends nothing until the test writes to it. `closed`
+ * resolves when it closes, to the answer, "closed" when there was none, or "error".
+ */
+function openConnection(socket: string) {
+  const connection = createConnection(socket)
+  let answer = Buffer.alloc(0)
+  const opened = new Promise<number>((done) =>
+    connection.on("connect", () => done(performance.now())),
+  )
+  connection.on("data", (chunk) => {
+    answer = Buffer.concat([answer, Buffer.from(chunk)])
+  })
+  const closed = new Promise<string>((done) => {
     connection.on("error", () => done("error"))
     connection.on("close", () =>
       done(answer.length >= 4 ? answer.subarray(4).toString("utf8") : "closed"),
     )
   })
+  return { connection, opened, closed }
+}
+
+/** One raw frame on the control socket: a 4-byte length, then the bytes. */
+function rawFrame(socket: string, frame: Buffer) {
+  const { connection, closed } = openConnection(socket)
+  connection.on("connect", () => connection.write(frame))
+  return closed
 }
 const framed = (body: string | Buffer, length?: number) => {
   const bytes = typeof body === "string" ? Buffer.from(body) : body
@@ -310,6 +323,10 @@ test("the control socket refuses an unknown verb, a frame that is too long and a
       ok: false,
       error: "length",
     })
+    // A frame with bytes after its end.
+    expect(
+      JSON.parse(await rawFrame(socket, Buffer.concat([framed("{}"), Buffer.from("{}")]))),
+    ).toEqual({ ok: false, error: "length" })
     const reconcile = JSON.parse(
       await rawFrame(socket, framed(JSON.stringify({ verb: "reconcile", body: { live: [] } }))),
     )
@@ -392,6 +409,146 @@ test("the gateway refuses to start when its control directory grants more than t
     await mkdir(join(f.root, "control"), { mode: 0o755 })
     await chmod(join(f.root, "control"), 0o755)
     await expect(startGateway(f)).rejects.toThrow()
+  } finally {
+    await f.close()
+  }
+})
+
+test("the gateway answers a caller that is not the daemon before it reads a byte, and ends the connection", async () => {
+  const f = await fixture()
+  const gateway = await startGateway(f, gatewayConfig(f, process.getuid!() + 1))
+  try {
+    // The caller sends nothing at all.
+    const caller = openConnection(socketOf(f))
+    const opened = await caller.opened
+    expect(JSON.parse(await caller.closed)).toEqual({ ok: false, error: "caller" })
+    expect(performance.now() - opened).toBeLessThan(1500)
+  } finally {
+    await gateway.stop()
+    await f.close()
+  }
+})
+
+test("the gateway holds 16 of the daemon's connections at once, and ends each 10 seconds after it accepted it", async () => {
+  const f = await fixture()
+  const gateway = await startGateway(f)
+  try {
+    const socket = socketOf(f)
+    const held = Array.from({ length: 16 }, () => openConnection(socket))
+    const accepted = await Promise.all(held.map((connection) => connection.opened))
+    // The 17th is refused at once.
+    expect(JSON.parse(await openConnection(socket).closed)).toEqual({
+      ok: false,
+      error: "unavailable",
+    })
+    // One connection sends a cut frame and stops; another keeps sending a byte every 500 ms.
+    held[0]!.connection.write(framed(JSON.stringify({ verb: "reconcile" }), 100))
+    held[1]!.connection.write(framed("", 100).subarray(0, 4))
+    const trickle = setInterval(() => held[1]!.connection.write("x"), 500)
+    try {
+      const ends = await Promise.all(
+        held.map(async (connection) => ({
+          answer: await connection.closed,
+          at: performance.now(),
+        })),
+      )
+      for (const [index, end] of ends.entries()) {
+        expect(end.answer).toBe("closed")
+        expect(end.at - accepted[index]!).toBeGreaterThan(9500)
+        expect(end.at - accepted[index]!).toBeLessThan(11500)
+      }
+    } finally {
+      clearInterval(trickle)
+    }
+    // With the 16 gone, the next request is answered.
+    expect(
+      JSON.parse(
+        await rawFrame(socket, framed(JSON.stringify({ verb: "reconcile", body: { live: [] } }))),
+      ),
+    ).toEqual({ ok: true, value: null })
+  } finally {
+    await gateway.stop()
+    await f.close()
+  }
+}, 30000)
+
+test("the gateway refuses a control directory whose parent another user could replace an entry of", async () => {
+  const f = await fixture()
+  try {
+    const under = (parent: string) => ({
+      ...gatewayConfig(f),
+      controlSocket: join(parent, "control", "gateway.sock"),
+    })
+    for (const [mode, starts] of [
+      [0o777, false],
+      [0o770, false],
+      [0o1777, true],
+      [0o755, true],
+    ] as const) {
+      const parent = join(f.root, `parent-${mode.toString(8)}`)
+      await mkdir(parent)
+      await chmod(parent, mode)
+      if (starts) await (await startGateway(f, under(parent))).stop()
+      else
+        await expect(startGateway(f, under(parent))).rejects.toThrow(
+          "lets another user replace the control socket directory",
+        )
+    }
+    // A path through a symbolic link is refused, even to a parent that passes.
+    await symlink(join(f.root, "parent-755"), join(f.root, "link"))
+    await expect(startGateway(f, under(join(f.root, "link")))).rejects.toThrow(
+      "must be named by its real path",
+    )
+  } finally {
+    await f.close()
+  }
+})
+
+test("the gateway refuses to start on a control directory or socket path that is not its own", async () => {
+  const f = await fixture()
+  try {
+    const control = join(f.root, "control")
+    const refusal = "control socket directory must be the gateway's"
+    // The directory has another group than the daemon's.
+    await mkdir(control)
+    await chmod(control, 0o710)
+    await expect(
+      startGateway(f, {
+        ...gatewayConfig(f),
+        daemon: { uid: process.getuid!(), gid: process.getgid!() + 1 },
+      }),
+    ).rejects.toThrow(refusal)
+    // A symbolic link to a directory that passes, in place of the directory.
+    await Bun.$`mv ${control} ${join(f.root, "real")}`
+    await symlink(join(f.root, "real"), control)
+    await expect(startGateway(f)).rejects.toThrow(refusal)
+    // A file in place of the directory.
+    await Bun.$`rm ${control}`
+    await writeFile(control, "")
+    await expect(startGateway(f)).rejects.toThrow(refusal)
+    // A file that is not a socket at the socket's path; it stays.
+    await Bun.$`rm ${control}`
+    await mkdir(control)
+    await chmod(control, 0o710)
+    await writeFile(socketOf(f), "kept")
+    await expect(startGateway(f)).rejects.toThrow("is not a socket")
+    expect(await Bun.file(socketOf(f)).text()).toBe("kept")
+    // A second gateway on the socket of a live one; the first still answers.
+    await Bun.$`rm ${socketOf(f)}`
+    const first = await startGateway(f)
+    try {
+      await expect(startGateway(f)).rejects.toThrow("locked by a live process")
+      expect(
+        JSON.parse(
+          await rawFrame(
+            socketOf(f),
+            framed(JSON.stringify({ verb: "reconcile", body: { live: [] } })),
+          ),
+        ),
+      ).toEqual({ ok: true, value: null })
+    } finally {
+      await first.stop()
+    }
   } finally {
     await f.close()
   }
