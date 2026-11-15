@@ -55,6 +55,13 @@ export const CapabilityGatewayConfig = Schema.Struct({
   credentialRole: Schema.String.check(Schema.isPattern(/^[A-Za-z0-9_.-]{1,128}$/)),
   maxStreams: Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 512 })),
   maxStreamsPerRun: Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: maxStreamsPerRun })),
+  /**
+   * Milliseconds a stream may go without a chunk before the gateway aborts it, at most ten
+   * minutes; 120000 when absent. A stream that keeps sending runs to its token's expiry.
+   */
+  streamIdleMs: Schema.optionalKey(
+    Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 600000 })),
+  ),
   /** How often the gateway ends the streams of revoked or replaced sessions; 1000 by default. */
   staleSweepMs: Schema.optionalKey(
     Schema.Int.check(Schema.isBetween({ minimum: 100, maximum: 60000 })),
@@ -65,7 +72,13 @@ export const CapabilityGatewayConfig = Schema.Struct({
     // Port 0 asks the kernel for a free port; the process prints the port it bound.
     port: Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 65535 })),
   }),
-})
+}).check(
+  Schema.makeFilter((config) =>
+    config.maxStreamsPerRun <= config.maxStreams
+      ? true
+      : { path: ["maxStreamsPerRun"], issue: "Expected a value of at most maxStreams" },
+  ),
+)
 export type CapabilityGatewayConfig = typeof CapabilityGatewayConfig.Type
 /** workflowd's side of the gateway: only the control socket, never the gateway's store. */
 export const CapabilityControlConfig = Schema.Struct({ socket: AbsolutePath })

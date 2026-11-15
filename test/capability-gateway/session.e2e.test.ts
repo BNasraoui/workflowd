@@ -109,11 +109,12 @@ async function scenario(start: (f: Fixture) => Promise<Gateway>) {
     expect(granted.status).toBe(200)
     const grant = await Grant(granted)
     expect(grant.token).toMatch(/^[A-Za-z0-9_-]{43}$/)
-    // A run token lives at most 15 minutes and is renewed 10 to 12 minutes in.
+    // A run token lives at most 15 minutes, and the relay asks for its renewal between 180 and
+    // 300 seconds before its end.
     expect(grant.expiresAt - Date.now()).toBeLessThanOrEqual(900000)
     expect(grant.expiresAt - Date.now()).toBeGreaterThan(840000)
-    expect(grant.renewAt - Date.now()).toBeGreaterThan(10 * 60000 - 10000)
-    expect(grant.renewAt - Date.now()).toBeLessThanOrEqual(12 * 60000)
+    expect(grant.expiresAt - grant.renewAt).toBeGreaterThanOrEqual(180000)
+    expect(grant.expiresAt - grant.renewAt).toBeLessThanOrEqual(300000)
     expect(grant.renewAt).toBeLessThanOrEqual(grant.deadline)
 
     const answer = await call(grant.token)
@@ -131,7 +132,8 @@ async function scenario(start: (f: Fixture) => Promise<Gateway>) {
     expect(renewed.status).toBe(200)
     const next = await Renewed(renewed)
     expect(next.token).not.toBe(grant.token)
-    expect(next.renewAt - Date.now()).toBeLessThanOrEqual(12 * 60000)
+    expect(next.expiresAt - next.renewAt).toBeGreaterThanOrEqual(180000)
+    expect(next.expiresAt - next.renewAt).toBeLessThanOrEqual(300000)
     expect(await (await call(next.token)).text()).toBe(sse)
 
     // The gateway restarts; the run's next call succeeds on the same binding.

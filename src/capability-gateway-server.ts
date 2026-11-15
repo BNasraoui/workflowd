@@ -19,7 +19,7 @@ import {
   CustodyRefused,
 } from "./capability-gateway/custody"
 
-export interface CapabilityGatewayServerOptions {
+interface CapabilityGatewayServerOptions {
   readonly upstream?: ClaudeUpstream
   readonly keys?: typeof githubJobKeys
 }
@@ -28,6 +28,12 @@ export interface CapabilityGatewayServerOptions {
  * The capability gateway as its own process, with its own SQLite store: its grants, bindings and
  * tokens survive a restart. workflowd reaches it only on the control socket. A store that holds
  * any table but the gateway's (workflowd's, for one) is refused before anything is written.
+ *
+ * Three values replace a fixed outside endpoint: `options.upstream` the provider's API,
+ * `options.keys` GitHub's job key set, and `gitUpstream` of `makeCapabilityGateway`, which this
+ * function leaves at `fetch`, github.com's Git. Only a test gives them, in code. No config key
+ * names an endpoint, so no config can send a run's provider credential, proof or Git read to
+ * another host.
  */
 export const serveCapabilityGateway = (
   env: Record<string, string | undefined>,
@@ -75,7 +81,7 @@ export const serveCapabilityGateway = (
         daemon: config.daemon,
         target: gateway.control,
       })
-      const { server, close } = capabilityHttpServer(capabilityApi(gateway), true)
+      const { server, close } = capabilityHttpServer(capabilityApi(gateway))
       yield* Effect.acquireRelease(
         Effect.tryPromise(
           () =>
@@ -94,11 +100,8 @@ export const serveCapabilityGateway = (
   })
 
 /** Process entry: serve until stopped, and name the bound port on standard output. */
-export const runCapabilityGatewayServer = (
-  env: Record<string, string | undefined>,
-  options: CapabilityGatewayServerOptions = {},
-) =>
-  serveCapabilityGateway(env, options).pipe(
+const runCapabilityGatewayServer = (env: Record<string, string | undefined>) =>
+  serveCapabilityGateway(env).pipe(
     Effect.tap(({ port }) => Effect.sync(() => process.stdout.write(`listening ${port}\n`))),
     Effect.andThen(Effect.never),
     Effect.scoped,

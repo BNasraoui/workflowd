@@ -43,7 +43,7 @@ const maxSessions = 8
 const maxReplacements = renewalReplacements
 /** A successor must outlive its predecessor by this much, so renewals near the deadline end. */
 const minimumExtensionMs = 60000
-export type CapabilityBinding = typeof Binding.Type
+type CapabilityBinding = typeof Binding.Type
 const Challenge = Schema.Struct({ ...Binding.fields, nonce: Digest, recipientId: Schema.String })
 const Row = Schema.Struct({
   run_id: Schema.String,

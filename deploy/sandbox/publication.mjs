@@ -11,7 +11,33 @@ const stackedMarks = new RegExp(`[${unicode.marks}]{3}`, "u")
 const languages = new Set(["", "text", "diff", "ts", "typescript", "tsx", "js", "json", "sh", "bash", "python", "rust", "go", "sql", "yaml", "toml"])
 const invisible = new RegExp(`[${unicode.forbidden}]`, "u")
 const references = /&(#[0-9]+|#[xX][0-9a-fA-F]+|[A-Za-z][A-Za-z0-9]*);/u
-const closing = new RegExp(String.raw`(?:^|[^${unicode.letters}])(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)(?::\s*|\s+)(?:#[0-9]|gh-[0-9]|[a-z0-9_.-]+\/[a-z0-9_.-]+#|https?:\/\/|github\.com\/[^\s]*\/(?:issues|pull)\/)`, "u")
+const keyword = String.raw`(?<![${unicode.letters}])(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)(?::\s*|\s+)`
+const closing = new RegExp(String.raw`${keyword}(?:#[0-9]|gh-[0-9]|[a-z0-9_.-]+\/[a-z0-9_.-]+#|https?:\/\/)`, "u")
+const githubClosing = new RegExp(String.raw`${keyword}github\.com\/`, "gu")
+
+/**
+ * Whether a closing keyword names a github.com path that holds `/issues/` or `/pull/` before the
+ * next white space. One pass: a later keyword reuses the searches of the one before it.
+ */
+function closesGithubPath(text) {
+  const space = /\s/g
+  const path = /\/(?:issues|pull)\//g
+  let spaceAt = -1
+  let pathAt = -1
+  for (const match of text.matchAll(githubClosing)) {
+    const end = match.index + match[0].length
+    if (spaceAt < end) {
+      space.lastIndex = end
+      spaceAt = space.exec(text)?.index ?? text.length
+    }
+    if (pathAt < end) {
+      path.lastIndex = end
+      pathAt = path.exec(text)?.index ?? text.length
+    }
+    if (pathAt < spaceAt) return true
+  }
+  return false
+}
 
 /** Validate literal Markdown; return false on every ambiguous fence. */
 export function safePublication(value, message = false) {
@@ -20,7 +46,10 @@ export function safePublication(value, message = false) {
   const folded = fold(value)
   if (message && (/[<@$\\]/.test(value) || folded.includes("\\"))) return false
   // Check both concatenated emphasis and punctuation acting as a separator.
-  if (["", " "].some(separator => closing.test(folded.replace(/[*_~`[\]()]/g, separator)))) return false
+  for (const separator of ["", " "]) {
+    const text = folded.replace(/[*_~`[\]()]/g, separator)
+    if (closing.test(text) || closesGithubPath(text)) return false
+  }
   let fence = null
   let blank = true
   for (const line of value.split("\n")) {
@@ -30,8 +59,8 @@ export function safePublication(value, message = false) {
       else if (/^ {0,3}(?:`{3,}|~{3,})/.test(line)) return false
     } else {
       if (line.includes("]:")) return false
-      if (/^ {0,3}(?:> ?|(?:[-+*]|[0-9]+[.)]) +).*(?:`{3,}|~{3,})/.test(line)) return false
-      const opener = /^(`{3,}|~{3,})(.*)$/.exec(line)
+      if (/^ {0,3}(?:>|(?:[-+*]|[0-9]+[.)]) ).*(?:`{3}|~{3})/.test(line)) return false
+      const opener = /^(`{3,}(?!`)|~{3,}(?!~))(.*)$/.exec(line)
       if (opener !== null) {
         if (!blank || !languages.has(opener[2])) return false
         fence = opener[1]

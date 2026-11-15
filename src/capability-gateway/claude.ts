@@ -19,7 +19,7 @@ const forwarded = new Set([
 ])
 /**
  * The anthropic-beta values the pinned Claude Code (test/resources/claude-code-version) sends on a messages call, for each
- * model family it knows. test/capability-gateway/claude-pinned.test.ts records them in CI and
+ * model family it knows. test/capability-gateway/claude-pinned.launcher.test.ts records them in CI and
  * fails when the pinned client sends a value this list does not hold.
  */
 export const claudeBetas: ReadonlySet<string> = new Set([
@@ -118,7 +118,6 @@ function withoutCredential(body: ReadableStream<Uint8Array>, patterns: ReadonlyA
 /** Headers of the client's transport, accepted and not sent on. */
 const dropped = new Set([
   "authorization",
-  "host",
   "content-length",
   "accept-encoding",
   "anthropic-dangerous-direct-browser-access",
@@ -159,7 +158,9 @@ function decimalValue(text: string) {
   if (!parts) return undefined
   const fraction = parts[3] ?? ""
   const digits = `${parts[2]}${fraction}`.replace(/^0+/, "")
-  const significant = digits.replace(/0+$/, "")
+  let end = digits.length
+  while (end > 0 && digits.charCodeAt(end - 1) === 48) end--
+  const significant = digits.slice(0, end)
   if (significant === "") return "0"
   const exponent = Number(parts[4] ?? "0") - fraction.length + (digits.length - significant.length)
   return `${parts[1]}${significant}e${exponent}`
@@ -229,7 +230,7 @@ export async function claudeRequest(
 }
 
 /** Same bounded credential-reflection exclusion for every native protocol. */
-export async function safeProviderResponse(response: Response, secrets: ReadonlyArray<string>) {
+async function safeProviderResponse(response: Response, secrets: ReadonlyArray<string>) {
   const patterns = credentialPatterns(secrets)
   if (
     (response.status >= 300 && response.status < 400) ||

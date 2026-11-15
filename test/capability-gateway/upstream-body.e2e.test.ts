@@ -1,7 +1,15 @@
 import { expect, test } from "bun:test"
 import { readFileSync } from "node:fs"
 import { claudeBetas } from "../../src/capability-gateway/claude"
-import { client, gateways, proof, sse, withGateway, type Fixture } from "./gateway-process"
+import {
+  client,
+  gateways,
+  processGateway,
+  proof,
+  sse,
+  withGateway,
+  type Fixture,
+} from "./gateway-process"
 
 /** Opens the seeded run's session and gives its run token. */
 async function runToken(port: number) {
@@ -164,3 +172,46 @@ for (const [mode, start] of gateways)
       expect(sent(f).map((request) => request.body)).toEqual([at])
     })
   }, 60000)
+
+/**
+ * Sends `body` as a model call, and 200 ms later asks the gateway for a challenge on a second
+ * connection. Gives each status, or "late" for a request with no answer by `bound` milliseconds
+ * from the first send.
+ */
+async function answersWithin(port: number, token: string, body: string, bound: number) {
+  const signal = AbortSignal.timeout(bound)
+  const status = (response: Promise<Response>) =>
+    response.then(
+      (answer) => answer.status,
+      () => "late" as const,
+    )
+  const runner = client(port)
+  const call = status(
+    fetch(runner.url("/capabilities/v1/providers/anthropic/v1/messages"), {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${token}`,
+        "content-type": "application/json",
+        "anthropic-version": "2023-06-01",
+        "anthropic-beta": "oauth-2025-04-20",
+      },
+      body,
+      signal,
+    }),
+  )
+  await Bun.sleep(200)
+  const other = status(fetch(runner.url("/capabilities/v1/challenge?lease=lease"), { signal }))
+  return Promise.all([call, other])
+}
+
+test("[process] a 1 MiB model body whose one number is a 1, zeros and a 1 is answered within 2 s, as is a request on another connection", async () => {
+  await withGateway(processGateway, async (f, gateway) => {
+    const token = await runToken(gateway.port)
+    const head = '{"model":"fixture-model","stream":true,"messages":[],"max_tokens":1'
+    const tail = "1}"
+    const body = head + "0".repeat(modelBodyLimit - head.length - tail.length) + tail
+    expect(Buffer.byteLength(body)).toBe(modelBodyLimit)
+    expect(await answersWithin(gateway.port, token, body, 2000)).toEqual([403, 200])
+    expect(sent(f)).toEqual([])
+  })
+}, 60000)
