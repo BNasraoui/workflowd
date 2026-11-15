@@ -1,8 +1,16 @@
 import { expect, test } from "bun:test"
 import { fixtureExecutable } from "../helpers/fixture-executable.mjs"
 import { loopbackCertificate, tlsFront } from "../helpers/loopback-tls"
-import { generateKeyPairSync, sign } from "node:crypto"
+import { sign } from "node:crypto"
 import { mkdtemp, mkdir, writeFile, rm, readFile } from "node:fs/promises"
+import {
+  gatewaySource,
+  jwks,
+  signingKey,
+  startGatewayProcess,
+  type Gateway,
+} from "../capability-gateway/gateway-process"
+import { writeNoscopeProviders } from "../capability-gateway/fixture"
 import { join, resolve } from "node:path"
 import { tmpdir } from "node:os"
 import { Effect } from "effect"
@@ -33,11 +41,6 @@ const hostileClaims: Record<string, Record<string, unknown>> = {
 }
 
 // One key pair serves every case: the job keys, and the GitHub App key of the fixture.
-const keys = generateKeyPairSync("rsa", { modulusLength: 2048 })
-const jwks = {
-  keys: [{ ...keys.publicKey.export({ format: "jwk" }), kid: "fixture", use: "sig", alg: "RS256" }],
-}
-
 for (const race of [
   false,
   true,
@@ -74,7 +77,7 @@ for (const race of [
       hostname: "127.0.0.1",
       port: 0,
       async fetch(request) {
-        expect(request.headers.get("authorization")).toBe("Bearer fixture-provider-access")
+        expect(request.headers.get("authorization")).toBe("Bearer fixture-access")
         expect(request.headers.get("x-api-key")).toBeNull()
         expect(JSON.parse(await request.text())).toEqual(JSON.parse(native))
         upstreamEffects++
@@ -86,6 +89,8 @@ for (const race of [
       hostname: "127.0.0.1",
       port: 0,
       fetch(request) {
+        // The job keys, as GitHub publishes them for its proofs.
+        if (new URL(request.url).pathname === "/jwks") return Response.json(jwks)
         expect(request.headers.get("authorization")).toBe("Bearer fixture-request")
         const audience = new URL(request.url).searchParams.get("audience")
         const ref = "refs/heads/workflowd/leases/lease"
@@ -128,7 +133,7 @@ for (const race of [
           .map((value) => Buffer.from(JSON.stringify(value)).toString("base64url"))
           .join(".")
         return Response.json({
-          value: `${input}.${sign("RSA-SHA256", Buffer.from(input), keys.privateKey).toString("base64url")}`,
+          value: `${input}.${sign("RSA-SHA256", Buffer.from(input), signingKey).toString("base64url")}`,
         })
       },
     })
@@ -181,34 +186,15 @@ for (const race of [
       maxStreamsPerRun: 2,
       listen: { host: "127.0.0.1", port: 0 },
     }
-    let gateway: ReturnType<typeof Bun.spawn> | undefined
+    let gateway: Gateway | undefined
     let front: Awaited<ReturnType<typeof tlsFront>> | undefined
     const relayPid = () =>
       readFile(join(sandbox, "relay.pid"), "utf8").then(Number, () => undefined)
     try {
-      await mkdir(join(root, "noscope/providers"), { recursive: true, mode: 0o700 })
-      await writeFile(
-        join(root, "app.pem"),
-        keys.privateKey.export({ type: "pkcs8", format: "pem" }),
-        { mode: 0o600 },
-      )
-      await writeFile(
-        join(root, "run.mjs"),
-        `import {randomBytes,randomUUID} from 'node:crypto';process.stdout.write(JSON.stringify({token:randomBytes(32).toString('base64url'),token_id:randomUUID(),expires_at:new Date(Date.now()+Number(process.argv[2])*1000).toISOString()}))`,
-      )
-      await writeFile(
-        join(root, "access.mjs"),
-        'process.stdout.write(JSON.stringify({token:"fixture-provider-access",token_id:"fixture",expires_at:new Date(Date.now()+120000).toISOString()}))',
-      )
-      for (const [name, script, argument] of [
-        ["run-capability", "run.mjs", " {ttl}"],
-        ["provider-access", "access.mjs", ""],
-      ] as const)
-        await writeFile(
-          join(root, `noscope/providers/${name}.toml`),
-          `contract_version = 1\n[commands]\nmint = "${node} ${join(root, script)}${argument}"\n`,
-          { mode: 0o600 },
-        )
+      await writeFile(join(root, "app.pem"), signingKey.export({ type: "pkcs8", format: "pem" }), {
+        mode: 0o600,
+      })
+      await writeNoscopeProviders(root, 120000)
       await Effect.runPromise(
         Effect.gen(function* () {
           yield* runStoreMigrations
@@ -262,41 +248,25 @@ for (const race of [
           expect((yield* leases.acquire("run")).state).toBe("starting")
 
           // The gateway as its own process, behind TLS; then the real bootstrap and relay.
-          const child = Bun.spawn(
-            [
-              process.execPath,
-              "-e",
-              `import { runCapabilityGatewayServer } from ${JSON.stringify(resolve("src/capability-gateway-server.ts"))}
-import { Effect } from "effect"
-Effect.runFork(runCapabilityGatewayServer(process.env, {
-  keys: async () => (${JSON.stringify(jwks)}),
-  upstream: (url, init) => fetch(url.replace("https://api.anthropic.com", ${JSON.stringify(upstream.url.origin)}), init),
-}))`,
-            ],
-            {
-              cwd: resolve("."),
-              env: {
+          gateway = yield* Effect.promise(() =>
+            startGatewayProcess(
+              [
+                process.execPath,
+                "-e",
+                gatewaySource({
+                  keysUrl: `${issuer.url.origin}/jwks`,
+                  upstreamUrl: upstream.url.origin,
+                }),
+              ],
+              {
                 PATH: process.env.PATH,
                 HOME: root,
                 WORKFLOWD_DATABASE_PATH: database,
                 WORKFLOWD_CAPABILITY_GATEWAY: JSON.stringify(config),
               },
-              stdout: "pipe",
-              stderr: "inherit",
-            },
+            ),
           )
-          gateway = child
-          const listening = yield* Effect.promise(async () => {
-            const reader = child.stdout.getReader()
-            let text = ""
-            while (!text.includes("\n")) {
-              const part = await reader.read()
-              if (part.done) throw new Error("gateway process exited before listening")
-              text += Buffer.from(part.value).toString()
-            }
-            reader.releaseLock()
-            return Number(/^listening (\d+)$/m.exec(text)?.[1])
-          })
+          const listening = gateway.port
           // The front drops the first session answer that the gateway grants: the gateway
           // sends it, the runner never gets it.
           let dropped = 0
@@ -422,8 +392,7 @@ await prepare({
         }
       }
       front?.close()
-      gateway?.kill("SIGKILL")
-      await gateway?.exited
+      await gateway?.stop()
       await issuer.stop(true)
       await github.stop(true)
       await upstream.stop(true)

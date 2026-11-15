@@ -3,8 +3,8 @@ import { capabilityHttpServer } from "../../src/capability-gateway/http"
 import { fixtureExecutable } from "../helpers/fixture-executable.mjs"
 import { Effect, Schema } from "effect"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
-import { mkdtemp, mkdir, writeFile, readFile, rm } from "node:fs/promises"
-import { resolve, join } from "node:path"
+import { mkdtemp, readFile, rm } from "node:fs/promises"
+import { join } from "node:path"
 import { tmpdir } from "node:os"
 import { connect } from "node:net"
 import { once } from "node:events"
@@ -15,21 +15,7 @@ import { portOf } from "../helpers/loopback-tls"
 
 test("bound streaming preserves native bytes, renews with noscope, and denies cross-run or proxy authority", async () => {
   const root = await mkdtemp(join(tmpdir(), "wfd-gateway-"))
-  await mkdir(join(root, "noscope/providers"), { recursive: true, mode: 0o700 })
-  await writeFile(
-    join(root, "noscope/providers/run-capability.toml"),
-    `contract_version = 1\n[commands]\nmint = "${process.execPath} ${resolve("src/capability-gateway/noscope-provider.ts")} run {ttl}"\n`,
-    { mode: 0o600 },
-  )
-  await writeFile(
-    join(root, "access.mjs"),
-    `import {appendFileSync} from 'node:fs';appendFileSync(${JSON.stringify(join(root, "mint-count"))},'x');process.stdout.write(JSON.stringify({token:"fixture-access",token_id:"fixture",expires_at:new Date(Date.now()+120000).toISOString()}))`,
-  )
-  await writeFile(
-    join(root, "noscope/providers/provider-access.toml"),
-    `contract_version = 1\n[commands]\nmint = "${process.execPath} ${join(root, "access.mjs")}"\n`,
-    { mode: 0o600 },
-  )
+  await writeNoscopeProviders(root, 120000)
   const sent: { url: string; body: string; headers: Headers }[] = []
   const native = '{ "model" : "fixture-model", "stream": true, "messages": [] }'
   const responseBytes = "event: message_start\ndata: {}\n\nevent: message_stop\ndata: {}\n\n"
@@ -174,7 +160,7 @@ test("bound streaming preserves native bytes, renews with noscope, and denies cr
         ])
           expect((yield* gateway.handle(denied)).status).toBe(403)
         expect(sent.length).toBe(1)
-        expect(yield* Effect.promise(() => readFile(join(root, "mint-count"), "utf8"))).toBe("x")
+        expect(yield* Effect.promise(() => readFile(join(root, "access-mints"), "utf8"))).toBe("x")
         // A renewal asked again replaces the successor that has not renewed: the last one holds.
         const renewals: Array<{ readonly token: string }> = []
         for (let asked = 0; asked < 3; asked++) {

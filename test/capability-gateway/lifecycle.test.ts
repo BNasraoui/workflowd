@@ -2,13 +2,18 @@ import { expect, test } from "bun:test"
 import { fixtureExecutable } from "../helpers/fixture-executable.mjs"
 import { Effect, Fiber } from "effect"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
-import { mkdtemp, writeFile, rm } from "node:fs/promises"
+import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { createServer, type Socket } from "node:net"
 import { AgentRunStoreLive } from "../../src/kernel/agent-run-store"
 import { makeCapabilityGateway } from "../../src/capability-gateway/service"
-import { bindRunSession, seedCapabilityRun, writeNoscopeProviders } from "./fixture"
+import {
+  bindRunSession,
+  seedCapabilityRun,
+  writeNoscopeProvider,
+  writeNoscopeProviders,
+} from "./fixture"
 
 for (const [ending, phase] of [
   ["interrupt", "setup"],
@@ -54,11 +59,12 @@ for (const [ending, phase] of [
     })
     if (phase === "mint") {
       await new Promise<void>((resolve) => host.listen(join(root, "host.sock"), resolve))
-      await writeFile(
-        join(root, "noscope/providers/provider-access.toml"),
-        `contract_version = 1\n[commands]\nmint = "${process.execPath} ${resolve("test/capability-gateway/blocking-provider.mjs")} ${join(root, "host.sock")} {ttl}"\n`,
-        { mode: 0o600 },
-      )
+      await writeNoscopeProvider(root, "provider-access", [
+        process.execPath,
+        resolve("test/capability-gateway/blocking-provider.mjs"),
+        join(root, "host.sock"),
+        "{ttl}",
+      ])
     }
     try {
       await Effect.runPromise(
