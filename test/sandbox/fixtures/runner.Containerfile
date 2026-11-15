@@ -12,9 +12,11 @@ RUN apt-get update \
        'HostKey /etc/ssh/ssh_host_ed25519_key' 'PidFile /home/runner/sshd.pid' > /etc/ssh/sshd_config \
     && mv -f /usr/local/bin/container-use /usr/local/bin/container-use-real \
     && printf '%s\n' '#!/bin/sh' 'cd /workspace/repository' \
-       'exec env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=/home/runner _EXPERIMENTAL_DAGGER_RUNNER_HOST=unix:///run/workflowd-engine/engine.sock /usr/local/bin/container-use-real "$@"' \
+       'exec env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=/home/runner GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/home/runner/.gitconfig _EXPERIMENTAL_DAGGER_RUNNER_HOST=unix:///run/workflowd-engine/engine.sock /usr/local/bin/container-use-real "$@"' \
        > /usr/local/bin/container-use \
     && chmod 755 /usr/local/bin/container-use
 USER runner
-RUN git init -b main && printf 'fixture\n' > README && git add README && git commit -m fixture
+ENV GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/home/runner/.gitconfig
+RUN git config --global user.name 'Workflowd Agent' && git config --global user.email agent@workflowd.invalid \
+    && git init -b main && printf 'fixture\n' > README && git add README && git commit -m fixture
 CMD ["/usr/sbin/sshd", "-D", "-e"]

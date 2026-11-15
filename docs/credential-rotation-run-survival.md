@@ -2,6 +2,25 @@
 
 ## Decision
 
+The decision below describes local Codex custody. The capability-gateway
+`actions-native` Claude slice has a different initial availability limit: a
+controller restart or lost transport revokes local run authority and cancels the
+owned Actions job, retaining uncertain cleanup until confirmed. It does not
+relaunch the prompt or replace the job. Run bearer renewal is hour-scale with
+45–55 minute jitter, capped by the absolute deadline, and swaps the host relay's
+bearer without restarting Claude. There is no 30-second per-job authority
+heartbeat in this mode. Provider OAuth refresh remains the existing credential
+owner's separate responsibility.
+
+Local fixtures cover bound SSH cancellation/acknowledgement loss, candidate
+freezing, and explicit same-session pause/resume. A clean pause leaves the run
+nonterminal, preserves its container/workspace and session, and fences provider
+requests until a controller-authorized resume rotates the invocation nonce.
+This does not provide transparent restart recovery: startup still cancels
+abandoned runs. P2 and production activation remain unaccepted. Scheduled noscope
+coordinator restarts can interrupt native jobs;
+500-job continuity needs the separately reviewed drain/reattachment decision.
+
 Workflowd uses **Option B**: every Codex agent run executes in its own transient
 systemd user service, outside `workflowd.service`'s control group. Workflowd
 writes the prompt, event stream, stderr, terminal result, and a versioned
@@ -49,8 +68,10 @@ completion or failure in the existing agent-run store.
 
 Prompts never appear in the transient unit's argument vector. Custody
 directories and files are created with owner-only permissions. The wrapper
-captures stdout and stderr with a 10 MiB limit per file; the observer reads only
-newly appended, newline-terminated bytes. Finished custody is removed at
+keeps stdout as an event record of at most 10 MiB across its files: a 1 MiB head,
+1 MiB tail segments that rotate out the oldest, and an index. A line over 1 MiB is
+stored as a `workflowd.line_dropped` marker. It captures stderr with a 10 MiB
+limit. The observer reads only newly appended, newline-terminated bytes. Finished custody is removed at
 startup after seven days, while active run IDs are protected.
 
 ## Execution ownership seam

@@ -129,6 +129,8 @@ for (const mutation of [
   "ordinary",
   "maximum metadata",
   "hidden history",
+  "credential blob",
+  "credential title",
   "symlink",
   "mode",
   "extra head",
@@ -151,7 +153,9 @@ for (const mutation of [
     const text =
       mutation === "maximum metadata"
         ? { title: "雪".repeat(200), commitMessage: "m".repeat(10240), body: "é".repeat(16384) }
-        : wording
+        : mutation === "credential title"
+          ? { ...wording, title: "ghp_" + "a".repeat(32) }
+          : wording
     try {
       await git("init", "-b", "main")
       await git("config", "user.name", "Fixture")
@@ -167,7 +171,10 @@ for (const mutation of [
         await git("commit", "-m", "hidden bad change")
         await rm(join(repo, ".github"), { recursive: true })
       }
-      await writeFile(join(repo, "result"), "accepted bytes\n")
+      await writeFile(
+        join(repo, "result"),
+        mutation === "credential blob" ? "ghp_" + "a".repeat(32) : "accepted bytes\n",
+      )
       if (mutation === "symlink") await command(["ln", "-s", "base", "link"], repo)
       await git("add", "-A")
       if (mutation === "mode") await git("update-index", "--chmod=+x", "base")

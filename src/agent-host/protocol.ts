@@ -8,6 +8,7 @@ export const CredentialAdmissionReason = Schema.Literals([
   "credential_relink_in_progress",
   "opencode_grant_migration_incomplete",
   "credential_host_unreachable_or_timed_out",
+  "provider_access_owner_required",
 ])
 export type CredentialAdmissionReason = typeof CredentialAdmissionReason.Type
 export const CredentialClient = Schema.Literals(["codex", "claude", "opencode"])
@@ -19,6 +20,7 @@ const tags = {
   credential_relink_in_progress: "CredentialRelinkInProgress",
   opencode_grant_migration_incomplete: "OpenCodeGrantMigrationIncomplete",
   credential_host_unreachable_or_timed_out: "CredentialHostUnreachableOrTimedOut",
+  provider_access_owner_required: "ProviderAccessOwnerRequired",
 } as const
 export type CredentialCheckError = Error & {
   readonly _tag: (typeof tags)[CredentialAdmissionReason]
@@ -42,6 +44,15 @@ export function credentialReason(error: unknown): CredentialAdmissionReason | un
 export const CredentialRequest = Schema.Struct({
   operation: Schema.Literal("checkCredentials"),
   client: CredentialClient,
+})
+export const ProviderAccessRequest = Schema.Struct({
+  operation: Schema.Literal("providerAccess"),
+  provider: Schema.Literals(["claude", "codex", "opencode"]),
+})
+export const ProviderAccessResponse = Schema.Struct({
+  admitted: Schema.Literal(true),
+  token: Schema.NonEmptyString,
+  expiresAt: Schema.Int,
 })
 export const CredentialResponse = Schema.Union([
   Schema.Struct({ admitted: Schema.Literal(true) }),
@@ -87,6 +98,13 @@ export const HostStart = Schema.Struct({
   ),
 })
 export type HostStart = typeof HostStart.Type
+/** The files of one host launch that its controller may read: the event
+ * record (head, index, tail segments), stderr and the result. */
+export const HostExchangeFile = Schema.Union([
+  Schema.Literals(["events", "events.index.json", "stderr", "result"]),
+  Schema.String.check(Schema.isPattern(/^events\.[1-9][0-9]{0,8}$/)),
+])
+export type HostExchangeFile = typeof HostExchangeFile.Type
 export const HostRequest = Schema.Union([
   Schema.Struct({
     operation: Schema.Literal("listOwned"),
@@ -100,7 +118,7 @@ export const HostRequest = Schema.Union([
     operation: Schema.Literal("exchange"),
     runId: HostId,
     launchId: Schema.String,
-    file: Schema.Literals(["events", "stderr", "result"]),
+    file: HostExchangeFile,
     offset: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
   }),
 ])

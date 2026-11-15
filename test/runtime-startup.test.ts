@@ -18,13 +18,76 @@ import {
 import { RemoteCoordinator } from "../src/remote/coordinator"
 import { runHookService, startHookService } from "../src/runtime"
 import { WorkflowStore } from "../src/store/contracts"
-import { WorkSignalLive } from "../src/work-signal"
+import { WorkSignal, WorkSignalLive } from "../src/work-signal"
+import { SandboxDispatch } from "../src/sandbox/dispatch"
 import { Workspace } from "../src/workspace"
 import { pullRequestPayload, signedRequest } from "./github-webhook"
 import { agentGitTestEnvironment } from "./helpers/agent-git-config"
 import { arrangeDelivery } from "./kernel/job-store-harness"
 
 import { automationStub, kernelLayer, qrspiDefinition, stubAdapters } from "./helpers/runtime"
+
+test("sandbox sweeps wait for lifecycle signals or the poll deadline", async () => {
+  const loaded = await loadConfig(
+    {
+      ...agentGitTestEnvironment,
+      GITHUB_APP_ID: "123",
+      GITHUB_PRIVATE_KEY_PATH: "/fixture/key",
+      GITHUB_WEBHOOK_SECRET: "fixture",
+      WORKFLOWD_ALLOWED_INSTALLATION_ACCOUNT_IDS: "1",
+      WORKFLOWD_PR_REPOSITORIES: '[{"repository":"fixture/repo","installationId":1}]',
+      OPENCODE_SERVER_PASSWORD: "fixture",
+      WORKFLOWD_REVIEW_OPENCODE_PASSWORD: "fixture-review",
+      WORKFLOWD_OPENCODE_ATTACH_URL: "http://127.0.0.1:1",
+    },
+    { home: "/fixture" },
+  )
+  let heartbeats = 0,
+    iterations = 0
+  await Effect.runPromise(
+    Effect.gen(function* () {
+      yield* startHookService({
+        ...loaded,
+        http: { ...loaded.http, host: "127.0.0.1", port: 0 },
+        worker: { ...loaded.worker, concurrency: 0, pollIntervalMs: 60000 },
+      })
+      yield* TestClock.adjust("1 millis")
+      expect([heartbeats, iterations]).toEqual([1, 1])
+      yield* TestClock.adjust("1 second")
+      expect([heartbeats, iterations]).toEqual([1, 1])
+      yield* (yield* WorkSignal).wake("agent-run")
+      yield* TestClock.adjust("1 millis")
+      expect([heartbeats, iterations]).toEqual([2, 2])
+      yield* TestClock.adjust("30001 millis")
+      expect([heartbeats, iterations]).toEqual([3, 3])
+    }).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          kernelLayer(":memory:"),
+          stubAdapters(),
+          WorkSignalLive,
+          TestClock.layer(),
+          Layer.mock(SandboxDispatch, {
+            heartbeat: Effect.sleep("1 millis").pipe(
+              Effect.tap(() => {
+                heartbeats++
+                return Effect.void
+              }),
+            ),
+            iteration: Effect.sleep("1 millis").pipe(
+              Effect.tap(() => {
+                iterations++
+                return Effect.void
+              }),
+            ),
+          }),
+        ),
+      ),
+      Effect.scoped,
+    ),
+  )
+})
+
 describe("runHookService startup", () => {
   test("applies the configured PR repository allowlist to signed webhooks", async () => {
     const loaded = await loadConfig(

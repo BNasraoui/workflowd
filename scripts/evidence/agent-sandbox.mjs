@@ -26,6 +26,7 @@ import { sandboxBridgeName, isSandboxBridgeNamespace } from "../../src/sandbox/b
 import proofTasks from "./agent-sandbox-proof.json"
 import { approvalComment } from "../../src/sandbox/publish.ts"
 import { readSandboxSubmission } from "../../src/sandbox/submission.ts"
+import { readEventRecordText } from "./event-record.mjs"
 
 import {
   collectListeners,
@@ -896,8 +897,10 @@ export function assertLivePublication(proof) {
   for (const receipt of receipts) {
     assert.deepEqual(receipt.binding, JSON.parse(comment))
     assert.equal(receipt.repository, policy.repository)
-    assert.equal(receipt.branch, submission.branch)
-    assert.equal(receipt.marker, marker)
+    assert.equal(receipt.v, 1)
+    assert.equal(receipt.failed, false)
+    assert.equal(receipt.branch, undefined)
+    assert.equal(receipt.marker, undefined)
   }
   const last = receipts.at(-1)
   assert.equal(last.stage, "published")
@@ -1259,7 +1262,7 @@ async function probeLive(policy) {
       const manifest = JSON.parse(await readFile(join(custody, "manifest.json"), "utf8"))
       assert.equal(manifest.executionId, binding.sessionId)
       assert.equal(manifest.runId, run.runId)
-      frames = (await readFile(manifest.eventsPath, "utf8"))
+      frames = (await readEventRecordText(manifest.eventsPath))
         .trim()
         .split("\n")
         .filter(Boolean)

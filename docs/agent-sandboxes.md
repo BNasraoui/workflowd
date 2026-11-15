@@ -4,6 +4,11 @@ Sandbox dispatch stays disabled until the remaining RPI implementation and live
 verification finish. Installing this agent does not enable dispatch. The worker
 must stop before changing production configuration or restarting its executor.
 
+For relocated native clients, see the [P3 capability adapter matrix](capability-gateway-p3.md)
+for exact Codex/OpenCode pins, fixed upstreams, isolated credentials, and evidence
+limits. Those clients use the existing Actions-native gateway/supervisor/result
+path, with no shared OpenCode server or credential-database mount.
+
 The reviewed fragment is `deploy/opencode/sandbox.json`. It adds only
 `agents.sandbox`. It contains no model, credentials, default agent, global
 permissions, MCP servers, or auxiliary-agent overrides. Project configuration
@@ -207,7 +212,94 @@ restart reuses the receipt in the same evidence directory. Parent-wake ordering 
 covered by the dispatch fixture. A model's success statement alone cannot pass the
 live gate. Leave dispatch disabled if confinement or cleanup cannot be confirmed.
 
-## Native CLI prototypes
+## Interactive Actions implementation gate (local only)
+
+The capability-gateway slice pins the official Linux x64 Claude Code **2.1.301**
+executable, SHA-256
+`bc1aad9982c7b59c7d889ff92595d61cf46e0a6eae074cb551d932a989bcd222`.
+The hash matches Anthropic's versioned release manifest. This is the version
+specified by the approved v2 plan. The image source and CI install now use this
+same hash-verified binary. The full CI launch graph still contains legacy Claude
+workers and must be migrated before execution under this gate.
+
+Run the offline feasibility fixture with an explicit executable path:
+
+```sh
+WORKFLOWD_FIXTURE_CLAUDE=/absolute/path/to/verified/claude \
+  python3 scripts/evidence/isolated-fixture.py \
+  bun scripts/check-capability-security.ts --suite native-local \
+    --upstream fixture --evidence /tmp/opencode/evidence/native-local
+```
+
+The launcher discovers `bun`, `node` and `noscope` on PATH, or accepts explicit
+`WORKFLOWD_FIXTURE_BUN`, `WORKFLOWD_FIXTURE_NODE` and `WORKFLOWD_FIXTURE_NOSCOPE`
+paths. It binds individual executables at private fixture paths, hides real homes,
+runtime sockets and temporary files, denies external networking, and bounds its
+unique user unit to 180 seconds, 6 GiB RAM and no swap. Linux bubblewrap, user
+namespaces and a user systemd manager are prerequisites; there is no unisolated
+fallback. Evidence is owner-only under `/tmp/opencode/wfd-isolated-*` (override
+the parent with `WORKFLOWD_FIXTURE_EVIDENCE`). Bun's resource preload is retained.
+
+The actual interactive PTY exercises file tool turns, an explicitly denied shell
+command, native Stop-hook observation followed by terminal exit, same-session
+resume, and cancellation of an explicitly allowed long-running tool child.
+Requests use a dummy OAuth sentinel and a local synthetic upstream. The fixture
+asserts model/thinking selection and OAuth headers without an API key. The Stop
+hook is fixture evidence, not a protected production completion authority.
+The local suite also covers the real gateway result route, real disposable SSH
+control, durable invocation/candidate state, stopped-result capture and relocated
+executor identity. Its private report lists the exact files and results; stdout
+contains fixed case IDs and projected status only. Docker-client tests use an
+injected engine port and do not start an engine or container.
+
+Production source now wires `claude:actions` through the lease's authenticated
+SSH connection to `runner-control native-execute`. The runner supervisor reserves
+the nonce before launch, captures bounded private PTY output, and requires a
+controller finish request plus confirmed backend shutdown before reporting
+completion. The runner-host PTY custodian runs outside the agent PID namespace;
+the normal interactive CLI and tools remain UID/GID1000 with no capabilities.
+HOME transcript discovery, JSONL, Stop files and PTY text are untrusted advisory
+data and never become model, turn or completion attestation. The gateway records
+only complete run-bound upstream responses matching the saved model and effort.
+That observation does not identify the requesting process or establish semantic
+task completion. A malicious tool can itself make a run-authorized request.
+Cancellation or acknowledgement loss revokes gateway
+authority; uncertain custody cannot replay the prompt.
+
+The controller and supervisor both require complete bounded stream closure;
+trailing events or private-output overflow cannot become successful completion.
+Launch/control input is bounded before newline discovery. Setup/sealing commands
+run with clean environments and owned process groups, with timeout and signal
+cancellation. A lost engine mutation response retains the exclusive operation
+lock: a stopped-state read alone cannot rule out a delayed daemon-side start.
+External recovery stop also persists a host-owned launch cancellation marker
+before attempting the engine lock. Every pending start checks it under that lock;
+an acknowledged stop therefore fences even a resume saved before engine acquisition.
+Active or uncertain mutations still prevent acknowledgement. Clean pause does not
+set this terminal marker. Received-closure and force-kill timers have separate owners.
+Controller SQL cleanup bounds and interrupts connection acquisition, then joins the
+actual persistence attempt and process pump; a held database cannot leave detached
+late mutations or prevent owned subprocess teardown.
+These lifecycle cases have local process/client-port controls. The owned backend
+also exercises the actual container supervisor, stopped export, capture retry and
+sleeping-tool cancellation; the complete controller/SSH/initialization path still
+needs a combined acceptance run.
+
+The source Docker boundary specifies UID/GID 1000, dropped capabilities,
+no-new-privileges, a read-only root, memory/PID limits and the job-specific gateway
+socket. The authorized owned-Docker fixtures have exercised these controls using
+the built Nix image and the pinned interactive CLI. The image is loaded by content
+ID in the private engine; a fixture-only reference translation does not claim a
+published registry digest. Explicit pause waits for complete SSH closure and
+stopped-container confirmation before saving nonterminal custody. Resume uses the
+same container/workspace, session, model, effort and absolute deadline, with a new
+invocation nonce and an exact predecessor check. Attach never replays a prompt.
+The controller API implementation has local lifecycle/HTTP tests; the complete
+application-to-owned-container acceptance path remains a separate review gate.
+Neither local suite success nor daemon readiness proves live entitlement,
+deployed Actions execution, full security acceptance or 500-job continuity.
+
+## Historical native CLI prototypes
 
 The live verifier accepts `opencode:opencode-primary`, `codex:local` and
 `claude:local`. Select an accessible model explicitly for each invocation:
@@ -215,9 +307,12 @@ OpenCode takes `provider/model`; native CLIs take their native model ID. Use a
 separate evidence root for each executor. All commands, including native workers,
 run in transient user services capped at 6 GiB with no swap. Existing mint
 credentials stay in their existing homes; none are copied into evidence or runners.
-Before the Claude live gate, verify actual inference with a trivial `claude --print`
-using the selected model. A positive `claude auth status` alone is insufficient.
-Expired OAuth requires the operator to run `claude auth login` on mint.
+The historical Claude worker and its executable fixtures use print mode and are
+outside the approved capability-gateway validation path. Do not invoke them,
+including through the current full CI suite. Applicable executable fixtures must
+be migrated to the interactive supervisor before full-suite execution. Live
+interactive provider checks require separate authorization; offline fixture
+success does not establish entitlement.
 
 Native sandbox dispatch uses the configured transient CLI even when ordinary
 Codex work uses a resident thread. The binding names its durable execution before

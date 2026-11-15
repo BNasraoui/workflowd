@@ -4,10 +4,57 @@ import type { CliPort } from "../kernel/cli-process-contract"
 import { WorkspaceError } from "../workspace/errors"
 import {
   CredentialResponse,
+  ProviderAccessResponse,
   credentialReason,
   credentialRefusal,
   type CredentialClient,
 } from "./protocol"
+
+/** Authenticated local credential-host channel; only the Mint-side noscope adapter consumes this. */
+export function providerAccessSnapshot(
+  path: string,
+  provider: "claude" | "codex" | "opencode" = "claude",
+): Promise<{ token: string; expiresAt: number }> {
+  return new Promise((resolve, reject) => {
+    const socket = connect(path)
+    let text = ""
+    let settled = false
+    const fail = () => {
+      if (settled) return
+      settled = true
+      socket.destroy()
+      reject(new Error("provider access unavailable"))
+    }
+    socket.setTimeout(15000, fail)
+    socket.once("error", fail)
+    socket.once("close", () => {
+      if (!settled) fail()
+    })
+    socket.once("connect", () =>
+      socket.write(JSON.stringify({ operation: "providerAccess", provider }) + "\n"),
+    )
+    socket.on("data", (bytes) => {
+      text += bytes.toString("utf8")
+      if (text.length > 16384) {
+        fail()
+        return
+      }
+      if (!text.includes("\n")) return
+      try {
+        const value = Schema.decodeUnknownSync(ProviderAccessResponse)(JSON.parse(text))
+        if (value.token.length > 8192 || value.expiresAt <= Date.now()) {
+          fail()
+          return
+        }
+        settled = true
+        socket.end()
+        resolve({ token: value.token, expiresAt: value.expiresAt })
+      } catch {
+        fail()
+      }
+    })
+  })
+}
 
 export function acquireCredentialAdmission(
   path: string,
@@ -203,7 +250,13 @@ function requestAgentHostResponse(path: string, request: import("./protocol").Ho
   })
 }
 
-import { HostResponse, type OwnedProcess, type HostStart } from "./protocol"
+import { HostExchangeFile, HostResponse, type OwnedProcess, type HostStart } from "./protocol"
+import {
+  eventRecordPaths,
+  readEventRecord,
+  recordEventParser,
+  type RecordSource,
+} from "../kernel/event-record"
 import type { CliEvent, CliRunProcess } from "../kernel/cli-process-contract"
 import { normalizeError, OBSERVATION_EVIDENCE } from "../errors"
 
@@ -220,7 +273,7 @@ export async function inspectAgentHost(socket: string, runId: string) {
 async function hostBytes(
   socket: string,
   process: OwnedProcess,
-  file: "events" | "stderr" | "result",
+  file: HostExchangeFile,
   offset: number,
 ) {
   const response = await requestAgentHost(socket, {
@@ -232,6 +285,13 @@ async function hostBytes(
   })
   if (!Buffer.isBuffer(response)) throw new Error("unexpected host observation")
   return response
+}
+
+/** The event record of a host launch, read through the host's exchange. */
+const hostRecordSource = (socket: string, process: OwnedProcess): RecordSource => {
+  const names = eventRecordPaths("events")
+  return (file, offset) =>
+    hostBytes(socket, process, Schema.decodeUnknownSync(HostExchangeFile)(names.of(file)), offset)
 }
 
 export async function startAgentHost(socket: string, input: Omit<HostStart, "operation">) {
@@ -264,26 +324,18 @@ export function observeAgentHost(
     launch: { launchId: process.launchId, invocationId: process.invocationId },
     events: {
       async *[Symbol.asyncIterator]() {
-        let offset = 0
-        let buffered = ""
-        const decoder = new TextDecoder()
-        for (;;) {
-          const current = await observe()
-          const bytes = await hostBytes(socket, process, "events", offset)
-          offset += bytes.length
-          buffered += decoder.decode(bytes, { stream: true })
-          let end: number
-          while ((end = buffered.indexOf("\n")) >= 0) {
-            yield parse(buffered.slice(0, end))
-            buffered = buffered.slice(end + 1)
-          }
-          if (buffered.length > 10 * 1024 * 1024) throw new Error("host event exceeds output limit")
-          if (!current.active && bytes.length === 0) {
-            if (buffered) yield parse(buffered)
-            return
-          }
-          if (bytes.length === 0) await new Promise((resolve) => setTimeout(resolve, 100))
-        }
+        // A launch that is no longer this host custody is evidence before any read.
+        await observe()
+        yield* readEventRecord({
+          source: hostRecordSource(socket, process),
+          pollIntervalMs: 100,
+          shouldStop: async () => !(await observe()).active,
+          parse: recordEventParser(parse),
+          // The worker's last line may have no newline; it is decoded at the end.
+          flushPartialAtEnd: true,
+          // Bounds the daemon's memory for one line of a record without segments.
+          maxPendingLength: 10 * 1024 * 1024,
+        })
       },
     },
     exited: Effect.tryPromise({

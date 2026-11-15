@@ -28,7 +28,9 @@ request = urllib.request.Request(url, headers={'Authorization': 'Bearer ' + os.e
 with urllib.request.urlopen(request, timeout=30) as response:
     token = json.load(response)['value']
 clean = {k: v for k, v in os.environ.items() if not k.startswith('ACTIONS_ID_TOKEN_REQUEST_')}
-result = subprocess.run(['sudo', '-n', 'tailscale', 'up', '--timeout=60s', '--ssh',
+# A private runner calls the gateway itself; nothing on the tailnet logs in to it.
+ssh = [] if os.environ.get('SANDBOX_BOOTSTRAP_MODE') == 'private' else ['--ssh']
+result = subprocess.run(['sudo', '-n', 'tailscale', 'up', '--timeout=60s', *ssh,
     '--accept-routes=false', '--accept-dns=false', '--advertise-tags=tag:agent-runner',
     '--hostname=lease-' + os.environ['GITHUB_RUN_ID'] + '-' + os.environ['GITHUB_RUN_ATTEMPT'],
     '--client-id=' + os.environ['SANDBOX_TAILSCALE_CLIENT_ID'] + '?preauthorized=true&ephemeral=true',
@@ -36,5 +38,3 @@ result = subprocess.run(['sudo', '-n', 'tailscale', 'up', '--timeout=60s', '--ss
 if result.returncode:
     raise SystemExit("Tailscale enrollment failed")
 PY
-# Retain a route inventory in the job log; the live verifier validates it again.
-ip route show table 52

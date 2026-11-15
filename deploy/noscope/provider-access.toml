@@ -1,0 +1,6 @@
+# Template only. The credential host must explicitly enable sole ownership for Claude.
+# Existing shared consumers are refused; no credential values appear in argv/configuration.
+contract_version = 1
+
+[commands]
+mint = "/usr/local/bin/bun /opt/workflowd/src/capability-gateway/noscope-provider.ts access /run/workflowd-agent-host/control.sock {role} {ttl}"

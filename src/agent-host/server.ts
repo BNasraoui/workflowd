@@ -22,9 +22,16 @@ import type { Socket } from "node:net"
 import { dlopen, FFIType, ptr } from "bun:ffi"
 import { Schema } from "effect"
 import { CredentialPolicy } from "./config"
-import { credentialLock } from "./credentials"
+import { credentialLock, inspectCredentialLayout } from "./credentials"
+import {
+  makeProviderAccessOwner,
+  refreshClaudeAccess,
+  refreshCodexAccess,
+  type ProviderAccessOwner,
+} from "./provider-access"
 import {
   CredentialRequest,
+  ProviderAccessRequest,
   HostRequest,
   HostStart,
   OwnedProcess,
@@ -39,7 +46,10 @@ export async function serveCredentialHost(
   policy: CredentialPolicy,
   supervisor: (args: string[]) => Promise<string> = hostCommand,
   environment: Record<string, string | undefined> = process.env,
+  providerOwner?: ProviderAccessOwner,
 ) {
+  if (policy.providerAccess !== undefined && environment.WORKFLOWD_PROVIDER_OWNER_HTTPS !== "1")
+    throw new Error("provider owner HTTPS sandbox opt-in required")
   const git = loadAgentGitConfig(environment, policy.launch !== undefined)
   const libc = dlopen("libc.so.6", {
     getsockopt: {
@@ -48,6 +58,35 @@ export async function serveCredentialHost(
     },
   })
   const native = nativeHost(policy, supervisor, git)
+  const accessOwners: Partial<Record<"claude" | "codex" | "opencode", ProviderAccessOwner>> = {}
+  for (const kind of ["claude", "codex"] as const) {
+    const configured = policy.providerAccess?.[kind]
+    if (configured)
+      accessOwners[kind] =
+        kind === "claude" && providerOwner
+          ? providerOwner
+          : makeProviderAccessOwner(
+              {
+                kind,
+                canonical: policy[kind].canonical,
+                ownerUid: policy.ownerUid,
+                groupGid: policy.groupGid,
+              },
+              kind === "claude"
+                ? refreshClaudeAccess(configured.clientId)
+                : refreshCodexAccess(configured.clientId),
+            )
+  }
+  if (policy.providerAccess?.opencode)
+    accessOwners.opencode = makeProviderAccessOwner(
+      {
+        kind: "api-key",
+        canonical: policy.providerAccess.opencode.canonical,
+        ownerUid: policy.ownerUid,
+        groupGid: policy.groupGid,
+      },
+      () => Promise.reject(new Error("provider refresh unavailable")),
+    )
   const sockets = new Set<Socket>()
   const pending = new Set<Promise<void>>()
   const server = createServer((socket) => {
@@ -86,6 +125,35 @@ export async function serveCredentialHost(
           )
             throw credentialRefusal("codex", "shared_credential_permissions_invalid")
           const raw: unknown = JSON.parse(data)
+          if (
+            typeof raw === "object" &&
+            raw !== null &&
+            "operation" in raw &&
+            raw.operation === "providerAccess"
+          ) {
+            const request = Schema.decodeUnknownSync(ProviderAccessRequest, {
+              onExcessProperty: "error",
+            })(raw)
+            const accessOwner = accessOwners[request.provider]
+            if (!accessOwner) throw new Error("provider access unavailable")
+            const releaseOwner = await credentialLock(policy, false)
+            try {
+              if (request.provider !== "opencode")
+                await inspectCredentialLayout(policy, request.provider, false, "provider-owner")
+              const snapshot = await accessOwner.snapshot()
+              if (!socket.destroyed)
+                socket.end(
+                  JSON.stringify({
+                    admitted: true,
+                    token: snapshot.token,
+                    expiresAt: snapshot.expiresAt,
+                  }) + "\n",
+                )
+            } finally {
+              await releaseOwner()
+            }
+            return
+          }
           if (
             typeof raw === "object" &&
             raw !== null &&

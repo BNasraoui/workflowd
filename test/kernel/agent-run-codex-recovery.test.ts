@@ -89,6 +89,7 @@ test("Claude spawning recovery persists native model evidence and Claude custody
         }),
     },
     store: {
+      read: () => Effect.succeed(recovered),
       claimSpawn: () => Effect.void,
       abandonLaunch: () => Effect.void,
       markSpawned: () => Effect.void,
@@ -139,6 +140,7 @@ test("startup recovery owns spawning, spawned, and verified Codex transition bou
   const completed = new Set<string>()
   let outputTokens = 0
   const store: AgentRunCodexStore = {
+    read: () => Effect.succeed(record),
     claimSpawn: () => Effect.void,
     markSpawned: (input) =>
       Effect.sync(() => {
@@ -220,6 +222,7 @@ test("resident mode leaves recovery and cancellation to the resident supervisor"
   let supervisorCancellations = 0
   let recordedCancellations = 0
   const store: AgentRunCodexStore = {
+    read: () => Effect.succeed(record),
     claimSpawn: () => Effect.void,
     abandonLaunch: () => Effect.void,
     markSpawned: () => Effect.void,
@@ -316,6 +319,7 @@ for (const kind of ["codex", "claude"] as const)
           }),
       },
       store: {
+        read: () => Effect.succeed(record),
         claimSpawn: () => Effect.void,
         abandonLaunch: () => Effect.void,
         markSpawned: () => Effect.void,

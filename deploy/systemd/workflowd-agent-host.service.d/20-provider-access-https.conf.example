@@ -1,0 +1,5 @@
+# Explicit provider-owner activation only; this example is not installed automatically.
+[Service]
+RestrictAddressFamilies=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+Environment=WORKFLOWD_PROVIDER_OWNER_HTTPS=1

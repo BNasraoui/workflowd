@@ -6,7 +6,7 @@ import { AuditReceipt, drainToolAudit } from "./audit"
 import { mkdir, mkdtemp, writeFile, rm } from "node:fs/promises"
 import { homedir } from "node:os"
 import { join } from "node:path"
-import { Effect, Schema } from "effect"
+import { Clock, Effect, Schema, Semaphore } from "effect"
 import {
   makeSandboxStore,
   SandboxError,
@@ -18,6 +18,8 @@ import {
 import { sandboxSshArguments, type SandboxTransport } from "./transport"
 import type { makeSandboxGithub } from "./github"
 import type { SavedSandboxPolicy } from "./saved-policy"
+import type { CapabilityGateway } from "../capability-gateway/service"
+import { requireNativePublisherActivation, type PublisherContract } from "./publisher-contract"
 
 type Github = Effect.Success<ReturnType<typeof makeSandboxGithub>>
 
@@ -215,10 +217,36 @@ export const makeSandboxLeaseService = (
   github: Github,
   controlRoot = join(homedir(), ".local/share/workflowd/sandboxes"),
   command = controlCommand,
+  privateAccess?: {
+    readonly publicationContract?: PublisherContract
+    readonly native?: {
+      readonly gateway: typeof CapabilityGateway.Service
+    }
+  },
 ) =>
   Effect.gen(function* () {
     const store = yield* makeSandboxStore
     const publications = yield* makePublishStore
+    const cleanupGate = yield* Semaphore.make(1)
+    const discoveryCursor = new Map<string, string>()
+    /**
+     * A private lease waits for its runner: the runner gets a challenge from the gateway and opens
+     * a session with its OIDC proof. The lease is ready once that session exists; until then this
+     * acquisition commits nothing. If committing fails, the run's binding is revoked.
+     */
+    const privatePeer = Effect.fn("SandboxLease.privatePeer")(function* <E>(
+      lease: NonNullable<Effect.Success<ReturnType<typeof store.read>>>,
+      ready: Effect.Effect<boolean, E>,
+    ) {
+      const native = privateAccess?.native
+      if (lease.policy.privateBootstrap?.mode !== "actions-native" || native === undefined)
+        return yield* Effect.fail(
+          new SandboxError({ message: "Private bootstrap policy unavailable" }),
+        )
+      return yield* ready.pipe(
+        Effect.onError(() => native.gateway.revoke(lease.run_id).pipe(Effect.orDie)),
+      )
+    })
     const required = Effect.fn("SandboxLease.required")(function* (runId: string) {
       const lease = yield* store.read(runId)
       if (lease === null)
@@ -227,65 +255,83 @@ export const makeSandboxLeaseService = (
         )
       return lease
     })
-    const cleanup = Effect.fn("SandboxLease.cleanup")(function* (policy?: SavedSandboxPolicy) {
-      const retained = (yield* store.cleanupRuns()).filter(
-        (row) => policy === undefined || JSON.stringify(row.policy) === JSON.stringify(policy),
-      )
-      let failed: unknown = undefined
-      for (const row of retained) {
-        const lease = yield* store.cleanupLease(row)
-        if (
-          lease !== null &&
-          !["releasing", "released"].includes(lease.state) &&
-          !isUnobservedRun(lease) &&
-          (lease.actions_run_id === null ||
-            (lease.actions_run_id === row.actions_run_id &&
-              lease.actions_attempt === row.actions_attempt))
-        )
-          continue
-        const result = yield* Effect.gen(function* () {
-          const run = yield* github.savedRun(
-            row.policy,
-            row.lease_id,
-            row.actions_run_id,
-            row.actions_attempt,
+    const cleanup = Effect.fn("SandboxLease.cleanup")(
+      function* (policy: SavedSandboxPolicy) {
+        const retained = (yield* store.cleanupRuns())
+          .filter((row) => JSON.stringify(row.policy) === JSON.stringify(policy))
+          .sort((a, b) => a.updated_at - b.updated_at)
+        const checked: typeof retained = []
+        let failed: unknown = undefined
+        for (const row of retained) {
+          const lease = yield* store.cleanupLease(row)
+          if (
+            lease !== null &&
+            !["releasing", "released"].includes(lease.state) &&
+            !isUnobservedRun(lease) &&
+            (lease.actions_run_id === null ||
+              (lease.actions_run_id === row.actions_run_id &&
+                lease.actions_attempt === row.actions_attempt))
           )
-          yield* store.cleanupState(row, run.status === "completed" ? "terminated" : "pending")
-          if (run.status !== "completed") yield* github.cancel(row.policy, row.actions_run_id)
-        }).pipe(
-          Effect.tapError((cause) =>
-            store.cleanupState(
-              row,
-              "pending",
-              sandboxDiagnostic("lease.confirmRun", cause).message,
-            ),
-          ),
-          Effect.result,
-        )
-        if (result._tag === "Failure") failed ??= result.failure
-      }
-      for (const row of retained) {
-        const result = yield* store
-          .finishCleanup(
-            row,
-            github.deleteRef(row.policy, row.lease_id),
-            github.ensureRef(row.policy, row.lease_id, false),
-          )
-          .pipe(
+            continue
+          // One serial, bounded batch per repository; oldest attempted custody first.
+          if (policy?.privateBootstrap?.mode === "actions-native" && checked.length >= 8) break
+          if (checked.length && policy?.privateBootstrap?.mode === "actions-native")
+            yield* Effect.sleep("250 millis")
+          checked.push(row)
+          const result = yield* Effect.gen(function* () {
+            const run = yield* github.savedRun(
+              row.policy,
+              row.lease_id,
+              row.actions_run_id,
+              row.actions_attempt,
+            )
+            yield* store.cleanupState(row, run.status === "completed" ? "terminated" : "pending")
+            if (run.status !== "completed") yield* github.cancel(row.policy, row.actions_run_id)
+          }).pipe(
             Effect.tapError((cause) =>
               store.cleanupState(
                 row,
-                "terminated",
-                sandboxDiagnostic("lease.deleteRef", cause).message,
+                "pending",
+                sandboxDiagnostic("lease.confirmRun", cause).message,
               ),
             ),
             Effect.result,
           )
-        if (result._tag === "Failure") failed ??= result.failure
-      }
-      if (failed !== undefined)
-        return yield* Effect.fail(new SandboxError(sandboxDiagnostic("lease.cleanup", failed)))
-    })
+          if (result._tag === "Failure") failed ??= result.failure
+          // Advance each confirmed run before the shared pass deadline can interrupt us.
+          const finished = yield* store
+            .finishCleanup(
+              row,
+              github.deleteRef(row.policy, row.lease_id),
+              github.ensureRef(row.policy, row.lease_id, false),
+            )
+            .pipe(
+              Effect.tapError((cause) =>
+                store.cleanupState(
+                  row,
+                  "terminated",
+                  sandboxDiagnostic("lease.deleteRef", cause).message,
+                ),
+              ),
+              Effect.result,
+            )
+          if (finished._tag === "Failure") failed ??= finished.failure
+        }
+        if (failed !== undefined)
+          return yield* Effect.fail(new SandboxError(sandboxDiagnostic("lease.cleanup", failed)))
+      },
+      (effect, policy: SavedSandboxPolicy) =>
+        policy.privateBootstrap?.mode === "actions-native"
+          ? cleanupGate
+              .withPermits(1)(effect)
+              .pipe(
+                Effect.timeout("60 seconds"),
+                Effect.mapError(
+                  (cause) => new SandboxError(sandboxDiagnostic("lease.cleanup", cause)),
+                ),
+              )
+          : effect,
+    )
     const discover = (lease: Effect.Success<ReturnType<typeof required>>) =>
       github.runs(lease.policy, lease.lease_id).pipe(
         Effect.flatMap((runs) =>
@@ -295,33 +341,101 @@ export const makeSandboxLeaseService = (
           ),
         ),
       )
-    const inventory = Effect.fn("SandboxLease.inventory")(function* (policy: SavedSandboxPolicy) {
+    const inventoryNow = Effect.fn("SandboxLease.inventoryNow")(function* (
+      policy: SavedSandboxPolicy,
+    ) {
       const owned = yield* github
         .inventory(policy)
         .pipe(Effect.tapError((cause) => store.inventoryError(policy, cause)))
       yield* store.adoptAll(policy, owned)
     })
+    const inventoryGate = yield* Semaphore.make(1)
+    const inventories = new Map<
+      number,
+      {
+        policy: string
+        after: number
+        result: ReturnType<typeof inventoryNow>
+        waiting: Map<string, SavedSandboxPolicy>
+      }
+    >()
+    const inventory = Effect.fn("SandboxLease.inventory")(
+      function* (policy: SavedSandboxPolicy) {
+        if (policy.privateBootstrap?.mode !== "actions-native") return yield* inventoryNow(policy)
+        const now = yield* Clock.currentTimeMillis
+        const key = JSON.stringify([
+          policy.repository,
+          policy.repositoryId,
+          policy.installationId,
+          policy.workflowSha,
+          policy.appActorId,
+          policy.toolingSha,
+        ])
+        const previous = inventories.get(policy.repositoryId)
+        const waiting = previous?.waiting ?? new Map<string, SavedSandboxPolicy>()
+        waiting.set(key, policy)
+        const uncertain = Effect.fail(
+          new SandboxError({ message: "Sandbox inventory unconfirmed; retry required" }),
+        )
+        if (previous && now < previous.after)
+          return yield* previous.policy === key ? previous.result : uncertain
+        // Serve the oldest waiting identity, even when today's configured policy calls first.
+        // Keeping the saved policy here also avoids stalling behind a caller that disappears.
+        const [selected, saved] = waiting.entries().next().value!
+        waiting.delete(selected)
+        // Cache failures too. An interrupted attempt never becomes evidence of absence.
+        const entry = {
+          policy: selected,
+          after: now + 60000,
+          result: uncertain as ReturnType<typeof inventoryNow>,
+          waiting,
+        }
+        inventories.set(policy.repositoryId, entry)
+        entry.result = Effect.fromResult(yield* inventoryNow(saved).pipe(Effect.result))
+        return yield* selected === key ? entry.result : uncertain
+      },
+      (effect) => inventoryGate.withPermits(1)(effect),
+    )
     const release = Effect.fn("SandboxLease.release")(function* (runId: string) {
       const lease = yield* required(runId)
+      if (lease.policy.privateBootstrap?.mode === "actions-native" && privateAccess?.native) {
+        yield* privateAccess.native.gateway
+          .revoke(runId)
+          .pipe(Effect.tapError((cause) => store.recordError(runId, cause)))
+      }
       yield* store.beginRelease(runId)
-      yield* Effect.gen(function* () {
+      const discovery = yield* Effect.gen(function* () {
         yield* cleanupUnobserved(lease)
         yield* inventory(lease.policy)
         yield* discover(lease)
-        yield* cleanup(lease.policy)
-        yield* store.clearPolicyErrors(lease.policy)
-      }).pipe(Effect.tapError((cause) => store.recordError(runId, cause)))
+      }).pipe(Effect.result)
+      // Native inventory is shared and may stay unconfirmed; that uncertainty is not
+      // permission to abandon known IDs. Other policies clean up only after inventory.
+      const cleaned =
+        discovery._tag === "Success" || lease.policy.privateBootstrap?.mode === "actions-native"
+          ? yield* cleanup(lease.policy).pipe(Effect.result)
+          : discovery
+      for (const result of [discovery, cleaned])
+        if (result._tag === "Failure") {
+          yield* store.recordError(runId, result.failure)
+          return yield* Effect.fail(result.failure)
+        }
+      yield* store.clearPolicyErrors(lease.policy)
+      return yield* Effect.void
     })
     const cleanupUnobserved = (lease: Effect.Success<ReturnType<typeof required>>) =>
       store.reconcileUnobserved(
         lease.run_id,
-        inventory(lease.policy).pipe(Effect.andThen(discover(lease))),
+        lease.policy.privateBootstrap?.mode === "actions-native"
+          ? discover(lease)
+          : inventory(lease.policy).pipe(Effect.andThen(discover(lease))),
         github.deleteRef(lease.policy, lease.lease_id),
         github.ensureRef(lease.policy, lease.lease_id, false),
       )
     const acquire = Effect.fn("SandboxLease.acquire")(function* (runId: string) {
       let lease = yield* required(runId)
       yield* Schema.decodeUnknownEffect(SandboxPolicy)(lease.policy)
+      yield* requireNativePublisherActivation(lease.policy, privateAccess?.publicationContract)
       if (lease.state === "ready") return lease
       if (lease.state === "requested") {
         if (!(yield* store.beginStart(runId))) return yield* required(runId)
@@ -353,6 +467,13 @@ export const makeSandboxLeaseService = (
             if (run !== undefined) {
               yield* commit(store.recordRun(runId, run.id, run.run_attempt))
               if (run.status !== "completed") {
+                if (lease.policy.privateBootstrap !== undefined) {
+                  yield* privatePeer(
+                    lease,
+                    commit(store.bindSession(runId, run.id, run.run_attempt)),
+                  )
+                  return
+                }
                 const ready = yield* github.readiness(
                   lease.policy,
                   lease.lease_id,
@@ -414,13 +535,20 @@ export const makeSandboxLeaseService = (
         ].map((policy) => [JSON.stringify(policy), policy] as const),
       )
       let failed: unknown = undefined
-      for (const policy of snapshots.values()) {
+      for (const key of discoveryCursor.keys()) if (!snapshots.has(key)) discoveryCursor.delete(key)
+      for (const [key, policy] of snapshots) {
         const selected = leases.filter(
           (lease) => JSON.stringify(lease.policy) === JSON.stringify(policy),
         )
+        const nativePolicy = policy.privateBootstrap?.mode === "actions-native"
+        const offset = nativePolicy
+          ? selected.findIndex((lease) => lease.run_id === discoveryCursor.get(key)) + 1
+          : 0
+        const ordered = [...selected.slice(offset), ...selected.slice(0, offset)]
         const result = yield* Effect.gen(function* () {
           yield* inventory(policy)
-          for (const lease of selected) {
+          let pending = 0
+          for (const lease of ordered) {
             // Shared sessions must cross their local cleanup barrier before runner release,
             // including after deadline expiry or a lost executor acknowledgement.
             if (
@@ -450,14 +578,29 @@ export const makeSandboxLeaseService = (
               lease.deadline <= Date.now() ||
               isUnobservedRun(lease)
             ) {
+              if (nativePolicy && pending++ >= 8) continue
+              if (nativePolicy) discoveryCursor.set(key, lease.run_id)
               yield* cleanupUnobserved(lease)
-              yield* discover(lease)
+              if (
+                policy.privateBootstrap?.mode !== "actions-native" ||
+                lease.actions_run_id === null
+              )
+                yield* discover(lease)
             } else yield* acquire(lease.run_id)
           }
-          yield* cleanup(policy)
+        }).pipe(
+          (effect) => (nativePolicy ? effect.pipe(Effect.timeout("60 seconds")) : effect),
+          Effect.result,
+        )
+        // Only the shared native inventory cleans known IDs after a failed inventory.
+        const cleaned =
+          result._tag === "Success" || nativePolicy
+            ? yield* cleanup(policy).pipe(Effect.result)
+            : result
+        if (result._tag === "Success" && cleaned._tag === "Success")
           yield* store.clearPolicyErrors(policy)
-        }).pipe(Effect.result)
         if (result._tag === "Failure") failed ??= result.failure
+        if (cleaned._tag === "Failure") failed ??= cleaned.failure
       }
       if (failed !== undefined)
         return yield* Effect.fail(new SandboxError(sandboxDiagnostic("lease.reconcile", failed)))
@@ -479,10 +622,13 @@ export const makeSandboxLeaseService = (
         })
       })
     const heartbeat = (runId: string) =>
-      remote(runId, "exec /usr/local/bin/container-use heartbeat").pipe(
-        Effect.timeout("10 seconds"),
-        Effect.andThen(store.heartbeat(runId, Date.now())),
-      )
+      Effect.gen(function* () {
+        if ((yield* required(runId)).policy.privateBootstrap?.mode === "actions-native") return
+        yield* remote(runId, "exec /usr/local/bin/container-use heartbeat").pipe(
+          Effect.timeout("10 seconds"),
+          Effect.andThen(store.heartbeat(runId, Date.now())),
+        )
+      })
     const finishResult = (runId: string, completion: string) =>
       Effect.gen(function* () {
         const lease = yield* required(runId)

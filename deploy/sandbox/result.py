@@ -14,6 +14,7 @@ import tempfile
 from pathlib import Path
 import subprocess
 import sys
+import urllib.parse
 
 if sys.flags.optimize:
     raise RuntimeError('Python optimization is not supported')
@@ -197,7 +198,21 @@ def safe_path(raw):
     return name.casefold()
 
 
-def inspect_changes(repo, source, result):
+def content_check(data, sensitive):
+    # Defined encodings only; this is not general DLP. Scan complete bounded values,
+    # including whitespace-fragmented forms, rather than independent output lines.
+    compact = re.sub(rb'\s+', b'', data)
+    if re.search(rb'(?:gh[pousr]_|github_pat_|sk-ant-)[A-Za-z0-9_-]{16,}|-----BEGIN(?:RSA|EC|OPENSSH)?PRIVATEKEY-----', compact):
+        raise ValueError('Credential-shaped public content')
+    for value in sensitive:
+        raw = value.encode('utf8')
+        forms = [raw, base64.b64encode(raw), base64.urlsafe_b64encode(raw).rstrip(b'='),
+                 raw.hex().encode(), raw.hex().upper().encode(), urllib.parse.quote(value, safe='').encode()]
+        if any(re.sub(rb'\s+', b'', form) in compact for form in forms):
+            raise ValueError('Sensitive public content')
+
+
+def inspect_changes(repo, source, result, sensitive=()):
     commits = git(repo, 'rev-list', '--reverse', source + '..' + result).decode().splitlines()
     if not (1 <= len(commits) <= 100):
         raise ValueError('Commit count exceeded bound')
@@ -209,6 +224,7 @@ def inspect_changes(repo, source, result):
         total += int(git(repo, 'cat-file', '-s', obj.split(b' ')[0].decode()))
         if total > 64 * 1024 * 1024:
             raise ValueError('Object bytes exceeded bound')
+        content_check(git(repo, 'cat-file', '-p', obj.split(b' ')[0].decode()), sensitive)
     parent = source
     content = 0
     changed = set()
@@ -228,6 +244,7 @@ def inspect_changes(repo, source, result):
             old, new, _, blob, _ = fields
             old = old.removeprefix(':')
             path = entries[i + 1]
+            content_check(path, sensitive)
             safe_path(path)
             changed.add(path)
             if len(changed) > 100:
@@ -300,6 +317,7 @@ def validate(source_url):
     manifest = json.loads(raw)
     if set(manifest) != {'sourceSha', 'resultSha', 'treeSha', 'branch', 'bundleSha256', 'title', 'commitMessage', 'body'}:
         raise ValueError('Invalid manifest fields')
+    content_check(json.dumps(manifest, ensure_ascii=False).encode('utf8'), [])
     if not isinstance(manifest['branch'], str):
         raise ValueError('Invalid manifest branch')
     publication_text(manifest['title'])

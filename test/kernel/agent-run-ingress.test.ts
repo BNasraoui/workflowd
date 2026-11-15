@@ -2,6 +2,11 @@ import { describe, expect, test } from "bun:test"
 import { SqlClient } from "effect/unstable/sql"
 import { Effect, Layer, Schema } from "effect"
 import { AgentRunStore } from "../../src/kernel/agent-run-store"
+import { KernelSessionStore } from "../../src/kernel/session-store"
+import {
+  OpenCodeResumeProvider,
+  runOpenCodeResumeIteration,
+} from "../../src/kernel/opencode-resume-worker"
 import { enqueueNextAgentHandoff } from "../../src/kernel/agent-handoff-reducer"
 import { KernelJobStore, KernelJobStoreLive } from "../../src/kernel/job-store"
 import { runKernelJobIteration } from "../../src/kernel/job-runner"
@@ -58,55 +63,148 @@ describe("agent-run ingress", () => {
     expect(created).toHaveLength(0)
   })
 
-  test("a completed Claude CLI child gives its OpenCode parent the final message", async () => {
-    const state = defaultState()
-    state.telemetry.set("ses_parent", {
-      directory: "/home/ben/coordination",
-      outputTokens: 1,
-      updatedAtMs: at.getTime(),
-      idle: false,
-    })
-    const cli = makeCodexCli([
-      { type: "agent_message", text: "Completed the review." },
-      { type: "turn.completed", outputTokens: 4 },
-    ])
-    const layer = makeLayer(
-      makeProvider(state),
-      worktrees([]),
-      undefined,
-      {
-        claudeRoutes: [{ name: "claude", modelID: "claude-opus-5-5" }],
-      },
-      cli.port,
-    )
-    const result = await Effect.runPromise(
-      Effect.gen(function* () {
-        const receipt = yield* register({
-          route: "claude",
-          repository: "workflowd",
-          prompt: "review",
-          parentSessionId: "ses_parent",
-          resumePrompt: "Continue with the review.",
-        })
-        const store = yield* AgentRunStore
-        yield* store
-          .read(receipt.runId)
-          .pipe(Effect.repeat({ until: (row) => row?.state === "completed" }))
-        const observed = yield* observeCliCompletion
-        const queued = yield* enqueueNextAgentHandoff(at).pipe(Effect.provide(KernelJobStoreLive))
-        const sql = yield* SqlClient.SqlClient
-        const jobs = yield* sql<{ input_json: string }>`SELECT input_json FROM kernel_workflow_jobs
+  test.each([false, true])(
+    "a completed CLI child wakes an ordinary OpenCode parent, saved=%s",
+    async (saved) => {
+      const state = defaultState()
+      const parentDirectory = process.cwd()
+      state.telemetry.set("ses_parent", {
+        directory: parentDirectory,
+        outputTokens: 1,
+        updatedAtMs: at.getTime(),
+        idle: false,
+      })
+      const cli = makeCodexCli([
+        { type: "agent_message", text: "Completed the review." },
+        { type: "turn.completed", outputTokens: 4 },
+      ])
+      const layer = makeLayer(
+        makeProvider(state),
+        worktrees([]),
+        undefined,
+        {
+          claudeRoutes: [{ name: "claude", modelID: "claude-opus-5-5" }],
+        },
+        cli.port,
+      )
+      const result = await Effect.runPromise(
+        Effect.gen(function* () {
+          const sessions = yield* KernelSessionStore
+          if (saved) {
+            yield* sessions.registerResource({
+              resourceId: "parent-resource",
+              owningHostId: "mint",
+              absolutePath: parentDirectory,
+              kind: "checkout",
+              createdAt: at,
+            })
+            yield* sessions.registerSession({
+              sessionId: "opencode-session-ses_parent",
+              nativeSessionId: "ses_parent",
+              resourceId: "parent-resource",
+              providerKind: "opencode",
+              providerId: "opencode-primary",
+              serverId: "opencode-primary",
+              endpointAlias: "local",
+              endpointIdentity: "http://127.0.0.1:4096",
+              providerVersion: 1,
+              owningHostId: "mint",
+              createdAt: at,
+            })
+          }
+          const receipt = yield* register({
+            route: "claude",
+            repository: "workflowd",
+            prompt: "review",
+            parentSessionId: "ses_parent",
+            resumePrompt: "Continue with the review.",
+          })
+          const store = yield* AgentRunStore
+          yield* store
+            .read(receipt.runId)
+            .pipe(Effect.repeat({ until: (row) => row?.state === "completed" }))
+          const observed = yield* observeCliCompletion
+          const queued = yield* enqueueNextAgentHandoff(at).pipe(Effect.provide(KernelJobStoreLive))
+          const sql = yield* SqlClient.SqlClient
+          const jobs = yield* sql<{
+            input_json: string
+          }>`SELECT input_json FROM kernel_workflow_jobs
         WHERE job_id = ${receipt.wait!.instanceId + ":resume-parent"}`
-        return { receipt, observed, queued, jobs }
-      }).pipe(Effect.provide(layer)),
-    )
-    expect(result.observed.status).toBe("completed")
-    expect(result.queued.status).toBe("enqueued")
-    const prompt = JSON.parse(result.jobs[0]!.input_json).resumePrompt
-    expect(prompt.task).toBe("Continue with the review.")
-    expect(prompt.terminal.final_message).toBe("Completed the review.")
-    expect(prompt.terminal.mailbox_id).toBe(result.receipt.mailboxId)
-  })
+          expect(yield* sessions.readSession("opencode-session-ses_parent")).toMatchObject({
+            server_id: "opencode-primary",
+            endpoint_identity: "http://127.0.0.1:4096",
+            native_session_id: "ses_parent",
+            ...(saved ? { resource_id: "parent-resource" } : {}),
+          })
+          yield* runKernelJobIteration({
+            workerId: "handoff",
+            now: () => at,
+            leaseDurationMs: 60000,
+            retryDelayMs: 1000,
+          }).pipe(Effect.provide(KernelJobStoreLive))
+          const prompted: string[] = []
+          const resumed = yield* runOpenCodeResumeIteration({
+            owningHostId: "mint",
+            workerId: "resume",
+            providerId: "opencode-primary",
+            serverId: "opencode-primary",
+            endpointAlias: "local",
+            endpointIdentity: "http://127.0.0.1:4096",
+            providerVersion: 1,
+            leaseDurationMs: 60000,
+            heartbeatIntervalMs: 10000,
+            now: () => at,
+            contracts: [
+              {
+                ...AGENT_WAKE_CONTRACT,
+                schema: AgentWakeResult,
+                jsonSchema: toJsonSchemaObject(AgentWakeResult),
+                agent: "parent",
+                model: { providerID: "fixture", modelID: "fixture" },
+                maxOutputBytes: 16384,
+              },
+            ],
+          }).pipe(
+            Effect.provideService(OpenCodeResumeProvider, {
+              sessionExists: async () => true,
+              sessionFinished: async () => true,
+              listMessages: async () => [],
+              promptAsync: async (input) => {
+                expect(input.directory).toBe(parentDirectory)
+                prompted.push(input.sessionID)
+              },
+              subscribeEvents: async () =>
+                (async function* () {
+                  yield {
+                    type: "message.updated" as const,
+                    sessionID: "ses_parent",
+                    message: {
+                      id: "answer",
+                      role: "assistant" as const,
+                      time: { created: at.getTime() + 2000, completed: at.getTime() + 3000 },
+                    },
+                  }
+                })(),
+              generate: async () => ({ acknowledged: true, summary: "Continued" }),
+            }),
+          )
+          expect(resumed).toMatchObject({ status: "completed" })
+          expect(prompted).toEqual(["ses_parent"])
+          expect(yield* sessions.readSession("opencode-session-ses_parent")).toMatchObject({
+            server_id: "opencode-primary",
+            endpoint_identity: "http://127.0.0.1:4096",
+          })
+          return { receipt, observed, queued, jobs }
+        }).pipe(Effect.provide(layer)),
+      )
+      expect(result.observed.status).toBe("completed")
+      expect(result.queued.status).toBe("enqueued")
+      const prompt = JSON.parse(result.jobs[0]!.input_json).resumePrompt
+      expect(prompt.task).toBe("Continue with the review.")
+      expect(prompt.terminal.final_message).toBe("Completed the review.")
+      expect(prompt.terminal.mailbox_id).toBe(result.receipt.mailboxId)
+    },
+  )
 
   test("gives an idempotent caller one durable mailbox identity", async () => {
     const layer = makeLayer(makeProvider(defaultState()), worktrees([]))

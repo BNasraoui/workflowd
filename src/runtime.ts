@@ -428,7 +428,9 @@ export function startHookService(
     if (Option.isSome(sandbox)) {
       const superviseSandbox = (operation: Effect.Effect<void, SandboxError>) =>
         operation.pipe(
-          Effect.as("worked" as const),
+          // A sweep is not evidence of new work. Wait for lifecycle signals or
+          // the poll deadline rather than immediately hammering remote inventory.
+          Effect.as("idle" as const),
           Effect.catch((cause) =>
             Effect.logError("Sandbox reconciliation failed; saved custody retained", cause).pipe(
               Effect.as("idle" as const),

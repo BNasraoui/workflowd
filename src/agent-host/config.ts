@@ -5,6 +5,17 @@ const Path = Schema.String.check(Schema.isPattern(/^\/[^\0]*$/))
 const Login = Schema.Struct({ canonical: Path, benLink: Path, agentLink: Path })
 export const CredentialPolicy = Schema.Struct({
   root: Path,
+  providerAccess: Schema.optionalKey(
+    Schema.Struct({
+      claude: Schema.optionalKey(
+        Schema.Struct({ clientId: Schema.NonEmptyString.check(Schema.isMaxLength(256)) }),
+      ),
+      codex: Schema.optionalKey(
+        Schema.Struct({ clientId: Schema.NonEmptyString.check(Schema.isMaxLength(256)) }),
+      ),
+      opencode: Schema.optionalKey(Schema.Struct({ canonical: Path })),
+    }),
+  ),
   launch: Schema.optionalKey(
     Schema.Struct({
       repositories: Schema.optionalKey(

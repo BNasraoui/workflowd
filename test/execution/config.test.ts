@@ -4,6 +4,8 @@ import { loadConfig } from "../../src/config"
 import { Effect } from "effect"
 import { localDiscoverySources } from "../../src/execution/local"
 import { loadExecutionCapabilitiesDaemon } from "../../src/mcp/auth"
+import { makeExecutionCapabilities } from "../../src/execution-capabilities"
+import { resolveExecutionSelection } from "../../src/execution-selection"
 
 const env = {
   ...agentGitTestEnvironment,
@@ -19,6 +21,112 @@ const env = {
   WORKFLOWD_OPENCODE_ATTACH_URL: "http://localhost:4096",
   WORKFLOWD_HOST_ID: "box",
 }
+
+for (const kind of ["claude", "codex", "opencode"] as const)
+  test(`configured ${kind} Actions-native discovery uses gateway custody and reports access as unknown`, async () => {
+    const model = kind === "claude" ? "claude-opus-4-6" : "gpt-5.5"
+    const provider = kind === "claude" ? "anthropic" : "openai"
+    const config = await loadConfig({
+      ...env,
+      WORKFLOWD_AGENT_RUN_TOKEN: "fixture-token",
+      WORKFLOWD_AGENT_RUN_CLAUDE_ROUTES: "native=claude-opus-4-6,other=claude-opus-4-6",
+      WORKFLOWD_AGENT_RUN_REPOSITORIES: "fixture=/fixture",
+      WORKFLOWD_AGENT_RUN_SANDBOX_REPOSITORIES: JSON.stringify([
+        {
+          alias: "fixture",
+          repository: "fixture/repo",
+          repositoryId: 12,
+          installationId: 1,
+          workflowSha: "a".repeat(40),
+          appActorId: 56,
+          agentImage: "ghcr.io/bnasraoui/workflowd-agent-base@sha256:" + "b".repeat(64),
+          tailscaleClientId: "fixture",
+          tailscaleAudience: "fixture",
+          privateBootstrap: { mode: "actions-native", repositoryOwnerId: 1 },
+        },
+      ]),
+      WORKFLOWD_CAPABILITY_GATEWAY: JSON.stringify({
+        nodeBinary: "/fixture/node",
+        noscope: { binary: "/fixture/noscope", configHome: "/fixture/providers" },
+        providerId: provider,
+        ...(kind === "claude"
+          ? {}
+          : {
+              native: {
+                protocol: kind === "codex" ? "codex-chatgpt" : "openai-chat",
+                models: [{ id: model, efforts: ["high"] }],
+              },
+            }),
+        credentialRole: "private-role",
+        maxStreams: 4,
+        maxStreamsPerRun: 4,
+      }),
+    })
+    const source = localDiscoverySources({
+      ...config,
+      credentialSocket: "/fixture/absent-local-credentials",
+    }).filter((source) => source.executor === `${kind}:actions`)
+    expect(source).toHaveLength(1)
+    const catalog = makeExecutionCapabilities({
+      host: "mint",
+      sources: source,
+      refreshMs: 1000,
+      timeoutMs: 1000,
+    })
+    try {
+      const snapshot = await catalog.list()
+      expect(snapshot.capabilities).toHaveLength(1)
+      expect(snapshot.capabilities[0]).toMatchObject({
+        identity: {
+          host: "github-actions",
+          executor: `${kind}:actions`,
+          provider,
+          model,
+        },
+        thinking: { status: kind === "claude" ? "unknown" : "configured" },
+        availability: "unknown",
+      })
+      expect(JSON.stringify(snapshot)).not.toContain("private-role")
+      const requested = {
+        model,
+        executor: `${kind}:actions`,
+        provider,
+      }
+      expect(resolveExecutionSelection(snapshot, requested)).toEqual({
+        outcome: "refused",
+        reason: "model_access_unknown",
+      })
+      expect(
+        resolveExecutionSelection(snapshot, { ...requested, allowUnknownAccess: true }),
+      ).toMatchObject({
+        outcome: "resolved",
+        selection: { host: "github-actions", executor: `${kind}:actions`, evidence: "configured" },
+      })
+      expect(
+        resolveExecutionSelection(snapshot, {
+          ...requested,
+          allowUnknownAccess: true,
+          thinking: { effort: "max" },
+        }),
+      ).toEqual({ outcome: "refused", reason: "unsupported_thinking" })
+      if (kind !== "claude")
+        expect(
+          resolveExecutionSelection(snapshot, {
+            ...requested,
+            allowUnknownAccess: true,
+            thinking: { effort: "high" },
+          }),
+        ).toMatchObject({ outcome: "resolved", selection: { thinking: { effort: "high" } } })
+      expect(
+        localDiscoverySources({
+          ...config,
+          agentRuns: { ...config.agentRuns!, sandboxRepositories: [] },
+        }).some((source) => source.executor === `${kind}:actions`),
+      ).toBe(false)
+    } finally {
+      await catalog.close()
+    }
+  })
 
 test("local discovery can be enabled without any dispatch routes and has bounded refresh settings", async () => {
   const config = await loadConfig({
