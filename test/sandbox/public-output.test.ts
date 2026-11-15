@@ -204,7 +204,7 @@ test("cancelled capture retains bounded private diagnostics and emits one fixed 
   }
 }, 3000)
 
-test("R2: exactly two trusted bootstrap fields are public, bounded and single-line", () => {
+test("exactly two trusted bootstrap fields are public, bounded and single-line", () => {
   expect(
     publicBootstrapConfiguration({
       tailscaleClientId: "fixture-client",

@@ -351,7 +351,7 @@ test("a stream that falls silent for the idle limit is aborted upstream and rele
 }, 20000)
 
 for (const attack of ["resets", "preface", "h2-preface", "truncated"] as const)
-  test(`D/R9: the gateway listener contains ${attack} and serves the next valid request`, async () => {
+  test(`the gateway listener contains ${attack} and serves the next valid request`, async () => {
     let served = 0
     let partial = 0
     let entered = Promise.withResolvers<void>()

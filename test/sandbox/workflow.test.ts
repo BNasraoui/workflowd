@@ -29,7 +29,7 @@ const Workflow = Schema.Struct({
 
 const root = resolve(import.meta.dir, "../..")
 
-test("R5: legacy readiness remains the explicit default and private bootstrap never uploads rendezvous", async () => {
+test("legacy readiness remains the explicit default and private bootstrap never uploads rendezvous", async () => {
   const workflow = Schema.decodeUnknownSync(Workflow)(
     Bun.YAML.parse(await Bun.file(`${root}/.github/workflows/agent-sandbox.yml`).text()),
   )

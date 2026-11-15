@@ -46,7 +46,7 @@ test("real noscope mints fresh bounded run credentials through the installed pro
   }
 })
 
-test("S1/R1: aborting noscope terminates its blocked provider adapter", async () => {
+test("aborting noscope terminates its blocked provider adapter", async () => {
   const root = await mkdtemp(join(tmpdir(), "noscope-cancel-"))
   const entered = Promise.withResolvers<void>()
   const closed = Promise.withResolvers<boolean>()

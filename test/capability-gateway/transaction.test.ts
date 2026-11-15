@@ -2,7 +2,7 @@ import { expect, test } from "bun:test"
 import { resolve } from "node:path"
 
 for (const writer of ["run", "lease"])
-  test(`S5: actual ${writer} writer composes with an outer SQLite transaction`, async () => {
+  test(`the actual ${writer} writer composes with an outer SQLite transaction`, async () => {
     // Separate process: the regressed uninterruptible lock inversion cannot hang
     // this test's cleanup or the supervisor. No gateway is needed to reproduce it.
     const child = Bun.spawn(

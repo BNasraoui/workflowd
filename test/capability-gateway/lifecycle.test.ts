@@ -26,7 +26,7 @@ for (const [ending, phase] of [
   ["cancel", "mint"],
   ["release", "mint"],
 ] as const) {
-  test(`S1/R1: ${ending} aborts owned ${phase} and releases admission`, async () => {
+  test(`${ending} aborts owned ${phase} and releases admission`, async () => {
     const root = await mkdtemp(join(tmpdir(), "gateway-lifetime-"))
     await writeNoscopeProviders(root, 120000)
     const started = Promise.withResolvers<AbortSignal | undefined>()

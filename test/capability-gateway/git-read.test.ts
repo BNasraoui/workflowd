@@ -186,7 +186,7 @@ const setup = () =>
   })
 
 test(
-  `G1: git clone and fetch read the saved repository through the gateway`,
+  `git clone and fetch read the saved repository through the gateway`,
   () =>
     withGitGateway(({ root, source, state, base }) =>
       Effect.promise(async () => {
@@ -208,7 +208,7 @@ test(
   20000,
 )
 
-test(`G2: foreign repositories, receive-pack and non-canonical paths are refused before the upstream`, () =>
+test(`foreign repositories, receive-pack and non-canonical paths are refused before the upstream`, () =>
   withGitGateway(({ state, direct, call }) =>
     Effect.gen(function* () {
       for (const [suffix, method] of [
@@ -224,7 +224,7 @@ test(`G2: foreign repositories, receive-pack and non-canonical paths are refused
     }),
   ))
 
-test(`G3: unsafe Git headers and a spoofed host are refused before the upstream`, () =>
+test(`unsafe Git headers and a spoofed host are refused before the upstream`, () =>
   withGitGateway(({ state, direct, call }) =>
     Effect.gen(function* () {
       for (const headers of [
@@ -240,7 +240,7 @@ test(`G3: unsafe Git headers and a spoofed host are refused before the upstream`
     }),
   ))
 
-test(`G4: an upload larger than 1 MiB is refused before the upstream`, () =>
+test(`an upload larger than 1 MiB is refused before the upstream`, () =>
   withGitGateway(({ state, direct, call }) =>
     Effect.gen(function* () {
       const response = yield* call(
@@ -255,7 +255,7 @@ test(`G4: an upload larger than 1 MiB is refused before the upstream`, () =>
     }),
   ))
 
-test(`G5: a changed saved repository is refused and the policy row is immutable`, () =>
+test(`a changed saved repository is refused and the policy row is immutable`, () =>
   withGitGateway(({ state, sql, direct, call }) =>
     Effect.gen(function* () {
       expect(
@@ -269,7 +269,7 @@ test(`G5: a changed saved repository is refused and the policy row is immutable`
     }),
   ))
 
-test(`G6: redirects and slow streams stay inside run authority`, () =>
+test(`redirects and slow streams stay inside run authority`, () =>
   withGitGateway(({ state, runs, direct, call }) =>
     Effect.gen(function* () {
       state.fault = "redirect"
