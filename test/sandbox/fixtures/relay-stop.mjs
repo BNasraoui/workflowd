@@ -32,6 +32,7 @@ test("a renewal answered after stop sends no further request", async (t) => {
       expiresAt: now + 3600000,
       renewAt: now + 2700000,
       deadline: now + 7200000,
+      providerId: "anthropic",
       gateway: `https://127.0.0.1:${server.address().port}`,
     },
     root,

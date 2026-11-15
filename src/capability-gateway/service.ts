@@ -279,6 +279,7 @@ export const makeCapabilityGateway = (
         expiresAt: grant.expiresAt,
         renewAt: grant.renewAt,
         deadline: job.deadline,
+        providerId: config.providerId,
       }
     })
     const revoke = Effect.fn("CapabilityGateway.revoke")((runId: string) =>

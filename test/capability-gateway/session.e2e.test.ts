@@ -111,6 +111,7 @@ async function scenario(start: (f: Fixture) => Promise<Gateway>) {
     expect(granted.status).toBe(200)
     const grant = await Grant(granted)
     expect(grant.token).toMatch(/^[A-Za-z0-9_-]{43}$/)
+    expect(grant.providerId).toBe("anthropic")
     // A run token lives at most 15 minutes, and the relay asks for its renewal between 180 and
     // 300 seconds before its end.
     expect(grant.expiresAt - Date.now()).toBeLessThanOrEqual(900000)

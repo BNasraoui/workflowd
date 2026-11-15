@@ -441,6 +441,7 @@ export const client = (port: number) => {
         expiresAt: Schema.Number,
         renewAt: Schema.Number,
         deadline: Schema.optionalKey(Schema.Number),
+        providerId: Schema.optionalKey(Schema.String),
       }),
     )(await response.json())
   /** A Claude messages call with `body` as its exact text; `headers` add to or replace the usual. */

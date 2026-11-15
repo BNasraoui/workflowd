@@ -14,6 +14,7 @@ const grant = {
   expiresAt: Date.now() + 10000,
   renewAt: Date.now() + 5000,
   deadline: Date.now() + 20000,
+  providerId: "anthropic",
 }
 /** A gateway whose answers follow `plan`, one entry per request, and that records each request. */
 function scriptedGateway(plan: Array<"challenge" | "grant" | number | "lost">) {
@@ -109,6 +110,26 @@ test("a refused challenge ends the exchange, and refused sessions end it after f
   await expect(
     openSession({ gateway: "https://gateway.fixture.invalid", leaseId: "../x", issue }),
   ).rejects.toThrow("lease refused")
+})
+
+test("a session grant whose provider id is missing or not of the form costs a proof, and five end the exchange", async () => {
+  for (const providerId of [undefined, "", "Anthropic", "../x", `a${"b".repeat(64)}`]) {
+    let proofs = 0
+    const send = async (url: URL) =>
+      url.pathname === "/capabilities/v1/challenge"
+        ? Response.json({ channel, nonce: "d".repeat(64) })
+        : Response.json({ ...grant, providerId })
+    await expect(
+      openSession({
+        gateway: "https://gateway.fixture.invalid",
+        leaseId: "lease",
+        issue: async () => `proof-${++proofs}`,
+        send,
+        backoff: () => 0,
+      }),
+    ).rejects.toThrow("gateway session unavailable")
+    expect(proofs).toBe(5)
+  }
 })
 
 /** A gateway over HTTPS with a self-signed certificate for 127.0.0.1; it records each proof. */

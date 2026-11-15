@@ -6,7 +6,7 @@ import { chmod } from "node:fs/promises"
 import { pathToFileURL } from "node:url"
 import { gatewayOrigin } from "./bootstrap-helper.mjs"
 import { renewalRequests } from "./renewal.mjs"
-import { maxHeaderBytes, maxStreamsPerRun } from "./capability-limits.mjs"
+import { maxHeaderBytes, maxStreamsPerRun, providerIdPattern } from "./capability-limits.mjs"
 
 const root = "/run/workflowd-sandbox"
 
@@ -39,7 +39,9 @@ export async function serveRunnerRelay(config, directory = root) {
     !Number.isSafeInteger(config.expiresAt) ||
     !Number.isSafeInteger(config.renewAt) ||
     !Number.isSafeInteger(config.deadline) ||
-    config.expiresAt > config.deadline
+    config.expiresAt > config.deadline ||
+    typeof config.providerId !== "string" ||
+    !providerIdPattern.test(config.providerId)
   )
     throw new Error("relay configuration refused")
   const origin = gatewayOrigin(config.gateway)
@@ -92,7 +94,7 @@ export async function serveRunnerRelay(config, directory = root) {
       )
       const path = request.url.startsWith("/capabilities/v1/")
         ? request.url
-        : `/capabilities/v1/providers/anthropic${request.url}`
+        : `/capabilities/v1/providers/${config.providerId}${request.url}`
       streams++
       let counted = true
       const upstream = httpsRequest(

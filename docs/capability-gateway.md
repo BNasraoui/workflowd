@@ -8,7 +8,7 @@ decode it with the same schema, and a key it does not name is refused.
 | Key | Value |
 | --- | --- |
 | `noscope.binary`, `noscope.configHome` | Absolute paths of the noscope binary and of its configuration. |
-| `providerId` | The provider id of the model route `/capabilities/v1/providers/<id>/`. |
+| `providerId` | The provider id of the model route `/capabilities/v1/providers/<id>/`: a lower-case letter, then at most 63 lower-case letters, digits and hyphens. The session grant names it, and the runner's relay puts it in the path of each model call. |
 | `credentialRole` | The noscope role that mints run tokens and provider credentials. |
 | `maxStreams` | The most streams open at once in the gateway: 1 to 512. |
 | `maxStreamsPerRun` | The most streams open at once for one run: 1 to 4, and at most `maxStreams`. |

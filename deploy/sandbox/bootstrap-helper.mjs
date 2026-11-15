@@ -1,4 +1,4 @@
-import { maxProofLength } from "./capability-limits.mjs"
+import { maxProofLength, providerIdPattern } from "./capability-limits.mjs"
 /** The gateway's origin: HTTPS only, with no credentials, path, query or fragment. */
 export function gatewayOrigin(value) {
   const url = new URL(value)
@@ -165,13 +165,16 @@ async function postSession(send, origin, token, bounded) {
     if (
       /^[A-Za-z0-9_-]{43}$/.test(grant.token) &&
       [grant.expiresAt, grant.renewAt, grant.deadline].every(Number.isSafeInteger) &&
-      grant.expiresAt <= grant.deadline
+      grant.expiresAt <= grant.deadline &&
+      typeof grant.providerId === "string" &&
+      providerIdPattern.test(grant.providerId)
     )
       return {
         token: grant.token,
         expiresAt: grant.expiresAt,
         renewAt: grant.renewAt,
         deadline: grant.deadline,
+        providerId: grant.providerId,
       }
     return undefined
   } catch (error) {
