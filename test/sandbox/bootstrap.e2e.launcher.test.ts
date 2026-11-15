@@ -294,7 +294,6 @@ await prepare({
             {
               env: {
                 PATH: "/usr/bin:/bin",
-                SANDBOX_AGENT_IMAGE: policy.agentImage,
                 GITHUB_SHA: policy.workflowSha,
                 GITHUB_REF: "refs/heads/workflowd/leases/lease",
                 GITHUB_REPOSITORY: policy.repository,
