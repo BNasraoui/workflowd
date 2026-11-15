@@ -445,7 +445,7 @@ export async function withGateway(
  * past each data chunk; "live" when it has not ended by then.
  */
 export async function streamEnd(
-  reader: ReadableStreamDefaultReader<Uint8Array>,
+  reader: { read(): Promise<{ readonly done: boolean }> },
   within: number,
 ): Promise<"ended" | "live"> {
   const deadline = Bun.sleep(within).then(() => "live" as const)
