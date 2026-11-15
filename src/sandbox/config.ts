@@ -32,7 +32,6 @@ export const PrivateBootstrapPolicy = Schema.Struct({
 })
 export const CapabilityGatewayConfig = Schema.Struct({
   gitRead: Schema.optionalKey(Schema.Boolean),
-  nodeBinary: Schema.String.check(Schema.isPattern(/^\/[A-Za-z0-9/_.-]+$/)),
   noscope: Schema.Struct({
     binary: Schema.String.check(Schema.isPattern(/^\/[A-Za-z0-9/_.-]+$/)),
     configHome: Schema.String.check(Schema.isPattern(/^\/[A-Za-z0-9/_.-]+$/)),

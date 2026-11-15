@@ -7,7 +7,6 @@ import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { AgentRunStoreLive } from "../../src/kernel/agent-run-store"
 import { makeCapabilityGateway } from "../../src/capability-gateway/service"
-import { makeTokenBroker } from "../../src/worker-identity/broker"
 import { bindRunSession, seedCapabilityRun } from "./fixture"
 import { fixtureExecutable } from "../helpers/fixture-executable.mjs"
 import { loopbackCertificate, portOf } from "../helpers/loopback-tls"
@@ -41,180 +40,166 @@ async function git(cwd: string, ...args: string[]) {
   return stdout.trim()
 }
 
-for (const authenticated of [false, true])
-  test(`real Git clone/fetch, repository and write fences (authenticated=${authenticated})`, async () => {
-    const root = await mkdtemp(join(tmpdir(), "gateway-git-"))
-    await mkdir(join(root, "noscope/providers"), { recursive: true, mode: 0o700 })
-    await writeFile(
-      join(root, "noscope/providers/run-capability.toml"),
-      `contract_version = 1\n[commands]\nmint = "${process.execPath} ${resolve("src/capability-gateway/noscope-provider.ts")} run {ttl}"\n`,
-      { mode: 0o600 },
-    )
-    await git(root, "init", "--initial-branch=main", "source")
-    const source = join(root, "source")
-    await writeFile(join(source, "public.txt"), "first\n")
-    await git(source, "add", ".")
-    await git(source, "commit", "-m", "synthetic public source")
-    await git(root, "clone", "--bare", source, "repo.git")
-    let calls = 0
-    let attempts = 0
-    const secret = "synthetic-git-read-credential"
-    // Real git-http-backend: clone/fetch negotiate and decode an actual pack, not canned HTTP.
-    const backend = Bun.serve({
-      hostname: "127.0.0.1",
-      port: 0,
-      async fetch(request) {
-        calls++
-        const response = await gitHttpBackend(root, request)
-        expect(response.status).toBe(200)
-        return response
-      },
-    })
-    const tls = await loopbackCertificate(root)
-    let relay: ReturnType<typeof Bun.spawn> | undefined
-    let listener: ReturnType<typeof capabilityHttpServer> | undefined
-    let front: ReturnType<typeof tlsServer> | undefined
-    try {
-      await Effect.runPromise(
-        Effect.gen(function* () {
-          yield* seedCapabilityRun(Date.now(), true)
-          const broker = yield* makeTokenBroker(async (input) => {
-            expect(input).toEqual({
-              installation_id: 1,
-              repositories: ["repo"],
-              permissions: { contents: "read" },
-            })
-            return { token: secret, expires_at: new Date(Date.now() + 3600000).toISOString() }
-          })
-          const config = {
-            noscope: { binary: fixtureExecutable("noscope"), configHome: root },
-            providerId: "anthropic",
-            credentialRole: "unused",
-            maxStreams: 2,
-            maxStreamsPerRun: 1,
-            gitRead: true,
-          }
-          const gateway = yield* makeCapabilityGateway(config, undefined, {
-            ...(authenticated ? { broker } : {}),
-            upstream: async (url, input) => {
-              attempts++
-              expect(url).toMatch(
-                /^https:\/\/github.com\/fixture\/repo.git\/(info\/refs\?service=git-upload-pack|git-upload-pack)$/,
-              )
-              expect(input.redirect).toBe("error")
-              return fetch(`${backend.url.href}repo.git/${url.split("repo.git/")[1]}`, input)
-            },
-          })
-          const grant = yield* bindRunSession(Date.now(), { jti: "git-jti" })
-          // The gateway's network listener, behind TLS on loopback.
-          const served = capabilityHttpServer(capabilityApi(gateway), true)
-          listener = served
-          served.server.listen(0, "127.0.0.1")
-          yield* Effect.promise(() => once(served.server, "listening"))
-          const backendPort = portOf(served.server)
-          const terminator = tlsServer(
-            {
-              key: yield* Effect.promise(() => readFile(tls.key)),
-              cert: yield* Effect.promise(() => readFile(tls.cert)),
-            },
-            (socket) => {
-              const plain = connect(backendPort, "127.0.0.1")
-              socket.pipe(plain).pipe(socket)
-              socket.on("error", () => plain.destroy())
-              plain.on("error", () => socket.destroy())
-            },
+test("real Git clone/fetch, repository and write fences", async () => {
+  const root = await mkdtemp(join(tmpdir(), "gateway-git-"))
+  await mkdir(join(root, "noscope/providers"), { recursive: true, mode: 0o700 })
+  await writeFile(
+    join(root, "noscope/providers/run-capability.toml"),
+    `contract_version = 1\n[commands]\nmint = "${process.execPath} ${resolve("src/capability-gateway/noscope-provider.ts")} run {ttl}"\n`,
+    { mode: 0o600 },
+  )
+  await git(root, "init", "--initial-branch=main", "source")
+  const source = join(root, "source")
+  await writeFile(join(source, "public.txt"), "first\n")
+  await git(source, "add", ".")
+  await git(source, "commit", "-m", "synthetic public source")
+  await git(root, "clone", "--bare", source, "repo.git")
+  let calls = 0
+  let attempts = 0
+  // Real git-http-backend: clone/fetch negotiate and decode an actual pack, not canned HTTP.
+  const backend = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    async fetch(request) {
+      calls++
+      const response = await gitHttpBackend(root, request)
+      expect(response.status).toBe(200)
+      return response
+    },
+  })
+  const tls = await loopbackCertificate(root)
+  let relay: ReturnType<typeof Bun.spawn> | undefined
+  let listener: ReturnType<typeof capabilityHttpServer> | undefined
+  let front: ReturnType<typeof tlsServer> | undefined
+  try {
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* seedCapabilityRun(Date.now(), true)
+        const config = {
+          noscope: { binary: fixtureExecutable("noscope"), configHome: root },
+          providerId: "anthropic",
+          credentialRole: "unused",
+          maxStreams: 2,
+          maxStreamsPerRun: 1,
+          gitRead: true,
+        }
+        const gateway = yield* makeCapabilityGateway(config, undefined, async (url, input) => {
+          attempts++
+          expect(url).toMatch(
+            /^https:\/\/github.com\/fixture\/repo.git\/(info\/refs\?service=git-upload-pack|git-upload-pack)$/,
           )
-          front = terminator
-          terminator.listen(0, "127.0.0.1")
-          yield* Effect.promise(() => once(terminator, "listening"))
-          relay = Bun.spawn(
-            [
-              fixtureExecutable("node"),
-              resolve("test/sandbox/fixtures/capability-job.mjs"),
-              "runner",
-              root,
-            ],
-            {
-              env: { PATH: "/usr/bin:/bin", HOME: root, NODE_EXTRA_CA_CERTS: tls.cert },
-              stdin: new Blob([
-                JSON.stringify({
-                  token: grant.token,
-                  expiresAt: grant.expiresAt,
-                  renewAt: grant.renewAt,
-                  deadline: Date.now() + 3600000,
-                  gateway: `https://127.0.0.1:${portOf(terminator)}`,
-                }),
-              ]),
-              stdout: "pipe",
-              stderr: "pipe",
-            },
-          )
-          const output = relay.stdout
-          if (typeof output === "number" || !output)
-            throw new Error("fixture relay output unavailable")
+          expect(input.redirect).toBe("error")
+          expect(input.headers.has("authorization")).toBe(false)
+          return fetch(`${backend.url.href}repo.git/${url.split("repo.git/")[1]}`, input)
+        })
+        const grant = yield* bindRunSession(Date.now(), { jti: "git-jti" })
+        // The gateway's network listener, behind TLS on loopback.
+        const served = capabilityHttpServer(capabilityApi(gateway), true)
+        listener = served
+        served.server.listen(0, "127.0.0.1")
+        yield* Effect.promise(() => once(served.server, "listening"))
+        const backendPort = portOf(served.server)
+        const terminator = tlsServer(
+          {
+            key: yield* Effect.promise(() => readFile(tls.key)),
+            cert: yield* Effect.promise(() => readFile(tls.cert)),
+          },
+          (socket) => {
+            const plain = connect(backendPort, "127.0.0.1")
+            socket.pipe(plain).pipe(socket)
+            socket.on("error", () => plain.destroy())
+            plain.on("error", () => socket.destroy())
+          },
+        )
+        front = terminator
+        terminator.listen(0, "127.0.0.1")
+        yield* Effect.promise(() => once(terminator, "listening"))
+        relay = Bun.spawn(
+          [
+            fixtureExecutable("node"),
+            resolve("test/sandbox/fixtures/capability-job.mjs"),
+            "runner",
+            root,
+          ],
+          {
+            env: { PATH: "/usr/bin:/bin", HOME: root, NODE_EXTRA_CA_CERTS: tls.cert },
+            stdin: new Blob([
+              JSON.stringify({
+                token: grant.token,
+                expiresAt: grant.expiresAt,
+                renewAt: grant.renewAt,
+                deadline: Date.now() + 3600000,
+                gateway: `https://127.0.0.1:${portOf(terminator)}`,
+              }),
+            ]),
+            stdout: "pipe",
+            stderr: "pipe",
+          },
+        )
+        const output = relay.stdout
+        if (typeof output === "number" || !output)
+          throw new Error("fixture relay output unavailable")
+        expect(
+          Buffer.from(
+            (yield* Effect.promise(() => output.getReader().read())).value ?? [],
+          ).toString(),
+        ).toBe("ready\n")
+        // Git speaks TCP; the relay listens on a socket. A plain forwarder joins them.
+        const forwarder = createServer((socket) => {
+          const upstream = connect(join(root, "gateway.sock"))
+          socket.pipe(upstream).pipe(socket)
+          socket.on("error", () => upstream.destroy())
+          upstream.on("error", () => socket.destroy())
+        })
+        forwarder.listen(0, "127.0.0.1")
+        yield* Effect.promise(() => once(forwarder, "listening"))
+        const url = `http://127.0.0.1:${portOf(forwarder)}`
+        try {
+          const base = `${url}/capabilities/v1/git/12.git`
+          yield* Effect.promise(() => git(root, "clone", base, "clone"))
           expect(
-            Buffer.from(
-              (yield* Effect.promise(() => output.getReader().read())).value ?? [],
-            ).toString(),
-          ).toBe("ready\n")
-          // Git speaks TCP; the relay listens on a socket. A plain forwarder joins them.
-          const forwarder = createServer((socket) => {
-            const upstream = connect(join(root, "gateway.sock"))
-            socket.pipe(upstream).pipe(socket)
-            socket.on("error", () => upstream.destroy())
-            upstream.on("error", () => socket.destroy())
+            yield* Effect.promise(() => readFile(join(root, "clone/public.txt"), "utf8")),
+          ).toBe("first\n")
+          yield* Effect.promise(async () => {
+            await writeFile(join(source, "public.txt"), "second\n")
+            await git(source, "commit", "-am", "second synthetic revision")
+            await git(source, "push", join(root, "repo.git"), "main")
+            await git(join(root, "clone"), "fetch", "origin")
           })
-          forwarder.listen(0, "127.0.0.1")
-          yield* Effect.promise(() => once(forwarder, "listening"))
-          const url = `http://127.0.0.1:${portOf(forwarder)}`
-          try {
-            const base = `${url}/capabilities/v1/git/12.git`
-            yield* Effect.promise(() => git(root, "clone", base, "clone"))
-            expect(
-              yield* Effect.promise(() => readFile(join(root, "clone/public.txt"), "utf8")),
-            ).toBe("first\n")
-            yield* Effect.promise(async () => {
-              await writeFile(join(source, "public.txt"), "second\n")
-              await git(source, "commit", "-am", "second synthetic revision")
-              await git(source, "push", join(root, "repo.git"), "main")
-              await git(join(root, "clone"), "fetch", "origin")
-            })
-            expect(
-              yield* Effect.promise(() =>
-                git(join(root, "clone"), "show", "origin/main:public.txt"),
-              ),
-            ).toBe("second")
-            const before = calls
-            const admitted = attempts
-            expect(
-              (yield* Effect.tryPromise(() =>
-                git(join(root, "clone"), "push", "origin", "HEAD:refs/heads/forbidden-write"),
-              ).pipe(Effect.result))._tag,
-            ).toBe("Failure")
-            expect(
-              (yield* Effect.tryPromise(() =>
-                git(root, "ls-remote", `${url}/capabilities/v1/git/13.git`),
-              ).pipe(Effect.result))._tag,
-            ).toBe("Failure")
-            expect(attempts).toBe(admitted)
-            expect(calls).toBe(before)
-          } finally {
-            yield* Effect.promise(
-              () => new Promise<void>((resolve) => forwarder.close(() => resolve())),
-            )
-          }
-        }).pipe(
-          Effect.provide(AgentRunStoreLive),
-          Effect.provide(SqliteClient.layer({ filename: ":memory:" })),
-          Effect.scoped,
-        ),
-      )
-    } finally {
-      relay?.kill("SIGKILL")
-      await relay?.exited
-      front?.close()
-      await listener?.close()
-      await backend.stop(true)
-      await rm(root, { recursive: true, force: true })
-    }
-  }, 20000)
+          expect(
+            yield* Effect.promise(() => git(join(root, "clone"), "show", "origin/main:public.txt")),
+          ).toBe("second")
+          const before = calls
+          const admitted = attempts
+          expect(
+            (yield* Effect.tryPromise(() =>
+              git(join(root, "clone"), "push", "origin", "HEAD:refs/heads/forbidden-write"),
+            ).pipe(Effect.result))._tag,
+          ).toBe("Failure")
+          expect(
+            (yield* Effect.tryPromise(() =>
+              git(root, "ls-remote", `${url}/capabilities/v1/git/13.git`),
+            ).pipe(Effect.result))._tag,
+          ).toBe("Failure")
+          expect(attempts).toBe(admitted)
+          expect(calls).toBe(before)
+        } finally {
+          yield* Effect.promise(
+            () => new Promise<void>((resolve) => forwarder.close(() => resolve())),
+          )
+        }
+      }).pipe(
+        Effect.provide(AgentRunStoreLive),
+        Effect.provide(SqliteClient.layer({ filename: ":memory:" })),
+        Effect.scoped,
+      ),
+    )
+  } finally {
+    relay?.kill("SIGKILL")
+    await relay?.exited
+    front?.close()
+    await listener?.close()
+    await backend.stop(true)
+    await rm(root, { recursive: true, force: true })
+  }
+}, 20000)

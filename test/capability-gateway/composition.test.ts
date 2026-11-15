@@ -17,7 +17,6 @@ import { fixtureExecutable } from "../helpers/fixture-executable.mjs"
 test("configured live composition settles prior leases, which revokes their grants, and refuses P2 native launch before external effects", async () => {
   const root = await mkdtemp(join(tmpdir(), "gateway-composition-"))
   const gateway = {
-    nodeBinary: fixtureExecutable("node"),
     noscope: { binary: fixtureExecutable("noscope"), configHome: root },
     providerId: "anthropic",
     credentialRole: "fixture",
