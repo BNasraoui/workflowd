@@ -35,9 +35,14 @@ const pause = (milliseconds, signal) =>
     )
   })
 
-/** Network failures that can clear by a wait: a refused connection, a reset and a timeout. */
+/**
+ * Network failures that can clear by a wait: a refused connection, a reset and a timeout, by
+ * the codes of Node's fetch and of Bun's.
+ */
 const passing = new Set([
   "ECONNREFUSED",
+  "ConnectionRefused",
+  "ConnectionClosed",
   "ECONNRESET",
   "ETIMEDOUT",
   "UND_ERR_SOCKET",
