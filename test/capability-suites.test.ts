@@ -36,7 +36,9 @@ test("each gateway test file belongs to exactly one suite, or names the job that
       file,
       suites: file in plainOnly ? 0 : 1,
     })
-  expect(suites["gateway"]).toEqual(files.filter((file) => file.endsWith(".e2e.test.ts")).sort())
+  expect(suites["gateway"]).toEqual(
+    files.filter((file) => file.endsWith(".e2e.test.ts")).sort((a, b) => a.localeCompare(b)),
+  )
 })
 
 test("each suite names existing test files, and no file runs in two suites", async () => {
