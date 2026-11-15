@@ -672,13 +672,29 @@ const parseDiff = (raw: string): ReadonlyArray<DiffEntry> => {
 
 const regularModes = new Set(["000000", "100644", "100755"])
 
+/**
+ * Whether a first path component is `.github` or a name that a checkout on Windows
+ * or macOS maps to it. The rule refuses more than the exact forms: any `~` (a short
+ * name such as GITHUB~1) or `:` (a stream such as `::$INDEX_ALLOCATION`), and any
+ * name that is `.github` in either case after NFKC, after dropping format and
+ * default-ignorable characters (which HFS+ ignores), and after dropping trailing
+ * dots and spaces (which NTFS ignores).
+ */
+const isGithubName = (component: string) => {
+  if (/[~:]/.test(component)) return true
+  const name = component
+    .normalize("NFKC")
+    .replace(/[\p{Cf}\p{Default_Ignorable_Code_Point}]/gu, "")
+    .replace(/[. ]+$/, "")
+  return name.toLowerCase() === ".github" || name.toUpperCase() === ".GITHUB"
+}
+
 const checkEntry = (entry: DiffEntry): SealedResultRefused | undefined => {
   if (!regularModes.has(entry.oldMode) || !regularModes.has(entry.newMode))
     return refused("file_mode", quoted(entry.path))
   if (entry.oldMode !== "000000" && entry.newMode !== "000000" && entry.oldMode !== entry.newMode)
     return refused("mode_change", quoted(entry.path))
-  if (entry.path.split("/")[0]!.toLowerCase() === ".github")
-    return refused("github_path", quoted(entry.path))
+  if (isGithubName(entry.path.split("/")[0]!)) return refused("github_path", quoted(entry.path))
   return undefined
 }
 

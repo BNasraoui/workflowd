@@ -189,7 +189,7 @@ const commitFile = async (
   await mkdir(join(dir, path, ".."), { recursive: true })
   await writeFile(join(dir, path), content)
   await git("add", "--", path)
-  await git("commit", "-q", "-m", `add ${path}`)
+  await git("commit", "-q", "-m", "Add a file")
 }
 
 const decode = (json: Uint8Array, bundle: Uint8Array) =>
@@ -1065,6 +1065,13 @@ test(
   }),
 )
 
+/** A name in a test title, with each character outside printable ASCII as an escape. */
+const shown = (name: string) =>
+  JSON.stringify(name).replace(
+    /[^\x20-\x7e]/g,
+    (character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`,
+  )
+
 const refusals: ReadonlyArray<
   readonly [
     string,
@@ -1232,29 +1239,61 @@ const refusals: ReadonlyArray<
       }),
     }),
   ],
-  [
-    "a .git path",
-    "fsck",
-    async (f) => ({
-      bundle: await handBundle(f, async (git, dir) => {
-        const content = await git("hash-object", "-w", "README.md")
-        const inner = await mktree(dir, `100644 blob ${content}\tconfig\n`)
-        const entries = await git("ls-tree", await git("write-tree"))
-        const tree = await mktree(dir, `${entries}\n040000 tree ${inner}\t.GIT\n`)
-        const commit = await git("commit-tree", tree, "-p", "HEAD", "-m", "dot git")
-        await git("reset", "-q", "--soft", commit)
-      }),
-    }),
-  ],
-  [
-    "a path below .GitHub/",
-    "github_path",
-    async (f) => ({
-      bundle: await handBundle(f, (git, dir) =>
-        commitFile(git, dir, ".GitHub/workflows/x.yml", "on: push\n"),
-      ),
-    }),
-  ],
+  // The strict check of git refuses each name a checkout on Windows or macOS maps to .git.
+  ...[
+    ".GIT",
+    ".git.",
+    ".git ",
+    "git~1",
+    "GIT~1",
+    ".g\u200cit",
+    ".git\ufeff",
+    ".git::$INDEX_ALLOCATION",
+  ].map(
+    (name) =>
+      [
+        `a tree entry ${shown(name)}`,
+        "fsck",
+        async (f: Fixture) => ({
+          bundle: await handBundle(f, async (git, dir) => {
+            const content = await git("hash-object", "-w", "README.md")
+            const inner = await mktree(dir, `100644 blob ${content}\tconfig\n`)
+            const entries = await git("ls-tree", await git("write-tree"))
+            const tree = await mktree(dir, `${entries}\n040000 tree ${inner}\t${name}\n`)
+            const commit = await git("commit-tree", tree, "-p", "HEAD", "-m", "dot git")
+            await git("reset", "-q", "--soft", commit)
+          }),
+        }),
+      ] as const,
+  ),
+  // Each first path component a checkout on Windows or macOS maps to .github.
+  ...[
+    ".GitHub",
+    ".github.",
+    ".github...",
+    ".github ",
+    ".github. .",
+    "GITHUB~1",
+    "github~2",
+    "GI3F2A~1",
+    ".git\u200chub",
+    ".github\u200d",
+    "\ufeff.github",
+    ".g\u0131thub",
+    "\uff0egithub",
+    ".github::$INDEX_ALLOCATION",
+  ].map(
+    (name) =>
+      [
+        `a path below ${shown(name)}`,
+        "github_path",
+        async (f: Fixture) => ({
+          bundle: await handBundle(f, (git, dir) =>
+            commitFile(git, dir, `${name}/workflows/x.yml`, "on: push\n"),
+          ),
+        }),
+      ] as const,
+  ),
   [
     "a commit message with terminal control sequences and a blocked co-author",
     "commit_message",
