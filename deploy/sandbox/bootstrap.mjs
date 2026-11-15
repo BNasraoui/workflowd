@@ -13,6 +13,8 @@ export async function prepare({
   environment = process.env,
   identity = fetch,
   tooling = dirname(fileURLToPath(import.meta.url)),
+  /** The pause between proofs; the helper's own when not named. */
+  backoff,
 } = {}) {
   const image = environment.SANDBOX_AGENT_IMAGE
   const workflowSha = environment.GITHUB_SHA
@@ -34,7 +36,7 @@ export async function prepare({
   const issue = takeJobIdentity(environment, identity)
   let grant
   try {
-    grant = await openSession({ gateway, leaseId, issue })
+    grant = await openSession({ gateway, leaseId, issue, backoff })
   } finally {
     issue.clear()
   }

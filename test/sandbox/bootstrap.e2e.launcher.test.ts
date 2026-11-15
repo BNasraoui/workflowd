@@ -122,6 +122,12 @@ async function tlsFront(tls: { key: string; cert: string }, gatewayPort: number)
   }
 }
 
+// One key pair serves every case: the job keys, and the GitHub App key of the fixture.
+const keys = generateKeyPairSync("rsa", { modulusLength: 2048 })
+const jwks = {
+  keys: [{ ...keys.publicKey.export({ format: "jwk" }), kid: "fixture", use: "sig", alg: "RS256" }],
+}
+
 for (const race of [
   false,
   true,
@@ -148,12 +154,6 @@ for (const race of [
       tailscaleClientId: "fixture",
       tailscaleAudience: "fixture",
       privateBootstrap: { repositoryOwnerId: 34, mode: "actions-native" as const },
-    }
-    const keys = generateKeyPairSync("rsa", { modulusLength: 2048 })
-    const jwks = {
-      keys: [
-        { ...keys.publicKey.export({ format: "jwk" }), kid: "fixture", use: "sig", alg: "RS256" },
-      ],
     }
     const native = '{ "model" : "fixture-model", "stream": true, "messages": [] }'
     const response = "event: message_start\ndata: {}\n\nevent: message_stop\ndata: {}\n\n"
@@ -400,6 +400,8 @@ Effect.runFork(runCapabilityGatewayServer(process.env, {
 await prepare({
   directory: ${JSON.stringify(sandbox)},
   identity: (url, init) => fetch(${JSON.stringify(issuer.url.origin + "/token")} + url.search, init),
+  // The fixture's gateway answers at once: a new proof after a lost or refused one need not wait.
+  backoff: () => 0,
 })`,
             ],
             {
