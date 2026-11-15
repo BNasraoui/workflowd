@@ -41,7 +41,6 @@ in
       printf 'root:x:0:\ngateway:x:10001:\n' > etc/group
       printf 'hosts: files dns\n' > etc/nsswitch.conf
       chmod 1777 tmp
-      date +%s%N > etc/build-stamp
     '';
     fakeRootCommands = ''
       chown 10001:10001 var/lib/workflowd-gateway
