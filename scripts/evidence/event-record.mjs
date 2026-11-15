@@ -1,23 +1,20 @@
-import { readFile } from "node:fs/promises"
-import { decodeRecordIndex, eventRecordPaths } from "../../src/kernel/event-record.ts"
-
-const absentAsEmpty = (path) =>
-  readFile(path, "utf8").catch((error) => {
-    if (error?.code === "ENOENT") return ""
-    throw error
-  })
+import { readEventRecord } from "../../src/kernel/event-record.ts"
+import { localRecordSource } from "../../src/kernel/event-record-files.ts"
 
 /**
- * The whole event record of a run as text: the head, then each segment that
- * the index names, in sequence. A segment the worker removed between the
- * index read and its own read is missing from the text.
+ * The whole event record of a run as text, one line per record line, read by
+ * the product's reader: the head, then each segment that still exists. An
+ * unterminated last line is included.
  */
 export const readEventRecordText = async (eventsPath) => {
-  const paths = eventRecordPaths(eventsPath)
-  let text = await readFile(paths.head, "utf8")
-  const index = await absentAsEmpty(paths.index)
-  if (index === "") return text
-  const { first, last } = decodeRecordIndex(index)
-  for (let n = first; n <= last; n++) text += await absentAsEmpty(paths.segment(n))
-  return text
+  const lines = []
+  for await (const line of readEventRecord({
+    source: localRecordSource(eventsPath),
+    pollIntervalMs: 0,
+    shouldStop: async () => true,
+    parse: (line) => line,
+    flushPartialAtEnd: true,
+  }))
+    lines.push(line)
+  return lines.join("\n")
 }
