@@ -434,11 +434,7 @@ export async function publisherHttpCase(fault: string) {
   try {
     const published = await invoke("publish")
     expect(published.code).toBe(
-      ["none", "approved pin", "maximum metadata", "lost PR reply"].includes(
-        fault,
-      )
-        ? 0
-        : 1,
+      ["none", "approved pin", "maximum metadata", "lost PR reply"].includes(fault) ? 0 : 1,
     )
     expect((await invoke("revoke")).code).toBe(0)
     expect(revokes).toBe(1)
@@ -486,11 +482,7 @@ export async function publisherHttpCase(fault: string) {
       expect(published.err).toContain(expectedCause)
     }
     if (fault === "wrong tree") expect(receipt.cause).toBe("commit validation failed")
-    if (
-      ["none", "approved pin", "maximum metadata", "lost PR reply"].includes(
-        fault,
-      )
-    ) {
+    if (["none", "approved pin", "maximum metadata", "lost PR reply"].includes(fault)) {
       expect(closingQueries).toBe(3)
       expect(receipt).toMatchObject({
         stage: "published",
