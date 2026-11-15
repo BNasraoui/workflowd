@@ -1,45 +1,60 @@
 // Named local slices only. None establishes container or deployed-policy acceptance.
-export const coreCases = [
-  ["A1", "test/sandbox/public-output.test.ts"],
-  ["B1", "test/sandbox/bootstrap.test.ts"],
-  ["B2", "test/sandbox/bootstrap-helper.test.ts"],
-  ["B3", "test/sandbox/bootstrap.e2e.launcher.test.ts"],
-  ["C1", "test/capability-gateway/authorization.test.ts"],
-  ["C2", "test/capability-gateway/noscope.test.ts"],
-  ["C3", "test/capability-gateway/lifecycle.test.ts"],
-  ["C6", "test/capability-gateway/transaction.test.ts"],
-  ["C7", "test/capability-gateway/composition.test.ts"],
-  ["D1", "test/capability-gateway/transport-security.test.ts"],
-  ["D3", "test/sandbox/capability-relay.test.ts"],
-] as const
 
-export const publicationCases = [
-  ["F1", "test/sandbox/publisher-http.e2e.test.ts"],
-  ["F2", "test/sandbox/publish.e2e.test.ts"],
-  ["F3", "test/sandbox/publish-recovery.e2e.test.ts"],
-  ["F4", "test/sandbox/ci-policy.test.ts"],
-] as const
+/** The directory whose every test file belongs to a suite, or to `plainOnly`. */
+export const gatewayTestDirectory = "test/capability-gateway"
 
-export const adapterCases = [
-  ["H1", "test/sandbox/public-output.test.ts"],
-  ["H2", "test/sandbox/bootstrap.e2e.launcher.test.ts"],
-  ["H3", "test/capability-gateway/transport-security.test.ts"],
-  ["H4", "test/sandbox/capability-relay.test.ts"],
-] as const
+/** Gateway test files that need what the isolated fixture does not hold, and where they run. */
+export const plainOnly: Readonly<Record<string, string>> = {
+  "test/capability-gateway/claude-pinned.test.ts":
+    "the pinned Claude Code client; the Tests job runs it",
+}
 
-export const finalCases = [
-  ["J1", "test/sandbox/public-output.test.ts"],
-  ["J2", "test/sandbox/ci-setup.test.ts"],
-  ["J3", "test/capability-gateway/git-read.test.ts"],
-  ["J4", "test/capability-gateway/git.launcher.test.ts"],
-  ["J5", "test/sandbox/process-environment.test.ts"],
-  ["J6", "test/sandbox/publication-parity.test.ts"],
-  ["J7", "test/runtime-startup.test.ts"],
-] as const
+const gatewayFiles = [
+  ...new Bun.Glob(`${gatewayTestDirectory}/*.test.ts`).scanSync({ cwd: import.meta.dir + "/.." }),
+]
+  .filter((file) => !(file in plainOnly))
+  .sort()
 
-export const suites: Readonly<Record<string, ReadonlyArray<readonly [string, string]>>> = {
-  core: coreCases,
-  "publication-local": publicationCases,
-  adapters: adapterCases,
-  "final-local": finalCases,
+/** The gateway's end-to-end files: a gateway process or listener on a real socket. */
+const gatewayEndToEnd = gatewayFiles.filter((file) => file.endsWith(".e2e.test.ts"))
+
+export const suites: Readonly<Record<string, ReadonlyArray<string>>> = {
+  core: [
+    "test/sandbox/public-output.test.ts",
+    "test/sandbox/bootstrap.test.ts",
+    "test/sandbox/bootstrap-helper.test.ts",
+    "test/sandbox/bootstrap.e2e.launcher.test.ts",
+    "test/sandbox/capability-relay.test.ts",
+    ...gatewayFiles.filter((file) => !gatewayEndToEnd.includes(file)),
+  ],
+  gateway: gatewayEndToEnd,
+  "publication-local": [
+    "test/sandbox/publisher-http.e2e.test.ts",
+    "test/sandbox/publish.e2e.test.ts",
+    "test/sandbox/publish-recovery.e2e.test.ts",
+    "test/sandbox/ci-policy.test.ts",
+  ],
+  "final-local": [
+    "test/sandbox/ci-setup.test.ts",
+    "test/sandbox/process-environment.test.ts",
+    "test/sandbox/publication-parity.test.ts",
+    "test/runtime-startup.test.ts",
+  ],
+}
+
+/**
+ * The lines that report a suite's run and its exit code: the number of cases that ran, then the
+ * name of each case that failed. A suite that holds no case fails.
+ */
+export function suiteReport(
+  suite: string,
+  cases: ReadonlyArray<string>,
+  failed: ReadonlyArray<string>,
+) {
+  const lines = [
+    `${suite}: ${cases.length} cases ran, ${failed.length} failed`,
+    ...(cases.length === 0 ? [`failed: ${suite} holds no case`] : []),
+    ...failed.map((name) => `failed: ${name}`),
+  ]
+  return { lines, exitCode: cases.length === 0 || failed.length > 0 ? 1 : 0 }
 }

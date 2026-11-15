@@ -1,6 +1,6 @@
 import { once } from "node:events"
 import { readFile } from "node:fs/promises"
-import { request as httpRequest } from "node:http"
+import { request as httpRequest, type IncomingMessage, type ServerResponse } from "node:http"
 import { createServer as httpsServer } from "node:https"
 import type { AddressInfo } from "node:net"
 import { join } from "node:path"
@@ -47,38 +47,42 @@ export async function loopbackCertificate(root: string) {
 /**
  * TLS with `tls` in front of the plain gateway at `gatewayPort`, as Tailscale Serve is in
  * production. When `lost(path, status)` holds for a gateway answer, the gateway has sent it and
- * the client never gets it: the front closes the connection instead.
+ * the client never gets it: the front closes the connection instead. A request reaches the
+ * gateway once `held(path)` settles.
  */
 export async function tlsFront(
   tls: { key: string; cert: string },
   gatewayPort: number,
   lost: (path: string | undefined, status: number | undefined) => boolean = () => false,
+  held: (path: string | undefined) => Promise<void> | undefined = () => undefined,
 ) {
   const server = httpsServer(
     { key: await readFile(tls.key), cert: await readFile(tls.cert) },
-    (incoming, outgoing) => {
-      const upstream = httpRequest(
-        {
-          host: "127.0.0.1",
-          port: gatewayPort,
-          path: incoming.url,
-          method: incoming.method,
-          headers: incoming.headers,
-        },
-        (reply) => {
-          if (lost(incoming.url, reply.statusCode)) {
-            reply.resume()
-            reply.once("end", () => incoming.socket.destroy())
-            return
-          }
-          outgoing.writeHead(reply.statusCode ?? 502, reply.headers)
-          pipeline(reply, outgoing, () => {})
-        },
-      )
-      upstream.once("error", () => outgoing.destroy())
-      pipeline(incoming, upstream, () => {})
-    },
+    (incoming, outgoing) => void forward(incoming, outgoing),
   )
+  const forward = async (incoming: IncomingMessage, outgoing: ServerResponse) => {
+    await held(incoming.url)
+    const upstream = httpRequest(
+      {
+        host: "127.0.0.1",
+        port: gatewayPort,
+        path: incoming.url,
+        method: incoming.method,
+        headers: incoming.headers,
+      },
+      (reply) => {
+        if (lost(incoming.url, reply.statusCode)) {
+          reply.resume()
+          reply.once("end", () => incoming.socket.destroy())
+          return
+        }
+        outgoing.writeHead(reply.statusCode ?? 502, reply.headers)
+        pipeline(reply, outgoing, () => {})
+      },
+    )
+    upstream.once("error", () => outgoing.destroy())
+    pipeline(incoming, upstream, () => {})
+  }
   server.listen(0, "127.0.0.1")
   await once(server, "listening")
   return {

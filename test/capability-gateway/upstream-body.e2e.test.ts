@@ -112,7 +112,7 @@ for (const [mode, start] of gateways) {
     })
   }, 60000)
 
-  test(`[${mode}] a request of the pinned Claude Code reaches the provider with the same meaning`, async () => {
+  test(`[${mode}] a request of the pinned Claude Code reaches the provider with the same meaning and exactly the listed headers`, async () => {
     await withGateway(start, async (f, gateway) => {
       const token = await runToken(gateway.port)
       const answer = await client(gateway.port).provider(token, pinnedBody, pinnedHeaders)
@@ -122,13 +122,45 @@ for (const [mode, start] of gateways) {
       const [request] = sent(f)
       expect(request!.path).toBe("/v1/messages")
       expect(JSON.parse(request!.body)).toEqual(JSON.parse(pinnedBody))
-      expect(request!.headers).toMatchObject({
+      const { host, "content-length": length, connection, ...forwarded } = request!.headers
+      expect(host).toMatch(/^127\.0\.0\.1:\d+$/)
+      expect([length, connection]).toEqual([String(Buffer.byteLength(request!.body)), "keep-alive"])
+      const { "anthropic-dangerous-direct-browser-access": notForwarded, ...listed } = pinnedHeaders
+      expect(notForwarded).toBe("true")
+      expect(forwarded).toEqual({
+        ...listed,
         authorization: "Bearer fixture-access",
-        "anthropic-beta": pinnedHeaders["anthropic-beta"],
-        "x-claude-code-session-id": pinnedHeaders["x-claude-code-session-id"],
-        "user-agent": pinnedHeaders["user-agent"],
+        "accept-encoding": "identity",
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
       })
-      expect(request!.headers["anthropic-dangerous-direct-browser-access"]).toBeUndefined()
     })
   }, 60000)
 }
+
+/** A valid messages body of exactly `bytes` bytes: one user message padded with `a`. */
+const bodyOfSize = (bytes: number) => {
+  const head = '{"model":"fixture-model","stream":true,"messages":[{"role":"user","content":"'
+  const tail = '"}]}'
+  return head + "a".repeat(bytes - head.length - tail.length) + tail
+}
+
+/** The most bytes a model call's body may hold. */
+const modelBodyLimit = 1048576
+
+for (const [mode, start] of gateways)
+  test(`[${mode}] a model call body one byte over 1 MiB is refused before the provider; one of 1 MiB is sent`, async () => {
+    await withGateway(start, async (f, gateway) => {
+      const token = await runToken(gateway.port)
+      const over = bodyOfSize(modelBodyLimit + 1)
+      expect(Buffer.byteLength(over)).toBe(modelBodyLimit + 1)
+      expect(JSON.parse(over).model).toBe("fixture-model")
+      expect((await client(gateway.port).provider(token, over)).status).toBe(403)
+      expect(sent(f)).toEqual([])
+      const at = bodyOfSize(modelBodyLimit)
+      const answer = await client(gateway.port).provider(token, at)
+      expect(answer.status).toBe(200)
+      expect(await answer.text()).toBe(sse)
+      expect(sent(f).map((request) => request.body)).toEqual([at])
+    })
+  }, 60000)
