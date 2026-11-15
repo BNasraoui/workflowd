@@ -4,7 +4,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { App } from "@octokit/app"
 import { Octokit } from "@octokit/rest"
-import { Duration, Effect, Schedule, Schema } from "effect"
+import { Context, Duration, Effect, Redacted, Schedule, Schema } from "effect"
 import type { SavedSandboxPolicy } from "./saved-policy"
 import { SandboxError, SandboxRefAbsent, SandboxRefRejected } from "./store"
 
@@ -107,6 +107,27 @@ async function readyArchive(value: unknown, signal: AbortSignal): Promise<unknow
     await rm(root, { recursive: true, force: true })
   }
 }
+
+/** The repository a placement reads or writes, as its sandbox policy names it. */
+type PolicyRepository = Pick<SavedSandboxPolicy, "repository" | "repositoryId" | "installationId">
+
+export type RepositoryVisibilityPort = {
+  /** "public" only when GitHub says so for this repository id; any failed read fails. */
+  readonly read: (
+    policy: PolicyRepository,
+  ) => Effect.Effect<"public" | "private", SandboxError | Schema.SchemaError>
+}
+
+export const RepositoryVisibility = Context.Service<RepositoryVisibilityPort>(
+  "workflowd/sandbox/RepositoryVisibility",
+)
+
+const VisibleRepository = Schema.Struct({
+  id: Schema.Int,
+  full_name: Schema.String,
+  private: Schema.Boolean,
+  visibility: Schema.optionalKey(Schema.String),
+})
 
 export const makeSandboxGithub = (
   github: { appId: number; privateKeyPath: string },
@@ -583,7 +604,39 @@ export const makeSandboxGithub = (
       if (response.status !== 200) return yield* Effect.fail(githubFailure(response))
       return response.data
     })
+    const installationToken = (policy: PolicyRepository, permissions: Record<string, string>) =>
+      http((signal) =>
+        app.octokit.request("POST /app/installations/{installation_id}/access_tokens", {
+          installation_id: policy.installationId,
+          repository_ids: [policy.repositoryId],
+          permissions,
+          request: { signal },
+        }),
+      ).pipe(Effect.map((response) => Redacted.make(response.data.token)))
+    const repositoryVisibility = Effect.fn("SandboxGithub.repositoryVisibility")(function* (
+      policy: PolicyRepository,
+    ) {
+      const token = yield* installationToken(policy, { metadata: "read" })
+      const client = new OctokitClass({ auth: Redacted.value(token) })
+      const response = yield* request(client, "GET", `/repos/${policy.repository}`)
+      if (response.status !== 200) return yield* Effect.fail(githubFailure(response))
+      const actual = yield* Schema.decodeUnknownEffect(VisibleRepository)(response.data)
+      if (
+        actual.id !== policy.repositoryId ||
+        actual.full_name.toLowerCase() !== policy.repository.toLowerCase()
+      )
+        return yield* Effect.fail(
+          new SandboxError({ message: "Sandbox repository identity mismatch" }),
+        )
+      return !actual.private && (actual.visibility ?? "public") === "public"
+        ? ("public" as const)
+        : ("private" as const)
+    })
+    /** A token for the daemon's one push of a checked result; it never leaves the daemon. */
+    const pushToken = (policy: PolicyRepository) => installationToken(policy, { contents: "write" })
     return {
+      repositoryVisibility,
+      pushToken,
       repositoryUrl: (policy: SavedSandboxPolicy) =>
         new OctokitClass().request.endpoint(`GET /repos/${policy.repository}`).url,
       publicationRead,

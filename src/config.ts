@@ -6,6 +6,7 @@ import {
   parseSandboxRepositories,
   type SandboxPolicy,
 } from "./sandbox/config"
+import type { Placement } from "./kernel/executor"
 import { Schema } from "effect"
 import { parseInstallationAccountIds } from "./installation-policy"
 import {
@@ -117,6 +118,8 @@ export interface QrspiConfig {
 
 export interface AgentRunConfig {
   readonly capabilityGateway?: CapabilityGatewayConfig
+  /** Repositories placed off the host; an alias that is absent is `host`. */
+  readonly placements?: Readonly<Record<string, Placement>>
   readonly sandboxRepositories?: ReadonlyArray<SandboxPolicy>
   readonly token: string
   readonly claudeBinary: string
@@ -423,6 +426,44 @@ async function loadSecrets(
   }
 }
 
+const isJsonObject = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value)
+
+/**
+ * `WORKFLOWD_AGENT_RUN_PLACEMENTS`, such as `{"<alias>": "runner"}`. A `runner`
+ * alias needs an actions-native sandbox policy of its own.
+ */
+export function parseAgentRunPlacements(
+  value: string | undefined,
+  repositories: ReadonlyArray<AgentRunRepository>,
+  sandboxRepositories: ReadonlyArray<SandboxPolicy>,
+): Readonly<Record<string, Placement>> {
+  if (value === undefined) return {}
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(value)
+  } catch {
+    throw new Error("WORKFLOWD_AGENT_RUN_PLACEMENTS must be a JSON object")
+  }
+  if (!isJsonObject(parsed)) throw new Error("WORKFLOWD_AGENT_RUN_PLACEMENTS must be a JSON object")
+  const placements: Record<string, Placement> = {}
+  for (const [alias, placement] of Object.entries(parsed)) {
+    if (!repositories.some((repository) => repository.name === alias))
+      throw new Error(`WORKFLOWD_AGENT_RUN_PLACEMENTS names an unknown repository alias`)
+    if (placement !== "host" && placement !== "runner")
+      throw new Error(`WORKFLOWD_AGENT_RUN_PLACEMENTS values must be "host" or "runner"`)
+    if (
+      placement === "runner" &&
+      !sandboxRepositories.some(
+        (policy) => policy.alias === alias && policy.privateBootstrap?.mode === "actions-native",
+      )
+    )
+      throw new Error("A runner placement needs an actions-native sandbox policy for its alias")
+    placements[alias] = placement
+  }
+  return placements
+}
+
 function loadAgentRunConfig(
   env: Record<string, string | undefined>,
   token: string | undefined,
@@ -433,6 +474,7 @@ function loadAgentRunConfig(
       env.WORKFLOWD_AGENT_RUN_CODEX_ROUTES !== undefined ||
       env.WORKFLOWD_AGENT_RUN_CLAUDE_ROUTES !== undefined ||
       env.WORKFLOWD_AGENT_RUN_SANDBOX_REPOSITORIES !== undefined ||
+      env.WORKFLOWD_AGENT_RUN_PLACEMENTS !== undefined ||
       env.WORKFLOWD_CAPABILITY_GATEWAY !== undefined
     ) {
       throw new Error("WORKFLOWD_AGENT_RUN_TOKEN is required when agent-run settings are present")
@@ -464,8 +506,14 @@ function loadAgentRunConfig(
     )
   )
     throw new Error("Unknown sandbox alias")
+  const placements = parseAgentRunPlacements(
+    env.WORKFLOWD_AGENT_RUN_PLACEMENTS,
+    repositories,
+    sandboxRepositories,
+  )
   return {
     ...(sandboxRepositories.length === 0 ? {} : { sandboxRepositories }),
+    ...(Object.keys(placements).length === 0 ? {} : { placements }),
     ...(capabilityGateway === undefined ? {} : { capabilityGateway }),
     token,
     claudeBinary: env.WORKFLOWD_AGENT_RUN_CLAUDE_BIN ?? "claude",

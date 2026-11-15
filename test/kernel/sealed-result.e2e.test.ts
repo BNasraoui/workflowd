@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test"
-import { Cause, Effect, Exit, Redacted } from "effect"
+import { Cause, Effect, Exit, Redacted, Schema } from "effect"
 import { chmod, mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
@@ -11,6 +11,7 @@ import {
   SealedResultRefused,
   sealedResultLimits,
   type SealedResult,
+  type SealedResultCheck,
   type SealedResultOptions,
 } from "../../src/kernel/sealed-result"
 import { command } from "../sandbox/harness"
@@ -161,11 +162,13 @@ const failure = (exit: Exit.Exit<unknown, unknown>) => {
   return error
 }
 
-const refusedCheck = (exit: Exit.Exit<unknown, unknown>) => {
+const refusal = (exit: Exit.Exit<unknown, unknown>) => {
   const error = failure(exit)
   if (!(error instanceof SealedResultRefused)) throw error
-  return error.check
+  return error
 }
+
+const refusedCheck = (exit: Exit.Exit<unknown, unknown>) => refusal(exit).check
 
 const remoteRef = (f: Fixture, ref = target.ref) =>
   command(["git", "for-each-ref", "--format=%(objectname)", ref], f.remote)
@@ -246,9 +249,7 @@ for (const [name, fields, check] of [
 ] as const)
   test(`result.json with ${name} is refused`, async () => {
     const error = await Effect.runPromise(
-      Effect.flip(
-        decodeSealedResult(manifest("a".repeat(40), fields), new Uint8Array([1, 2, 3])),
-      ),
+      Effect.flip(decodeSealedResult(manifest("a".repeat(40), fields), new Uint8Array([1, 2, 3]))),
     )
     expect(error).toBeInstanceOf(SealedResultRefused)
     expect(error.check).toBe(check)
@@ -257,10 +258,7 @@ for (const [name, fields, check] of [
 test("result.json with a key outside SealedResult is refused by the name of the key", async () => {
   const error = await Effect.runPromise(
     Effect.flip(
-      decodeSealedResult(
-        manifest("a".repeat(40), { branch: "main" }),
-        new Uint8Array([1, 2, 3]),
-      ),
+      decodeSealedResult(manifest("a".repeat(40), { branch: "main" }), new Uint8Array([1, 2, 3])),
     ),
   )
   expect(error.check).toBe("unknown_key")
@@ -334,6 +332,13 @@ test(
   }),
 )
 
+const GitCall = Schema.decodeUnknownSync(
+  Schema.Struct({
+    argv: Schema.Array(Schema.String),
+    env: Schema.Record(Schema.String, Schema.UndefinedOr(Schema.String)),
+  }),
+)
+
 /** A git that records its arguments and environment, then runs the real git. */
 async function recordingGit(f: Fixture) {
   const log = join(f.root, "git-calls.jsonl")
@@ -347,10 +352,7 @@ async function recordingGit(f: Fixture) {
     (await readFile(log, "utf8"))
       .trim()
       .split("\n")
-      .map(
-        (line) =>
-          JSON.parse(line) as { argv: string[]; env: Record<string, string | undefined> },
-      )
+      .map((line) => GitCall(JSON.parse(line)))
   return { path, calls }
 }
 
@@ -366,11 +368,10 @@ test(
       // The target ref appears in the remote after the check and before the push.
       command(["git", "update-ref", target.ref, f.sourceSha], f.remote).then(() => undefined),
     )
-    const error = failure(exit)
-    expect(error).toBeInstanceOf(SealedResultRefused)
-    expect((error as SealedResultRefused).check).toBe("target_exists")
+    const error = refusal(exit)
+    expect(error.check).toBe("target_exists")
     const encoded = Buffer.from(`x-access-token:${token}`).toString("base64")
-    const text = `${String(error)} ${JSON.stringify(error)} ${(error as SealedResultRefused).detail}`
+    const text = `${String(error)} ${JSON.stringify(error)} ${error.detail}`
     expect(text).not.toContain(token)
     expect(text).not.toContain(encoded)
     const calls = await recorder.calls()
@@ -379,8 +380,9 @@ test(
       expect(call.argv.join("\n")).not.toContain(token)
       expect(call.argv.join("\n")).not.toContain(encoded)
       expect(call.argv).toContain("credential.helper=")
-      expect(call.argv.some((arg) => arg.includes("--force") && !arg.startsWith("--force-with-lease=")))
-        .toBe(false)
+      expect(
+        call.argv.some((arg) => arg.includes("--force") && !arg.startsWith("--force-with-lease=")),
+      ).toBe(false)
       expect(call.argv.some((arg) => arg.startsWith("+"))).toBe(false)
       expect(call.env).toMatchObject({
         GIT_CONFIG_NOSYSTEM: "1",
@@ -394,12 +396,71 @@ test(
       const values = Object.entries(call.env)
       expect(values.filter(([, value]) => value?.includes(token))).toEqual([])
       if (call.env.GIT_CONFIG_COUNT !== undefined)
-        expect(values.filter(([, value]) => value?.includes(encoded)).map(([key]) => key)).toEqual(
-          ["GIT_CONFIG_VALUE_0"],
-        )
+        expect(values.filter(([, value]) => value?.includes(encoded)).map(([key]) => key)).toEqual([
+          "GIT_CONFIG_VALUE_0",
+        ])
     }
     // Never forced: the ref that appeared keeps its value.
     expect(await remoteRef(f)).toBe(f.sourceSha)
+  }),
+)
+
+test(
+  "the push token of the installation is asked for contents only, and reaches git as a header",
+  withFixture(async (f) => {
+    const { generateKeyPairSync } = await import("node:crypto")
+    const { Octokit } = await import("@octokit/rest")
+    const { makeSandboxGithub } = await import("../../src/sandbox/github")
+    const privateKeyPath = join(f.root, "app.pem")
+    await writeFile(
+      privateKeyPath,
+      generateKeyPairSync("rsa", { modulusLength: 2048 }).privateKey.export({
+        type: "pkcs8",
+        format: "pem",
+      }),
+      { mode: 0o600 },
+    )
+    const requests: unknown[] = []
+    // A GitHub API stub; nothing here reaches GitHub.
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      async fetch(request) {
+        requests.push({ path: new URL(request.url).pathname, body: await request.json() })
+        return Response.json({ token }, { status: 201 })
+      },
+    })
+    try {
+      const github = await Effect.runPromise(
+        makeSandboxGithub(
+          { appId: 1, privateKeyPath },
+          Octokit.defaults({ baseUrl: server.url.toString().replace(/\/$/, "") }),
+        ),
+      )
+      const pushToken = await Effect.runPromise(
+        github.pushToken({ repository: "fixture/repo", repositoryId: 12, installationId: 34 }),
+      )
+      expect(requests).toEqual([
+        {
+          path: "/app/installations/34/access_tokens",
+          body: { repository_ids: [12], permissions: { contents: "write" } },
+        },
+      ])
+      const recorder = await recordingGit(f)
+      const sealed = await sealWithResultPy(f, async (workspace) => {
+        await writeFile(join(workspace, "result.txt"), "content\n")
+      })
+      const result = await decode(sealed.json, sealed.bundle)
+      const exit = await publish(result, options(f, { token: pushToken, gitBinary: recorder.path }))
+      expect(Exit.isSuccess(exit)).toBe(true)
+      const push = (await recorder.calls()).find((call) => call.argv.includes("push"))!
+      expect(push.env.GIT_CONFIG_KEY_0).toBe(`http.${f.remote}.extraHeader`)
+      expect(push.env.GIT_CONFIG_VALUE_0).toBe(
+        `Authorization: Basic ${Buffer.from(`x-access-token:${token}`).toString("base64")}`,
+      )
+    } finally {
+      await server.stop(true)
+    }
   }),
 )
 
@@ -449,7 +510,7 @@ test(
     const calls = await Bun.file(join(f.root, "git-calls.jsonl"))
       .exists()
       .then((exists) => (exists ? recorder.calls() : []))
-    expect(calls.some((call) => call.argv.some((arg) => arg.endsWith(".bundle")))).toBe(false)
+    expect(calls.some((call) => call.argv.includes("index-pack"))).toBe(false)
     expect(await remoteRef(f)).toBe("")
   }),
 )
@@ -462,7 +523,7 @@ test(
     })
     const result = await decode(sealed.json, sealed.bundle)
     const slow = join(f.root, "slow-git")
-    await writeFile(slow, "#!/bin/sh\nsleep 30\nexec /usr/bin/git \"$@\"\n")
+    await writeFile(slow, '#!/bin/sh\nsleep 30\nexec /usr/bin/git "$@"\n')
     await chmod(slow, 0o755)
     const started = Date.now()
     const exit = await publish(result, options(f, { gitBinary: slow, timeLimitMs: 500 }))
@@ -487,7 +548,7 @@ test(
 const refusals: ReadonlyArray<
   readonly [
     string,
-    string,
+    SealedResultCheck,
     (f: Fixture) => Promise<{ bundle: Uint8Array; json?: Uint8Array }>,
   ]
 > = [
@@ -691,7 +752,18 @@ const refusals: ReadonlyArray<
       bundle: await handBundle(f, async (git, dir) => {
         await writeFile(join(dir, "a.txt"), "a\n")
         await git("add", "a.txt")
-        await git("-c", "user.email=owner@example.invalid", "commit", "-q", "-m", "blocked")
+        // The committer comes from the environment, which wins over any config.
+        const child = Bun.spawn(["git", "commit", "-q", "-m", "blocked"], {
+          cwd: dir,
+          env: {
+            ...process.env,
+            GIT_AUTHOR_NAME: "Fixture",
+            GIT_AUTHOR_EMAIL: "fixture@example.invalid",
+            GIT_COMMITTER_NAME: "Owner",
+            GIT_COMMITTER_EMAIL: "owner@example.invalid",
+          },
+        })
+        expect(await child.exited).toBe(0)
       }),
     }),
   ],
@@ -718,7 +790,7 @@ for (const [name, check, make] of refusals)
       const result = await decode(made.json ?? manifest(f.sourceSha), made.bundle)
       const exit = await publish(result, options(f))
       expect(refusedCheck(exit)).toBe(check)
-      expect(failure(exit)).toHaveProperty("message", expect.stringMatching(`^result_refused: ${check}`))
+      expect(refusal(exit).message).toStartWith(`result_refused: ${check}`)
       expect(await remoteRef(f)).toBe("")
     }),
     30_000,

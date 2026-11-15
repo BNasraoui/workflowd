@@ -4,6 +4,8 @@ import { sandboxDiagnostic } from "../sandbox/diagnostics"
 import { canonicalJson } from "./session-store-support"
 import type { SandboxPolicy } from "../sandbox/config"
 import { SandboxDispatch } from "../sandbox/dispatch"
+import { RepositoryVisibility } from "../sandbox/github"
+import type { Placement } from "./executor"
 import { ExecutionDiscovery } from "../execution-capabilities"
 import {
   resolveExecutionSelection,
@@ -74,6 +76,8 @@ export type AgentRunRefusalReason =
   | "repository_busy"
   | "invalid_base_ref"
   | "worktree_failed"
+  | "repository_visibility_unknown"
+  | "runner_requires_public_repository"
   | SelectionRefusal
 
 /**
@@ -130,6 +134,8 @@ export const AgentRunProvider = Context.Service<AgentRunProviderPort>(
 
 export type AgentRunIngressOptions = {
   readonly sandboxRepositories?: ReadonlyArray<SandboxPolicy>
+  /** A repository's placement; an alias that is absent is `host`. */
+  readonly placements?: Readonly<Record<string, Placement>>
   readonly routes: ReadonlyArray<AgentRunRoute>
   /** Codex CLI routes, resolved after `routes` and refused ambiguous when a
    * name or bare model id is served by both providers. */
@@ -277,6 +283,31 @@ const make = (options: AgentRunIngressOptions) =>
       options.sandboxRepositories?.some((policy) => policy.alias === repository) ?? false
     const sandboxFailure = (cause: unknown) =>
       refuse("executor_unavailable", sandboxDiagnostic("ingress.custody", cause).message)
+    const visibility = Option.getOrUndefined(yield* Effect.serviceOption(RepositoryVisibility))
+    // A runner run needs a public repository; a read that fails never counts as public.
+    // Until the runner executor exists, a public repository is refused too.
+    const refuseRunner = (alias: string) =>
+      Effect.gen(function* () {
+        const policy = options.sandboxRepositories?.find((candidate) => candidate.alias === alias)
+        const read =
+          policy === undefined || visibility === undefined
+            ? undefined
+            : yield* visibility.read(policy).pipe(Effect.option)
+        if (read === undefined || Option.isNone(read))
+          return yield* refuse(
+            "repository_visibility_unknown",
+            "The visibility of the repository could not be read; a runner run needs a public repository",
+          )
+        if (read.value !== "public")
+          return yield* refuse(
+            "runner_requires_public_repository",
+            "A runner run needs a public repository",
+          )
+        return yield* refuse(
+          "executor_unavailable",
+          "The runner placement has no executor yet; this repository's runs are refused",
+        )
+      })
     const sessions = yield* KernelSessionStore
     const providerOption = yield* Effect.serviceOption(AgentRunProvider)
     const provider = Option.getOrUndefined(providerOption)
@@ -821,6 +852,8 @@ const make = (options: AgentRunIngressOptions) =>
             `repository "${submission.repository}" is not in the dispatch allow-list`,
           )
         }
+        if (options.placements?.[repository.name] === "runner")
+          return yield* refuseRunner(repository.name)
         if (dispatch.sandboxRepositories?.some((policy) => policy.alias === repository.name)) {
           if (sandbox === undefined)
             return yield* refuse(

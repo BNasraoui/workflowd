@@ -479,3 +479,228 @@ test("real SSH completion seals on the container-use runner and ends hold withou
     await runner.close()
   }
 }, 300000)
+
+// Native seal and export: the runner's workspace becomes one bundle and a result.json
+// with exactly the SealedResult keys. The run names no branch.
+const native = {
+  title: "Native result",
+  commitMessage: "Native change\n\nOne file.",
+  body: "## Result\n\nNative change.",
+  finalMessage: "Done.",
+}
+const secret = "fixture-sensitive-value-93b28a5d"
+
+async function nativeSource(root: string) {
+  const work = join(root, "work")
+  await mkdir(work)
+  const git = (...args: string[]) =>
+    command(
+      ["git", "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", ...args],
+      work,
+    )
+  await git("init", "-q", "-b", "main")
+  await writeFile(join(work, ".gitignore"), "/build-cache/\n")
+  await writeFile(join(work, "base.txt"), "base\n")
+  await git("add", ".")
+  await git("commit", "-q", "-m", "source")
+  const source = await git("rev-parse", "HEAD")
+  await command(["git", "clone", "-q", "--bare", work, join(root, "source.git")])
+  return { work, git, source }
+}
+
+const nativeSeal = async (root: string, source: string, request: unknown) => {
+  const child = Bun.spawn(["python3", "-I", script, "native-seal", source], {
+    cwd: root,
+    stdin: new Blob([JSON.stringify(request)]),
+    stdout: "pipe",
+    stderr: "pipe",
+  })
+  const [status, stdout] = await Promise.all([
+    child.exited,
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+  ])
+  return { status, stdout }
+}
+
+test("native export restores only bounded regular files and drops .git", async () => {
+  const root = await mkdtemp(join(tmpdir(), "native-export-"))
+  try {
+    const { work } = await nativeSource(root)
+    await command(["tar", "-cf", join(root, "workspace.tar"), "-C", work, "."])
+    await command(["python3", "-I", script, "native-export", "workspace.tar"], root)
+    expect(await Bun.file(join(root, "repository/base.txt")).text()).toBe("base\n")
+    expect(await Bun.file(join(root, "repository/.git/HEAD")).exists()).toBe(false)
+    await rm(join(root, "repository"), { recursive: true, force: true })
+    await command(
+      [
+        "python3",
+        "-I",
+        "-c",
+        "import tarfile; f=tarfile.open('bad.tar','w'); i=tarfile.TarInfo('../escaped'); i.size=0; f.addfile(i); f.close()",
+      ],
+      root,
+    )
+    await expect(
+      command(["python3", "-I", script, "native-export", "bad.tar"], root),
+    ).rejects.toThrow()
+    expect(await Bun.file(join(root, "escaped")).exists()).toBe(false)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+for (const variant of ["ignored", "selected", "negative size"] as const)
+  test(`native export never materializes a workspace link: ${variant}`, async () => {
+    const root = await mkdtemp(join(tmpdir(), "native-export-link-"))
+    try {
+      const { work, source } = await nativeSource(root)
+      await mkdir(join(work, "build-cache"))
+      await writeFile(join(root, "outside"), "untouched\n")
+      await symlink(
+        join(root, "outside"),
+        join(work, variant === "selected" ? "link" : "build-cache/link"),
+      )
+      await command(["tar", "--exclude=.git", "-cf", join(root, "workspace.tar"), "-C", work, "."])
+      if (variant === "negative size")
+        await command(
+          [
+            "python3",
+            "-I",
+            "-c",
+            "import tarfile\nwith tarfile.open('workspace.tar') as source, tarfile.open('malformed.tar','w',format=tarfile.GNU_FORMAT) as target:\n for item in source:\n  if item.issym(): item.size=-1\n  target.addfile(item,source.extractfile(item) if item.isfile() else None)\n",
+          ],
+          root,
+        )
+      const archive = variant === "negative size" ? "malformed.tar" : "workspace.tar"
+      const exported = command(["python3", "-I", script, "native-export", archive, source], root)
+      if (variant === "ignored") {
+        await exported
+        expect(await Bun.file(join(root, "repository/base.txt")).text()).toBe("base\n")
+        expect(await Bun.file(join(root, "repository/build-cache/link")).exists()).toBe(false)
+      } else await expect(exported).rejects.toThrow()
+      expect(await Bun.file(join(root, "outside")).text()).toBe("untouched\n")
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+for (const variant of [
+  "ordinary",
+  "encoded canary",
+  "metadata canary",
+  "symlink",
+  "forbidden path",
+  "branch key",
+  "missing final message",
+  "NUL in the final message",
+  "newline in the title",
+] as const)
+  test(`native seal checks before it writes a result: ${variant}`, async () => {
+    const root = await mkdtemp(join(tmpdir(), "native-seal-"))
+    try {
+      const { work, git, source } = await nativeSource(root)
+      // History and local Git configuration of the workspace never enter the result or run.
+      await writeFile(join(work, "removed.txt"), secret)
+      await git("add", ".")
+      await git("commit", "-q", "-m", secret)
+      await rm(join(work, "removed.txt"))
+      await git("config", "core.fsmonitor", `touch ${join(root, "executed")}`)
+      await writeFile(
+        join(work, "result.txt"),
+        variant === "encoded canary"
+          ? Buffer.from(secret).toString("base64")
+          : "intended public content\n",
+      )
+      await mkdir(join(work, "build-cache"))
+      await writeFile(join(work, "build-cache/private.txt"), secret)
+      if (variant === "symlink") await symlink("/etc/passwd", join(work, "link"))
+      if (variant === "forbidden path") {
+        await mkdir(join(work, ".github"))
+        await writeFile(join(work, ".github", "bad.yml"), "bad")
+      }
+      await command(["tar", "--exclude=.git", "-cf", join(root, "workspace.tar"), "-C", work, "."])
+      const exported = command(
+        ["python3", "-I", script, "native-export", "workspace.tar", source],
+        root,
+      )
+      if (variant === "symlink") {
+        // A selected link is refused at export, before any seal.
+        await expect(exported).rejects.toThrow()
+        expect(await Bun.file(join(root, "result")).exists()).toBe(false)
+        return
+      }
+      await exported
+      const completions: Record<string, Record<string, unknown>> = {
+        "metadata canary": { ...native, body: secret },
+        "branch key": { ...native, branch: "main" },
+        "missing final message": {
+          title: native.title,
+          commitMessage: native.commitMessage,
+          body: native.body,
+        },
+        "NUL in the final message": { ...native, finalMessage: "a\u0000b" },
+        "newline in the title": { ...native, title: "one\ntwo" },
+      }
+      const sealed = await nativeSeal(root, source, {
+        completion: completions[variant] ?? native,
+        sensitiveValues: [secret],
+      })
+      expect(await Bun.file(join(root, "executed")).exists()).toBe(false)
+      if (variant !== "ordinary") {
+        expect(sealed.status).not.toBe(0)
+        expect(await Bun.file(join(root, "result/result.bundle")).exists()).toBe(false)
+        expect(await Bun.file(join(root, "result/result.json")).exists()).toBe(false)
+        return
+      }
+      expect(sealed.status).toBe(0)
+      const json = await Bun.file(join(root, "result/result.json")).bytes()
+      const bundle = await Bun.file(join(root, "result/result.bundle")).bytes()
+      expect(JSON.parse(new TextDecoder().decode(json))).toEqual({ sourceSha: source, ...native })
+      const metadata = Schema.decodeUnknownSync(
+        Schema.Struct({
+          sourceSha: Schema.String,
+          resultSha: Schema.String,
+          bundleSha256: Schema.String,
+          manifestSha256: Schema.String,
+        }),
+      )(JSON.parse(sealed.stdout))
+      expect(metadata).toEqual({
+        sourceSha: source,
+        resultSha: metadata.resultSha,
+        bundleSha256: digest(bundle),
+        manifestSha256: digest(json),
+      })
+      const clean = join(root, "clean.git")
+      await command(["git", "clone", "-q", "--bare", join(root, "source.git"), clean])
+      await command(
+        [
+          "git",
+          "fetch",
+          "-q",
+          join(root, "result/result.bundle"),
+          "refs/workflowd/result:refs/heads/result",
+        ],
+        clean,
+      )
+      expect(await command(["git", "rev-parse", "result"], clean)).toBe(metadata.resultSha)
+      expect(await command(["git", "rev-list", "--count", `${source}..result`], clean)).toBe("1")
+      expect(await command(["git", "log", "-1", "--format=%B", "result"], clean)).toBe(
+        native.commitMessage,
+      )
+      expect(await command(["git", "show", "-s", "--format=%an <%ae>", "result"], clean)).toBe(
+        "Workflowd Agent <agent@workflowd.invalid>",
+      )
+      expect(await command(["git", "show", "result:result.txt"], clean)).toBe(
+        "intended public content",
+      )
+      expect(await command(["git", "ls-tree", "-r", "--name-only", "result"], clean)).not.toContain(
+        "build-cache",
+      )
+      expect(await command(["git", "ls-tree", "-r", "--name-only", "result"], clean)).not.toContain(
+        "removed.txt",
+      )
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
