@@ -1,6 +1,7 @@
-import { expect, test } from "bun:test"
+import { expect, spyOn, test } from "bun:test"
 import { mkdtemp, rm, writeFile } from "node:fs/promises"
 import { join } from "node:path"
+import { Server } from "node:http"
 import { tmpdir } from "node:os"
 import { generateKeyPairSync } from "node:crypto"
 import { Effect, Exit, Option, Scope } from "effect"
@@ -11,6 +12,7 @@ import { SandboxDispatch } from "../../src/sandbox/dispatch"
 import { seedCapabilityRun } from "./fixture"
 import { makeDaemonCapability } from "../../src/sandbox/capability-control"
 import { serveCapabilityGateway } from "../../src/capability-gateway-server"
+import { capabilityHttpServer } from "../../src/capability-gateway/http"
 import { requiredEnvironment } from "../helpers/config"
 import { AgentRunStoreLive } from "../../src/kernel/agent-run-store"
 import { fixtureExecutable } from "../helpers/fixture-executable.mjs"
@@ -157,7 +159,7 @@ test("configured live composition settles prior leases, which revokes their gran
   }
 })
 
-test("the gateway config bounds its streams: an idle limit of 1 ms to ten minutes, a stale sweep every 100 ms to a minute, and at most maxStreams for a run", () => {
+test("the gateway config bounds its streams: an idle limit of 1 ms to the listener's socket timeout of two minutes, a stale sweep every 100 ms to a minute, and at most maxStreams for a run", () => {
   const gateway = {
     noscope: { binary: "/fixture/noscope", configHome: "/fixture" },
     providerId: "anthropic",
@@ -174,9 +176,9 @@ test("the gateway config bounds its streams: an idle limit of 1 ms to ten minute
       WORKFLOWD_CAPABILITY_GATEWAY: JSON.stringify({ ...gateway, ...keys }),
     })
   for (const [keys, reason] of [
-    [{ streamIdleMs: 0 }, 'Expected a value between 1 and 600000\n  at ["streamIdleMs"]'],
-    [{ streamIdleMs: -1 }, 'Expected a value between 1 and 600000\n  at ["streamIdleMs"]'],
-    [{ streamIdleMs: 600001 }, 'Expected a value between 1 and 600000\n  at ["streamIdleMs"]'],
+    [{ streamIdleMs: 0 }, 'Expected a value between 1 and 120000\n  at ["streamIdleMs"]'],
+    [{ streamIdleMs: -1 }, 'Expected a value between 1 and 120000\n  at ["streamIdleMs"]'],
+    [{ streamIdleMs: 120001 }, 'Expected a value between 1 and 120000\n  at ["streamIdleMs"]'],
     [{ streamIdleMs: 1.5 }, 'Expected an integer\n  at ["streamIdleMs"]'],
     [{ streamIdleMs: "1000" }, 'Expected number\n  at ["streamIdleMs"]'],
     [{ maxStreams: 513 }, 'Expected a value between 1 and 512\n  at ["maxStreams"]'],
@@ -190,7 +192,15 @@ test("the gateway config bounds its streams: an idle limit of 1 ms to ten minute
   ] as const)
     expect(() => load(keys)).toThrow(reason)
   expect(load({ streamIdleMs: 1 }).streamIdleMs).toBe(1)
-  expect(load({ streamIdleMs: 600000 }).streamIdleMs).toBe(600000)
+  expect(load({ streamIdleMs: 120000 }).streamIdleMs).toBe(120000)
+  // A socket idle this long is destroyed under a silent stream, so the bound is this timeout.
+  const socketTimeout = spyOn(Server.prototype, "setTimeout")
+  try {
+    capabilityHttpServer(async () => new Response(null))
+    expect(socketTimeout.mock.calls.map((call): unknown => call[0])).toEqual([120000])
+  } finally {
+    socketTimeout.mockRestore()
+  }
   expect(load({}).streamIdleMs).toBeUndefined()
   expect(load({ staleSweepMs: 100 }).staleSweepMs).toBe(100)
   expect(load({ staleSweepMs: 60000 }).staleSweepMs).toBe(60000)
@@ -212,7 +222,16 @@ test("the gateway listens only on a loopback address: 127.0.0.1 or ::1", () => {
     loadCapabilityGatewayConfig({
       WORKFLOWD_CAPABILITY_GATEWAY: JSON.stringify({ ...gateway, listen: { host, port: 0 } }),
     }).listen
-  for (const host of ["10.0.0.1", "0.0.0.0", "gateway.example"])
+  for (const host of [
+    "10.0.0.1",
+    "0.0.0.0",
+    "gateway.example",
+    "::",
+    "localhost",
+    "127.0.0.2",
+    "::ffff:127.0.0.1",
+    "::1%lo",
+  ])
     expect(() => load(host)).toThrow('Expected "127.0.0.1" | "::1"\n  at ["listen"]["host"]')
   expect(load("127.0.0.1")).toEqual({ host: "127.0.0.1", port: 0 })
   expect(load("::1")).toEqual({ host: "::1", port: 0 })
