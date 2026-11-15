@@ -370,6 +370,28 @@ jobs:
             test "$relative" != "$source"
             sudo ln -s "/opt/workflowd-credential-fixture/$relative" "/opt/workflowd-credential-fixture/bin/$client"
           done
+      # The gateway, run as ben-fixture, is configured for agent-fixture's uid as its daemon; the
+      # caller, ben-fixture, is refused by its kernel-reported uid. The case mints no run token, so
+      # noscope is any executable here.
+      - name: Require the gateway's control socket to refuse another uid
+        run: |
+          set -euo pipefail
+          sudo systemd-run --wait --pipe --collect \
+          -p MemoryMax=2G -p MemorySwapMax=0 --working-directory="$PWD" \
+          --uid=61001 --gid=61000 \
+          --setenv=HOME=/tmp \
+          --setenv=PATH=/opt/workflowd-credential-fixture/bin:/usr/bin:/bin \
+          --setenv=WORKFLOWD_FIXTURE_NOSCOPE=/usr/bin/false \
+          /opt/workflowd-credential-fixture/bin/bun test test/capability-gateway/control.e2e.test.ts \
+          --test-name-pattern="refuses a caller whose uid is not the daemon's" \
+          --reporter=junit --reporter-outfile=/tmp/workflowd-control-tests.xml
+          python3 - <<'PYTEST'
+          import xml.etree.ElementTree as ET
+          cases = [case for case in ET.parse('/tmp/workflowd-control-tests.xml').findall('.//testcase') if len(case.findall('skipped')) == 0]
+          name = "the gateway refuses a caller whose uid is not the daemon's"
+          matching = [case for case in cases if case.get('name') == name]
+          assert len(matching) == 1 and len(matching[0]) == 0, f'Missing or unsuccessful required test: {name}'
+          PYTEST
       - name: Probe two-UID native supervision prerequisites
         run: >-
           sudo systemd-run --wait --pipe --collect
