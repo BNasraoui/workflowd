@@ -14,6 +14,7 @@ import {
   localRecordSource,
   openEventRecord,
   readEventRecord,
+  recordEventParser,
   type EventRecordWriter,
   type RecordSource,
 } from "../../src/kernel/event-record"
@@ -456,3 +457,14 @@ await writer.close()
     }),
   30_000,
 )
+
+test("the line_dropped marker is a typed event and every other line is the CLI's", () => {
+  const parse = recordEventParser(parseClaudeDispatchEvent)
+  expect(parse(lineDroppedMarker(2_000_000).trimEnd())).toEqual({
+    type: "record.line_dropped",
+    bytes: 2_000_000,
+  })
+  expect(parse('{"type":"workflowd.line_dropped","bytes":"x"}')).toEqual({ type: "other" })
+  expect(parse("not json")).toEqual({ type: "other" })
+  expect(parse(message(1, 200).trimEnd())).toEqual({ type: "agent_message", text: "m1" })
+})

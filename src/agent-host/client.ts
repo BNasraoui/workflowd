@@ -204,7 +204,7 @@ function requestAgentHostResponse(path: string, request: import("./protocol").Ho
 }
 
 import { HostResponse, type HostExchangeFile, type OwnedProcess, type HostStart } from "./protocol"
-import { readEventRecord, type RecordSource } from "../kernel/event-record"
+import { readEventRecord, recordEventParser, type RecordSource } from "../kernel/event-record"
 import type { CliEvent, CliRunProcess } from "../kernel/cli-process-contract"
 import { normalizeError, OBSERVATION_EVIDENCE } from "../errors"
 
@@ -286,7 +286,7 @@ export function observeAgentHost(
           source: hostRecordSource(socket, process),
           pollIntervalMs: 100,
           shouldStop: async () => !(await observe()).active,
-          parse,
+          parse: recordEventParser(parse),
           // The worker's last line may have no newline; it is decoded at the end.
           flushPartialAtEnd: true,
           // Bounds the daemon's memory for one line of a record without segments.

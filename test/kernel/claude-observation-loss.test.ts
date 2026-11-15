@@ -8,6 +8,7 @@ import { Effect, Schema } from "effect"
 import { makeAgentRunCliDispatcher, type AgentRunCliStore } from "../../src/kernel/agent-run-cli"
 import { makeClaudeDispatchCli, parseClaudeDispatchEvent } from "../../src/kernel/claude-dispatch"
 import { makeCodexCli, parseCodexExecEvent } from "../../src/kernel/codex-session"
+import { eventRecordLimits } from "../../src/kernel/event-record"
 import { makeHostCli } from "../../src/agent-host/client"
 import { agentHostUnitName, HostRequest } from "../../src/agent-host/protocol"
 import type { CliPort, CliRunProcess } from "../../src/kernel/cli-process-contract"
@@ -1182,5 +1183,57 @@ process.exit(0)`,
     } finally {
       await host.close()
       await rm(root, { recursive: true, force: true })
+    }
+  }, 20_000)
+
+/** Twice the line limit of a record of RECORD_LIMIT bytes. */
+const OVERSIZED = 2 * eventRecordLimits(RECORD_LIMIT).line
+
+for (const kind of ["claude", "codex"] as const)
+  test(`a ${kind} run whose final message exceeds the line limit ends with the line limit reason`, async () => {
+    const h = await harness(kind, {
+      maxOutputBytes: RECORD_LIMIT,
+      progressWindowMs: 300,
+      script: `start()
+message("working")
+message("y".repeat(${OVERSIZED}))
+end(0)
+process.exit(0)`,
+    })
+    try {
+      await h.dispatch()
+      const terminals = await h.settle()
+      expect(terminals).toHaveLength(1)
+      expect(terminals[0]).toMatchObject({
+        kind: "operator_required",
+        diagnostic: expect.stringMatching(
+          new RegExp(
+            `^${kind}_output_line_limit: a ${kind} event of [0-9]+ bytes exceeded the line limit; the final message was not captured$`,
+          ),
+        ),
+      })
+      expect(h.manager.stops()).toBe(0)
+    } finally {
+      await h.cleanup()
+    }
+  }, 20_000)
+
+for (const kind of ["claude", "codex"] as const)
+  test(`a ${kind} run with a dropped line and a later final message completes with that message`, async () => {
+    const h = await harness(kind, {
+      maxOutputBytes: RECORD_LIMIT,
+      progressWindowMs: 300,
+      script: `start()
+message("working")
+message("y".repeat(${OVERSIZED}))
+message("final answer")
+end(0)
+process.exit(0)`,
+    })
+    try {
+      await h.dispatch()
+      expect(await h.settle()).toEqual([{ kind: "complete", finalMessage: "final answer" }])
+    } finally {
+      await h.cleanup()
     }
   }, 20_000)

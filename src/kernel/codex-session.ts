@@ -11,7 +11,12 @@ import { runWorkspaceCommand } from "../workspace/command"
 import { WorkspaceError } from "../workspace/errors"
 import type { CodexCliPort, CodexExit, CodexPreflightError } from "./codex-cli-port"
 import { cleanupFinishedCustody } from "./codex-output"
-import { EVENT_RECORD_LIMITS, localRecordSource, readEventRecord } from "./event-record"
+import {
+  EVENT_RECORD_LIMITS,
+  localRecordSource,
+  readEventRecord,
+  recordEventParser,
+} from "./event-record"
 import { readSandboxBinding } from "../sandbox/binding"
 export type {
   CodexCliPort,
@@ -403,7 +408,7 @@ export const makeDurableCliProcess = (
           pollIntervalMs,
           shouldStop: async () =>
             (await terminal()) !== null || Date.now() - attachedAt >= observationTimeoutMs,
-          parse: options.driver.parseEvent,
+          parse: recordEventParser(options.driver.parseEvent),
         })
 
         const waitInactive = (durationMs: number): Promise<boolean> => {

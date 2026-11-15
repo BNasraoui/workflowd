@@ -3,6 +3,7 @@ import { open, readdir, rename, rm, writeFile } from "node:fs/promises"
 import { basename, dirname, join } from "node:path"
 import { Schema } from "effect"
 import { OBSERVATION_EVIDENCE } from "../errors"
+import type { CliEvent } from "./cli-process-contract"
 
 /**
  * The event record of one CLI run: a fixed head file (`events.jsonl`) and,
@@ -211,6 +212,21 @@ export const lineDroppedMarker = (bytes: number) =>
   `${JSON.stringify({ type: "workflowd.line_dropped", bytes })}\n`
 
 const NEWLINE = 10
+
+const LINE_DROPPED_PREFIX = '{"type":"workflowd.line_dropped","bytes":'
+
+/** Decodes one record line: the worker's line_dropped marker is a typed
+ * event, and every other line is the CLI's own, decoded by `parse`. */
+export const recordEventParser =
+  (parse: (line: string) => CliEvent) =>
+  (line: string): CliEvent => {
+    if (line.startsWith(LINE_DROPPED_PREFIX)) {
+      const bytes = Number(line.slice(LINE_DROPPED_PREFIX.length, -1))
+      if (line.endsWith("}") && Number.isSafeInteger(bytes) && bytes >= 0)
+        return { type: "record.line_dropped", bytes }
+    }
+    return parse(line)
+  }
 
 export type EventRecordWriter = {
   /** Appends bytes of the CLI's output; lines are stored once they end. */

@@ -95,12 +95,15 @@ const diagnostic = (
   turnFailed: string | null,
   cliName: string,
   codexErrorInfo?: unknown,
+  lineDropped: number | null = null,
 ) => {
   if (stalled)
     return `${cliName}_stalled: no ${cliName} event for ${stallWindowMs}ms; the process group was terminated`
   const provider = providerFailure(turnFailed, codexErrorInfo)
   if (provider !== undefined) return `${provider.reason}: ${provider.message}`
   const exitCode = Exit.isSuccess(exit) ? exit.value.exitCode : -1
+  if (exitCode === 0 && lineDropped !== null)
+    return `${cliName}_output_line_limit: a ${cliName} event of ${lineDropped} bytes exceeded the line limit; the final message was not captured`
   let detail = `${cliName}_failed: exit ${exitCode}`
   if (exitCode === 143 || exitCode === -15) detail += " (SIGTERM)"
   if (turnFailed !== null) detail += `; ${diagnosticMessage(turnFailed)}`
@@ -448,6 +451,8 @@ export const makeAgentRunCliDispatcher = (dependencies: {
       let outputTokens: number | null = null
       let turnFailed: string | null = null
       let codexErrorInfo: unknown
+      /** The bytes of a dropped line that no later message replaced. */
+      let lineDropped: number | null = null
       let stalled = false
       let exit: Exit.Exit<CliExit, WorkspaceError>
       const budget = input.budget ?? outage()
@@ -493,9 +498,16 @@ export const makeAgentRunCliDispatcher = (dependencies: {
             codexErrorInfo = undefined
             finalMessage = null
             outputTokens = null
+            lineDropped = null
           }
-          if (event.type === "agent_message") finalMessage = event.text
-          else if (event.type === "turn.completed") outputTokens = event.outputTokens
+          if (event.type === "agent_message") {
+            finalMessage = event.text
+            lineDropped = null
+          } else if (event.type === "record.line_dropped") {
+            // The dropped line may have been the final message; an older one is not.
+            finalMessage = null
+            lineDropped = event.bytes
+          } else if (event.type === "turn.completed") outputTokens = event.outputTokens
           else if (
             event.type === "turn.failed" ||
             (event.type === "error" && turnFailed === null)
@@ -528,6 +540,7 @@ export const makeAgentRunCliDispatcher = (dependencies: {
         outputTokens = null
         turnFailed = null
         codexErrorInfo = undefined
+        lineDropped = null
       }
       finalMessage = providerFailure(turnFailed, codexErrorInfo)?.message ?? finalMessage
       if (input.sandboxRun !== undefined) {
@@ -552,6 +565,7 @@ export const makeAgentRunCliDispatcher = (dependencies: {
                 turnFailed,
                 kind,
                 codexErrorInfo,
+                lineDropped,
               ),
               exitCode: Exit.isSuccess(exit) ? exit.value.exitCode : undefined,
               cause: Exit.isFailure(exit) ? exit.cause : undefined,
@@ -588,6 +602,7 @@ export const makeAgentRunCliDispatcher = (dependencies: {
             turnFailed,
             kind,
             codexErrorInfo,
+            lineDropped,
           ),
           now: new Date(),
           finalMessage,
