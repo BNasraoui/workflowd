@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { client, processGateway, proof, withGateway } from "../capability-gateway/gateway-process"
-import { renewalRequests, renewalWindowMs } from "../../deploy/sandbox/renewal.mjs"
+import { renewalRequests } from "../../deploy/sandbox/renewal.mjs"
 import { fixtureExecutable } from "../helpers/fixture-executable.mjs"
 import { loopbackCertificate, tlsFront } from "../helpers/loopback-tls"
 
@@ -271,9 +271,9 @@ test("a renewal that the gateway refuses ends the relay at once: it sends no fur
       const { audience } = await runner.audience()
       const answer = await runner.session(proof(audience, "jti-relay"))
       expect(answer.status).toBe(200)
-      // The token lives 15 minutes, more than the renewal window: the gateway refuses to renew it.
+      // The token lives 15 minutes, more than the renewal window of 330 s: the gateway refuses to renew it.
       const grant = await runner.grant(answer)
-      expect(grant.expiresAt - Date.now()).toBeGreaterThan(renewalWindowMs)
+      expect(grant.expiresAt - Date.now()).toBeGreaterThan(330000)
       f.setStall(true)
       const child = Bun.spawn(
         [
