@@ -22,12 +22,8 @@ function make(sql: SqlClient) {
         if (!owned.size) listeners.delete(runId)
       }
     },
-    change: <A, E, R>(
-      runId: string,
-      effect: Effect.Effect<A, E, R>,
-      transaction: SqlClient["withTransaction"] = sql.withTransaction,
-    ) =>
-      transaction(
+    change: <A, E, R>(runId: string, effect: Effect.Effect<A, E, R>) =>
+      sql.withTransaction(
         // Abort is deliberately conservative on rollback: an interrupted stream
         // cannot be resumed, but no durable revocation or sticky local flag is
         // published. The next request always reads the committed SQL authority.

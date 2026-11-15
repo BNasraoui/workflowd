@@ -256,7 +256,6 @@ for (const race of [
             () => Promise.reject(new Error("no controller command for a private lease")),
             {
               native: { gateway: local },
-              publicationContract: { reference: "fixture-only:worktree", receipt: "fixed-v1" },
             },
           )
           // The run is recorded before the runner asks; with no session the lease stays starting.

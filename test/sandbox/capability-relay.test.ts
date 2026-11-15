@@ -130,6 +130,30 @@ test("R7: accelerated clock expiry refuses renewal resurrection", async () => {
   }
 }, 10000)
 
+test("after stop, the answer of a renewal in flight sends no further request", async () => {
+  const root = await mkdtemp(join(tmpdir(), "relay-stop-tls-"))
+  try {
+    const tls = await loopbackCertificate(root)
+    const child = Bun.spawn(
+      [fixtureExecutable("node"), "--test", resolve("test/sandbox/fixtures/relay-stop.mjs")],
+      {
+        env: { PATH: "/usr/bin:/bin", NODE_EXTRA_CA_CERTS: tls.cert, RELAY_CLOCK_KEY: tls.key },
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    )
+    const [code, stdout, stderr] = await Promise.all([
+      child.exited,
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+    ])
+    expect({ code, output: stdout + stderr }).toMatchObject({ code: 0 })
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+}, 10000)
+
 test("the relay refuses a gateway that is not an HTTPS origin", async () => {
   const root = await mkdtemp(join(tmpdir(), "relay-origin-"))
   try {

@@ -54,7 +54,7 @@ esac
 test("hold starts with an empty OIDC request environment", async () => {
   const source = await Bun.file(`${root}/.github/workflows/agent-sandbox.yml`).text()
   const hold = source.slice(
-    source.indexOf("      - name: Hold the privately authenticated lease"),
+    source.indexOf("      - name: Hold the lease"),
     source.indexOf("      - name: Upload sealed result"),
   )
   expect(hold).toContain(
@@ -229,7 +229,7 @@ test("release logs out even when container cleanup fails and preserves the failu
   }
 })
 
-test("the hold of a session fails with the reason renewal when the relay ended on a failed renewal", async () => {
+test("the hold of a session fails with the reason for which its relay ended or the deadline passed", async () => {
   const source = await Bun.file(`${root}/deploy/sandbox/runner.sh`).text()
   const script = source.split("    python3 -c '\n")[1]?.split('\n\' "$1"')[0]
   if (!script?.includes('Path("/run/workflowd-sandbox")')) throw new Error("Missing hold script")
@@ -262,10 +262,17 @@ test("the hold of a session fails with the reason renewal when the relay ended o
       const { outcome, reason } = JSON.parse(stdout)
       return { code, outcome, reason }
     }
-    // A relay that ends with no reason (the run finished its work or its deadline) is not a fault.
-    expect(await receipt()).toEqual({ code: 0, outcome: "ok", reason: "none" })
-    await writeFile(join(directory, "relay-ended"), "renewal\n")
-    expect(await receipt()).toEqual({ code: 1, outcome: "failed", reason: "renewal" })
+    // A relay that ends with no reason, as after a crash, fails the hold with no named cause.
+    expect(await receipt()).toEqual({ code: 1, outcome: "failed", reason: "unavailable" })
+    for (const reason of ["renewal", "expiry", "deadline"]) {
+      await writeFile(join(directory, "relay-ended"), `${reason}\n`)
+      expect(await receipt()).toEqual({ code: 1, outcome: "failed", reason })
+    }
+    // The deadline passes while the relay still holds the session.
+    await rm(join(directory, "relay-ended"))
+    await writeFile(join(directory, "relay.pid"), String(process.pid))
+    await writeFile(join(directory, "native-deadline"), String(Date.now() - 1000))
+    expect(await receipt()).toEqual({ code: 1, outcome: "failed", reason: "deadline" })
   } finally {
     await rm(directory, { recursive: true, force: true })
   }

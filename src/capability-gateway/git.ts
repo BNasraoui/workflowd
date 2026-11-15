@@ -1,4 +1,5 @@
 import { readRequestBody } from "./claude"
+import { checkHeaders, RequestRefused } from "./headers"
 
 export interface GitRequest {
   readonly method: "GET" | "POST"
@@ -10,37 +11,28 @@ export interface GitRequest {
 export type GitUpstream = (url: string, input: GitRequest) => Promise<Response>
 
 function validateGitHeaders(request: Request, upload: boolean, advertisement: boolean) {
-  let bytes = 0
-  for (const [name, value] of request.headers) {
-    bytes += name.length + value.length
-    if (
-      bytes > 8192 ||
-      value.length > 2048 ||
-      /[\r\n\0]/.test(value) ||
-      ![
-        "authorization",
-        "host",
-        "content-type",
-        "content-length",
-        "accept",
-        "accept-encoding",
-        "accept-language",
-        "pragma",
-        "user-agent",
-        "git-protocol",
-      ].includes(name)
-    )
-      throw new Error("request refused")
-  }
+  checkHeaders(request, (name) =>
+    [
+      "authorization",
+      "host",
+      "content-type",
+      "content-length",
+      "accept",
+      "accept-encoding",
+      "accept-language",
+      "pragma",
+      "user-agent",
+      "git-protocol",
+    ].includes(name),
+  )
   const protocol = request.headers.get("git-protocol")
   if (
-    (request.headers.get("host") ?? "capability.invalid") !== "capability.invalid" ||
     (protocol !== null && !/^version=[012]$/.test(protocol)) ||
     (upload && request.headers.get("content-type") !== "application/x-git-upload-pack-request") ||
     (advertisement &&
       (request.body !== null || Number(request.headers.get("content-length") ?? 0) !== 0))
   )
-    throw new Error("request refused")
+    throw new RequestRefused()
   return protocol
 }
 
@@ -63,7 +55,7 @@ export async function gitReadRequest(
     (!advertisement && !upload) ||
     !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository.repositoryName)
   )
-    throw new Error("request refused")
+    throw new RequestRefused()
   const protocol = validateGitHeaders(request, upload, advertisement)
   const body = upload ? await readRequestBody(request, signal, 1048576) : undefined
   const headers = new Headers({ "accept-encoding": "identity" })

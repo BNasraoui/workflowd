@@ -4,6 +4,8 @@ import { pipeline } from "node:stream/promises"
 import type { Socket } from "node:net"
 import { Cause, Effect, Exit } from "effect"
 import { readRequestBody } from "./claude"
+import { capabilityOrigin } from "./headers"
+import { maxHeaderBytes } from "../../deploy/sandbox/capability-limits.mjs"
 import { CapabilityRefused } from "./store"
 import type { CapabilityGateway } from "./service"
 
@@ -67,7 +69,7 @@ export function capabilityHttpServer(
   const sockets = new Set<Socket>()
   const pending = new Set<Promise<void>>()
   const responses = new Set<ServerResponse>()
-  const server = createServer({ maxHeaderSize: 8192 }, (incoming, outgoing) => {
+  const server = createServer({ maxHeaderSize: maxHeaderBytes }, (incoming, outgoing) => {
     responses.add(outgoing)
     const lifetime = new AbortController()
     const abort = () => lifetime.abort()
@@ -81,7 +83,7 @@ export function capabilityHttpServer(
         headers.delete("connection")
         headers.delete("transfer-encoding")
         if (network) headers.delete("host")
-        const request = new Request(`http://capability.invalid${incoming.url}`, {
+        const request = new Request(`${capabilityOrigin}${incoming.url}`, {
           method: incoming.method ?? "GET",
           headers,
           body: ["GET", "HEAD"].includes(incoming.method ?? "GET")

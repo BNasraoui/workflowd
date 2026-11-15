@@ -61,8 +61,8 @@ jobs:
           SANDBOX_BOOTSTRAP_MODE: ${{ inputs.bootstrap-mode }}
         run: node deploy/sandbox/public-output.mjs bootstrap -- bash -c '[[ "$SANDBOX_BOOTSTRAP_MODE" == legacy-artifact || "$SANDBOX_BOOTSTRAP_MODE" == private ]]'
       - name: Join the restricted tailnet
-        # Ben-approved public bootstrap fields only. Runner headers precede the
-        # capture process: these inputs must originate in trusted caller config.
+        # The runner prints these two fields in the step header, before the public output
+        # wrapper starts, so they come only from the trusted caller's configuration.
         env:
           SANDBOX_TAILSCALE_CLIENT_ID: ${{ inputs.tailscale-client-id }}
           SANDBOX_AUDIENCE: ${{ inputs.tailscale-audience }}
@@ -93,7 +93,7 @@ jobs:
           SANDBOX_AUDIENCE: ${{ inputs.tailscale-audience }}
           SANDBOX_GATEWAY_URL: ${{ inputs.gateway-url }}
         run: node deploy/sandbox/public-output.mjs bootstrap -- bash deploy/sandbox/runner.sh prepare-private
-      - name: Hold the privately authenticated lease
+      - name: Hold the lease
         # The runner injects OIDC variables after step env overrides. Strip them
         # in the shell launcher, before either the shell or hold process starts.
         shell: /usr/bin/env -u ACTIONS_ID_TOKEN_REQUEST_TOKEN -u ACTIONS_ID_TOKEN_REQUEST_URL /bin/bash --noprofile --norc -e -o pipefail {0}

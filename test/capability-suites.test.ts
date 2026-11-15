@@ -1,7 +1,10 @@
 import { expect, test } from "bun:test"
 import { readdir } from "node:fs/promises"
 import { Schema } from "effect"
-import { launcherTestPattern, suites } from "../scripts/capability-suites"
+import { suites } from "../scripts/capability-suites"
+
+/** Test files that only a suite runs; bunfig.toml keeps them out of the plain run. */
+const launcherTestPattern = "**/*.launcher.test.ts"
 
 const listed = Object.values(suites).flatMap((cases) => cases.map(([, file]) => file))
 

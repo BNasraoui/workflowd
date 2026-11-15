@@ -34,7 +34,7 @@ A reservation failure leaves an `audit-failed` receipt; incomplete records and t
 receipt prevent successful settlement. The record budget is 1,024 calls, 4 KiB each;
 command previews are limited to 512 characters. Results, file contents and environments
 are never copied into the audit. Recognizable credential strings are redacted. A command
-preview stays private to the runner and mint; redaction cannot detect every caller-supplied secret.
+preview stays private to the runner and the controller; redaction cannot detect every caller-supplied secret.
 
 Mint sends bounded JSON on stdin through the existing pinned SSH connection policy to
 a fixed `runner-control audit` operation, separate from replaceable MCP stdio. No command

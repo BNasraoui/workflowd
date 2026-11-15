@@ -1,4 +1,5 @@
 import { createPublicKey, verify } from "node:crypto"
+import { maxJtiLength, maxProofLength } from "../../deploy/sandbox/capability-limits.mjs"
 import { Schema } from "effect"
 
 const githubIssuer = "https://token.actions.githubusercontent.com"
@@ -71,7 +72,7 @@ export function verifyJobProof(
   now: number,
 ) {
   try {
-    if (token.length > 16384) throw new Error()
+    if (token.length > maxProofLength) throw new Error()
     const parts = token.split(".")
     if (parts.length !== 3 || parts.some((part) => !/^[A-Za-z0-9_-]+$/.test(part)))
       throw new Error()
@@ -124,7 +125,7 @@ export function verifyJobProof(
       claims.exp * 1000 <= now ||
       claims.exp <= claims.iat ||
       claims.exp - claims.iat > 600 ||
-      claims.jti.length > 256
+      claims.jti.length > maxJtiLength
     )
       throw new Error()
     return { jti: claims.jti, expiresAt: claims.exp * 1000 }

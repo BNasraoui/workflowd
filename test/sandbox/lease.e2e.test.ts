@@ -1104,6 +1104,7 @@ test("an actions-native lease becomes ready on its runner's gateway session, and
         "a".repeat(64),
         now + 60000,
         now,
+        now + 610000,
       )
       // Another Actions run or attempt does not take the session.
       expect(yield* leases.bindSession("run", 79, 1)).toBe(false)
@@ -1140,6 +1141,7 @@ test("a revoked gateway binding does not make its lease ready", async () => {
         "a".repeat(64),
         now + 60000,
         now,
+        now + 610000,
       )
       yield* gateway.revoke("run")
       expect(yield* leases.bindSession("run", 78, 1)).toBe(false)

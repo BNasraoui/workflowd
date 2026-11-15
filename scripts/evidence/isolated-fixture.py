@@ -1,6 +1,5 @@
 #!/usr/bin/python3
 """Bounded Linux fixture custody. Never exposes a host bus, engine or real HOME."""
-import json
 import os
 from pathlib import Path
 import shutil
@@ -29,23 +28,17 @@ def main():
     if mountpoint.is_symlink():
         raise SystemExit('Fixture scratch mountpoint must be a directory')
     mountpoint.mkdir(mode=0o700, exist_ok=True)
-    evidence_parent = Path(os.environ.get("WORKFLOWD_FIXTURE_EVIDENCE", "/tmp/opencode"))
-    evidence_parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    # A private directory of this run: below the caller's own directory when it names one,
+    # otherwise in the system's temporary directory.
+    evidence_parent = os.environ.get("WORKFLOWD_FIXTURE_EVIDENCE")
+    if evidence_parent is not None:
+        Path(evidence_parent).mkdir(mode=0o700, parents=True, exist_ok=True)
     evidence = Path(tempfile.mkdtemp(prefix="wfd-isolated-", dir=evidence_parent))
     scratch = evidence / "scratch"
     scratch.mkdir(mode=0o700)
-    pinned_publisher = os.environ.get('WORKFLOWD_FIXTURE_PINNED_PUBLISHER') == '1'
-    if pinned_publisher:
-        target = evidence / 'pinned-publisher'
-        target.mkdir(mode=0o700)
-        for name in ['publish.mjs', 'publication.mjs', 'publication-unicode.json', 'result.py', 'casefold.json']:
-            data = subprocess.check_output(['git', 'show', 'f74e0505155bc32aa2cedef00ba8b08ef1b90007:deploy/sandbox/' + name], cwd=repo, timeout=10)
-            (target / name).write_bytes(data)
     binaries = {name: executable(name) for name in ["bun", "node", "noscope"]}
     binds = []
     fixture_env = []
-    if pinned_publisher:
-        fixture_env.extend(['--setenv', 'WORKFLOWD_FIXTURE_PINNED_PUBLISHER', '/tmp/opencode/evidence/pinned-publisher'])
     for name, path in binaries.items():
         # Individual executable files only, never a user's package/config directory.
         binds.extend(["--ro-bind", path, "/opt/wfd-fixture/bin/" + name])
@@ -55,7 +48,7 @@ def main():
         "--ro-bind", "/", "/", "--tmpfs", "/home", "--tmpfs", "/root",
         "--tmpfs", "/run", "--tmpfs", "/tmp", "--tmpfs", "/opt", "--proc", "/proc", "--dev", "/dev",
         "--ro-bind", str(repo), str(repo), "--bind", str(scratch), str(repo / ".scratch"),
-        *binds, "--bind", str(evidence), "/tmp/opencode/evidence",
+        *binds,
         "--dir", "/tmp/fixture-home", "--dir", "/tmp/fixture-runtime",
         "--dir", "/tmp/fixture-tmp", "--chmod", "0700", "/tmp/fixture-runtime",
         "--clearenv", "--setenv", "PATH", "/opt/wfd-fixture/bin:/usr/bin:/bin",
@@ -83,11 +76,10 @@ def main():
         "-p", "CPUQuota=200%", "-p", "TasksMax=512",
         "-p", "RuntimeMaxSec=180s", "/usr/bin/env", "-i", "PATH=/usr/bin:/bin", *command,
     ]
-    (evidence / "invocation.json").write_text(json.dumps({"unit": unit, "command": outer}, indent=2))
-    result = subprocess.run(outer, check=False, timeout=200)
-    (evidence / "exit.json").write_text(json.dumps({"exit": result.returncode}))
-    print(f"isolated unit={unit} evidence={evidence} exit={result.returncode}", flush=True)
-    return result.returncode
+    try:
+        return subprocess.run(outer, check=False, timeout=200).returncode
+    finally:
+        shutil.rmtree(evidence, ignore_errors=True)
 
 
 if __name__ == "__main__":

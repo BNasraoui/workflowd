@@ -207,11 +207,11 @@ test("the runner's bootstrap names an untrusted gateway certificate and stops at
         fixtureExecutable("node"),
         "--input-type=module",
         "-e",
-        `import { prepare, failure } from ${JSON.stringify(resolve("deploy/sandbox/bootstrap.mjs"))}
+        `import { prepare } from ${JSON.stringify(resolve("deploy/sandbox/bootstrap.mjs"))}
 await prepare({
   directory: ${JSON.stringify(directory)},
   identity: async () => Response.json({ value: "fixture-proof" }),
-}).catch((error) => { process.stderr.write(failure(error)); process.exitCode = 1 })`,
+}).catch((error) => { process.stderr.write(error.message + "\\n"); process.exitCode = 1 })`,
       ],
       {
         env: {
@@ -231,7 +231,7 @@ await prepare({
     const [code, text] = await Promise.all([child.exited, new Response(child.stderr).text()])
     expect({ code, text }).toEqual({
       code: 1,
-      text: "private bootstrap unavailable: gateway certificate not trusted (DEPTH_ZERO_SELF_SIGNED_CERT)\n",
+      text: "gateway certificate not trusted (DEPTH_ZERO_SELF_SIGNED_CERT)\n",
     })
     expect(Date.now() - started).toBeLessThan(10000)
     expect(gateway.proofs).toEqual([])

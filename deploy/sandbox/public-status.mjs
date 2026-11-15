@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto"
 
-// Ben-approved v2 addendum (review 01a18ac2-d32b-7362-b43a-c0aad6ce2c74).
-// Only trusted administrator configuration may reach these two public fields.
+// The only two bootstrap fields that may appear in the public job log. They come from the
+// trusted caller's configuration.
 export const publicBootstrapFields = {
   tailscaleClientId: /^[A-Za-z0-9_-]{1,128}$/,
   tailscaleAudience: /^[A-Za-z0-9][A-Za-z0-9:/._-]{0,255}$/,
@@ -22,7 +22,16 @@ export function serializePublicStatus(input) {
   if (
     !["setup", "bootstrap", "audit", "transport", "cleanup", "test"].includes(stage) ||
     !["ok", "failed", "cancelled"].includes(outcome) ||
-    !["none", "refused", "unavailable", "timeout", "capacity", "renewal"].includes(reason) ||
+    ![
+      "none",
+      "refused",
+      "unavailable",
+      "timeout",
+      "capacity",
+      "renewal",
+      "expiry",
+      "deadline",
+    ].includes(reason) ||
     !Number.isSafeInteger(count) ||
     count < 0 ||
     count > 1000000000

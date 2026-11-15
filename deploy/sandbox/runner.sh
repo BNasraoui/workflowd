@@ -244,16 +244,19 @@ if mode == "audit":
 else:
     mode_file = root / "execution-mode"
     if mode_file.exists() and mode_file.read_text() == "actions-native":
-        # Local process/absolute-deadline hold, never an authorization heartbeat.
+        # The hold lasts while the relay holds the session, up to the deadline of the run. Each end
+        # is a failure: 3 a failed renewal, 4 the expiry of the token, 5 the deadline, 6 a relay
+        # that ended with no reason.
         pid = int((root / "relay.pid").read_text())
         deadline = int((root / "native-deadline").read_text()) / 1000
-        while time.time() < deadline and not (root / "finished").exists():
+        while time.time() < deadline:
             try: os.kill(pid, 0)
             except ProcessLookupError: break
             time.sleep(1)
-        # The relay names a fixed reason when it ended the session on a failed renewal.
         ended = root / "relay-ended"
-        sys.exit(3 if ended.exists() and ended.read_text() == "renewal\n" else 0)
+        reason = ended.read_text() if ended.exists() else ""
+        codes = {"renewal\n": 3, "expiry\n": 4, "deadline\n": 5}
+        sys.exit(codes.get(reason, 5 if time.time() >= deadline else 6))
     heartbeat = root / "heartbeat"
     last_heartbeat = int(time.time())
     while True:

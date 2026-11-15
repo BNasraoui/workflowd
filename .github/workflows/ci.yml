@@ -435,11 +435,9 @@ jobs:
           export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
           tools="$RUNNER_TEMP/capability-tools/bin"
           export WORKFLOWD_FIXTURE_NOSCOPE="$tools/noscope"
-          export WORKFLOWD_FIXTURE_PINNED_PUBLISHER=1
-          # Raw diagnostics remain ephemeral and owner-only; no artifact upload, even on failure.
-          node deploy/sandbox/public-output.mjs test -- python3 scripts/evidence/check-isolated-fixture.py
-          node deploy/sandbox/public-output.mjs test -- python3 scripts/evidence/isolated-fixture.py \
-            bun scripts/check-capability-security.ts --suite "$SUITE" --upstream fixture --evidence /tmp/opencode/evidence/security
+          # Each prints the number of cases that ran and the name of each case that failed.
+          python3 scripts/evidence/check-isolated-fixture.py
+          python3 scripts/evidence/isolated-fixture.py bun scripts/check-capability-security.ts --suite "$SUITE"
 
   aislop:
     name: AI slop (advisory)
