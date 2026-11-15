@@ -129,6 +129,7 @@ test("real Git clone/fetch, repository and write fences", async () => {
                 expiresAt: grant.expiresAt,
                 renewAt: grant.renewAt,
                 deadline: Date.now() + 3600000,
+                providerId: "anthropic",
                 gateway: `https://127.0.0.1:${portOf(terminator)}`,
               }),
             ]),
