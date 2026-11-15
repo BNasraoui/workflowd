@@ -1,6 +1,7 @@
-import { expect, test } from "bun:test"
+import { expect, spyOn, test } from "bun:test"
 import { mkdtemp, rm, writeFile } from "node:fs/promises"
 import { join } from "node:path"
+import { Server } from "node:http"
 import { tmpdir } from "node:os"
 import { generateKeyPairSync } from "node:crypto"
 import { Effect, Option } from "effect"
@@ -182,7 +183,13 @@ test("the gateway config bounds its streams: an idle limit of 1 ms to the listen
   expect(load({ streamIdleMs: 1 }).streamIdleMs).toBe(1)
   expect(load({ streamIdleMs: 120000 }).streamIdleMs).toBe(120000)
   // A socket idle this long is destroyed under a silent stream, so the bound is this timeout.
-  expect(capabilityHttpServer(async () => new Response(null)).server.timeout).toBe(120000)
+  const socketTimeout = spyOn(Server.prototype, "setTimeout")
+  try {
+    capabilityHttpServer(async () => new Response(null))
+    expect(socketTimeout.mock.calls.map(([ms]) => ms)).toEqual([120000])
+  } finally {
+    socketTimeout.mockRestore()
+  }
   expect(load({}).streamIdleMs).toBeUndefined()
 })
 
