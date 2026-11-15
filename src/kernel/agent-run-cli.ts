@@ -32,9 +32,7 @@ type RefusalReason =
   | "unsupported_thinking"
   | "model_not_available"
 type Custody = ReturnType<typeof makeAgentRunCustody>
-export type AgentRunCliStore = Partial<
-  Pick<AgentRunStorePort, "recordResolvedSelection" | "read">
-> &
+export type AgentRunCliStore = Partial<Pick<AgentRunStorePort, "recordResolvedSelection">> &
   Pick<
     AgentRunStorePort,
     | "claimSpawn"
@@ -224,21 +222,20 @@ const observeFirstToken = (
         }
         if (step.type === "thread.started") {
           threadId = step.threadId
-          nativeModel = step.model ?? nativeModel
-        } else if (step.type === "agent_message" || step.type === "provider.response") {
-          firstMessage ??= step.type === "agent_message" ? step.text : ""
-          if (step.type === "provider.response") nativeModel = step.model
+          nativeModel = step.model
+        } else if (step.type === "agent_message") {
+          firstMessage ??= step.text
+          if (threadId !== null)
+            return {
+              outcome: "generating" as const,
+              threadId,
+              firstMessage,
+              ...(nativeModel === undefined ? {} : { model: nativeModel }),
+            }
         } else if (step.type === "error" || step.type === "turn.failed") {
           errors.push(step.message)
           provider = providerFailure(step.message, step.codexErrorInfo)
         }
-        if (threadId !== null && firstMessage !== null)
-          return {
-            outcome: "generating" as const,
-            threadId,
-            firstMessage,
-            ...(nativeModel === undefined ? {} : { model: nativeModel }),
-          }
       }
     })
     const timedOut: Effect.Effect<FirstToken> = Effect.as(Effect.sleep(timeoutMs), {
@@ -311,9 +308,9 @@ const observeFirstToken = (
   })
 
 export const makeAgentRunCliDispatcher = (dependencies: {
-  /** Native CLIs share durable process custody, verification, and recovery. */
+  /** Claude and Codex share durable process custody, verification, and recovery. */
   readonly executor: {
-    readonly kind: "codex" | "claude" | "opencode"
+    readonly kind: "codex" | "claude"
     readonly sessionCustodyId: (nativeSessionId: string) => string
   }
   readonly cli: CliPort
@@ -360,23 +357,15 @@ export const makeAgentRunCliDispatcher = (dependencies: {
   }
 
   const recordModelEvidence = (run: AgentRunRecord, model: string | undefined, now: Date) =>
-    Effect.gen(function* () {
-      if (model === undefined || store.recordResolvedSelection === undefined) return
-      // The stored selection may have changed since dispatch read the run.
-      const current = store.read === undefined ? run : yield* store.read(run.runId)
-      if (current?.resolvedSelection == null) return
-      yield* store.recordResolvedSelection({
-        runId: run.runId,
-        now,
-        selection: {
-          ...current.resolvedSelection,
-          model,
-          evidence: current.resolvedSelection.executor.endsWith(":actions")
-            ? "provider-response"
-            : "runtime",
-        },
-      })
-    })
+    model === undefined ||
+    run.resolvedSelection == null ||
+    store.recordResolvedSelection === undefined
+      ? Effect.void
+      : store.recordResolvedSelection({
+          runId: run.runId,
+          now,
+          selection: { ...run.resolvedSelection, model, evidence: "runtime" },
+        })
 
   type Observed = {
     readonly iterator: AsyncIterator<CliEvent>
@@ -466,7 +455,6 @@ export const makeAgentRunCliDispatcher = (dependencies: {
       let lineDropped: number | null = null
       let stalled = false
       let exit: Exit.Exit<CliExit, WorkspaceError>
-      let progressFailure: unknown
       const budget = input.budget ?? outage()
       const observationLost = (detail: string) => {
         const lostDiagnostic = `${kind}_observation_lost: ${detail}`
@@ -519,19 +507,6 @@ export const makeAgentRunCliDispatcher = (dependencies: {
             // The dropped line may have been the final message; an older one is not.
             finalMessage = null
             lineDropped = event.bytes
-          } else if (event.type === "provider.response") {
-            outputTokens = event.outputTokens
-            const progress = yield* store
-              .recordProgress({ runId: input.runId, outputTokens, now: new Date() })
-              .pipe(
-                Effect.catchTag("AgentRunStoreConflictError", () => Effect.void),
-                Effect.result,
-              )
-            if (progress._tag === "Failure") {
-              progressFailure = progress.failure
-              turnFailed = "Native progress persistence failed"
-              break
-            }
           } else if (event.type === "turn.completed") outputTokens = event.outputTokens
           else if (
             event.type === "turn.failed" ||
@@ -541,11 +516,9 @@ export const makeAgentRunCliDispatcher = (dependencies: {
             codexErrorInfo = event.codexErrorInfo
           }
         }
-        if (stalled || progressFailure !== undefined) yield* observed.cancel.pipe(Effect.ignore)
+        if (stalled) yield* observed.cancel.pipe(Effect.ignore)
         exit = yield* Effect.exit(Fiber.join(observed.exited))
-        // A progress write failure is final: the run was cancelled, not lost.
-        if (!stalled && progressFailure === undefined && lost === null && Exit.isFailure(exit))
-          lost = { cause: exit.cause }
+        if (!stalled && lost === null && Exit.isFailure(exit)) lost = { cause: exit.cause }
         if (lost === null) break
         // Known evidence (custody or identity changed, a record that fails to
         // decode) is final; any other lost observation is re-attached.
@@ -569,7 +542,6 @@ export const makeAgentRunCliDispatcher = (dependencies: {
         codexErrorInfo = undefined
         lineDropped = null
       }
-      if (!stalled && Exit.isSuccess(exit) && exit.value.paused) return
       finalMessage = providerFailure(turnFailed, codexErrorInfo)?.message ?? finalMessage
       if (input.sandboxRun !== undefined) {
         yield* finishSandbox(input.sandboxRun, {
@@ -596,7 +568,7 @@ export const makeAgentRunCliDispatcher = (dependencies: {
                 lineDropped,
               ),
               exitCode: Exit.isSuccess(exit) ? exit.value.exitCode : undefined,
-              cause: progressFailure ?? (Exit.isFailure(exit) ? exit.cause : undefined),
+              cause: Exit.isFailure(exit) ? exit.cause : undefined,
             },
             input.sandboxRun.createdAt.getTime(),
           ).message,
@@ -691,7 +663,7 @@ export const makeAgentRunCliDispatcher = (dependencies: {
                   ? run.prompt
                   : yield* dependencies.workerPrompt(run),
               model: run.resolvedSelection?.model ?? route.modelID,
-              ...(attachment?.sandboxBindingFile === undefined
+              ...(attachment === undefined
                 ? {}
                 : { sandboxBindingFile: attachment.sandboxBindingFile }),
               ...(run.resolvedSelection?.provider == null
@@ -746,11 +718,7 @@ export const makeAgentRunCliDispatcher = (dependencies: {
           }
           const threadId = observed.result.threadId
           yield* recordModelEvidence(run, observed.result.model, now)
-          const endpointRun = store.read === undefined ? run : yield* store.read(run.runId)
           yield* ensureSession({
-            ...(endpointRun?.resolvedSelection?.executor.endsWith(":actions")
-              ? { actionsHost: endpointRun.resolvedSelection.host }
-              : {}),
             nativeSessionId: threadId,
             resourceId,
             createdAt: run.createdAt,

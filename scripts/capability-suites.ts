@@ -24,10 +24,8 @@ export const publicationCases = [
 export const adapterCases = [
   ["P3-A", "test/sandbox/public-output.test.ts"],
   ["P3-B", "test/sandbox/bootstrap.e2e.launcher.test.ts"],
-  ["P3-C3", "test/execution/config.test.ts"],
   ["P3-D1", "test/capability-gateway/transport-security.test.ts"],
   ["P3-D2", "test/sandbox/capability-relay.test.ts"],
-  ["P3-G5", "test/kernel/actions-session-custody.test.ts"],
 ] as const
 
 export const finalCases = [

@@ -7,13 +7,11 @@ import { CapabilityRefused, capabilityDigest, makeCapabilityStore } from "./stor
 import { githubJobKeys, verifyJobProof } from "../sandbox/bootstrap"
 import { runLifetime } from "../store/run-lifetime"
 import { ownedPromise } from "./owned"
-import type { CapabilityGatewayConfig } from "../sandbox/config"
 import { gitReadRequest, type GitUpstream } from "./git"
 import type { makeTokenBroker } from "../worker-identity/broker"
 
 export interface GatewayConfiguration {
   readonly gitRead?: boolean
-  readonly native?: CapabilityGatewayConfig["native"]
   readonly noscope: NoscopeConfiguration
   readonly providerId: string
   readonly credentialRole: string
@@ -318,8 +316,6 @@ export const makeCapabilityGateway = (
         const prefix = `/capabilities/v1/providers/${config.providerId}`
         const isGit = config.gitRead === true && target.startsWith("/capabilities/v1/git/")
         if (!isGit && !target.startsWith(`${prefix}/`)) return denied()
-        // A native provider protocol serves a harness invocation, and no invocation exists here.
-        if (config.native) return denied()
         return yield* Effect.acquireUseRelease(
           authority.withPermit(
             Effect.gen(function* () {
