@@ -1,8 +1,10 @@
 # Template only: install owner-only (0600) for the gateway's uid, with the image's paths.
 # Custody serves the gateway's own provider login from its 0700 directory, renewed on demand.
-# The directory is the one of `login.directory` in the gateway's configuration; {role} is its
-# `credentialRole`, a provider of custody's table. No value appears in argv or configuration.
+# Write the value of `login.directory` of the gateway's configuration in place of
+# LOGIN_DIRECTORY: the gateway refuses to start when this command names another directory.
+# {role} is its `credentialRole`, a provider of custody's table. No value appears in argv or
+# configuration.
 contract_version = 1
 
 [commands]
-mint = "/bin/bun /app/src/capability-gateway/custody.ts access /var/lib/workflowd-gateway/login {role} {ttl}"
+mint = "/bin/bun /app/src/capability-gateway/custody.ts access LOGIN_DIRECTORY {role} {ttl}"

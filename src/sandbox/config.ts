@@ -48,7 +48,8 @@ export const CapabilityGatewayConfig = Schema.Struct({
   daemon: Schema.Struct({ uid: Id, gid: Id }),
   /**
    * The directory of the provider login that custody holds for `credentialRole`; the gateway's
-   * uid owns it, mode 0700. The noscope provider `provider-access` names the same directory.
+   * uid owns it, mode 0700. It is the one source of the directory: the gateway refuses to start
+   * when the noscope provider `provider-access` names another.
    */
   login: Schema.optionalKey(Schema.Struct({ directory: AbsolutePath })),
   providerId: Schema.NonEmptyString,

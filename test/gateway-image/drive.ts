@@ -99,7 +99,7 @@ async function gatewayIds(name: string) {
       name,
       "/bin/bun",
       "-e",
-      'process.stdout.write(require("node:fs").readFileSync("/proc/1/status", "utf8"))',
+      'const fs = require("node:fs"); process.stdout.write(fs.readFileSync("/proc/1/status", "utf8") + fs.readFileSync("/proc/1/limits", "utf8"))',
     ],
     { stdout: "pipe", stderr: "inherit" },
   )
@@ -107,7 +107,13 @@ async function gatewayIds(name: string) {
   if ((await read.exited) !== 0) throw new Error(`cannot read the gateway's ids in ${name}`)
   const field = (key: string) =>
     new RegExp(`^${key}:(.*)$`, "m").exec(status)?.[1]?.trim().split(/\s+/) ?? []
-  return { uid: field("Uid"), gid: field("Gid"), groups: field("Groups") }
+  const core = /^Max core file size\s+(\S+)\s+(\S+)/m.exec(status)
+  return {
+    uid: field("Uid"),
+    gid: field("Gid"),
+    groups: field("Groups"),
+    core: [core?.[1], core?.[2]],
+  }
 }
 
 /**
@@ -177,6 +183,8 @@ async function imageGateway(
       ids.groups.includes(group),
       `the gateway lacks the runner's group: ${ids.groups.join(" ")}`,
     )
+    // The gateway writes no core file, nor does a process it starts: they inherit the limit.
+    assert.deepEqual(ids.core, ["0", "0"], "the gateway's core file limit is not 0")
   } catch (error) {
     await stop()
     throw error
@@ -246,6 +254,7 @@ async function imageCommand(
   custody: object,
   args: ReadonlyArray<string>,
   input?: string,
+  user?: string,
 ) {
   const child = Bun.spawn(
     [
@@ -256,6 +265,7 @@ async function imageCommand(
       "--network",
       "host",
       ...containerFlags(f),
+      ...(user === undefined ? [] : ["--user", user]),
       "--env",
       "WORKFLOWD_CAPABILITY_GATEWAY",
       image,
@@ -369,6 +379,31 @@ try {
     next.refresh,
   ]
 
+  // The noscope provider provider-access is custody, with the image's Bun and source.
+  await writeCustodyProvider(
+    f.root,
+    loginDirectory(f),
+    oauth.url,
+    "/bin/bun",
+    "/app/src/capability-gateway/custody.ts",
+  )
+  await chmod(join(f.root, "noscope/providers/provider-access.toml"), 0o640)
+
+  // import-login as root is refused, and makes no directory.
+  const rootImport = await imageCommand(
+    f,
+    custody,
+    ["import-login", "claude"],
+    JSON.stringify(old),
+    "0",
+  )
+  assert.deepEqual(rootImport, {
+    code: 1,
+    stdout: "",
+    stderr: "import-login refused: import-login runs as the gateway's user, not as root\n",
+  })
+  await assert.rejects(readdir(loginDirectory(f)), "import-login as root made the directory")
+
   // A login directory of another owner is refused, by import-login and by the gateway.
   await mkdir(loginDirectory(f), { mode: 0o700 })
   const runnerUid = process.getuid!()
@@ -415,15 +450,6 @@ process.stdout.write(JSON.stringify([of(${JSON.stringify(loginDirectory(f))}), o
     [Number(imageUser), "600"],
   ])
 
-  // The noscope provider provider-access is custody, with the image's Bun and source.
-  await writeCustodyProvider(
-    f.root,
-    loginDirectory(f),
-    oauth.url,
-    "/bin/bun",
-    "/app/src/capability-gateway/custody.ts",
-  )
-  await chmod(join(f.root, "noscope/providers/provider-access.toml"), 0o640)
   const upstreamAt: number[] = []
   f.onUpstream(async () => {
     upstreamAt.push(performance.now())
@@ -476,7 +502,14 @@ process.stdout.write(JSON.stringify([of(${JSON.stringify(loginDirectory(f))}), o
   )
   outputs.push(wideStart.stdout, wideStart.stderr)
 
-  // No value in an output of the image's processes, an answer, or the gateway's store.
+  // No value in an output of the image's processes, an answer, or the gateway's store. First,
+  // a value put there on purpose: an output of import-login, and a store file.
+  const plantedOutput = syntheticValue("planted")
+  const plantedImport = await imageCommand(f, custody, ["import-login", plantedOutput], "")
+  assert.equal(plantedImport.code, 1)
+  outputs.push(plantedImport.stdout, plantedImport.stderr)
+  const plantedStore = syntheticValue("planted")
+  await writeFile(join(f.root, "planted.db"), plantedStore, { mode: 0o644 })
   const store = await asImageUser(
     f,
     `const fs = require("node:fs"); const root = ${JSON.stringify(f.root)}
@@ -485,13 +518,14 @@ process.stdout.write(Buffer.concat(fs.readdirSync(root).filter((n) => /[.]db(-wa
   assert.equal(store.code, 0, store.stderr)
   const storeText = Buffer.from(store.stdout, "base64").toString("latin1")
   assert.ok(storeText.length > 0, "the store was not read")
-  const found = values
-    .flatMap((value) => [
-      value,
-      Buffer.from(value).toString("base64"),
-      Buffer.from(value).toString("base64url"),
-    ])
-    .filter((form) => outputs.join("").includes(form) || storeText.includes(form))
+  const search = (value: string) =>
+    [value, Buffer.from(value).toString("base64"), Buffer.from(value).toString("base64url")].filter(
+      (form) => outputs.join("").includes(form) || storeText.includes(form),
+    )
+  // The search finds a value put on purpose in an output and in the store files.
+  assert.deepEqual(search(plantedOutput), [plantedOutput], "the search missed an output value")
+  assert.deepEqual(search(plantedStore), [plantedStore], "the search missed a store value")
+  const found = values.flatMap(search)
   assert.deepEqual(found, [], "a login value left custody")
   console.log(
     `gateway image: custody refused a foreign owner and mode 0750, imported a login, and renewed it ${oauth.requests().length} time across two starts`,

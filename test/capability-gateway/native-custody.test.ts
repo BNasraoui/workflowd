@@ -8,6 +8,7 @@ import {
   readdir,
   rename,
   rm,
+  stat,
   symlink,
   writeFile,
 } from "node:fs/promises"
@@ -17,18 +18,15 @@ import { Schema } from "effect"
 import {
   checkLogin,
   CustodyRefused,
-  CustodyUnavailable,
   custodyCommand,
-  custodyFailure,
-  LoginImportRequired,
   loginFault,
-  tokenUrl,
 } from "../../src/capability-gateway/custody"
 import { importLoginCommand } from "../../src/capability-gateway-server"
 import {
   claudeLogin,
   importLogin,
   oauthFixture,
+  sentRefresh,
   storedAccess,
   syntheticValue,
   type OAuthFixture,
@@ -160,66 +158,66 @@ test("a stop of import-login at any point of its write leaves the old login or t
   })
 }, 120000)
 
-test("a stop after the answer of the OAuth server and before the write keeps the old login and asks for a new import", async () => {
+test("a stop after the answer of the OAuth server and before the write keeps the old login, and the next call sends the same refresh value once more", async () => {
   await withLogin(async (root, oauth, env) => {
     const old = claudeLogin(syntheticValue("access"), syntheticValue("refresh"), Date.now() - 1000)
     expect((await importLogin(env, JSON.stringify(old))).code).toBe(0)
     const child = access(root, oauth)
-    oauth.mode("cut", () => child.kill("SIGKILL"))
+    oauth.mode("cut", { cut: () => child.kill("SIGKILL") })
     const stopped = await finished(child)
     expect(stopped.code).not.toBe(0)
     expect(stopped.stdout).toBe("")
     expect(oauth.requests()).toHaveLength(1)
     expect(await stored(root)).toBe(old.claudeAiOauth.accessToken)
 
-    // The OAuth server may have taken the old refresh value: it is never sent again.
     oauth.mode("renew")
     const again = await finished(access(root, oauth))
-    expect(again).toMatchObject({ code: 1, stdout: "" })
-    expect(again.stderr).toBe(
-      "custody: the claude login needs a new import: a renewal stopped before its answer was stored\n",
-    )
-    expect(oauth.requests()).toHaveLength(1)
-
-    // A new import ends that state.
-    const fresh = claudeLogin(
-      syntheticValue("access"),
-      syntheticValue("refresh"),
-      Date.now() + 3600000,
-    )
-    expect((await importLogin(env, JSON.stringify(fresh))).code).toBe(0)
-    const served = await finished(access(root, oauth))
-    expect(served.code).toBe(0)
-    expect(JSON.parse(served.stdout).token).toBe(fresh.claudeAiOauth.accessToken)
-    expect(oauth.requests()).toHaveLength(1)
+    expect(again.code).toBe(0)
+    expect(JSON.parse(again.stdout).token).toBe(oauth.next().access)
+    expect(oauth.requests().map(sentRefresh)).toEqual([
+      old.claudeAiOauth.refreshToken,
+      old.claudeAiOauth.refreshToken,
+    ])
+    expect(await stored(root)).toBe(oauth.next().access)
+    expect((await readdir(join(root, "login"))).sort()).toEqual(["claude.json", "claude.lock"])
   })
 }, 30000)
 
-test("an OAuth server that refuses the connection is asked again on the next call", async () => {
+test("an OAuth server that refuses the connection leaves the login as it was, and is asked again after the first wait", async () => {
   await withLogin(async (root, oauth, env) => {
     const old = claudeLogin(syntheticValue("access"), syntheticValue("refresh"), Date.now() - 1000)
     expect((await importLogin(env, JSON.stringify(old))).code).toBe(0)
     const closed = oauthFixture()
     const url = closed.url
     await closed.stop()
-    const refused = await finished(
-      Bun.spawn(
-        [
-          process.execPath,
-          resolve("src/capability-gateway/custody.ts"),
-          "access",
-          join(root, "login"),
-          "--token-url",
-          url,
-          "claude",
-          "3600",
-        ],
-        { env: { PATH: "/usr/bin:/bin" }, stdout: "pipe", stderr: "pipe" },
-      ),
-    )
+    const custody = (to: string) =>
+      finished(
+        Bun.spawn(
+          [
+            process.execPath,
+            resolve("src/capability-gateway/custody.ts"),
+            "access",
+            join(root, "login"),
+            "--token-url",
+            to,
+            "claude",
+            "3600",
+          ],
+          { env: { PATH: "/usr/bin:/bin" }, stdout: "pipe", stderr: "pipe" },
+        ),
+      )
+    const refused = await custody(url)
+    const refusedAt = Date.now()
     expect(refused).toMatchObject({ code: 1, stdout: "" })
-    expect(refused.stderr).toBe("custody: the OAuth server of claude is not reachable\n")
-    const renewed = await finished(access(root, oauth))
+    expect(refused.stderr).toStartWith(
+      "custody: the OAuth server of claude gave no answer that custody reads; no request before ",
+    )
+    expect(await stored(root)).toBe(old.claudeAiOauth.accessToken)
+    const waiting = await custody(oauth.url)
+    expect(waiting.stderr).toStartWith("custody: the claude login waits to renew until ")
+    expect(oauth.requests()).toHaveLength(0)
+    await Bun.sleep(Math.max(0, refusedAt + 5100 - Date.now()))
+    const renewed = await custody(oauth.url)
     expect(renewed.code).toBe(0)
     expect(JSON.parse(renewed.stdout).token).toBe(oauth.next().access)
     expect(oauth.requests()).toHaveLength(1)
@@ -255,46 +253,53 @@ test("the custody command refuses a token URL that is plain HTTP off loopback, a
   })
 }, 30000)
 
-test("the provider-access template runs custody's access command from the image", async () => {
+test("the provider-access template runs custody's access command from the image, on the login directory of the configuration", async () => {
   const template = await readFile(resolve("deploy/noscope/provider-access.toml"), "utf8")
   const mint = /^mint = "(.*)"$/m.exec(template)?.[1]?.split(" ")
   expect(mint).toEqual([
     "/bin/bun",
     "/app/src/capability-gateway/custody.ts",
     "access",
-    "/var/lib/workflowd-gateway/login",
+    "LOGIN_DIRECTORY",
     "{role}",
     "{ttl}",
   ])
 })
 
-// The same custody in this process, so that its code counts toward coverage.
+// The command surfaces of custody in this process (`importLoginCommand` of the gateway's entry,
+// `custodyCommand` that noscope's provider runs, and `checkLogin` and `loginFault` that the
+// gateway calls), so that their code counts toward coverage: a process's run does not.
 
-const chunks = (text: string) =>
-  (async function* () {
-    yield Buffer.from(text)
-  })()
+/** A reader of standard input that holds `text`, and records the limit it was asked for. */
+const input =
+  (text: string, asked: number[] = []) =>
+  async (limit: number) => {
+    asked.push(limit)
+    return Buffer.from(text).subarray(0, limit)
+  }
 
-test("in this process, import-login imports, replaces and refuses as its process does", async () => {
+test("in this process, import-login imports, replaces and refuses as its process does, and reads at most 16385 bytes", async () => {
   await withLogin(async (root, _oauth, env) => {
     const login = claudeLogin(syntheticValue("access"), syntheticValue("refresh"), Date.now())
-    const run = (args: ReadonlyArray<string>, input: string, with_ = env) =>
-      importLoginCommand(with_, args, chunks(input))
+    const asked: number[] = []
+    const run = (args: ReadonlyArray<string>, text: string, with_ = env) =>
+      importLoginCommand(with_, args, input(text, asked))
     expect(await run(["claude"], JSON.stringify(login))).toEqual({
       code: 0,
       output: "imported the claude login\n",
     })
+    expect(asked).toEqual([16385])
     expect(await run(["claude"], JSON.stringify(login))).toEqual({
       code: 0,
       output: "replaced the claude login\n",
     })
     const refused = async (
       args: ReadonlyArray<string>,
-      input: string,
+      text: string,
       reason: string,
       with_ = env,
     ) =>
-      expect(await run(args, input, with_)).toEqual({
+      expect(await run(args, text, with_)).toEqual({
         code: 1,
         error: `import-login refused: ${reason}\n`,
       })
@@ -311,6 +316,10 @@ test("in this process, import-login imports, replaces and refuses as its process
     const config = Schema.decodeUnknownSync(Schema.Record(Schema.String, Schema.Unknown))(
       JSON.parse(env.WORKFLOWD_CAPABILITY_GATEWAY ?? "{}"),
     )
+    const withDirectory = (directory: string) => ({
+      ...env,
+      WORKFLOWD_CAPABILITY_GATEWAY: JSON.stringify({ ...config, login: { directory } }),
+    })
     await refused(["claude"], JSON.stringify(login), "the gateway's configuration names no login", {
       ...env,
       WORKFLOWD_CAPABILITY_GATEWAY: JSON.stringify({ ...config, login: undefined }),
@@ -319,30 +328,55 @@ test("in this process, import-login imports, replaces and refuses as its process
       ...env,
       WORKFLOWD_CAPABILITY_GATEWAY: "{",
     })
+    // A new directory is 0700, made under the user's own parent.
+    expect(
+      (await run(["claude"], JSON.stringify(login), withDirectory(join(root, "fresh")))).code,
+    ).toBe(0)
+    expect(((await stat(join(root, "fresh"))).mode & 0o777).toString(8)).toBe("700")
+    await refused(
+      ["claude"],
+      JSON.stringify(login),
+      `the login was not stored`,
+      withDirectory(join(root, "absent", "login")),
+    )
     await chmod(join(root, "login"), 0o755)
     await refused(
       ["claude"],
       JSON.stringify(login),
       `custody refused ${join(root, "login")}: mode 0755, custody requires 0700`,
     )
+    await rm(join(root, "login"), { recursive: true })
+    await symlink(join(root, "fresh"), join(root, "login"))
+    await refused(
+      ["claude"],
+      JSON.stringify(login),
+      `custody refused ${join(root, "login")}: not a directory`,
+    )
   })
 })
 
-test("in this process, custody renews, refuses, waits out a busy server and fences a stopped renewal", async () => {
+test("in this process, custody renews, refuses only invalid_grant, waits between tries, recovers a stopped renewal and keeps a narrowed login", async () => {
   await withLogin(async (root, oauth, env) => {
     const directory = join(root, "login")
+    const statePath = join(directory, "claude.state")
     const expired = () =>
       claudeLogin(syntheticValue("access"), syntheticValue("refresh"), Date.now() - 1000)
     const load = async (login: object) =>
-      expect((await importLoginCommand(env, ["claude"], chunks(JSON.stringify(login)))).code).toBe(
-        0,
-      )
+      expect((await importLoginCommand(env, ["claude"], input(JSON.stringify(login)))).code).toBe(0)
     const command = (url = oauth.url) =>
       custodyCommand(["access", directory, "--token-url", url, "claude", "60"])
+    /** A later try: the wait of the last failed try is over. */
+    const waited = async () => {
+      const state = JSON.parse(await readFile(statePath, "utf8"))
+      await writeFile(statePath, JSON.stringify({ ...state, retryAt: 0 }), { mode: 0o600 })
+    }
 
     // No login yet.
     await expect(command()).rejects.toThrow(`custody refused ${directory}: no login imported`)
-    expect(await loginFault(directory, "claude")).toBeUndefined()
+    expect(await loginFault(directory, "claude")).toBe(
+      `custody refused ${directory}: no login imported`,
+    )
+    await checkLogin(directory, "claude")
     await mkdir(directory, { mode: 0o700 })
     await expect(command()).rejects.toThrow(
       `custody refused ${join(directory, "claude.json")}: no login imported`,
@@ -355,53 +389,103 @@ test("in this process, custody renews, refuses, waits out a busy server and fenc
     expect(Date.parse(renewed.expires_at)).toBeLessThanOrEqual(Date.now() + 60000)
     expect((await command()).token).toBe(oauth.next().access)
     expect(oauth.requests()).toHaveLength(1)
+    expect(await loginFault(directory, "claude")).toBeUndefined()
 
-    // A busy server leaves the refresh value as it was; the next call asks again.
+    // A busy server, a 400 that is not invalid_grant, and an answer that does not parse each
+    // leave the login and wait: 5 s, then 10, 20 and 40.
     await load(expired())
-    oauth.mode("busy")
-    await expect(command()).rejects.toThrow("the OAuth server of claude answered 503")
+    const waits: number[] = []
+    for (const mode of ["busy", "invalid", "garbled", "busy"] as const) {
+      oauth.mode(mode)
+      const before = Date.now()
+      await expect(command()).rejects.toThrow("no request before")
+      const state = JSON.parse(await readFile(statePath, "utf8"))
+      waits.push(Math.round((state.retryAt - before) / 1000))
+      await expect(command()).rejects.toThrow("the claude login waits to renew until")
+      expect(await loginFault(directory, "claude")).toBe(
+        "custody: the claude login was not renewed; custody waits before it asks the OAuth server again",
+      )
+      await waited()
+    }
+    expect(waits).toEqual([5, 10, 20, 40])
+    // A Retry-After past the cap waits the cap, 300 s; a renewal clears the wait.
+    oauth.mode("limited", { retryAfter: 100000 })
+    const before = Date.now()
+    await expect(command()).rejects.toThrow("answered 429")
+    expect(
+      Math.round((JSON.parse(await readFile(statePath, "utf8")).retryAt - before) / 1000),
+    ).toBe(300)
+    await waited()
     oauth.mode("renew")
     expect((await command()).token).toBe(oauth.next().access)
-    expect(oauth.requests()).toHaveLength(3)
-
-    // An answer that does not parse may hide a renewal: a new import is required.
-    await load(expired())
-    oauth.mode("garbled")
-    await expect(command()).rejects.toThrow(LoginImportRequired)
-    await expect(command()).rejects.toThrow(
-      "the claude login needs a new import: a renewal stopped before its answer was stored",
-    )
-    expect(oauth.requests()).toHaveLength(4)
+    expect(await readdir(directory)).not.toContain("claude.state")
 
     // A refusal is final until a new import.
     await load(expired())
     oauth.mode("refuse")
-    await expect(command()).rejects.toThrow("the OAuth server refused its renewal")
-    await expect(command()).rejects.toThrow("the OAuth server refused its renewal")
-    expect(oauth.requests()).toHaveLength(5)
+    await expect(command()).rejects.toThrow("the OAuth server refused its renewal value")
+    const requests = oauth.requests().length
+    await expect(command()).rejects.toThrow("the OAuth server refused its renewal value")
+    expect(oauth.requests()).toHaveLength(requests)
     expect(await loginFault(directory, "claude")).toBe(
-      "custody: the claude login needs a new import: the OAuth server refused its renewal",
+      "custody: the claude login needs a new import: the OAuth server refused its renewal value",
     )
 
-    // A renewal that a stopped process left behind is not sent again.
-    await load(expired())
-    await writeFile(join(directory, "claude.state"), JSON.stringify({ state: "renewing" }), {
+    // A renewal that a stopped process left behind is sent again, with the same refresh value.
+    const left = expired()
+    await load(left)
+    await writeFile(statePath, JSON.stringify({ state: "renewing", failures: 0, retryAt: 0 }), {
       mode: 0o600,
     })
-    expect(await loginFault(directory, "claude")).toBeUndefined()
-    await expect(command()).rejects.toThrow("a renewal stopped before its answer was stored")
-    expect(oauth.requests()).toHaveLength(5)
-
-    // No server on the port: nothing was sent, so the next call asks again.
-    await load(expired())
-    const closed = oauthFixture()
-    const url = closed.url
-    await closed.stop()
-    await expect(command(url)).rejects.toThrow("the OAuth server of claude is not reachable")
     oauth.mode("renew")
     expect((await command()).token).toBe(oauth.next().access)
+    expect(sentRefresh(oauth.requests().at(-1))).toBe(left.claudeAiOauth.refreshToken)
+
+    // No scope in the answer keeps the scope; a narrower one is stored and refused.
+    await load(expired())
+    oauth.mode("unscoped")
+    expect((await command()).token).toBe(oauth.next().access)
+    await load(expired())
+    oauth.mode("narrow")
+    await expect(command()).rejects.toThrow(
+      "the claude login does not hold the scope user:inference",
+    )
+    expect(await stored(root)).toBe(oauth.next().access)
+    expect(await loginFault(directory, "claude")).toBe(
+      "custody: the claude login does not hold the scope user:inference",
+    )
+
+    // The production token URL and client id, with the network replaced: no request leaves.
+    await load(expired())
+    const sent: Array<{ readonly url: string; readonly body: unknown }> = []
+    const network = globalThis.fetch
+    globalThis.fetch = Object.assign(
+      async (url: string | URL | Request, init?: RequestInit) => {
+        sent.push({
+          url: url instanceof Request ? url.url : url.toString(),
+          body: JSON.parse(typeof init?.body === "string" ? init.body : "null"),
+        })
+        return Response.json({ error: "invalid_grant" }, { status: 400 })
+      },
+      { preconnect: network.preconnect },
+    )
+    try {
+      await expect(custodyCommand(["access", directory, "claude", "60"])).rejects.toThrow(
+        "refused its renewal value",
+      )
+    } finally {
+      globalThis.fetch = network
+    }
+    expect(sent.map(({ url }) => url)).toEqual(["https://platform.claude.com/v1/oauth/token"])
+    expect(Object.keys(sent[0]?.body ?? {}).sort()).toEqual([
+      "client_id",
+      "grant_type",
+      "refresh_token",
+    ])
+    expect(sent[0]?.body).toMatchObject({ client_id: "9d1c250a-e61b-44d9-88ed-5944d1962f5e" })
 
     // The faults of a path, by path and fault.
+    await load(expired())
     await chmod(join(directory, "claude.json"), 0o640)
     expect(await loginFault(directory, "claude")).toBe(
       `custody refused ${join(directory, "claude.json")}: mode 0640, custody requires 0600`,
@@ -423,9 +507,9 @@ test("in this process, custody renews, refuses, waits out a busy server and fenc
     await writeFile(join(directory, "claude.json"), "x".repeat(20000), { mode: 0o600 })
     await expect(command()).rejects.toThrow("longer than 16384 bytes")
   })
-})
+}, 30000)
 
-test("in this process, the custody command refuses what its grammar does not hold, and its failure line names no value", async () => {
+test("in this process, the custody command refuses what its grammar does not hold", async () => {
   await withLogin(async (root, oauth) => {
     const directory = join(root, "login")
     for (const args of [
@@ -439,15 +523,6 @@ test("in this process, the custody command refuses what its grammar does not hol
       ["access", directory, "--token-url", "ftp://127.0.0.1/token", "claude", "60"],
     ])
       await expect(custodyCommand(args)).rejects.toThrow(CustodyRefused)
-    expect(tokenUrl("claude")).toBe("https://platform.claude.com/v1/oauth/token")
-    expect(tokenUrl("claude", "https://example.com/token")).toBe("https://example.com/token")
-    expect(custodyFailure(new CustodyUnavailable("the claude login is busy"))).toBe(
-      "custody: the claude login is busy\n",
-    )
-    expect(custodyFailure(new LoginImportRequired("claude", "unanswered"))).toBe(
-      "custody: the claude login needs a new import: its renewal got no answer within 5 seconds\n",
-    )
-    expect(custodyFailure(new Error(syntheticValue("access")))).toBe("custody: refused\n")
     expect(oauth.requests()).toHaveLength(0)
   })
 })

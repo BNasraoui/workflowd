@@ -102,7 +102,11 @@ interface GatewayKeys {
 }
 
 /** The fixed event stream, one event and then silence, or `chunks` events `gapMs` apart. */
-type UpstreamAnswer = "events" | "stall" | { readonly chunks: number; readonly gapMs: number }
+type UpstreamAnswer =
+  | "events"
+  | "stall"
+  | { readonly chunks: number; readonly gapMs: number }
+  | { readonly text: string }
 
 /** A request that reached the model upstream: its path and query, headers and body text. */
 export interface UpstreamRequest {
@@ -164,6 +168,8 @@ try {
       })
       if (answer === "events")
         return new Response(sse, { headers: { "content-type": "text/event-stream" } })
+      if (typeof answer === "object" && "text" in answer)
+        return new Response(answer.text, { headers: { "content-type": "text/event-stream" } })
       const ends = answer !== "stall"
       const { chunks, gapMs } = answer === "stall" ? { chunks: 1, gapMs: 0 } : answer
       let timer: ReturnType<typeof setTimeout> | undefined
@@ -276,6 +282,10 @@ try {
     setTrickle: (chunks: number, gapMs: number) => {
       answer = { chunks, gapMs }
     },
+    /** The upstream answers with `text` as its whole event stream. */
+    setAnswerText: (text: string) => {
+      answer = { text }
+    },
     /** How many upstream answers the gateway cancelled before their end. */
     upstreamCancels: () => cancelled,
     /** Runs before the model upstream records and answers each request. */
@@ -310,6 +320,10 @@ export type Fixture = Awaited<ReturnType<typeof fixture>>
 export interface Gateway {
   readonly port: number
   stop(): Promise<void>
+  /** Sends SIGTERM, the stop of a service manager, and waits for the end of the process. */
+  readonly terminate?: () => Promise<void>
+  /** The id of the process. */
+  readonly pid?: number
   /** Each byte the process wrote to standard output and standard error so far. */
   readonly output?: () => string
 }
@@ -318,15 +332,17 @@ export interface Gateway {
  * The `bun -e` source of a gateway process: the server of `src/capability-gateway-server.ts`
  * (or `entry`, its path in an image), which reads its configuration from the environment, with
  * the job keys of the fixture key server at `keysUrl` and the model upstream at `upstreamUrl` in
- * place of api.anthropic.com. It prints the bound port as the process entry does.
+ * place of api.anthropic.com. It prints the bound port and ends on SIGTERM as the process entry
+ * does.
  */
 export const gatewaySource = (
   servers: { readonly keysUrl: string; readonly upstreamUrl: string },
   entry = resolve("src/capability-gateway-server.ts"),
 ) =>
   `import { serveCapabilityGateway } from ${JSON.stringify(entry)}
+import { BunRuntime } from "@effect/platform-bun"
 import { Cause, Effect } from "effect"
-Effect.runFork(serveCapabilityGateway(process.env, {
+BunRuntime.runMain(serveCapabilityGateway(process.env, {
   keys: async (signal) => (await fetch(${JSON.stringify(servers.keysUrl)}, { signal })).json(),
   upstream: (url, init) => fetch(url.replace("https://api.anthropic.com", ${JSON.stringify(servers.upstreamUrl)}), init),
 }).pipe(
@@ -334,7 +350,7 @@ Effect.runFork(serveCapabilityGateway(process.env, {
   Effect.andThen(Effect.never),
   Effect.scoped,
   Effect.tapCause((cause) => Effect.sync(() => process.stderr.write(Cause.pretty(cause) + "\\n"))),
-))`
+), { disableErrorReporting: true })`
 
 /**
  * Starts a gateway process from `argv` and `env`, in the repository root, and returns once its
@@ -386,7 +402,12 @@ export async function startGatewayProcess(
   void (async () => {
     for await (const chunk of child.stdout) text += Buffer.from(chunk).toString()
   })()
-  return { port, stop, output: () => text + errors }
+  const terminate = async () => {
+    child.kill("SIGTERM")
+    await child.exited
+    await forwarded
+  }
+  return { port, stop, terminate, pid: child.pid, output: () => text + errors }
 }
 
 /**
@@ -569,36 +590,81 @@ export interface OAuthRequest {
   readonly at: number
 }
 
+/** The refresh value that a request to the fixture OAuth server sent. */
+export const sentRefresh = (request: OAuthRequest | undefined) =>
+  Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Struct({ refresh_token: Schema.String })))(
+    request?.body ?? "{}",
+  ).refresh_token
+
+/** Claude Code's public OAuth client id, the only one the fixture OAuth server takes. */
+export const claudeClientId = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+
 /**
- * A fixture OAuth server on loopback, a real HTTP server in this process. In `renew` it answers a
- * refresh with `next` (an access value that lives an hour, and a new refresh value). In `refuse`
- * it answers 400 `invalid_grant`, in `busy` 503, and in `garbled` a body that does not parse.
- * In `silent` it never answers. In `cut` it sends the status and
- * part of the body, calls `onCut`, and never sends the rest.
+ * A fixture OAuth server on loopback, a real HTTP server in this process. It reads the request
+ * as JSON and answers 401 `invalid_client` to any client id but Claude Code's. Else, in `renew`
+ * it answers a refresh with `next` (an access value that lives an hour, and a new refresh value),
+ * with no `scope` field in `unscoped` and the scope `user:profile` alone in `narrow`. In `refuse`
+ * it answers 400 `invalid_grant`, in `invalid` 400 `invalid_request`, in `busy` 503, in `limited`
+ * 429 with `Retry-After` of `retryAfter` seconds, and in `garbled` a body that does not parse. In
+ * `silent` it never answers. In `hold` it answers as `renew` once `release` is called. In `cut`
+ * it sends the status and part of the body, calls `onCut`, and never sends the rest.
  */
 export function oauthFixture() {
-  let mode: "renew" | "refuse" | "silent" | "cut" | "busy" | "garbled" = "renew"
+  type Mode =
+    | "renew"
+    | "unscoped"
+    | "narrow"
+    | "refuse"
+    | "invalid"
+    | "silent"
+    | "hold"
+    | "cut"
+    | "busy"
+    | "limited"
+    | "garbled"
+  let mode: Mode = "renew"
+  let retryAfter = 0
   let next = { access: syntheticValue("access"), refresh: syntheticValue("refresh") }
   let onCut: (() => void) | undefined
+  let released = Promise.withResolvers<void>()
   const requests: OAuthRequest[] = []
   const server = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
     idleTimeout: 0,
     fetch: async (request) => {
-      requests.push({ body: await request.text(), at: performance.now() })
+      const text = await request.text()
+      requests.push({ body: text, at: performance.now() })
+      const clientId = (() => {
+        try {
+          const body: unknown = JSON.parse(text)
+          return typeof body === "object" && body !== null && "client_id" in body
+            ? body.client_id
+            : undefined
+        } catch {
+          return undefined
+        }
+      })()
+      if (clientId !== claudeClientId)
+        return Response.json({ error: "invalid_client" }, { status: 401 })
       if (mode === "refuse") return Response.json({ error: "invalid_grant" }, { status: 400 })
+      if (mode === "invalid") return Response.json({ error: "invalid_request" }, { status: 400 })
       if (mode === "silent") return new Promise<Response>(() => {})
       if (mode === "busy") return new Response(null, { status: 503 })
+      if (mode === "limited")
+        return new Response(null, { status: 429, headers: { "retry-after": String(retryAfter) } })
       if (mode === "garbled") return new Response("{not json")
+      if (mode === "hold") await released.promise
       const body = JSON.stringify({
         token_type: "Bearer",
         access_token: next.access,
         refresh_token: next.refresh,
         expires_in: 3600,
-        scope: "user:inference user:profile",
+        ...(mode === "unscoped"
+          ? {}
+          : { scope: mode === "narrow" ? "user:profile" : "user:inference user:profile" }),
       })
-      if (mode === "renew") return Response.json(JSON.parse(body))
+      if (mode !== "cut") return Response.json(JSON.parse(body))
       return new Response(
         new ReadableStream({
           start(controller) {
@@ -613,10 +679,17 @@ export function oauthFixture() {
   return {
     url: `http://127.0.0.1:${server.port}/v1/oauth/token`,
     requests: (): ReadonlyArray<OAuthRequest> => requests,
-    mode: (value: typeof mode, cut?: () => void) => {
+    mode: (
+      value: Mode,
+      options: { readonly cut?: () => void; readonly retryAfter?: number } = {},
+    ) => {
       mode = value
-      onCut = cut
+      onCut = options.cut
+      retryAfter = options.retryAfter ?? 0
+      if (value === "hold") released = Promise.withResolvers<void>()
     },
+    /** Each held request gets its answer. */
+    release: () => released.resolve(),
     /** The values the next renewal gives. */
     next: () => next,
     renewWith: (value: { access: string; refresh: string }) => {

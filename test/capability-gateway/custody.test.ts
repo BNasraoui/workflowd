@@ -1,6 +1,8 @@
 import { expect, test } from "bun:test"
 import { createConnection } from "node:net"
-import { chmod, readFile, readdir, stat } from "node:fs/promises"
+import { randomUUID } from "node:crypto"
+import { chmod, readFile, readdir, stat, writeFile } from "node:fs/promises"
+import { dlopen, FFIType, ptr } from "bun:ffi"
 import { join, resolve } from "node:path"
 import { Effect, Exit, Scope } from "effect"
 import { serveCapabilityGateway } from "../../src/capability-gateway-server"
@@ -13,6 +15,7 @@ import {
   importLogin,
   oauthFixture,
   proof,
+  sentRefresh,
   sse,
   startGatewayProcess,
   storedAccess,
@@ -182,6 +185,16 @@ test("import-login takes the login on standard input only, into a 0700 directory
       "the login is longer than 16384 bytes",
     )
     expect(leaked(outputs.join(""), values)).toEqual([])
+
+    // Not into a new directory whose parent belongs to another user: the gateway would refuse it.
+    const foreign = `/tmp/wfd-login-${randomUUID()}`
+    expect((await stat("/tmp")).uid).not.toBe(process.getuid!())
+    expect(await importLogin(custodyEnv(f, foreign), JSON.stringify(first))).toEqual({
+      code: 1,
+      stdout: "",
+      stderr: `import-login refused: /tmp belongs to uid ${(await stat("/tmp")).uid}: import-login runs as the gateway's user, which owns it\n`,
+    })
+    expect(await stat(foreign).catch(() => "absent")).toBe("absent")
   } finally {
     await f.close()
   }
@@ -233,6 +246,13 @@ test("the gateway refuses a login whose directory or file has a wider mode, and 
     )
     await chmod(loginFile(f), 0o600)
 
+    // The noscope provider names the login directory of the configuration, or the gateway stops.
+    await writeCustodyProvider(f.root, join(f.root, "elsewhere"), oauth.url)
+    expect(await refusedStart()).toContain(
+      `the noscope provider provider-access names ${join(f.root, "elsewhere")}, not the login directory ${loginDirectory(f)}`,
+    )
+    await writeCustodyProvider(f.root, loginDirectory(f), oauth.url)
+
     // A gateway that runs refuses to use a login whose mode widens, and names it in its log.
     const gateway = await start()
     const token = await runToken(gateway, "jti-mode")
@@ -281,9 +301,11 @@ test("two calls at one time renew once, the new login is on disk before the upst
     }
 
     expect(oauth.requests()).toHaveLength(1)
-    expect(JSON.parse(oauth.requests()[0]?.body ?? "{}")).toMatchObject({
+    // The body holds these fields and no other; the client id is Claude Code's public one.
+    expect(JSON.parse(oauth.requests()[0]?.body ?? "{}")).toEqual({
       grant_type: "refresh_token",
       refresh_token: old.claudeAiOauth.refreshToken,
+      client_id: "9d1c250a-e61b-44d9-88ed-5944d1962f5e",
     })
     // The upstream got the new value only, and the new login was on disk when it did.
     expect(f.upstreamRequests().map((request) => request.headers.authorization)).toEqual([
@@ -323,6 +345,103 @@ test("two calls at one time renew once, the new login is on disk before the upst
   })
 }, 30000)
 
+test("a call that fails for a cause of the configuration logs the cause, once for calls that repeat it", async () => {
+  await withCustody(async (f, oauth, start) => {
+    // No login key: the gateway starts, and each provider call names the missing key.
+    const keyless = await startGatewayProcess([process.execPath, "-e", gatewaySource(f)], {
+      ...f.env,
+      WORKFLOWD_CAPABILITY_GATEWAY: JSON.stringify({ ...f.config, credentialRole: "claude" }),
+    })
+    try {
+      await f.reconcile()
+      const token = await runToken(keyless, "jti-keyless")
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const call = await client(keyless.port).call(token)
+        expect(call.status).toBe(503)
+        await call.text()
+      }
+      const line = "custody: the gateway's configuration names no login directory for claude"
+      expect(keyless.output?.().split(line)).toHaveLength(2)
+    } finally {
+      await keyless.stop()
+    }
+
+    // A login key, and no login imported yet.
+    const gateway = await start()
+    const token = await runToken(gateway, "jti-nologin")
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const call = await client(gateway.port).call(token)
+      expect(call.status).toBe(503)
+      await call.text()
+    }
+    const line = `custody refused ${loginDirectory(f)}: no login imported`
+    expect(gateway.output?.().split(line)).toHaveLength(2)
+    expect(oauth.requests()).toHaveLength(0)
+  })
+}, 30000)
+
+test("each search for a value finds one put on purpose in its output: the gateway's, import-login's, a route answer and the stores", async () => {
+  await withCustody(async (f, oauth, start, outputs) => {
+    // The gateway's output: a login directory whose name holds the value, in a fault line.
+    const inLog = syntheticValue("planted")
+    const directory = join(f.root, `login-${inLog}`)
+    await writeCustodyProvider(f.root, directory, oauth.url)
+    const gateway = await startGatewayProcess(
+      [process.execPath, "-e", gatewaySource(f)],
+      custodyEnv(f, directory),
+    )
+    try {
+      await f.reconcile()
+      const token = await runToken(gateway, "jti-planted")
+      expect((await client(gateway.port).call(token)).status).toBe(503)
+      expect(leaked(gateway.output?.() ?? "", [inLog])).toEqual([inLog])
+
+      // A route answer: the upstream's answer, which the gateway passes on.
+      const inAnswer = syntheticValue("planted")
+      f.setAnswerText(`data: ${Buffer.from(inAnswer).toString("base64")}\n\n`)
+      const login = claudeLogin(
+        syntheticValue("access"),
+        syntheticValue("refresh"),
+        Date.now() + 3600000,
+      )
+      expect((await importLogin(custodyEnv(f, directory), JSON.stringify(login))).code).toBe(0)
+      const call = await client(gateway.port).call(token)
+      expect(leaked(await call.text(), [inAnswer])).toContain(
+        Buffer.from(inAnswer).toString("base64"),
+      )
+    } finally {
+      await gateway.stop()
+    }
+
+    // import-login's output: a provider name that holds the value, in base64url.
+    const inImport = syntheticValue("planted")
+    const named = await importLogin(custodyEnv(f, loginDirectory(f)), "", [
+      Buffer.from(inImport).toString("base64url"),
+    ])
+    outputs.push(named.stdout, named.stderr)
+    expect(leaked(outputs.join(""), [inImport])).toContain(
+      Buffer.from(inImport).toString("base64url"),
+    )
+
+    // The stores: a row of workflowd's store.
+    const inStore = syntheticValue("planted")
+    await f.sql((sql) =>
+      sql`CREATE TABLE planted(value TEXT)`.pipe(
+        Effect.andThen(sql`INSERT INTO planted VALUES(${inStore})`),
+      ),
+    )
+    expect(leaked(await storeBytes(f), [inStore])).toEqual([inStore])
+  })
+}, 30000)
+
+test("the gateway process writes no core file: its core limit is 0, which the processes it starts inherit", async () => {
+  await withCustody(async (_f, _oauth, start) => {
+    const gateway = await start()
+    const limits = await readFile(`/proc/${gateway.pid}/limits`, "utf8")
+    expect(/^Max core file size\s+(\S+)\s+(\S+)/m.exec(limits)?.slice(1)).toEqual(["0", "0"])
+  })
+}, 30000)
+
 test("no verb of the control socket imports or returns a login", async () => {
   await withCustody(async (f, _oauth, start) => {
     const login = claudeLogin(
@@ -339,7 +458,7 @@ test("no verb of the control socket imports or returns a login", async () => {
   })
 }, 30000)
 
-test("a refusal of the OAuth server leaves a state that asks for a new import, and is not asked again", async () => {
+test("only a refusal of the renewal value (400 invalid_grant) asks for a new import, and it is not asked again", async () => {
   await withCustody(async (f, oauth, start) => {
     const old = claudeLogin(syntheticValue("access"), syntheticValue("refresh"), Date.now() - 1000)
     await imported(f, old)
@@ -353,9 +472,10 @@ test("a refusal of the OAuth server leaves a state that asks for a new import, a
     }
     expect(oauth.requests()).toHaveLength(1)
     expect(f.upstreamRequests()).toHaveLength(0)
-    expect(gateway.output?.()).toContain(
-      "custody: the claude login needs a new import: the OAuth server refused its renewal",
-    )
+    const line =
+      "custody: the claude login needs a new import: the OAuth server refused its renewal value"
+    // A client that repeats its call does not repeat the line.
+    expect(gateway.output?.().split(line)).toHaveLength(2)
     expect(JSON.parse(await readFile(loginFile(f), "utf8"))).toEqual(old)
 
     // A new import is the way out: the next call uses it, with no request to the OAuth server.
@@ -374,7 +494,33 @@ test("a refusal of the OAuth server leaves a state that asks for a new import, a
   })
 }, 30000)
 
-test("an OAuth server that does not answer ends the call at the time limit, with no upstream call on the old value", async () => {
+/** Calls on `token` until `at` (a time of `Date.now()`): each gets 503, and none asks the OAuth server. */
+async function quietUntil(gateway: Gateway, token: string, oauth: OAuthFixture, at: number) {
+  const before = oauth.requests().length
+  let calls = 0
+  while (Date.now() < at - 400) {
+    const call = await client(gateway.port).call(token)
+    expect(call.status).toBe(503)
+    await call.text()
+    calls++
+    await Bun.sleep(250)
+  }
+  expect(calls).toBeGreaterThan(0)
+  expect(oauth.requests()).toHaveLength(before)
+  await Bun.sleep(Math.max(0, at - Date.now()) + 100)
+}
+
+/** The call works with the fixture's next access value; the OAuth server got one more request. */
+async function works(gateway: Gateway, token: string, oauth: OAuthFixture, old: string) {
+  const before = oauth.requests().length
+  const call = await client(gateway.port).call(token)
+  expect(call.status).toBe(200)
+  expect(await call.text()).toBe(sse)
+  expect(oauth.requests()).toHaveLength(before + 1)
+  expect(sentRefresh(oauth.requests().at(-1))).toBe(old)
+}
+
+test("an OAuth server that does not answer leaves the login as it was; no request goes out for 5 seconds, then one does", async () => {
   await withCustody(async (f, oauth, start) => {
     const old = claudeLogin(syntheticValue("access"), syntheticValue("refresh"), Date.now() - 1000)
     await imported(f, old)
@@ -383,22 +529,303 @@ test("an OAuth server that does not answer ends the call at the time limit, with
     const token = await runToken(gateway, "jti-silent")
     const began = performance.now()
     const call = await client(gateway.port).call(token)
+    const failedAt = Date.now()
     const took = performance.now() - began
     expect(call.status).toBe(503)
     expect(took).toBeGreaterThanOrEqual(5000)
     expect(took).toBeLessThan(9000)
     expect(oauth.requests()).toHaveLength(1)
     expect(f.upstreamRequests()).toHaveLength(0)
+    expect(JSON.parse(await readFile(loginFile(f), "utf8"))).toEqual(old)
     expect(gateway.output?.()).toContain(
-      "custody: the claude login needs a new import: its renewal got no answer within 5 seconds",
+      "custody: the claude login was not renewed; custody waits before it asks the OAuth server again",
     )
-    // The OAuth server may have taken the old refresh value: it is not sent again.
-    const again = await client(gateway.port).call(token)
-    expect(again.status).toBe(503)
+    expect(gateway.output?.()).not.toContain("needs a new import")
+    oauth.mode("renew")
+    await quietUntil(gateway, token, oauth, failedAt + 5000)
+    await works(gateway, token, oauth, old.claudeAiOauth.refreshToken)
+    expect(f.upstreamRequests().map((request) => request.headers.authorization)).toEqual([
+      `Bearer ${oauth.next().access}`,
+    ])
+  })
+}, 40000)
+
+test("a 429 waits for its Retry-After when that is longer, and a 503 doubles the wait", async () => {
+  await withCustody(async (f, oauth, start) => {
+    const old = claudeLogin(syntheticValue("access"), syntheticValue("refresh"), Date.now() - 1000)
+    await imported(f, old)
+    const refresh = old.claudeAiOauth.refreshToken
+    const gateway = await start()
+    const token = await runToken(gateway, "jti-busy")
+    // 429 with Retry-After 7: longer than the first wait of 5 seconds.
+    oauth.mode("limited", { retryAfter: 7 })
+    expect((await client(gateway.port).call(token)).status).toBe(503)
+    const limitedAt = Date.now()
+    await quietUntil(gateway, token, oauth, limitedAt + 6000)
+    expect((await client(gateway.port).call(token)).status).toBe(503)
     expect(oauth.requests()).toHaveLength(1)
-    expect(f.upstreamRequests()).toHaveLength(0)
+    await Bun.sleep(Math.max(0, limitedAt + 7100 - Date.now()))
+    // The second failed try, a 503, waits twice the first wait: 10 seconds.
+    oauth.mode("busy")
+    expect((await client(gateway.port).call(token)).status).toBe(503)
+    const busyAt = Date.now()
+    expect(oauth.requests()).toHaveLength(2)
+    oauth.mode("renew")
+    await quietUntil(gateway, token, oauth, busyAt + 10000)
+    await works(gateway, token, oauth, refresh)
+    expect(oauth.requests().map(sentRefresh)).toEqual([refresh, refresh, refresh])
+    expect(gateway.output?.()).not.toContain("needs a new import")
+    expect(JSON.parse(await readFile(loginFile(f), "utf8")).claudeAiOauth.refreshToken).toBe(
+      oauth.next().refresh,
+    )
+  })
+}, 40000)
+
+test("a 400 that is not invalid_grant does not ask for a new import", async () => {
+  await withCustody(async (f, oauth, start) => {
+    const old = claudeLogin(syntheticValue("access"), syntheticValue("refresh"), Date.now() - 1000)
+    await imported(f, old)
+    oauth.mode("invalid")
+    const gateway = await start()
+    const token = await runToken(gateway, "jti-invalid")
+    expect((await client(gateway.port).call(token)).status).toBe(503)
+    const failedAt = Date.now()
+    oauth.mode("renew")
+    await quietUntil(gateway, token, oauth, failedAt + 5000)
+    await works(gateway, token, oauth, old.claudeAiOauth.refreshToken)
+    expect(gateway.output?.()).not.toContain("needs a new import")
   })
 }, 30000)
+
+/** A Claude call on `port` that the client gives up when `signal` aborts. */
+const callUntil = (port: number, token: string, signal: AbortSignal) =>
+  fetch(client(port).url("/capabilities/v1/providers/anthropic/v1/messages"), {
+    method: "POST",
+    signal,
+    headers: {
+      authorization: `Bearer ${token}`,
+      "content-type": "application/json",
+      "anthropic-version": "2023-06-01",
+      "anthropic-beta": "oauth-2025-04-20",
+    },
+    body: JSON.stringify({ model: "fixture-model", stream: true, messages: [] }),
+  })
+
+/** Waits until `ready` holds, for at most 10 seconds. */
+async function until(ready: () => boolean) {
+  const end = Date.now() + 10000
+  while (!ready()) {
+    if (Date.now() > end) throw new Error("the condition did not come")
+    await Bun.sleep(20)
+  }
+}
+
+test("a client that goes away while the OAuth server holds the renewal ends its own wait only; the next call uses that renewal", async () => {
+  await withCustody(async (f, oauth, start) => {
+    const old = claudeLogin(syntheticValue("access"), syntheticValue("refresh"), Date.now() - 1000)
+    await imported(f, old)
+    oauth.mode("hold")
+    const gateway = await start()
+    const token = await runToken(gateway, "jti-away")
+    const away = new AbortController()
+    const first = callUntil(gateway.port, token, away.signal).catch(() => "gone")
+    await until(() => oauth.requests().length === 1)
+    away.abort()
+    expect(await first).toBe("gone")
+    await Bun.sleep(300)
+    oauth.release()
+    const second = await client(gateway.port).call(token)
+    expect(second.status).toBe(200)
+    expect(await second.text()).toBe(sse)
+    expect(oauth.requests()).toHaveLength(1)
+    expect(storedAccess(await readFile(loginFile(f), "utf8"))).toBe(oauth.next().access)
+    expect(f.upstreamRequests().map((request) => request.headers.authorization)).toEqual([
+      `Bearer ${oauth.next().access}`,
+    ])
+  })
+}, 30000)
+
+/** An exclusive advisory lock on `path`, as a custody process takes it, until `release`. */
+function holdLock(path: string) {
+  const libc = dlopen("libc.so.6", {
+    open: { args: [FFIType.cstring, FFIType.i32], returns: FFIType.i32 },
+    flock: { args: [FFIType.i32, FFIType.i32], returns: FFIType.i32 },
+    close: { args: [FFIType.i32], returns: FFIType.i32 },
+  })
+  const fd = libc.symbols.open(ptr(Buffer.from(`${path}\0`)), 2)
+  if (fd < 0 || libc.symbols.flock(fd, 2) !== 0) throw new Error("the lock was not taken")
+  return () => {
+    libc.symbols.close(fd)
+    libc.close()
+  }
+}
+
+test("the gateway's time limit of one call ends that call's wait; the renewal goes on and the next call uses it", async () => {
+  await withCustody(async (f, oauth, start) => {
+    const old = claudeLogin(syntheticValue("access"), syntheticValue("refresh"), Date.now() - 1000)
+    await imported(f, old)
+    const gateway = await start()
+    const token = await runToken(gateway, "jti-timer")
+    // Custody waits up to 15 seconds for the lock; the call waits 10.
+    const release = holdLock(join(loginDirectory(f), "claude.lock"))
+    let released = false
+    try {
+      const began = performance.now()
+      const call = await client(gateway.port).call(token)
+      expect(call.status).toBe(503)
+      expect(performance.now() - began).toBeLessThan(12000)
+      expect(oauth.requests()).toHaveLength(0)
+      release()
+      released = true
+      await until(() => oauth.requests().length === 1)
+    } finally {
+      if (!released) release()
+    }
+    const next = await client(gateway.port).call(token)
+    expect(next.status).toBe(200)
+    expect(await next.text()).toBe(sse)
+    expect(oauth.requests()).toHaveLength(1)
+  })
+}, 40000)
+
+test("a stop of the gateway while the OAuth server holds the renewal: after a start, the same refresh value is sent once more and the call works", async () => {
+  await withCustody(async (f, oauth, start) => {
+    const old = claudeLogin(syntheticValue("access"), syntheticValue("refresh"), Date.now() - 1000)
+    await imported(f, old)
+    oauth.mode("hold")
+    const gateway = await start()
+    const token = await runToken(gateway, "jti-stop")
+    const first = client(gateway.port)
+      .call(token)
+      .catch(() => "gone")
+    await until(() => oauth.requests().length === 1)
+    await gateway.terminate?.()
+    await first
+    // The custody process ended with the gateway: the held answer is stored by no one.
+    oauth.release()
+    await Bun.sleep(300)
+    expect(storedAccess(await readFile(loginFile(f), "utf8"))).toBe(old.claudeAiOauth.accessToken)
+    oauth.mode("renew")
+    const restarted = await start()
+    await works(
+      restarted,
+      await runToken(restarted, "jti-restart"),
+      oauth,
+      old.claudeAiOauth.refreshToken,
+    )
+    expect(oauth.requests()).toHaveLength(2)
+    expect(storedAccess(await readFile(loginFile(f), "utf8"))).toBe(oauth.next().access)
+  })
+}, 40000)
+
+test("a stop after the renewed login is complete and before its rename: the next call stores it and sends no request", async () => {
+  await withCustody(async (f, oauth, start) => {
+    const old = claudeLogin(syntheticValue("access"), syntheticValue("refresh"), Date.now() - 1000)
+    await imported(f, old)
+    // What such a stop leaves: the state written before the request, and the complete new login
+    // in a temporary file of mode 0600 beside the old one.
+    const renewed = claudeLogin(
+      syntheticValue("access"),
+      syntheticValue("refresh"),
+      Date.now() + 3600000,
+    )
+    const older = claudeLogin(
+      syntheticValue("access"),
+      syntheticValue("refresh"),
+      Date.now() - 5000,
+    )
+    await writeFile(
+      join(loginDirectory(f), "claude.state"),
+      JSON.stringify({ state: "renewing", failures: 0, retryAt: 0 }),
+      { mode: 0o600 },
+    )
+    await writeFile(
+      join(loginDirectory(f), `claude.json.${randomUUID()}.tmp`),
+      JSON.stringify(renewed),
+      { mode: 0o600 },
+    )
+    // A temporary file that ends earlier, and one cut short, are not the login.
+    await writeFile(
+      join(loginDirectory(f), `claude.json.${randomUUID()}.tmp`),
+      JSON.stringify(older),
+      { mode: 0o600 },
+    )
+    await writeFile(
+      join(loginDirectory(f), `claude.json.${randomUUID()}.tmp`),
+      JSON.stringify(renewed).slice(0, 60),
+      { mode: 0o600 },
+    )
+    const gateway = await start()
+    const token = await runToken(gateway, "jti-tmp")
+    const call = await client(gateway.port).call(token)
+    expect(call.status).toBe(200)
+    expect(await call.text()).toBe(sse)
+    expect(oauth.requests()).toHaveLength(0)
+    expect(JSON.parse(await readFile(loginFile(f), "utf8"))).toEqual(renewed)
+    expect((await readdir(loginDirectory(f))).sort()).toEqual(["claude.json", "claude.lock"])
+    expect(f.upstreamRequests().map((request) => request.headers.authorization)).toEqual([
+      `Bearer ${renewed.claudeAiOauth.accessToken}`,
+    ])
+  })
+}, 30000)
+
+test("a renewal answer with no scope keeps the scope; one without user:inference is stored, and calls are refused for that scope", async () => {
+  await withCustody(async (f, oauth, start) => {
+    const old = claudeLogin(syntheticValue("access"), syntheticValue("refresh"), Date.now() - 1000)
+    await imported(f, old)
+    oauth.mode("unscoped")
+    const gateway = await start()
+    const token = await runToken(gateway, "jti-scope")
+    const call = await client(gateway.port).call(token)
+    expect(call.status).toBe(200)
+    expect(await call.text()).toBe(sse)
+    const kept = JSON.parse(await readFile(loginFile(f), "utf8")).claudeAiOauth
+    expect([kept.accessToken, kept.scopes]).toEqual([
+      oauth.next().access,
+      ["user:inference", "user:profile"],
+    ])
+
+    // The server answers with a narrower scope: it has replaced the refresh value, so the new
+    // values are stored, and no call gets an access value.
+    await imported(
+      f,
+      claudeLogin(syntheticValue("access"), syntheticValue("refresh"), Date.now() - 1000),
+    )
+    const narrow = { access: syntheticValue("access"), refresh: syntheticValue("refresh") }
+    oauth.renewWith(narrow)
+    oauth.mode("narrow")
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const refused = await client(gateway.port).call(token)
+      expect(refused.status).toBe(503)
+      await refused.text()
+    }
+    expect(oauth.requests()).toHaveLength(2)
+    const stored = JSON.parse(await readFile(loginFile(f), "utf8")).claudeAiOauth
+    expect([stored.accessToken, stored.refreshToken, stored.scopes]).toEqual([
+      narrow.access,
+      narrow.refresh,
+      ["user:profile"],
+    ])
+    expect(gateway.output?.()).toContain(
+      "custody: the claude login does not hold the scope user:inference",
+    )
+    expect(gateway.output?.()).not.toContain("needs a new import")
+    expect(f.upstreamRequests()).toHaveLength(1)
+  })
+}, 30000)
+
+test("the fixture OAuth server refuses another client id", async () => {
+  const oauth = oauthFixture()
+  try {
+    const answer = await fetch(oauth.url, {
+      method: "POST",
+      body: JSON.stringify({ grant_type: "refresh_token", refresh_token: "x", client_id: "other" }),
+    })
+    expect([answer.status, await answer.json()]).toEqual([401, { error: "invalid_client" }])
+  } finally {
+    await oauth.stop()
+  }
+})
 
 /** One frame on the control socket: a 4-byte length, then the JSON. */
 function rawFrame(socket: string, value: unknown) {

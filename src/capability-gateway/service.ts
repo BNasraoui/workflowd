@@ -103,6 +103,30 @@ const failureKind = (error: unknown) =>
       : typeof error
 const logFailure = (message: string) => (error: unknown) =>
   Effect.logWarning(message, { kind: failureKind(error) })
+/** A call waits this long for the provider's access value; the renewal it waits on goes on. */
+const accessWaitMs = 10000
+/** Noscope's run of custody ends after this: past custody's lock wait and request limit. */
+const accessLimitMs = 30000
+/** A fault line of one cause is written at most once in this time. */
+const faultLogEveryMs = 60000
+/** `shared`, or the reason of `signal` once it aborts first; `shared` goes on either way. */
+const waitFor = <A>(shared: Promise<A>, signal: AbortSignal) =>
+  new Promise<A>((resolve, reject) => {
+    const abort = () =>
+      reject(signal.reason instanceof Error ? signal.reason : new Error("the call ended"))
+    if (signal.aborted) return abort()
+    signal.addEventListener("abort", abort, { once: true })
+    shared.then(
+      (value) => {
+        signal.removeEventListener("abort", abort)
+        resolve(value)
+      },
+      (error: unknown) => {
+        signal.removeEventListener("abort", abort)
+        reject(error instanceof Error ? error : new Error("no access value"))
+      },
+    )
+  })
 const denied = () => new Response(null, { status: 403 })
 const unavailable = () => new Response(null, { status: 503, headers: { "retry-after": "5" } })
 
@@ -118,6 +142,46 @@ export const makeCapabilityGateway = (
     const store = yield* makeCapabilityStore
     const sql = yield* SqlClient.SqlClient
     const authority = runLifetime(sql)
+    // The gateway's lifetime: a renewal of the provider login ends with the gateway, never with
+    // the call that started it.
+    const lifetime = new AbortController()
+    yield* Effect.addFinalizer(() => Effect.sync(() => lifetime.abort()))
+    const custody = custodyProvider(config.credentialRole)
+    const logged = new Map<string, number>()
+    const logFault = (line: string) => {
+      const now = Date.now()
+      if (now - (logged.get(line) ?? -Infinity) < faultLogEveryMs) return
+      logged.set(line, now)
+      console.error(line)
+    }
+    /** Why custody gave no access value, as a line without any value; undefined when unknown. */
+    const accessFault = async () => {
+      if (!custody) return undefined
+      if (!config.login)
+        return `custody: the gateway's configuration names no login directory for ${custody}`
+      return await loginFault(config.login.directory, custody)
+    }
+    // One run of the provider-access mint at a time: each call that needs it waits for that one.
+    let inFlight: Promise<{ readonly token: string; readonly expiresAt: number }> | undefined
+    const providerAccess = (signal: AbortSignal) => {
+      inFlight ??= mintCapability(
+        config.noscope,
+        "provider-access",
+        config.credentialRole,
+        3600,
+        lifetime.signal,
+        accessLimitMs,
+      )
+        .catch(async (error: unknown) => {
+          const fault = await accessFault()
+          if (fault) logFault(fault)
+          throw error
+        })
+        .finally(() => {
+          inFlight = undefined
+        })
+      return waitFor(inFlight, AbortSignal.any([signal, AbortSignal.timeout(accessWaitMs)]))
+    }
     // Each live stream, by run, with the session and the digest of the token that opened it.
     const active = new Map<
       string,
@@ -467,21 +531,7 @@ export const makeCapabilityGateway = (
               route.path,
               grant.modelId,
               async () => {
-                const snapshot = await mintCapability(
-                  config.noscope,
-                  "provider-access",
-                  config.credentialRole,
-                  3600,
-                  signal,
-                ).catch(async (error: unknown) => {
-                  const provider = custodyProvider(config.credentialRole)
-                  const fault =
-                    config.login && provider
-                      ? await loginFault(config.login.directory, provider)
-                      : undefined
-                  if (fault) console.error(fault)
-                  throw error
-                })
+                const snapshot = await providerAccess(signal)
                 ownership.providerExpiry(snapshot.expiresAt)
                 return snapshot.token
               },

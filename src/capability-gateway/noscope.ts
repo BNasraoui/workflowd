@@ -14,13 +14,17 @@ const Envelope = Schema.Array(
   }),
 )
 
-/** Noscope owns bounded provider execution; callers bind only its opaque material, never its role as authority. */
+/**
+ * Noscope owns bounded provider execution; callers bind only its opaque material, never its role
+ * as authority. The run of noscope ends on `signal`, or is killed after `limitMs`.
+ */
 export async function mintCapability(
   config: NoscopeConfiguration,
   provider: "run-capability" | "provider-access",
   role: string,
   ttl: number,
   signal: AbortSignal,
+  limitMs = 10000,
 ) {
   const refused = () => new Error("capability mint refused")
   if (
@@ -46,7 +50,7 @@ export async function mintCapability(
     child.kill("SIGKILL")
   }
   signal.addEventListener("abort", stop, { once: true })
-  const timeout = setTimeout(stop, 10000)
+  const timeout = setTimeout(stop, limitMs)
   try {
     const chunks: Uint8Array[] = []
     let size = 0
