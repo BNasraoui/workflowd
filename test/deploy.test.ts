@@ -63,7 +63,7 @@ test("an OpenCode restart cannot stop workflowd: its units are wanted, never req
   const units = await Promise.all(
     [
       "deploy/systemd/workflowd.service",
-      ...(await readdir(directory)).map((name) => join(directory, name)),
+      ...(await readdir(directory).catch(() => [])).map((name) => join(directory, name)),
     ].map(async (path) => ({ path, text: await readFile(path, "utf8") })),
   )
   const directives = units.flatMap(({ path, text }) =>

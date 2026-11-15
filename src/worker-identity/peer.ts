@@ -1,9 +1,10 @@
 import { readFileSync } from "node:fs"
-import { chmod, chown } from "node:fs/promises"
-import { createServer } from "node:net"
+import { chmod, chown, lstat, rm } from "node:fs/promises"
+import { createConnection, createServer } from "node:net"
 import { Schema } from "effect"
 import type { Socket } from "node:net"
 import { dlopen, FFIType, ptr } from "bun:ffi"
+import { tryFileLock } from "../file-lock"
 
 function processIdentity(pid: number) {
   const stat = readFileSync(`/proc/${pid}/stat`, "utf8")
@@ -57,6 +58,48 @@ export function loadRunSocketPolicy(
   return { controllerUid, agentUid, groupGid }
 }
 
+/** True when a process accepts a connect on the path. A failed connect proves nothing. */
+function answersConnect(path: string) {
+  return new Promise<boolean>((resolve) => {
+    const probe = createConnection(path)
+    const settle = (answered: boolean) => {
+      probe.destroy()
+      resolve(answered)
+    }
+    probe.once("connect", () => settle(true))
+    probe.once("error", () => settle(false))
+  })
+}
+
+/**
+ * The daemon that serves a run socket holds an exclusive flock(2) on `<path>.lock` until the
+ * server closes, and the kernel releases it when that process ends, SIGKILL included. With the
+ * lock taken, a socket at the path has a dead owner and is removed, so the bind cannot fail with
+ * EADDRINUSE on a file that a killed daemon left. A file, directory or symbolic link at the path
+ * is not a socket that this daemon made, and it refuses the start and stays. Resolves to the
+ * release of the lock.
+ */
+async function claimSocketPath(path: string) {
+  const release = await tryFileLock(`${path}.lock`, process.getuid!(), true)
+  if (release === undefined)
+    throw new Error(`${path} is locked by a live process; refusing to bind it`)
+  try {
+    // An unreadable path is left to bind, which reports its own error.
+    const entry = await lstat(path).catch(() => null)
+    if (entry === null) return release
+    if (!entry.isSocket())
+      throw new Error(`${path} exists and is not a socket; refusing to remove it`)
+    // A process that does not take the lock, such as an older daemon, can still serve the path.
+    if (await answersConnect(path))
+      throw new Error(`${path} is held by a live process; refusing to remove it`)
+    await rm(path, { force: true })
+    return release
+  } catch (error) {
+    await release()
+    throw error
+  }
+}
+
 /** Linux only: fail closed on hosts without a kernel-supplied peer PID. */
 export async function serveRunSocket(
   path: string,
@@ -64,6 +107,7 @@ export async function serveRunSocket(
   policy?: RunSocketPolicy,
 ) {
   if (process.platform !== "linux") throw new Error("Run sockets require Linux SO_PEERCRED")
+  const release = await claimSocketPath(path)
   const libc = dlopen("libc.so.6", {
     getsockopt: {
       args: [FFIType.i32, FFIType.i32, FFIType.i32, FFIType.ptr, FFIType.ptr],
@@ -142,13 +186,16 @@ export async function serveRunSocket(
   } catch (error) {
     server.close()
     libc.close()
+    await release()
     throw error
   }
   return {
     close: async () => {
       for (const socket of sockets) socket.destroy()
+      // Bun removes the socket file as the server closes; the next daemon then finds no entry.
       await new Promise<void>((resolve) => server.close(() => resolve()))
       libc.close()
+      await release()
     },
   }
 }

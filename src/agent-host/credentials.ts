@@ -3,7 +3,7 @@ import { constants } from "node:fs"
 import { lstat, open, readlink, stat } from "node:fs/promises"
 import type { FileHandle } from "node:fs/promises"
 import { basename, dirname, join, resolve } from "node:path"
-import { dlopen, FFIType } from "bun:ffi"
+import { tryFileLock } from "../file-lock"
 import type { CredentialPolicy } from "./config"
 import { credentialRefusal, type CredentialClient } from "./protocol"
 
@@ -35,36 +35,16 @@ export async function credentialParent(path: string, ownerUid: number) {
 
 export async function credentialLock(policy: CredentialPolicy, exclusive: boolean) {
   const directory = await credentialParent(join(policy.root, "admission.lock"), policy.ownerUid)
-  let handle: FileHandle | undefined
-  const libc = dlopen("libc.so.6", {
-    flock: { args: [FFIType.i32, FFIType.i32], returns: FFIType.i32 },
-  })
-  try {
-    handle = await open(
-      directory.path,
-      constants.O_RDWR | constants.O_CREAT | constants.O_NOFOLLOW,
-      0o600,
-    )
-    const info = await handle.stat()
-    if (
-      !info.isFile() ||
-      info.uid !== policy.ownerUid ||
-      info.nlink !== 1 ||
-      (info.mode & 0o777) !== 0o600 ||
-      libc.symbols.flock(handle.fd, (exclusive ? 2 : 1) | 4) !== 0
-    )
-      throw new Error("admission locked")
-    const owned = handle
-    return async () => {
-      await owned.close()
-      libc.close()
-      await directory.handle.close()
-    }
-  } catch {
-    await handle?.close()
-    libc.close()
+  const release = await tryFileLock(directory.path, policy.ownerUid, exclusive).catch(
+    () => undefined,
+  )
+  if (release === undefined) {
     await directory.handle.close()
     throw credentialRefusal("codex", "credential_relink_in_progress")
+  }
+  return async () => {
+    await release()
+    await directory.handle.close()
   }
 }
 
