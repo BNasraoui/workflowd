@@ -93,13 +93,9 @@ if name=='systemd-run': sys.exit(subprocess.run(sys.argv[sys.argv.index('cargo')
         expect(stdout).not.toContain("fixture-setup-canary")
         for (const name of ["output", "env", "path", "state", "summary"])
           expect(await Bun.file(join(directory, name)).exists()).toBe(false)
-        const captures = (await readdir(directory)).filter((name) =>
-          name.startsWith("workflowd-private-"),
-        )
-        expect(captures).toHaveLength(1)
-        expect(await readFile(join(directory, captures[0]!, "capture.log"), "utf8")).toContain(
-          "::add-mask::fixture-setup-canary",
-        )
+        expect(
+          (await readdir(directory)).filter((name) => name.startsWith("workflowd-private-")),
+        ).toEqual([])
         if (!fail) {
           const calls = await readFile(join(directory, "calls"), "utf8")
           for (const command of [["bun"], ["sudo"], ["git", "systemd-run", "cargo"]][index]!)
