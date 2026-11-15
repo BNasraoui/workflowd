@@ -7,10 +7,7 @@ import { CapabilityRefused, capabilityDigest, makeCapabilityStore } from "./stor
 import { githubJobKeys, verifyJobProof } from "../sandbox/bootstrap"
 import { runLifetime } from "../store/run-lifetime"
 import { ownedPromise } from "./owned"
-import { codexRequest } from "./codex"
-import { opencodeRequest } from "./opencode"
 import type { CapabilityGatewayConfig } from "../sandbox/config"
-import { saveSandboxFile } from "../sandbox/binding"
 import { gitReadRequest, type GitUpstream } from "./git"
 import type { makeTokenBroker } from "../worker-identity/broker"
 
@@ -335,12 +332,6 @@ export const makeCapabilityGateway = (
                     )
                     return await started.response
                   }
-                  const adapter =
-                    config.native?.protocol === "codex-chatgpt"
-                      ? codexRequest
-                      : config.native?.protocol === "openai-chat"
-                        ? opencodeRequest
-                        : claudeRequest
                   const selected = isGit
                     ? await gitReadRequest(
                         request,
@@ -362,7 +353,7 @@ export const makeCapabilityGateway = (
                         signal,
                         (url, input) => send(() => (git?.upstream ?? fetch)(url, input)),
                       )
-                    : await adapter(
+                    : await claudeRequest(
                         request,
                         target.slice(prefix.length),
                         grant.modelId,
@@ -379,26 +370,6 @@ export const makeCapabilityGateway = (
                         },
                         signal,
                         (url, input) => send(() => upstream(url, input)),
-                        undefined,
-                        undefined,
-                        async (evidence) => {
-                          const rows = await Effect.runPromise(
-                            sql`SELECT directory FROM kernel_agent_runs WHERE run_id=${binding.runId}`,
-                            { signal },
-                          )
-                          const directory = rows[0]?.directory
-                          if (typeof directory !== "string")
-                            throw new Error("Private custody unavailable")
-                          // Two fixed, bounded latest snapshots follow the run's existing private
-                          // custody/retention. Neither is in the remote workspace or public projection.
-                          await saveSandboxFile(
-                            directory,
-                            evidence.status >= 300
-                              ? "provider-error.json"
-                              : "provider-response.json",
-                            JSON.stringify(evidence),
-                          )
-                        },
                       )
                   if (signal.aborted) {
                     await selected.response.body?.cancel()

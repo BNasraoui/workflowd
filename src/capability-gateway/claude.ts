@@ -1,9 +1,4 @@
-import {
-  credentialPatterns,
-  providerResponseEvidence,
-  type ProviderProtocol,
-  type RetainProviderEvidence,
-} from "./provider-evidence"
+import { credentialPatterns } from "./provider-evidence"
 
 const forwarded = new Set([
   "content-type",
@@ -187,23 +182,8 @@ export async function claudeRequest(
 }
 
 /** Same bounded credential-reflection exclusion for every native protocol. */
-export async function safeProviderResponse(
-  response: Response,
-  secrets: ReadonlyArray<string>,
-  protocol?: ProviderProtocol,
-  retain?: RetainProviderEvidence,
-) {
+export async function safeProviderResponse(response: Response, secrets: ReadonlyArray<string>) {
   const patterns = credentialPatterns(secrets)
-  const evidence =
-    protocol === undefined ? undefined : providerResponseEvidence(response, protocol, patterns)
-  if (retain && evidence) {
-    try {
-      await retain(evidence)
-    } catch {
-      await response.body?.cancel()
-      throw new Error("upstream unavailable")
-    }
-  }
   if (
     (response.status >= 300 && response.status < 400) ||
     response.headers.has("content-encoding")
