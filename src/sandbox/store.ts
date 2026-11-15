@@ -7,6 +7,7 @@ import { SavedSandboxPolicy } from "./saved-policy"
 import { SandboxTransport } from "./transport"
 import type { OwnedLeaseRun } from "./github"
 import { SandboxFailureEvidence, sandboxDiagnostic } from "./diagnostics"
+import { runLifetime } from "../store/run-lifetime"
 
 export class SandboxError extends Schema.TaggedError<SandboxError>()("SandboxError", {
   message: Schema.String,
@@ -92,6 +93,7 @@ type LeaseOperation = {
 
 export const makeSandboxStore = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient
+  const lifetime = runLifetime(sql)
   const currentOperation = (operation: LeaseOperation, checkGeneration = true) =>
     sql`SELECT 1 FROM sandbox_lease_operations
       WHERE repository_id=${operation.repositoryId} AND lease_id=${operation.leaseId}
@@ -268,18 +270,21 @@ export const makeSandboxStore = Effect.gen(function* () {
       }),
     )
   })
-  const beginRelease = Effect.fn("SandboxStore.beginRelease")(function* (runId: string) {
-    const rows = yield* sql`UPDATE sandbox_leases SET state=CASE WHEN state='operator_required'
+  const beginRelease = Effect.fn("SandboxStore.beginRelease")(
+    function* (runId: string) {
+      const rows = yield* sql`UPDATE sandbox_leases SET state=CASE WHEN state='operator_required'
         AND release_error LIKE ${unobservedRun + "%"}
         AND EXISTS (SELECT 1 FROM sandbox_lease_operations o WHERE o.lease_id=sandbox_leases.lease_id
           AND o.repository_id=json_extract(sandbox_leases.policy,'$.repositoryId') AND o.creation_pending=1)
         THEN state ELSE 'releasing' END WHERE run_id=${runId} AND state != 'released'
       AND coalesce(release_error,'') != ${sessionCleanupUnconfirmed} RETURNING run_id`
-    if (rows.length === 0 && (yield* read(runId))?.state !== "released")
-      return yield* Effect.fail(
-        new SandboxError({ message: "Sandbox local cleanup must be confirmed before release" }),
-      )
-  })
+      if (rows.length === 0 && (yield* read(runId))?.state !== "released")
+        return yield* Effect.fail(
+          new SandboxError({ message: "Sandbox local cleanup must be confirmed before release" }),
+        )
+    },
+    (effect, runId) => lifetime.change(runId, effect),
+  )
   const reconcileUnobserved = Effect.fn("SandboxStore.reconcileUnobserved")(function* <E, E2>(
     runId: string,
     discoverRuns: Effect.Effect<void, E>,
@@ -425,12 +430,13 @@ export const makeSandboxStore = Effect.gen(function* () {
     yield* sql`UPDATE sandbox_leases SET release_error=${diagnostic} WHERE run_id=${runId}
       AND coalesce(release_error,'') != ${sessionCleanupUnconfirmed} AND state != 'operator_required'`
   })
-  const sessionCleanupError = Effect.fn("SandboxStore.sessionCleanupError")(function* (
-    runId: string,
-  ) {
-    yield* sql`UPDATE sandbox_leases SET state=CASE WHEN state='released' THEN state ELSE 'operator_required' END,
+  const sessionCleanupError = Effect.fn("SandboxStore.sessionCleanupError")(
+    function* (runId: string) {
+      yield* sql`UPDATE sandbox_leases SET state=CASE WHEN state='released' THEN state ELSE 'operator_required' END,
       release_error=${sessionCleanupUnconfirmed} WHERE run_id=${runId}`
-  })
+    },
+    (effect, runId) => lifetime.change(runId, effect),
+  )
   const sessionCleanupConfirmed = Effect.fn("SandboxStore.sessionCleanupConfirmed")(function* (
     runId: string,
   ) {
@@ -451,6 +457,22 @@ export const makeSandboxStore = Effect.gen(function* () {
       return yield* Effect.fail(
         new SandboxError({ message: "Sandbox lease changed before peer binding" }),
       )
+  })
+  /**
+   * An actions-native lease is ready once its runner holds a gateway session: the binding has a
+   * session and is not revoked. One statement checks and sets it, so a revoke cannot interleave.
+   */
+  const bindSession = Effect.fn("SandboxStore.bindSession")(function* (
+    runId: string,
+    actionsRunId: number,
+    attempt: number,
+  ) {
+    const rows = yield* sql`UPDATE sandbox_leases SET state='ready'
+      WHERE run_id=${runId} AND state='starting' AND actions_run_id=${actionsRunId} AND actions_attempt=${attempt}
+      AND json_extract(policy,'$.privateBootstrap.mode')='actions-native'
+      AND EXISTS(SELECT 1 FROM capability_bindings b WHERE b.run_id=${runId} AND b.session>0
+        AND b.revoked=0) RETURNING run_id`
+    return rows.length === 1
   })
   const adopt = Effect.fn("SandboxStore.adopt")(function* (
     policy: SavedSandboxPolicy,
@@ -538,7 +560,7 @@ export const makeSandboxStore = Effect.gen(function* () {
       cause === undefined
         ? "Sandbox inventory incomplete; retry required"
         : sandboxDiagnostic("lease.inventory", cause).message
-    yield* sql`UPDATE sandbox_cleanup_runs SET last_error=${diagnostic},updated_at=${Date.now()}
+    yield* sql`UPDATE sandbox_cleanup_runs SET last_error=${diagnostic}
       WHERE repository_id=${policy.repositoryId} AND state != 'released'`
     yield* sql`UPDATE sandbox_leases SET release_error=${diagnostic}
       WHERE json_extract(policy,'$.repositoryId')=${policy.repositoryId} AND state != 'released'
@@ -636,6 +658,7 @@ export const makeSandboxStore = Effect.gen(function* () {
     sessionCleanupError,
     sessionCleanupConfirmed,
     bind,
+    bindSession,
     adopt,
     adoptAll,
     cleanupRuns,

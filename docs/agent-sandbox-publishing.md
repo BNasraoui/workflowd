@@ -34,15 +34,17 @@ A reservation failure leaves an `audit-failed` receipt; incomplete records and t
 receipt prevent successful settlement. The record budget is 1,024 calls, 4 KiB each;
 command previews are limited to 512 characters. Results, file contents and environments
 are never copied into the audit. Recognizable credential strings are redacted. A command
-preview is **public** and redaction cannot detect every caller-supplied secret.
+preview stays private to the runner and mint; redaction cannot detect every caller-supplied secret.
 
 Mint sends bounded JSON on stdin through the existing pinned SSH connection policy to
 a fixed `runner-control audit` operation, separate from replaceable MCP stdio. No command
 text enters the SSH command line.
 The runner queues records by sequence, rejects conflicting replay and identity changes,
-and bounds its queue to 4 MiB. The `hold` process prints escaped single-line
-`workflowd.audit {...}` records on the same stdout used by the Actions hold step, then
-advances its acknowledgement watermark. SSH receives only that watermark. Replaying
+and bounds its queue to 4 MiB. The `hold` process prints single-line
+`workflowd.audit {"sequence":...,"tool":...,"outcome":...}` records, without the command
+preview, to `deploy/sandbox/public-output.mjs`, which writes only a fixed status line
+(stage, outcome and sequence) to the Actions log; it then advances its acknowledgement
+watermark. SSH receives only that watermark. Replaying
 the same record does not print it again. A crash between stdout emission and checkpoint
 can repeat a line; correlate/deduplicate by run, lease and sequence.
 

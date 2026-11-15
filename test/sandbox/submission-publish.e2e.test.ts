@@ -167,13 +167,16 @@ for (const kind of ["opencode", "codex", "claude"] as const) {
             if (!mismatch) {
               const fault = kind === "codex" ? "validation failure" : "branch collision"
               const cause =
-                kind === "codex" ? "bundle validation failed" : "branch already exists (HTTP 200)"
+                kind === "codex" ? "bundle validation failed" : "Protected publication failed"
               sandboxPublicationFixture(fixture, policy, "lease-1", fault, completion.branch)
               yield* publisher.continuePublication({ ...stored, nativeSessionId })
               yield* publisher.continuePublication({ ...stored, nativeSessionId })
               const receipt = (yield* publication.read(stored.runId))?.receipt
               if (kind === "codex") expect(receipt).toBeNull()
-              else expect(receipt).toMatchObject({ cause })
+              else {
+                expect(receipt).toMatchObject({ cause })
+                expect(JSON.stringify(receipt)).not.toContain("branch already exists")
+              }
               const failed = yield* Effect.tryPromise(() =>
                 Bun.file(join(directory, "terminal.json")).json(),
               )

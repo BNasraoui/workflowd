@@ -53,13 +53,15 @@ esac
 test("hold starts with an empty OIDC request environment", async () => {
   const source = await Bun.file(`${root}/.github/workflows/agent-sandbox.yml`).text()
   const hold = source.slice(
-    source.indexOf("      - name: Hold the lease"),
+    source.indexOf("      - name: Hold the privately authenticated lease"),
     source.indexOf("      - name: Upload sealed result"),
   )
   expect(hold).toContain(
     "shell: /usr/bin/env -u ACTIONS_ID_TOKEN_REQUEST_TOKEN -u ACTIONS_ID_TOKEN_REQUEST_URL",
   )
-  expect(hold).toContain("run: exec /usr/local/bin/container-use hold")
+  expect(hold).toContain(
+    "run: exec node deploy/sandbox/public-output.mjs audit -- /usr/local/bin/container-use hold",
+  )
   expect(hold).toContain("env -u ACTIONS_ID_TOKEN_REQUEST_TOKEN -u ACTIONS_ID_TOKEN_REQUEST_URL")
   const directory = await mkdtemp(join(tmpdir(), "sandbox-hold-env-"))
   try {
@@ -181,14 +183,21 @@ test("release logs out even when container cleanup fails and preserves the failu
     .map((line) => line.slice(10))
     .join("\n")
   if (!script) throw new Error("Missing release script")
+  const cleanup = script.match(/cleanup -- bash -c '([\s\S]*)'\s*$/)?.[1]
+  if (!cleanup) throw new Error("Missing captured cleanup command")
   const directory = await mkdtemp(join(tmpdir(), "sandbox-release-"))
   try {
-    await writeFile(join(directory, "bash"), "#!/bin/sh\nexit 23\n", { mode: 0o755 })
+    await writeFile(
+      join(directory, "bash"),
+      '#!/bin/sh\nif [ "$1" = -c ]; then exec /bin/bash "$@"; fi\nexit 23\n',
+      { mode: 0o755 },
+    )
     await writeFile(join(directory, "sudo"), '#!/bin/sh\nprintf "%s\\n" "$*" >> "$CALLS"\n', {
       mode: 0o755,
     })
-    const child = Bun.spawn(["/bin/bash", "-e", "-c", script], {
-      env: { PATH: `${directory}:/usr/bin:/bin`, CALLS: join(directory, "calls") },
+    const env = { PATH: `${directory}:${process.env.PATH}`, CALLS: join(directory, "calls") }
+    const child = Bun.spawn(["/bin/bash", "-e", "-c", cleanup], {
+      env,
       stdout: "pipe",
       stderr: "pipe",
     })
@@ -196,6 +205,66 @@ test("release logs out even when container cleanup fails and preserves the failu
     expect(await Bun.file(join(directory, "calls")).text()).toBe(
       "tailscale logout\nsystemctl stop workflowd-tailscaled\n",
     )
+    await writeFile(join(directory, "calls"), "")
+    const captured = Bun.spawn(["/bin/bash", "-e", "-c", script], {
+      env,
+      stdout: "pipe",
+      stderr: "pipe",
+    })
+    expect(await captured.exited).toBe(1)
+    expect(JSON.parse(await new Response(captured.stdout).text())).toMatchObject({
+      version: 1,
+      stage: "cleanup",
+      outcome: "failed",
+      reason: "unavailable",
+      count: 0,
+    })
+    expect(await new Response(captured.stderr).text()).toBe("")
+    expect(await Bun.file(join(directory, "calls")).text()).toBe(
+      "tailscale logout\nsystemctl stop workflowd-tailscaled\n",
+    )
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
+test("the hold of a session fails with the reason renewal when the relay ended on a failed renewal", async () => {
+  const source = await Bun.file(`${root}/deploy/sandbox/runner.sh`).text()
+  const script = source.split("    python3 -c '\n")[1]?.split('\n\' "$1"')[0]
+  if (!script?.includes('Path("/run/workflowd-sandbox")')) throw new Error("Missing hold script")
+  const directory = await mkdtemp(join(tmpdir(), "sandbox-hold-relay-"))
+  try {
+    const ended = Bun.spawn(["true"])
+    await ended.exited
+    await writeFile(join(directory, "execution-mode"), "actions-native")
+    await writeFile(join(directory, "relay.pid"), String(ended.pid))
+    await writeFile(join(directory, "native-deadline"), String(Date.now() + 600000))
+    const hold = script.replace(
+      'Path("/run/workflowd-sandbox")',
+      `Path(${JSON.stringify(directory)})`,
+    )
+    const receipt = async () => {
+      const child = Bun.spawn(
+        [
+          "node",
+          `${root}/deploy/sandbox/public-output.mjs`,
+          "audit",
+          "--",
+          "python3",
+          "-c",
+          hold,
+          "hold",
+        ],
+        { env: { PATH: "/usr/bin:/bin" }, stdout: "pipe", stderr: "pipe" },
+      )
+      const [code, stdout] = await Promise.all([child.exited, new Response(child.stdout).text()])
+      const { outcome, reason } = JSON.parse(stdout)
+      return { code, outcome, reason }
+    }
+    // A relay that ends with no reason (the run finished its work or its deadline) is not a fault.
+    expect(await receipt()).toEqual({ code: 0, outcome: "ok", reason: "none" })
+    await writeFile(join(directory, "relay-ended"), "renewal\n")
+    expect(await receipt()).toEqual({ code: 1, outcome: "failed", reason: "renewal" })
   } finally {
     await rm(directory, { recursive: true, force: true })
   }

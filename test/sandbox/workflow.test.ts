@@ -1,8 +1,11 @@
 import { expect, test } from "bun:test"
-import { resolve } from "node:path"
+import { join, resolve } from "node:path"
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
+import { tmpdir } from "node:os"
 import { Schema } from "effect"
 
 const Step = Schema.Struct({
+  if: Schema.optionalKey(Schema.String),
   uses: Schema.optionalKey(Schema.String),
   run: Schema.optionalKey(Schema.String),
   with: Schema.optionalKey(Schema.Record(Schema.String, Schema.Json)),
@@ -25,6 +28,32 @@ const Workflow = Schema.Struct({
 })
 
 const root = resolve(import.meta.dir, "../..")
+
+test("R5: legacy readiness remains the explicit default and private bootstrap never uploads rendezvous", async () => {
+  const workflow = Schema.decodeUnknownSync(Workflow)(
+    Bun.YAML.parse(await Bun.file(`${root}/.github/workflows/agent-sandbox.yml`).text()),
+  )
+  const call = Schema.decodeUnknownSync(
+    Schema.Struct({
+      inputs: Schema.Struct({
+        "bootstrap-mode": Schema.optionalKey(
+          Schema.Struct({ type: Schema.String, default: Schema.String }),
+        ),
+      }),
+    }),
+  )(workflow.on.workflow_call)
+  expect(call.inputs["bootstrap-mode"]?.default).toBe("legacy-artifact")
+  const steps = workflow.jobs.runner?.steps ?? []
+  const legacy = steps.filter((step) => step.if === "inputs.bootstrap-mode == 'legacy-artifact'")
+  const privateSteps = steps.filter((step) => step.if === "inputs.bootstrap-mode == 'private'")
+  expect(legacy.some((step) => step.run?.endsWith("runner.sh prepare"))).toBe(true)
+  expect(legacy.some((step) => step.with?.path === "/run/workflowd-sandbox/ready.json")).toBe(true)
+  expect(privateSteps.some((step) => step.run?.endsWith("runner.sh prepare-private"))).toBe(true)
+  expect(
+    steps.filter((step) => step.with?.path === "/run/workflowd-sandbox/ready.json"),
+  ).toHaveLength(1)
+  expect(privateSteps.some((step) => step.uses?.startsWith("actions/upload-artifact@"))).toBe(false)
+})
 
 test("only App lease pushes can invoke the repository-bound reusable workflow", async () => {
   const caller = Schema.decodeUnknownSync(Workflow)(
@@ -61,7 +90,13 @@ test("runner workflow grants only read/OIDC and pins third-party actions", async
       "persist-credentials"
     ],
   ).toBe(false)
-  expect(job.steps.some((step) => step.run === "bash deploy/sandbox/tailscale.sh")).toBe(true)
+  expect(
+    job.steps.some(
+      (step) =>
+        step.run ===
+        "node deploy/sandbox/public-output.mjs setup -- bash deploy/sandbox/tailscale.sh",
+    ),
+  ).toBe(true)
   expect(job.steps.some((step) => step.uses?.startsWith("tailscale/github-action@"))).toBe(false)
 })
 
@@ -80,14 +115,20 @@ test("runner joins without accepting routes or DNS before preparing tooling", as
   const source = await Bun.file(`${root}/deploy/sandbox/tailscale.sh`).text()
   expect(source).toContain("--accept-routes=false")
   expect(source).toContain("--accept-dns=false")
-  expect(source).toContain("ip route show table 52")
+  expect(source).not.toContain("ip route show table 52")
   const workflow = Schema.decodeUnknownSync(Workflow)(
     Bun.YAML.parse(await Bun.file(`${root}/.github/workflows/agent-sandbox.yml`).text()),
   )
   const steps = workflow.jobs.runner?.steps ?? []
-  const join = steps.findIndex((step) => step.run === "bash deploy/sandbox/tailscale.sh")
+  const join = steps.findIndex(
+    (step) =>
+      step.run ===
+      "node deploy/sandbox/public-output.mjs setup -- bash deploy/sandbox/tailscale.sh",
+  )
   expect(join).toBeGreaterThan(0)
-  expect(steps[join + 1]?.run).toBe("bash deploy/sandbox/runner.sh prepare")
+  expect(steps[join + 1]?.run).toBe(
+    "node deploy/sandbox/public-output.mjs bootstrap -- bash deploy/sandbox/runner.sh prepare",
+  )
   expect(steps.at(-1)?.run).toContain("tailscale logout")
 })
 
@@ -239,3 +280,69 @@ for (const tracked of [false, true]) {
     }
   })
 }
+
+test("a private runner gets the gateway URL, waits at most five minutes for its first contact, and joins the tailnet without Tailscale SSH", async () => {
+  const workflow = Schema.decodeUnknownSync(
+    Schema.Struct({
+      jobs: Schema.Struct({
+        runner: Schema.Struct({
+          steps: Schema.Array(
+            Schema.Struct({
+              name: Schema.optionalKey(Schema.String),
+              env: Schema.optionalKey(Schema.Record(Schema.String, Schema.String)),
+              "timeout-minutes": Schema.optionalKey(Schema.Number),
+            }),
+          ),
+        }),
+      }),
+    }),
+  )(Bun.YAML.parse(await Bun.file(`${root}/.github/workflows/agent-sandbox.yml`).text()))
+  const step = (name: string) => workflow.jobs.runner.steps.find((entry) => entry.name === name)
+  expect(step("Prepare private first contact")?.env?.SANDBOX_GATEWAY_URL).toBe(
+    "${{ inputs.gateway-url }}",
+  )
+  expect(step("Prepare private first contact")?.["timeout-minutes"]).toBe(5)
+  expect(step("Join the restricted tailnet")?.env?.SANDBOX_BOOTSTRAP_MODE).toBe(
+    "${{ inputs.bootstrap-mode }}",
+  )
+  const source = await Bun.file(`${root}/deploy/sandbox/tailscale.sh`).text()
+  const enroll = /python3 - <<'PY'\n([\s\S]*?)\nPY\n/.exec(source)?.[1]
+  if (enroll === undefined) throw new Error("enrollment script missing")
+  const directory = await mkdtemp(join(tmpdir(), "wfd-tailscale-join-"))
+  const issuer = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch: () => Response.json({ value: "fixture-id-token" }),
+  })
+  try {
+    await writeFile(
+      join(directory, "sudo"),
+      `#!/bin/sh\nprintf '%s\\n' "$@" > "${join(directory, "argv")}"\ncat > /dev/null\n`,
+      { mode: 0o700 },
+    )
+    for (const mode of ["private", "legacy-artifact"]) {
+      const child = Bun.spawn(["/usr/bin/python3", "-c", enroll], {
+        env: {
+          PATH: `${directory}:/usr/bin:/bin`,
+          ACTIONS_ID_TOKEN_REQUEST_URL: `http://127.0.0.1:${issuer.port}/token?api-version=2`,
+          ACTIONS_ID_TOKEN_REQUEST_TOKEN: "fixture-request",
+          SANDBOX_AUDIENCE: "fixture",
+          SANDBOX_TAILSCALE_CLIENT_ID: "fixture",
+          SANDBOX_BOOTSTRAP_MODE: mode,
+          GITHUB_RUN_ID: "78",
+          GITHUB_RUN_ATTEMPT: "1",
+        },
+        stdout: "ignore",
+        stderr: "pipe",
+      })
+      expect(await child.exited).toBe(0)
+      const argv = (await readFile(join(directory, "argv"), "utf8")).split("\n")
+      expect(argv.slice(0, 3)).toEqual(["-n", "tailscale", "up"])
+      expect(argv.includes("--ssh")).toBe(mode !== "private")
+      expect(argv).toContain("--advertise-tags=tag:agent-runner")
+    }
+  } finally {
+    await issuer.stop(true)
+    await rm(directory, { recursive: true, force: true })
+  }
+})

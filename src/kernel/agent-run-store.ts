@@ -3,6 +3,7 @@ import { randomBytes } from "node:crypto"
 import { SqlClient } from "effect/unstable/sql"
 import { Context, Data, Effect, Layer, Schema } from "effect"
 import { RequestedSelection, ResolvedSelection } from "../execution-selection"
+import { runLifetime } from "../store/run-lifetime"
 
 /**
  * Durable record of one managed agent run: a dispatched child session the
@@ -262,6 +263,7 @@ const toRecord = (row: Record<string, unknown>) =>
 
 const make = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient
+  const lifetime = runLifetime(sql)
 
   const readRow = (runId: string) =>
     sql`SELECT * FROM kernel_agent_runs WHERE run_id = ${runId}`.pipe(
@@ -346,11 +348,14 @@ const make = Effect.gen(function* () {
     )
 
   const abandonLaunch: AgentRunStorePort["abandonLaunch"] = (input) =>
-    transition(
+    lifetime.change(
       input.runId,
-      "run is not an incomplete launch",
-      sql`DELETE FROM kernel_agent_runs
+      transition(
+        input.runId,
+        "run is not an incomplete launch",
+        sql`DELETE FROM kernel_agent_runs
         WHERE run_id = ${input.runId} AND state = 'spawning' RETURNING run_id`,
+      ),
     )
 
   const markSpawned: AgentRunStorePort["markSpawned"] = (input) =>
@@ -404,14 +409,17 @@ const make = Effect.gen(function* () {
     )
 
   const beginAttempt: AgentRunStorePort["beginAttempt"] = (input) =>
-    transition(
+    lifetime.change(
       input.runId,
-      "run is not in verified state or attempt is not the successor",
-      sql`UPDATE kernel_agent_runs SET attempt = ${input.attempt},
+      transition(
+        input.runId,
+        "run is not in verified state or attempt is not the successor",
+        sql`UPDATE kernel_agent_runs SET attempt = ${input.attempt},
         diagnostic = ${input.diagnostic}, last_progress_at = ${input.now.toISOString()},
         updated_at = ${input.now.toISOString()}
         WHERE run_id = ${input.runId} AND state = 'verified'
         AND attempt = ${input.attempt - 1} AND attempt < max_attempts RETURNING run_id`,
+      ),
     )
 
   const terminal = (
@@ -421,28 +429,31 @@ const make = Effect.gen(function* () {
     finalMessage: string | null,
     change: Effect.Effect<void, AgentRunStoreError>,
   ) =>
-    sql.withTransaction(
-      Effect.gen(function* () {
-        yield* change
-        const run = yield* readRow(runId)
-        if (run === null) return
-        const prompt = JSON.stringify({
-          run_id: run.runId,
-          session_id: run.sessionId,
-          native_session_id: run.nativeSessionId,
-          route: run.route,
-          model: run.resolvedSelection?.model ?? run.modelId,
-          executor: agentRunExecutorKind(run),
-          status: run.state,
-          end_reason: endReason,
-          ended_at: now.toISOString(),
-          final_message: finalMessage,
-          final_message_ref: finalMessage === null ? run.nativeSessionId : null,
-        })
-        yield* sql`INSERT INTO resident_inbox (id,thread_id,mailbox_id,prompt,state)
+    lifetime.change(
+      runId,
+      sql.withTransaction(
+        Effect.gen(function* () {
+          yield* change
+          const run = yield* readRow(runId)
+          if (run === null) return
+          const prompt = JSON.stringify({
+            run_id: run.runId,
+            session_id: run.sessionId,
+            native_session_id: run.nativeSessionId,
+            route: run.route,
+            model: run.resolvedSelection?.model ?? run.modelId,
+            executor: agentRunExecutorKind(run),
+            status: run.state,
+            end_reason: endReason,
+            ended_at: now.toISOString(),
+            final_message: finalMessage,
+            final_message_ref: finalMessage === null ? run.nativeSessionId : null,
+          })
+          yield* sql`INSERT INTO resident_inbox (id,thread_id,mailbox_id,prompt,state)
           VALUES (${"agent-run-end-" + runId},NULL,${run.callerMailboxId},${prompt},'prepared')
           ON CONFLICT(id) DO NOTHING`
-      }),
+        }),
+      ),
     )
 
   const complete: AgentRunStorePort["complete"] = (input) =>
