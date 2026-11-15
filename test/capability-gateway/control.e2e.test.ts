@@ -25,13 +25,14 @@ import {
  * commands on standard input and answers each with one JSON line.
  */
 const src = (path: string) => JSON.stringify(resolve("src", path))
-const daemonProgram = (database: string, socket: string) => `
+const daemonProgram = (database: string, socket: string, reconcileEveryMs: number) => `
 import { createInterface } from "node:readline"
 import { Cause, Effect, Exit, Layer, Scope } from "effect"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
 import { SqlClient } from "effect/unstable/sql"
 import { AgentRunStore, AgentRunStoreLive } from ${src("kernel/agent-run-store.ts")}
 import { runStoreMigrations } from ${src("store/migrations.ts")}
+import { runLifetime } from ${src("store/run-lifetime.ts")}
 import { makeDaemonCapability } from ${src("sandbox/capability-control.ts")}
 import { seedLease } from ${JSON.stringify(resolve("test/capability-gateway/gateway-process.ts"))}
 const scope = Effect.runSync(Scope.make())
@@ -46,7 +47,7 @@ const started = await run(Effect.gen(function* () {
   yield* runStoreMigrations
   const sql = yield* SqlClient.SqlClient
   yield* sql\`INSERT OR IGNORE INTO directory_local_identity(singleton,host_id) VALUES(1,'fixture-controller')\`
-  return yield* makeDaemonCapability({ socket: ${JSON.stringify(socket)}, reconcileEveryMs: 200 }).pipe(Scope.provide(scope))
+  return yield* makeDaemonCapability({ socket: ${JSON.stringify(socket)}, reconcileEveryMs: ${reconcileEveryMs} }).pipe(Scope.provide(scope))
 }))
 if (Exit.isFailure(started)) {
   const reason = String(Cause.squash(started.cause)?.message ?? "").replaceAll("\\n", " ")
@@ -60,6 +61,13 @@ const commands = {
   authorize: (runId) => capability.authorize(runId),
   bound: (runId, actions) => capability.sessionBound(runId, Number(actions), 1),
   settle: (runId) => Effect.gen(function* () { yield* (yield* AgentRunStore).cancel({ runId, now: new Date() }) }),
+  // A change that notifies, then waits 300 ms inside its transaction before it writes the state.
+  "settle-late": (runId) => Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient
+    yield* runLifetime(sql).change(runId, Effect.sleep("300 millis").pipe(
+      Effect.andThen(sql\`UPDATE kernel_agent_runs SET state='cancelled' WHERE run_id=\${runId}\`),
+    ))
+  }),
   reconcile: () => capability.reconcile(),
 }
 for await (const line of createInterface({ input: process.stdin })) {
@@ -87,15 +95,23 @@ interface Daemon {
   stop(): Promise<void>
 }
 
-async function startDaemon(database: string, socket: string): Promise<Daemon> {
-  const child = Bun.spawn([process.execPath, "-e", daemonProgram(database, socket)], {
-    cwd: resolve("."),
-    // A writable home of its own, beside its database, as Bun needs one for its caches.
-    env: { PATH: process.env.PATH, HOME: dirname(database) },
-    stdin: "pipe",
-    stdout: "pipe",
-    stderr: "inherit",
-  })
+/** The daemon process; it reconciles at start and every `reconcileEveryMs`. */
+async function startDaemon(
+  database: string,
+  socket: string,
+  reconcileEveryMs = 200,
+): Promise<Daemon> {
+  const child = Bun.spawn(
+    [process.execPath, "-e", daemonProgram(database, socket, reconcileEveryMs)],
+    {
+      cwd: resolve("."),
+      // A writable home of its own, beside its database, as Bun needs one for its caches.
+      env: { PATH: process.env.PATH, HOME: dirname(database) },
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "inherit",
+    },
+  )
   const reader = child.stdout.getReader()
   let text = ""
   const line = async () => {
@@ -207,13 +223,17 @@ async function withProcesses(
     f: Fixture,
     parts: { gateway: Awaited<ReturnType<typeof startGateway>>; daemon: Daemon },
   ) => Promise<void>,
+  periods: { readonly reconcileEveryMs?: number; readonly staleSweepMs?: number } = {},
 ) {
   const f = await fixture()
   const stops: Array<() => Promise<void>> = []
   try {
-    const gateway = await startGateway(f)
+    const gateway = await startGateway(f, {
+      ...gatewayConfig(f),
+      ...(periods.staleSweepMs === undefined ? {} : { staleSweepMs: periods.staleSweepMs }),
+    })
     stops.push(() => gateway.stop())
-    const daemon = await startDaemon(daemonDatabase(f), socketOf(f))
+    const daemon = await startDaemon(daemonDatabase(f), socketOf(f), periods.reconcileEveryMs)
     stops.push(() => daemon.stop())
     expect(daemon.ready).toBe(true)
     await body(f, { gateway, daemon })
@@ -223,30 +243,69 @@ async function withProcesses(
   }
 }
 
+/**
+ * Only the daemon's revoke at the change of the run, and the gateway's abort on that revoke, can
+ * end the stream inside the bound: the daemon reconciles once an hour and the gateway sweeps
+ * stale streams once a minute, each after its start.
+ */
+const streamEndBoundMs = 500
 test("a run that settles in the daemon's store ends its open stream in the gateway process", async () => {
-  await withProcesses(async (f, { gateway, daemon }) => {
-    expect(await daemon.send("authorize run")).toEqual({ ok: true, value: null })
-    expect(await daemon.send("bound run 78")).toEqual({ ok: true, value: false })
-    const token = await sessionToken(gateway.port)
-    expect(await daemon.send("bound run 78")).toEqual({ ok: true, value: true })
-    f.setStall(true)
-    const stream = await client(gateway.port).call(token)
-    expect(stream.status).toBe(200)
-    const reader = stream.body!.getReader()
-    expect((await reader.read()).done).toBe(false)
-    const settled = performance.now()
-    expect((await daemon.send("settle run")).ok).toBe(true)
-    let done = false
-    void (async () => {
-      while (!(await reader.read().catch(() => ({ done: true }))).done);
-      done = true
-    })()
-    await within(2000, async () => done)
-    const elapsed = performance.now() - settled
-    console.log(`settled run to the end of its stream: ${Math.round(elapsed)} ms`)
-    expect(elapsed).toBeLessThan(2000)
-    expect((await client(gateway.port).call(token)).status).toBe(403)
-  })
+  await withProcesses(
+    async (f, { gateway, daemon }) => {
+      expect(await daemon.send("authorize run")).toEqual({ ok: true, value: null })
+      expect(await daemon.send("bound run 78")).toEqual({ ok: true, value: false })
+      const token = await sessionToken(gateway.port)
+      expect(await daemon.send("bound run 78")).toEqual({ ok: true, value: true })
+      f.setStall(true)
+      const stream = await client(gateway.port).call(token)
+      expect(stream.status).toBe(200)
+      const reader = stream.body!.getReader()
+      expect((await reader.read()).done).toBe(false)
+      const settled = performance.now()
+      expect((await daemon.send("settle run")).ok).toBe(true)
+      let done = false
+      void (async () => {
+        while (!(await reader.read().catch(() => ({ done: true }))).done);
+        done = true
+      })()
+      await within(streamEndBoundMs, async () => done)
+      const elapsed = performance.now() - settled
+      console.log(`settled run to the end of its stream: ${Math.round(elapsed)} ms`)
+      expect(elapsed).toBeLessThan(streamEndBoundMs)
+      expect((await client(gateway.port).call(token)).status).toBe(403)
+    },
+    { reconcileEveryMs: 3600000, staleSweepMs: 60000 },
+  )
+})
+
+test("the daemon reads a changed run only once the change commits, so the revoke is not lost", async () => {
+  await withProcesses(
+    async (f, { gateway, daemon }) => {
+      expect(await daemon.send("authorize run")).toEqual({ ok: true, value: null })
+      const token = await sessionToken(gateway.port)
+      expect(await daemon.send("bound run 78")).toEqual({ ok: true, value: true })
+      f.setStall(true)
+      const stream = await client(gateway.port).call(token)
+      const reader = stream.body!.getReader()
+      expect((await reader.read()).done).toBe(false)
+      // The change notifies the daemon's control client 300 ms before it writes. A read that did
+      // not wait for the commit would find the run live and grant it again, and nothing but the
+      // hourly reconcile would revoke it.
+      expect((await daemon.send("settle-late run")).ok).toBe(true)
+      const committed = performance.now()
+      let done = false
+      void (async () => {
+        while (!(await reader.read().catch(() => ({ done: true }))).done);
+        done = true
+      })()
+      await within(streamEndBoundMs, async () => done)
+      console.log(
+        `commit to the end of the stream: ${Math.round(performance.now() - committed)} ms`,
+      )
+      expect((await client(gateway.port).call(token)).status).toBe(403)
+    },
+    { reconcileEveryMs: 3600000, staleSweepMs: 60000 },
+  )
 })
 
 test("a lease that the daemon did not authorize gets no challenge, and the daemon refuses to authorize a settled run", async () => {

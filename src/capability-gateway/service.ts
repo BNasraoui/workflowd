@@ -23,6 +23,8 @@ export interface GatewayConfiguration {
   readonly maxStreamsPerRun: number
   /** A stream silent this long is aborted; a stream that keeps sending runs to token expiry. */
   readonly streamIdleMs?: number
+  /** How often the gateway ends the streams of revoked or replaced sessions and tokens. */
+  readonly staleSweepMs?: number
 }
 const SessionProof = Schema.Struct({ token: Schema.String.check(Schema.isMaxLength(16384)) })
 const SessionAudience = /^workflowd:([a-f0-9]{64}):([a-f0-9]{64})$/
@@ -148,11 +150,12 @@ export const makeCapabilityGateway = (
           if (owner.session === session && owner.digest === digest) controller.abort()
     }
     // Bindings outlive this process: a restart revokes nothing. A stream whose binding moved to a
-    // later session, or whose run token a renewal replaced, ends within a second.
+    // later session, or whose run token a renewal replaced, ends within `staleSweepMs`, a second
+    // unless configured.
     yield* Effect.suspend(() => store.staleAmong(streams())).pipe(
       Effect.tap((stale) => Effect.sync(() => abortStale(stale))),
       Effect.ignore,
-      Effect.andThen(Effect.sleep("1 second")),
+      Effect.andThen(Effect.sleep(config.staleSweepMs ?? 1000)),
       Effect.forever,
       Effect.forkScoped,
     )

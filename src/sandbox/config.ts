@@ -55,6 +55,10 @@ export const CapabilityGatewayConfig = Schema.Struct({
   credentialRole: Schema.String.check(Schema.isPattern(/^[A-Za-z0-9_.-]{1,128}$/)),
   maxStreams: Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 512 })),
   maxStreamsPerRun: Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 4 })),
+  /** How often the gateway ends the streams of revoked or replaced sessions; 1000 by default. */
+  staleSweepMs: Schema.optionalKey(
+    Schema.Int.check(Schema.isBetween({ minimum: 100, maximum: 60000 })),
+  ),
   /** Where the gateway's process listens. */
   listen: Schema.Struct({
     host: Schema.String.check(Schema.isPattern(/^(?:\d{1,3}(?:\.\d{1,3}){3}|[0-9a-f:]+)$/)),
