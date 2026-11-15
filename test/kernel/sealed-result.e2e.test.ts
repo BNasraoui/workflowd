@@ -980,13 +980,17 @@ test(
   }),
 )
 
-const alive = (pid: number) => {
-  try {
-    process.kill(pid, 0)
-    return true
-  } catch {
-    return false
-  }
+/** Whether a process runs: it exists and is not a zombie that waits for its parent. */
+const alive = async (pid: number) => {
+  const stat = await readFile(`/proc/${pid}/stat`, "utf8").catch(() => "")
+  return stat !== "" && stat.slice(stat.lastIndexOf(")") + 2)[0] !== "Z"
+}
+
+/** Whether a process has ended within a second; a killed process needs a moment to be scheduled. */
+const ends = async (pid: number) => {
+  for (const deadline = Date.now() + 1_000; Date.now() < deadline; await Bun.sleep(10))
+    if (!(await alive(pid))) return true
+  return false
 }
 
 test(
@@ -1007,12 +1011,12 @@ test(
     while (!(await Bun.file(pids).exists()) || (await Bun.file(pids).text()) === "")
       await Bun.sleep(10)
     const [git, child] = (await Bun.file(pids).text()).trim().split(" ").map(Number)
-    expect(alive(git!) && alive(child!)).toBe(true)
+    expect((await alive(git!)) && (await alive(child!))).toBe(true)
     const started = Date.now()
     await Effect.runPromise(Fiber.interrupt(fiber))
     expect(Date.now() - started).toBeLessThan(2_000)
-    expect(alive(git!)).toBe(false)
-    expect(alive(child!)).toBe(false)
+    expect(await ends(git!)).toBe(true)
+    expect(await ends(child!)).toBe(true)
     expect(await readdir(f.scratchRoot)).toEqual([])
   }),
 )
