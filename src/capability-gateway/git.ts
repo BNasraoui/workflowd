@@ -94,6 +94,5 @@ export async function gitReadRequest(
     response:
       access && basic ? (await safeProviderResponse(response, [access, basic])).response : response,
     headers: new Headers({ "content-type": contentType, "cache-control": "no-store" }),
-    selectionObserved: false,
   }
 }
