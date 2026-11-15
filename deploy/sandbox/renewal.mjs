@@ -7,3 +7,8 @@
  */
 export const renewalReplacements = 3
 export const renewalRequests = renewalReplacements + 1
+/** The holder of a run token renews it between these many milliseconds before it expires. */
+export const renewLeadMinMs = 180000
+export const renewLeadMaxMs = 300000
+/** The gateway renews a token only this close to its expiry: the latest lead and 30 s of slack. */
+export const renewalWindowMs = renewLeadMaxMs + 30000

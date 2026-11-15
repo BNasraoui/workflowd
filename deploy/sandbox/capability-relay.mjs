@@ -6,6 +6,7 @@ import { chmod } from "node:fs/promises"
 import { pathToFileURL } from "node:url"
 import { gatewayOrigin } from "./bootstrap-helper.mjs"
 import { renewalRequests } from "./renewal.mjs"
+import { maxHeaderBytes, maxStreamsPerRun } from "./capability-limits.mjs"
 
 const root = "/run/workflowd-sandbox"
 
@@ -49,9 +50,9 @@ export async function serveRunnerRelay(config, directory = root) {
   let closed = false
   const sockets = new Set()
   const http = httpServer(
-    { maxHeaderSize: 8192, requestTimeout: 120000, headersTimeout: 10000 },
+    { maxHeaderSize: maxHeaderBytes, requestTimeout: 120000, headersTimeout: 10000 },
     (request, response) => {
-      if (closed || streams >= 4 || Date.now() >= credential.expiresAt) {
+      if (closed || streams >= maxStreamsPerRun || Date.now() >= credential.expiresAt) {
         response.writeHead(503, { "retry-after": "5" })
         response.end()
         return
@@ -100,7 +101,7 @@ export async function serveRunnerRelay(config, directory = root) {
           method: request.method,
           headers: { ...headers, authorization: `Bearer ${credential.token}` },
           agent,
-          maxHeaderSize: 8192,
+          maxHeaderSize: maxHeaderBytes,
         },
         (reply) => {
           const output = Object.fromEntries(

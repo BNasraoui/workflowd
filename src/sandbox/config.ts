@@ -2,6 +2,7 @@ import { Schema } from "effect"
 import { safePublication } from "../../deploy/sandbox/publication.mjs"
 import skills from "../../deploy/sandbox/skills/catalog.json"
 import { publicBootstrapFields } from "../../deploy/sandbox/public-status.mjs"
+import { maxStreamsPerRun } from "../../deploy/sandbox/capability-limits.mjs"
 
 const PublicationCoAuthor = Schema.String.check(
   Schema.makeFilter(
@@ -39,7 +40,7 @@ export const CapabilityGatewayConfig = Schema.Struct({
   providerId: Schema.NonEmptyString,
   credentialRole: Schema.String.check(Schema.isPattern(/^[A-Za-z0-9_.-]{1,128}$/)),
   maxStreams: Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 512 })),
-  maxStreamsPerRun: Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 4 })),
+  maxStreamsPerRun: Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: maxStreamsPerRun })),
   /** Where the gateway's own process listens; workflowd ignores it. */
   listen: Schema.optionalKey(
     Schema.Struct({

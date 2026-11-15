@@ -1,7 +1,8 @@
 import { createHash, randomBytes } from "node:crypto"
+import { maxJtiLength } from "../../deploy/sandbox/capability-limits.mjs"
 import { Effect, Schema } from "effect"
 import { SqlClient } from "effect/unstable/sql"
-import { renewalReplacements } from "../../deploy/sandbox/renewal.mjs"
+import { renewalReplacements, renewalWindowMs } from "../../deploy/sandbox/renewal.mjs"
 import { SandboxTransport } from "../sandbox/transport"
 import { authorizeWorker } from "../worker-identity/access"
 
@@ -36,8 +37,6 @@ const Binding = Schema.Struct({ runId: Schema.String, channel: Digest })
 const SessionBinding = Schema.Struct({ ...Binding.fields, session: Schema.Int })
 /** A run opens at most this many sessions; only a verified proof opens one. */
 const maxSessions = 8
-/** A run token is renewed only in its last 330 seconds: the relay's 180 to 300, and 30 of slack. */
-const renewalWindowMs = 330000
 /** A renewal asked again replaces the successor of one token at most this many times. */
 const maxReplacements = renewalReplacements
 /** A successor must outlive its predecessor by this much, so renewals near the deadline end. */
@@ -306,7 +305,7 @@ export const makeCapabilityStore = Effect.gen(function* () {
           row.session >= maxSessions ||
           row.authority.recipientId !== challenge.recipientId ||
           !jti ||
-          jti.length > 256 ||
+          jti.length > maxJtiLength ||
           !Number.isSafeInteger(expiresAt) ||
           expiresAt <= now ||
           expiresAt > row.authority.deadline

@@ -1,4 +1,5 @@
 import { credentialPatterns } from "./provider-evidence"
+import { checkHeaders, RequestRefused } from "./headers"
 
 const forwarded = new Set([
   "content-type",
@@ -48,7 +49,7 @@ export type ClaudeUpstream = (url: string, input: ClaudeRequest) => Promise<Resp
 
 export async function readRequestBody(request: Request, signal: AbortSignal, limit: number) {
   signal.throwIfAborted()
-  if (!request.body) throw new Error("request refused")
+  if (!request.body) throw new RequestRefused()
   const reader = request.body.getReader()
   let cancelled: Promise<void> | undefined
   const stop = () => {
@@ -63,9 +64,9 @@ export async function readRequestBody(request: Request, signal: AbortSignal, lim
       signal.throwIfAborted()
       if (item.done) break
       const chunk: unknown = item.value
-      if (!(chunk instanceof Uint8Array)) throw new Error("request refused")
+      if (!(chunk instanceof Uint8Array)) throw new RequestRefused()
       size += chunk.length
-      if (size > limit) throw new Error("request refused")
+      if (size > limit) throw new RequestRefused()
       chunks.push(chunk)
     }
     return Buffer.concat(chunks)
@@ -129,32 +130,23 @@ const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
  * recorded list only, and the client's session id when it is a UUID.
  */
 function claudeHeaders(request: Request) {
-  let headerBytes = 0
   const headers = new Headers()
-  for (const [key, value] of request.headers) {
-    headerBytes += key.length + value.length
+  checkHeaders(request, (key, value) => {
     const sent = forwarded.has(key) || (key === "x-claude-code-session-id" && uuid.test(value))
-    if (
-      headerBytes > 8192 ||
-      value.length > 2048 ||
-      /[\r\n\0]/.test(value) ||
-      !(sent || dropped.has(key))
-    )
-      throw new Error("request refused")
     if (sent) headers.set(key, value)
-  }
+    return sent || dropped.has(key)
+  })
   const betas = headers
     .get("anthropic-beta")
     ?.split(",")
     .map((value) => value.trim())
   if (
-    (request.headers.get("host") ?? "capability.invalid") !== "capability.invalid" ||
     !/^application\/json(?:; ?charset=utf-8)?$/i.test(headers.get("content-type") ?? "") ||
     headers.get("anthropic-version") !== "2023-06-01" ||
     !betas?.includes("oauth-2025-04-20") ||
     !betas.every((value) => claudeBetas.has(value))
   )
-    throw new Error("request refused")
+    throw new RequestRefused()
   return headers
 }
 
@@ -183,7 +175,7 @@ function sameNumber(this: unknown, _key: string, value: unknown, context?: { sou
     (context?.source === undefined ||
       decimalValue(context.source) !== decimalValue(JSON.stringify(value)))
   )
-    throw new Error("request refused")
+    throw new RequestRefused()
   return value
 }
 
@@ -193,10 +185,9 @@ function parsedBody(body: Buffer) {
   try {
     data = JSON.parse(body.toString("utf8"), sameNumber)
   } catch {
-    throw new Error("request refused")
+    throw new RequestRefused()
   }
-  if (typeof data !== "object" || data === null || Array.isArray(data))
-    throw new Error("request refused")
+  if (typeof data !== "object" || data === null || Array.isArray(data)) throw new RequestRefused()
   return data
 }
 
@@ -218,10 +209,10 @@ export async function claudeRequest(
       "/v1/messages/count_tokens?beta=true",
     ].includes(path)
   )
-    throw new Error("request refused")
+    throw new RequestRefused()
   const headers = claudeHeaders(request)
   const data = parsedBody(await readRequestBody(request, signal, 1048576))
-  if (!("model" in data) || data.model !== model) throw new Error("request refused")
+  if (!("model" in data) || data.model !== model) throw new RequestRefused()
   const access = await credential()
   signal.throwIfAborted()
   headers.set("authorization", `Bearer ${access}`)

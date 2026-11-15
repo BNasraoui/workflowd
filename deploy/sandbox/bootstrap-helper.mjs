@@ -1,3 +1,4 @@
+import { maxProofLength } from "./capability-limits.mjs"
 /** The gateway's origin: HTTPS only, with no credentials, path, query or fragment. */
 export function gatewayOrigin(value) {
   const url = new URL(value)
@@ -121,7 +122,7 @@ export async function openSession({
       throw new Error("challenge refused")
     attempt++
     const token = await issue(`workflowd:${issued.channel}:${issued.nonce}`, bounded())
-    if (typeof token !== "string" || token.length > 16384) throw new Error("job identity refused")
+    if (typeof token !== "string" || token.length > maxProofLength) throw new Error("job identity refused")
     try {
       const response = await send(new URL("/capabilities/v1/session", origin), {
         method: "POST",

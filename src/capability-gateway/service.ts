@@ -8,6 +8,13 @@ import { githubJobKeys, verifyJobProof } from "../sandbox/bootstrap"
 import { runLifetime } from "../store/run-lifetime"
 import { ownedPromise } from "./owned"
 import { gitReadRequest, type GitUpstream } from "./git"
+import { renewLeadMaxMs, renewLeadMinMs } from "../../deploy/sandbox/renewal.mjs"
+import { capabilityOrigin, RequestRefused } from "./headers"
+import {
+  maxJtiLength,
+  maxProofLength,
+  maxStreamsPerRun,
+} from "../../deploy/sandbox/capability-limits.mjs"
 
 export interface GatewayConfiguration {
   readonly gitRead?: boolean
@@ -19,7 +26,9 @@ export interface GatewayConfiguration {
   /** A stream silent this long is aborted; a stream that keeps sending runs to token expiry. */
   readonly streamIdleMs?: number
 }
-const SessionProof = Schema.Struct({ token: Schema.String.check(Schema.isMaxLength(16384)) })
+const SessionProof = Schema.Struct({
+  token: Schema.String.check(Schema.isMaxLength(maxProofLength)),
+})
 const SessionAudience = /^workflowd:([a-f0-9]{64}):([a-f0-9]{64})$/
 /**
  * Reads the audience and jti of an unverified proof only to select its challenge and to refuse a
@@ -40,7 +49,7 @@ const proofClaims = (token: string) => {
     return match?.[1] &&
       match[2] &&
       typeof jti === "string" &&
-      jti.length <= 256 &&
+      jti.length <= maxJtiLength &&
       typeof kid === "string"
       ? { audience: match[0], channel: match[1], nonce: match[2], jti, kid }
       : null
@@ -86,8 +95,9 @@ const maxMints = 4
 class MintsBusy extends Schema.TaggedError<MintsBusy>()("MintsBusy", {}) {}
 /** A run token lives at most 15 minutes. */
 const tokenLifeMs = 900000
-/** Its holder renews it 180 to 300 seconds before it expires, or now when less is left. */
-const renewAt = (expiresAt: number) => Math.max(Date.now(), expiresAt - randomInt(180000, 300001))
+/** Its holder renews it within the renewal lead before it expires, or now when less is left. */
+const renewAt = (expiresAt: number) =>
+  Math.max(Date.now(), expiresAt - randomInt(renewLeadMinMs, renewLeadMaxMs + 1))
 const denied = () => new Response(null, { status: 403 })
 const unavailable = () => new Response(null, { status: 503, headers: { "retry-after": "5" } })
 
@@ -121,7 +131,7 @@ export const makeCapabilityGateway = (
       config.maxStreams > 512 ||
       !Number.isSafeInteger(config.maxStreamsPerRun) ||
       config.maxStreamsPerRun < 1 ||
-      config.maxStreamsPerRun > config.maxStreams ||
+      config.maxStreamsPerRun > Math.min(config.maxStreams, maxStreamsPerRun) ||
       !Number.isSafeInteger(streamIdleMs) ||
       streamIdleMs < 1 ||
       streamIdleMs > 600000
@@ -294,7 +304,7 @@ export const makeCapabilityGateway = (
     const handle = Effect.fn("CapabilityGateway.handle")(
       function* (request: Request) {
         const auth = /^Bearer ([A-Za-z0-9_-]{43})$/.exec(request.headers.get("authorization") ?? "")
-        if (!auth?.[1] || !request.url.startsWith("http://capability.invalid/")) return denied()
+        if (!auth?.[1] || !request.url.startsWith(`${capabilityOrigin}/`)) return denied()
         const digest = capabilityDigest(auth[1])
         // The run token alone selects its binding; no route reads a body before this check.
         const found = yield* Effect.result(store.bindingFor(digest, Date.now()))
@@ -306,7 +316,7 @@ export const makeCapabilityGateway = (
         if (checked._tag === "Failure") return denied()
         const grant = checked.success
         if (grant.providerId !== config.providerId) return denied()
-        const target = request.url.slice("http://capability.invalid".length)
+        const target = request.url.slice(capabilityOrigin.length)
         if (target === "/capabilities/v1/renew") {
           if (request.method !== "POST" || Number(request.headers.get("content-length") ?? 0) > 2)
             return denied()
@@ -486,7 +496,7 @@ export const makeCapabilityGateway = (
                   })
                 }).pipe(
                   Effect.mapError((error) =>
-                    error instanceof Error && error.message === "request refused"
+                    error instanceof RequestRefused
                       ? ("refused" as const)
                       : ("unavailable" as const),
                   ),
