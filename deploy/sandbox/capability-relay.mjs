@@ -140,7 +140,7 @@ export async function serveRunnerRelay(config, directory = root) {
     let retryable = true
     // After a clock jump the predecessor may have expired: it is never sent.
     if (Date.now() >= credential.expiresAt) {
-      stop()
+      end("expiry")
       return
     }
     try {
@@ -186,7 +186,7 @@ export async function serveRunnerRelay(config, directory = root) {
       credential = next
       failures = 0
       clearTimeout(expiry)
-      expiry = setTimeout(stop, next.expiresAt - Date.now())
+      expiry = setTimeout(() => end("expiry"), next.expiresAt - Date.now())
       renewal = setTimeout(renew, next.renewAt - Date.now())
     } catch {
       if (closed) return
@@ -204,10 +204,11 @@ export async function serveRunnerRelay(config, directory = root) {
     }
   }
   renewal = setTimeout(renew, Math.max(0, credential.renewAt - Date.now()))
-  const deadline = setTimeout(() => stop(), Math.max(0, config.deadline - Date.now()))
-  let expiry = setTimeout(() => stop(), Math.max(0, config.expiresAt - Date.now()))
+  const deadline = setTimeout(() => end("deadline"), Math.max(0, config.deadline - Date.now()))
+  let expiry = setTimeout(() => end("expiry"), Math.max(0, config.expiresAt - Date.now()))
   /** Ends the session and leaves its fixed reason for the job's hold step. */
   function end(reason) {
+    if (closed) return
     try {
       writeFileSync(`${directory}/relay-ended`, `${reason}\n`, { mode: 0o600 })
     } catch {

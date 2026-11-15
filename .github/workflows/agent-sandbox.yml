@@ -93,7 +93,7 @@ jobs:
           SANDBOX_AUDIENCE: ${{ inputs.tailscale-audience }}
           SANDBOX_GATEWAY_URL: ${{ inputs.gateway-url }}
         run: node deploy/sandbox/public-output.mjs bootstrap -- bash deploy/sandbox/runner.sh prepare-private
-      - name: Hold the privately authenticated lease
+      - name: Hold the lease
         # The runner injects OIDC variables after step env overrides. Strip them
         # in the shell launcher, before either the shell or hold process starts.
         shell: /usr/bin/env -u ACTIONS_ID_TOKEN_REQUEST_TOKEN -u ACTIONS_ID_TOKEN_REQUEST_URL /bin/bash --noprofile --norc -e -o pipefail {0}

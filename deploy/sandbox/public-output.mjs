@@ -81,8 +81,9 @@ if (import.meta.main) {
     })
     child.once("close", (code) => {
       clearTimeout(timer)
-      // The hold exits 3 when the relay ended the session on its last failed renewal.
-      if (stage === "audit" && code === 3 && reason === "none") reason = "renewal"
+      // The hold of a session names why the relay ended it.
+      const ended = { 3: "renewal", 4: "expiry", 5: "deadline" }[code]
+      if (stage === "audit" && ended && reason === "none") reason = ended
       // The child's own output is counted and dropped: only this status line is public.
       const receipt = serializePublicStatus({
         stage,
