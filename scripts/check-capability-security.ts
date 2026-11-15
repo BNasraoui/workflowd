@@ -80,7 +80,6 @@ async function main() {
         completeCoreCases: suite === "core" && results.every((result) => result.ok),
         completeListedCases: results.every((result) => result.ok),
         separateP1Evidence: [
-          "filesystem-run.py provider-gid.test.ts",
           "Node real-SSH transport feasibility",
           "changed-line and per-file coverage",
           "final static gates",

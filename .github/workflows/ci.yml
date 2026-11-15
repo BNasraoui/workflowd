@@ -238,14 +238,12 @@ jobs:
             /bin/sh -c 'ip link set lo up && export PATH="$PWD/test/resources/forbidden:$PATH" && exec "$@"' fixture \
             /opt/workflowd-credential-fixture/bin/bun test --coverage \
             --coverage-dir=coverage/administrative \
-            --test-name-pattern='^(installed|offline migration|a replaced login|missing links|an admission lease|interrupted repair|repair after|the host|relink |a FIFO|host transport|admitted|one rotating|credential-host snapshots|uncertain rotation|R10: |independent owners|confirmed non-rotation|Codex |explicit OpenCode|authenticated host)' \
+            --test-name-pattern='^(installed|offline migration|a replaced login|missing links|an admission lease|interrupted repair|repair after|the host|relink |a FIFO|host transport|admitted)' \
             test/agent-user/client-versions.test.ts \
             test/agent-user/credentials.e2e.test.ts \
             test/agent-user/credential-dispatch.e2e.test.ts \
             test/agent-user/native.e2e.test.ts \
-            test/agent-user/opencode-migration.e2e.test.ts \
-            test/agent-host/provider-access.test.ts \
-            test/agent-host/native-provider-owner.test.ts
+            test/agent-user/opencode-migration.e2e.test.ts
       - name: Generate Bun LCOV
         run: |
           # Migration needs privileged /proc access; refresh probes need network

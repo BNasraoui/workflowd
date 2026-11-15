@@ -70,7 +70,7 @@ for (const [ending, phase] of [
       await new Promise<void>((resolve) => host.listen(join(root, "host.sock"), resolve))
       await writeFile(
         join(root, "noscope/providers/provider-access.toml"),
-        `contract_version = 1\n[commands]\nmint = "${process.execPath} ${resolve("src/capability-gateway/noscope-provider.ts")} access ${join(root, "host.sock")} claude {ttl}"\n`,
+        `contract_version = 1\n[commands]\nmint = "${process.execPath} ${resolve("test/capability-gateway/blocking-provider.mjs")} ${join(root, "host.sock")} {ttl}"\n`,
         { mode: 0o600 },
       )
     }
