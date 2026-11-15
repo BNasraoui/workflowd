@@ -72,24 +72,7 @@ provider-advertised. Explicit model selection still requires acceptance of unkno
 access. Repository aliases resolve to `codex:actions` or `opencode:actions` before
 dispatch and never use local/shared-server credential preflight as native authority.
 
-## Two independent credential lifecycles
-
-The [credential owner](provider-access-owner.md) supports
-`providerAccess.codex.clientId` for canonical ChatGPT auth, or
-`providerAccess.opencode.canonical` for an explicit private JSON
-`{"apiKey":"...","expiresAt":...}` file. `expiresAt` is Unix milliseconds and
-must be an operator-selected real access bound. Expired static keys are refused;
-they never trigger OAuth fallback. This path does not read OpenCode's database.
-
-Codex refresh uses fixed `https://auth.openai.com/oauth/token` with verified TLS,
-no redirects, ten-second timeout, and a 16-KiB response bound. The pinned public
-client ID is `app_EMoamEEZ73f0CkXaXp7hrann`; deployment selects it explicitly.
-Optional rotated refresh/ID tokens preserve their previous value when absent.
-JWT `exp` supplies a conservative expiry bound on an already custodied credential;
-it is not job authentication. Native auth shape, account, and unrelated fields are
-preserved. Account/access snapshots remain on Mint, behind the authenticated host
-socket and noscope. The existing flock, canonical reread, atomic fsync, cooldown,
-and uncertain-rotation fence govern both rotating providers.
+## Run capability lifetime
 
 The run capability separately retains its 60-minute maximum, 45–55-minute renewal
 jitter, absolute job cap, same binding/grants, and stable relay endpoint. Renewal

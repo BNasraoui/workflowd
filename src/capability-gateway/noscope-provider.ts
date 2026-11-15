@@ -1,11 +1,10 @@
 import { randomBytes, randomUUID } from "node:crypto"
-import { providerAccessSnapshot } from "../agent-host/client"
 import { dlopen, FFIType } from "bun:ffi"
 
 /** The noscope command contract; the entrypoint owns process lifetime and stdio. */
-export async function capabilityProvider([operation, ...args]: readonly string[]) {
-  // Noscope uses a separate process group. Parent-death signaling also owns
-  // this adapter's pending credential-host socket if mint is cancelled.
+export function capabilityProvider([operation, ...args]: readonly string[]) {
+  // Noscope uses a separate process group. Parent-death signaling ends this
+  // adapter if mint is cancelled.
   const parent = process.ppid
   const libc = dlopen("libc.so.6", {
     prctl: {
@@ -19,27 +18,11 @@ export async function capabilityProvider([operation, ...args]: readonly string[]
   const ttl = Number(args.at(-1))
   if (!Number.isInteger(ttl) || ttl < 1 || ttl > 3600)
     throw new Error("capability provider refused")
-  if (operation === "run" && args.length === 1)
-    return {
-      token: randomBytes(32).toString("base64url"),
-      token_id: randomUUID(),
-      expires_at: new Date(Date.now() + ttl * 1000).toISOString(),
-    }
-  if (
-    operation !== "access" ||
-    args.length !== 3 ||
-    !args[0]?.startsWith("/") ||
-    !["claude", "codex", "opencode"].includes(args[1] ?? "")
-  )
-    throw new Error("capability provider refused")
-  const provider = args[1]
-  if (provider !== "claude" && provider !== "codex" && provider !== "opencode")
-    throw new Error("capability provider refused")
-  const snapshot = await providerAccessSnapshot(args[0], provider)
+  if (operation !== "run" || args.length !== 1) throw new Error("capability provider refused")
   return {
-    token: snapshot.token,
+    token: randomBytes(32).toString("base64url"),
     token_id: randomUUID(),
-    expires_at: new Date(Math.min(snapshot.expiresAt, Date.now() + ttl * 1000)).toISOString(),
+    expires_at: new Date(Date.now() + ttl * 1000).toISOString(),
   }
 }
 
@@ -47,7 +30,7 @@ export async function capabilityProvider([operation, ...args]: readonly string[]
 // Run material has no authority until workflowd commits its digest and exact binding.
 if (import.meta.main) {
   try {
-    process.stdout.write(JSON.stringify(await capabilityProvider(process.argv.slice(2))))
+    process.stdout.write(JSON.stringify(capabilityProvider(process.argv.slice(2))))
   } catch {
     process.stderr.write("capability provider refused\n")
     process.exitCode = 1

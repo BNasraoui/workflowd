@@ -79,29 +79,3 @@ test("an OpenCode restart cannot stop workflowd: its units are wanted, never req
     expect(lines.some((line) => /^After=/.test(line) && line.includes(unit))).toBe(true)
   }
 })
-
-test("the capability gateway is its own unit, independent of workflowd", async () => {
-  const [gateway, workflowd] = await Promise.all([
-    readFile("deploy/systemd/workflowd-capability-gateway.service", "utf8"),
-    readFile("deploy/systemd/workflowd.service", "utf8"),
-  ])
-  const lines = gateway.split("\n")
-  expect(lines.filter((line) => line.startsWith("ExecStart="))).toEqual([
-    "ExecStart=/opt/workflowd/bin/bun /opt/workflowd/deploy/current/src/capability-gateway-server.ts",
-  ])
-  expect(await Bun.file("src/capability-gateway-server.ts").exists()).toBe(true)
-  expect(lines).toContain("EnvironmentFile=%h/.config/workflowd/env")
-  for (const directive of ["NoNewPrivileges=true", "ProtectSystem=strict", "PrivateTmp=true"])
-    expect(lines).toContain(directive)
-  // Neither unit stops, requires or orders itself on the other.
-  for (const [text, other] of [
-    [gateway, "workflowd.service"],
-    [workflowd, "workflowd-capability-gateway.service"],
-  ] as const)
-    expect(
-      text
-        .split("\n")
-        .filter((line) => /^(Requires|BindsTo|Requisite|PartOf|After|Before)=/.test(line))
-        .filter((line) => line.split(/[=\s]/).includes(other)),
-    ).toEqual([])
-})

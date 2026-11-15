@@ -7,8 +7,6 @@ export const coreCases = [
   ["C1", "test/capability-gateway/authorization.test.ts"],
   ["C2", "test/capability-gateway/noscope.test.ts"],
   ["C3", "test/capability-gateway/lifecycle.test.ts"],
-  ["C4", "test/agent-host/provider-access.test.ts"],
-  ["C5", "test/agent-host/provider-https.launcher.test.ts"],
   ["C6", "test/capability-gateway/transaction.test.ts"],
   ["C7", "test/capability-gateway/composition.test.ts"],
   ["D1", "test/capability-gateway/transport-security.test.ts"],
@@ -26,9 +24,7 @@ export const publicationCases = [
 export const adapterCases = [
   ["P3-A", "test/sandbox/public-output.test.ts"],
   ["P3-B", "test/sandbox/bootstrap.e2e.launcher.test.ts"],
-  ["P3-C2", "test/agent-host/native-provider-owner.test.ts"],
   ["P3-C3", "test/execution/config.test.ts"],
-  ["P3-C4", "test/agent-host/provider-https.launcher.test.ts"],
   ["P3-D1", "test/capability-gateway/transport-security.test.ts"],
   ["P3-D2", "test/sandbox/capability-relay.test.ts"],
   ["P3-G5", "test/kernel/actions-session-custody.test.ts"],

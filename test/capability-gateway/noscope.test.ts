@@ -7,40 +7,11 @@ import { tmpdir } from "node:os"
 import { capabilityProvider } from "../../src/capability-gateway/noscope-provider"
 import { fixtureExecutable } from "../helpers/fixture-executable.mjs"
 
-test("provider command boundary refuses invalid grants and caps owner access to its actual expiry", async () => {
-  for (const args of [
-    [],
-    ["run", "0"],
-    ["run", "3601"],
-    ["run", "extra", "60"],
-    ["other", "60"],
-    ["access", "relative", "claude", "60"],
-    ["access", "/fixture", "other", "60"],
-  ])
-    await expect(capabilityProvider(args)).rejects.toThrow("capability provider refused")
-  const run = await capabilityProvider(["run", "60"])
+test("provider command boundary refuses invalid grants", () => {
+  for (const args of [[], ["run", "0"], ["run", "3601"], ["run", "extra", "60"], ["other", "60"]])
+    expect(() => capabilityProvider(args)).toThrow("capability provider refused")
+  const run = capabilityProvider(["run", "60"])
   expect(run.token).toMatch(/^[A-Za-z0-9_-]{43}$/)
-  const root = await mkdtemp(join(tmpdir(), "provider-boundary-"))
-  const socket = join(root, "owner.sock")
-  const expiresAt = Date.now() + 10000
-  const server = createServer((client) =>
-    client.once("data", (bytes) => {
-      expect(JSON.parse(bytes.toString())).toEqual({
-        operation: "providerAccess",
-        provider: "claude",
-      })
-      client.end(JSON.stringify({ admitted: true, token: "fixture-access", expiresAt }) + "\n")
-    }),
-  )
-  try {
-    await new Promise<void>((resolve) => server.listen(socket, resolve))
-    const access = await capabilityProvider(["access", socket, "claude", "60"])
-    expect(access.token).toBe("fixture-access")
-    expect(Date.parse(access.expires_at)).toBe(expiresAt)
-  } finally {
-    await new Promise<void>((resolve) => server.close(() => resolve()))
-    await rm(root, { recursive: true, force: true })
-  }
 })
 
 test("real noscope mints fresh bounded run credentials through the installed provider contract", async () => {
@@ -99,7 +70,7 @@ test("S1/R1: aborting noscope terminates its blocked provider adapter", async ()
     await mkdir(join(root, "noscope/providers"), { recursive: true, mode: 0o700 })
     await writeFile(
       join(root, "noscope/providers/provider-access.toml"),
-      `contract_version = 1\n[commands]\nmint = "${process.execPath} ${resolve("src/capability-gateway/noscope-provider.ts")} access ${socketPath} claude {ttl}"\n`,
+      `contract_version = 1\n[commands]\nmint = "${process.execPath} ${resolve("test/capability-gateway/blocking-provider.mjs")} ${socketPath} {ttl}"\n`,
       { mode: 0o600 },
     )
     const abort = new AbortController()
