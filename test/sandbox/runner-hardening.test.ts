@@ -2,6 +2,7 @@ import { expect, test } from "bun:test"
 import { mkdtemp, writeFile, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
+import { fixtureExecutable } from "../helpers/fixture-executable.mjs"
 
 const root = resolve(import.meta.dir, "../..")
 
@@ -246,7 +247,7 @@ test("the hold of a session fails with the reason renewal when the relay ended o
     const receipt = async () => {
       const child = Bun.spawn(
         [
-          "node",
+          fixtureExecutable("node"),
           `${root}/deploy/sandbox/public-output.mjs`,
           "audit",
           "--",
