@@ -613,10 +613,26 @@ export const makeSandboxGithub = (
           request: { signal },
         }),
       ).pipe(Effect.map((response) => Redacted.make(response.data.token)))
-    const repositoryVisibility = Effect.fn("SandboxGithub.repositoryVisibility")(function* (
+    /** Revokes an installation token; a failure is logged, the token then ends within an hour. */
+    const revokeToken = (token: Redacted.Redacted<string>) =>
+      http((signal) =>
+        new OctokitClass({ auth: Redacted.value(token) }).request("DELETE /installation/token", {
+          request: { signal },
+        }),
+      ).pipe(
+        Effect.asVoid,
+        Effect.catch(() => Effect.logWarning("Installation token not revoked")),
+      )
+    /** Mints an installation token for `use` and revokes it when `use` ends, also on a failure. */
+    const withInstallationToken = <A, E, R>(
       policy: PolicyRepository,
+      permissions: Record<string, string>,
+      use: (token: Redacted.Redacted<string>) => Effect.Effect<A, E, R>,
+    ) => Effect.acquireUseRelease(installationToken(policy, permissions), use, revokeToken)
+    const readVisibility = Effect.fn("SandboxGithub.readVisibility")(function* (
+      policy: PolicyRepository,
+      token: Redacted.Redacted<string>,
     ) {
-      const token = yield* installationToken(policy, { metadata: "read" })
       const client = new OctokitClass({ auth: Redacted.value(token) })
       const response = yield* request(client, "GET", `/repos/${policy.repository}`)
       if (response.status !== 200) return yield* Effect.fail(githubFailure(response))
@@ -632,11 +648,19 @@ export const makeSandboxGithub = (
         ? ("public" as const)
         : ("private" as const)
     })
-    /** A token for the daemon's one push of a checked result; it never leaves the daemon. */
-    const pushToken = (policy: PolicyRepository) => installationToken(policy, { contents: "write" })
+    const repositoryVisibility = (policy: PolicyRepository) =>
+      withInstallationToken(policy, { metadata: "read" }, (token) => readVisibility(policy, token))
+    /**
+     * A token for the daemon's one push of a checked result, revoked when `use` ends;
+     * it never leaves the daemon.
+     */
+    const withPushToken = <A, E, R>(
+      policy: PolicyRepository,
+      use: (token: Redacted.Redacted<string>) => Effect.Effect<A, E, R>,
+    ) => withInstallationToken(policy, { contents: "write" }, use)
     return {
       repositoryVisibility,
-      pushToken,
+      withPushToken,
       repositoryUrl: (policy: SavedSandboxPolicy) =>
         new OctokitClass().request.endpoint(`GET /repos/${policy.repository}`).url,
       publicationRead,

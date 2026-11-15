@@ -1079,49 +1079,12 @@ describe("runner placement", () => {
     privateBootstrap: { repositoryOwnerId: 78, mode: "actions-native" as const },
   }
 
-  /** A GitHub API stub: an installation token, then one repository read. Nothing reaches GitHub. */
+  /** The shared GitHub API stub, whose one repository answers as `repository` says. */
   const githubStub = async (repository: () => Response) => {
-    const { generateKeyPairSync } = await import("node:crypto")
-    const { Octokit } = await import("@octokit/rest")
-    const { mkdtemp, writeFile, rm } = await import("node:fs/promises")
-    const { tmpdir } = await import("node:os")
-    const { join } = await import("node:path")
-    const root = await mkdtemp(join(tmpdir(), "runner-visibility-"))
-    const privateKeyPath = join(root, "app.pem")
-    const key = generateKeyPairSync("rsa", { modulusLength: 2048 }).privateKey.export({
-      type: "pkcs8",
-      format: "pem",
-    })
-    await writeFile(privateKeyPath, key, { mode: 0o600 })
-    const tokenRequests: unknown[] = []
-    const server = Bun.serve({
-      hostname: "127.0.0.1",
-      port: 0,
-      async fetch(request) {
-        const path = new URL(request.url).pathname
-        if (path.endsWith("/access_tokens")) {
-          tokenRequests.push(await request.json())
-          return Response.json({ token: "fixture-token" }, { status: 201 })
-        }
-        if (path === `/repos/${runnerPolicy.repository}`) return repository()
-        return new Response(null, { status: 404 })
-      },
-    })
-    const { makeSandboxGithub } = await import("../../src/sandbox/github")
-    const github = await Effect.runPromise(
-      makeSandboxGithub(
-        { appId: 1, privateKeyPath },
-        Octokit.defaults({ baseUrl: server.url.toString().replace(/\/$/, "") }),
-      ),
+    const { githubApiStub } = await import("../sandbox/github-api-stub")
+    return githubApiStub((path) =>
+      path === `/repos/${runnerPolicy.repository}` ? repository() : undefined,
     )
-    return {
-      github,
-      tokenRequests,
-      close: async () => {
-        await server.stop(true)
-        await rm(root, { recursive: true, force: true })
-      },
-    }
   }
 
   const visible = (fields: Record<string, unknown>) => () =>
@@ -1156,18 +1119,26 @@ describe("runner placement", () => {
       )
       expect(state.created).toHaveLength(0)
       expect(trees).toHaveLength(0)
-      return { refusal, tokenRequests: stub?.tokenRequests ?? [] }
+      return {
+        refusal,
+        tokenRequests: stub?.minted() ?? [],
+        revoked: stub?.revoked() ?? [],
+      }
     } finally {
       await stub?.close()
     }
   }
 
   test("a runner dispatch of a public repository is refused until the runner executor exists", async () => {
-    const { refusal, tokenRequests } = await dispatchRunner(visible({ visibility: "public" }))
+    const { refusal, tokenRequests, revoked } = await dispatchRunner(
+      visible({ visibility: "public" }),
+    )
     expect(refusal.reason).toBe("executor_unavailable")
     expect(tokenRequests).toEqual([
       { repository_ids: [runnerPolicy.repositoryId], permissions: { metadata: "read" } },
     ])
+    // The token of the read is revoked once the read is done.
+    expect(revoked.map((request) => request.authorization)).toEqual(["token fixture-token"])
   })
 
   test("a private or internal repository is refused for a runner", async () => {
@@ -1186,10 +1157,12 @@ describe("runner placement", () => {
       visible({ id: 999 }),
       visible({ full_name: "fixture/other" }),
       () => Response.json({ id: runnerPolicy.repositoryId }),
-    ])
-      expect((await dispatchRunner(repository)).refusal.reason).toBe(
-        "repository_visibility_unknown",
-      )
+    ]) {
+      const { refusal, revoked } = await dispatchRunner(repository)
+      expect(refusal.reason).toBe("repository_visibility_unknown")
+      // The token is revoked also when the read fails.
+      expect(revoked).toHaveLength(1)
+    }
     // No visibility reader at all is a failed read too.
     expect((await dispatchRunner()).refusal.reason).toBe("repository_visibility_unknown")
   })

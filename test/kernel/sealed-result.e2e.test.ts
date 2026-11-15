@@ -27,6 +27,7 @@ import {
   type SealedResultCheck,
   type SealedResultOptions,
 } from "../../src/kernel/sealed-result"
+import { githubApiStub } from "../sandbox/github-api-stub"
 import { command } from "../sandbox/harness"
 
 // The real sealing script of the runner, and a daemon check that pushes into a bare
@@ -566,60 +567,51 @@ test(
 )
 
 test(
-  "the push token of the installation is asked for contents only, and reaches git as a header",
+  "the push token of the installation is asked for contents only, reaches git as a header, and is revoked after the push",
   withFixture(async (f) => {
-    const { generateKeyPairSync } = await import("node:crypto")
-    const { Octokit } = await import("@octokit/rest")
-    const { makeSandboxGithub } = await import("../../src/sandbox/github")
-    const privateKeyPath = join(f.root, "app.pem")
-    await writeFile(
-      privateKeyPath,
-      generateKeyPairSync("rsa", { modulusLength: 2048 }).privateKey.export({
-        type: "pkcs8",
-        format: "pem",
-      }),
-      { mode: 0o600 },
-    )
-    const requests: unknown[] = []
-    // A GitHub API stub; nothing here reaches GitHub.
-    const server = Bun.serve({
-      hostname: "127.0.0.1",
-      port: 0,
-      async fetch(request) {
-        requests.push({ path: new URL(request.url).pathname, body: await request.json() })
-        return Response.json({ token }, { status: 201 })
-      },
-    })
+    const stub = await githubApiStub(undefined, token)
     try {
-      const github = await Effect.runPromise(
-        makeSandboxGithub(
-          { appId: 1, privateKeyPath },
-          Octokit.defaults({ baseUrl: server.url.toString().replace(/\/$/, "") }),
-        ),
-      )
-      const pushToken = await Effect.runPromise(
-        github.pushToken({ repository: "fixture/repo", repositoryId: 12, installationId: 34 }),
-      )
-      expect(requests).toEqual([
-        {
-          path: "/app/installations/34/access_tokens",
-          body: { repository_ids: [12], permissions: { contents: "write" } },
-        },
-      ])
+      const policy = { repository: "fixture/repo", repositoryId: 12, installationId: 34 }
       const recorder = await recordingGit(f)
       const sealed = await sealWithResultPy(f, async (workspace) => {
         await writeFile(join(workspace, "result.txt"), "content\n")
       })
       const result = await decode(sealed.json, sealed.bundle)
-      const exit = await publish(result, options(f, { token: pushToken, gitBinary: recorder.path }))
-      expect(Exit.isSuccess(exit)).toBe(true)
+      const publishWithToken = () =>
+        Effect.runPromiseExit(
+          stub.github.withPushToken(policy, (pushToken) =>
+            Effect.scoped(
+              Effect.gen(function* () {
+                const opts = options(f, { token: pushToken, gitBinary: recorder.path })
+                return yield* pushSealedResult(yield* checkSealedResult(result, target, opts))
+              }),
+            ),
+          ),
+        )
+      expect(Exit.isSuccess(await publishWithToken())).toBe(true)
       const push = (await recorder.calls()).find((call) => call.argv.includes("push"))!
       expect(push.env.GIT_CONFIG_KEY_0).toBe(`http.${f.remote}.extraHeader`)
       expect(push.env.GIT_CONFIG_VALUE_0).toBe(
         `Authorization: Basic ${Buffer.from(`x-access-token:${token}`).toString("base64")}`,
       )
+      // A second publication of the same result fails, and its token is revoked too.
+      expect(refusedCheck(await publishWithToken())).toBe("target_exists")
+      expect(stub.requests.map((request) => `${request.method} ${request.path}`)).toEqual([
+        "POST /app/installations/34/access_tokens",
+        "DELETE /installation/token",
+        "POST /app/installations/34/access_tokens",
+        "DELETE /installation/token",
+      ])
+      expect(stub.minted()).toEqual([
+        { repository_ids: [12], permissions: { contents: "write" } },
+        { repository_ids: [12], permissions: { contents: "write" } },
+      ])
+      expect(stub.revoked().map((request) => request.authorization)).toEqual([
+        `token ${token}`,
+        `token ${token}`,
+      ])
     } finally {
-      await server.stop(true)
+      await stub.close()
     }
   }),
 )
