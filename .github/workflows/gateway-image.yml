@@ -221,7 +221,7 @@ jobs:
           SECOND_PARTS: ${{ needs.rebuild.outputs.parts }}
           # The NAR hash of nix/noscope.nix's output. A change of its revision, of flake.lock or of
           # the toolchain that changes the build output must change this line too.
-          NOSCOPE: sha256-10fV179tWOSWf68LoizIAwUpWh8UjkSLm0NWvZHrH0E=
+          NOSCOPE: sha256-10fV179tWOSWf68LoizIAwUpWh8UjkSLm0NWvZHrH0F=
         run: |
           set -euo pipefail
           printf 'First:  %s %s\nSecond: %s %s\n' "$FIRST" "$FIRST_PARTS" "$SECOND" "$SECOND_PARTS" | tee -a "$GITHUB_STEP_SUMMARY"
