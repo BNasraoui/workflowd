@@ -10,7 +10,10 @@ export class CapabilityRefused extends Schema.TaggedError<CapabilityRefused>()(
   "CapabilityRefused",
   {},
 ) {}
-/** The lease cannot be challenged yet: it is unknown, or its Actions run is not recorded. */
+/**
+ * The lease cannot be challenged: it is unknown, its Actions run is not recorded, its run has
+ * ended, or its binding is revoked. All of them get the same answer.
+ */
 class CapabilityNotReady extends Schema.TaggedError<CapabilityNotReady>()(
   "CapabilityNotReady",
   {},
@@ -256,13 +259,16 @@ export const makeCapabilityStore = Effect.gen(function* () {
           typeof rows[0]?.actions_run_id !== "number"
         )
           return yield* Effect.fail(new CapabilityNotReady())
-        const value = yield* current(runId, now)
+        // An ended run and a revoked binding answer as an unknown lease does: not ready.
+        const value = yield* current(runId, now).pipe(
+          Effect.mapError(() => new CapabilityNotReady()),
+        )
         const bound = yield* sql`SELECT * FROM capability_bindings WHERE run_id=${runId}`
         const nonce = randomBytes(32).toString("hex")
         const expiresAt = Math.min(now + 60000, value.deadline)
         if (bound.length > 0) {
           const row = yield* Schema.decodeUnknownEffect(Row)(bound[0])
-          if (row.revoked !== 0) return yield* Effect.fail(new CapabilityRefused())
+          if (row.revoked !== 0) return yield* Effect.fail(new CapabilityNotReady())
           if (row.nonce !== null && row.challenge_expires > now)
             return { channel: row.channel, nonce: row.nonce, expiresAt: row.challenge_expires }
           yield* sql`UPDATE capability_bindings

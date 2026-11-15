@@ -68,10 +68,11 @@ const passes = (error) =>
 /**
  * Opens the run's gateway session: a challenge for the lease, an OIDC proof for that challenge,
  * and the session post. A challenge that is not ready (503, a refused connection, a reset, a
- * timeout or a name that does not resolve yet) uses no attempt: the helper waits, with backoff up to 10 seconds, for at most `wait`
- * milliseconds in all, since the daemon may record the Actions run after the runner first asks.
- * Any other failure of the challenge ends the exchange at once: a refused challenge (the lease is
- * not open to this runner), another status, and a certificate that the runner does not trust,
+ * timeout or a name that does not resolve yet) uses no attempt: the helper waits, with backoff up
+ * to 10 seconds, for at most `wait` milliseconds in all, since the daemon may record the Actions
+ * run after the runner first asks.
+ * Any other failure of the challenge ends the exchange at once: a refused challenge (a lease id
+ * that is not well formed), another status, and a certificate that the runner does not trust,
  * which no wait can clear. An answer can be lost after the gateway sent it, so a lost or refused
  * session costs a new proof, at most `attempts` times.
  */

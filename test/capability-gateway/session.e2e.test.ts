@@ -192,8 +192,8 @@ async function scenario(start: (f: Fixture) => Promise<Gateway>) {
         yield* (yield* AgentRunStore).cancel({ runId: "run-c", now: new Date() })
       }),
     )
-    expect((await challenge("lease-b")).status).toBe(403)
-    expect((await challenge("lease-c")).status).toBe(403)
+    expect((await challenge("lease-b")).status).toBe(503)
+    expect((await challenge("lease-c")).status).toBe(503)
 
     // A revoke written by another process aborts a live stream.
     f.setStall(true)
