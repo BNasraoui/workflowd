@@ -12,11 +12,15 @@ export const ownStep: Readonly<Record<string, string>> = {
     "the pinned Claude Code client; a step of the Tests job runs it with loopback as its only network",
 }
 
-const gatewayFiles = [
-  ...new Bun.Glob(`${gatewayTestDirectory}/*.test.ts`).scanSync({ cwd: import.meta.dir + "/.." }),
-]
-  .filter((file) => !(file in ownStep))
-  .sort((a, b) => a.localeCompare(b))
+/** The test files of `directory` and of each directory below it, relative to `root`, by name. */
+export const testFilesBelow = (root: string, directory: string) =>
+  [...new Bun.Glob(`${directory}/**/*.test.ts`).scanSync({ cwd: root })].sort((a, b) =>
+    a.localeCompare(b),
+  )
+
+const gatewayFiles = testFilesBelow(import.meta.dir + "/..", gatewayTestDirectory).filter(
+  (file) => !(file in ownStep),
+)
 
 /** The gateway's end-to-end files: a gateway process or listener on a real socket. */
 const gatewayEndToEnd = gatewayFiles.filter((file) => file.endsWith(".e2e.test.ts"))
