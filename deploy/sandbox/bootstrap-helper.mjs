@@ -91,70 +91,92 @@ export async function openSession({
 }) {
   const origin = gatewayOrigin(gateway)
   if (!/^[a-zA-Z0-9-]{1,80}$/.test(leaseId ?? "")) throw new Error("lease refused")
-  const started = clock()
-  let waited = 0
   const bounded = () => AbortSignal.any([AbortSignal.timeout(30000), ...(signal ? [signal] : [])])
-  const challenge = async () => {
-    let response
-    try {
-      response = await send(new URL(`/capabilities/v1/challenge?lease=${leaseId}`, origin), {
-        redirect: "error",
-        signal: bounded(),
-      })
-    } catch (error) {
-      signal?.throwIfAborted()
-      if (passes(error)) return undefined
-      throw untrustedCertificate(error) ?? new Error("gateway unavailable")
-    }
-    if (response.status === 503) return undefined
-    if (response.status === 403) throw new Error("lease refused")
-    if (response.status !== 200) throw new Error("gateway unavailable")
-    return await boundedJson(response, 4096)
-  }
+  const waiting = { started: clock(), waited: 0, wait, waitBackoff, clock, sleep, signal }
   for (let attempt = 0; attempt < attempts; ) {
-    const issued = await challenge()
-    if (issued === undefined) {
-      const left = started + wait - clock()
-      if (left <= 0) break
-      await sleep(Math.min(left, waitBackoff(waited++)), signal)
-      continue
-    }
+    const issued = await readyChallenge(
+      () => askChallenge(send, origin, leaseId, bounded, signal),
+      waiting,
+    )
+    if (issued === undefined) break
     if (!/^[a-f0-9]{64}$/.test(issued?.channel) || !/^[a-f0-9]{64}$/.test(issued?.nonce))
       throw new Error("challenge refused")
     attempt++
     const token = await issue(`workflowd:${issued.channel}:${issued.nonce}`, bounded())
-    if (typeof token !== "string" || token.length > maxProofLength) throw new Error("job identity refused")
-    try {
-      const response = await send(new URL("/capabilities/v1/session", origin), {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ token }),
-        redirect: "error",
-        signal: bounded(),
-      })
-      if (response.status === 200) {
-        const grant = await boundedJson(response, 4096)
-        if (
-          /^[A-Za-z0-9_-]{43}$/.test(grant.token) &&
-          [grant.expiresAt, grant.renewAt, grant.deadline].every(Number.isSafeInteger) &&
-          grant.expiresAt <= grant.deadline
-        )
-          return {
-            token: grant.token,
-            expiresAt: grant.expiresAt,
-            renewAt: grant.renewAt,
-            deadline: grant.deadline,
-          }
-      }
-    } catch (error) {
-      // The answer is lost; the next attempt proves the runner again. An untrusted
-      // certificate does not change by a new proof.
-      const untrusted = untrustedCertificate(error)
-      if (untrusted) throw untrusted
-    }
+    if (typeof token !== "string" || token.length > maxProofLength)
+      throw new Error("job identity refused")
+    const grant = await postSession(send, origin, token, bounded)
+    if (grant) return grant
     if (attempt < attempts) await sleep(backoff(attempt), signal)
   }
   throw new Error("gateway session unavailable")
+}
+
+/** One challenge for the lease: its JSON, or undefined when it is not ready yet. */
+async function askChallenge(send, origin, leaseId, bounded, signal) {
+  let response
+  try {
+    response = await send(new URL(`/capabilities/v1/challenge?lease=${leaseId}`, origin), {
+      redirect: "error",
+      signal: bounded(),
+    })
+  } catch (error) {
+    signal?.throwIfAborted()
+    if (passes(error)) return undefined
+    throw untrustedCertificate(error) ?? new Error("gateway unavailable")
+  }
+  if (response.status === 503) return undefined
+  if (response.status === 403) throw new Error("lease refused")
+  if (response.status !== 200) throw new Error("gateway unavailable")
+  return await boundedJson(response, 4096)
+}
+
+/**
+ * Asks until a challenge is ready, with the wait backoff between asks; undefined once `wait`
+ * milliseconds have passed since the first ask of the exchange.
+ */
+async function readyChallenge(ask, waiting) {
+  for (;;) {
+    const issued = await ask()
+    if (issued !== undefined) return issued
+    const left = waiting.started + waiting.wait - waiting.clock()
+    if (left <= 0) return undefined
+    await waiting.sleep(Math.min(left, waiting.waitBackoff(waiting.waited++)), waiting.signal)
+  }
+}
+
+/**
+ * Posts one proof: the session's grant, or undefined when the answer is refused or lost. An
+ * untrusted certificate does not change by a new proof, so it ends the exchange.
+ */
+async function postSession(send, origin, token, bounded) {
+  try {
+    const response = await send(new URL("/capabilities/v1/session", origin), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ token }),
+      redirect: "error",
+      signal: bounded(),
+    })
+    if (response.status !== 200) return undefined
+    const grant = await boundedJson(response, 4096)
+    if (
+      /^[A-Za-z0-9_-]{43}$/.test(grant.token) &&
+      [grant.expiresAt, grant.renewAt, grant.deadline].every(Number.isSafeInteger) &&
+      grant.expiresAt <= grant.deadline
+    )
+      return {
+        token: grant.token,
+        expiresAt: grant.expiresAt,
+        renewAt: grant.renewAt,
+        deadline: grant.deadline,
+      }
+    return undefined
+  } catch (error) {
+    const untrusted = untrustedCertificate(error)
+    if (untrusted) throw untrusted
+    return undefined
+  }
 }
 
 /**
