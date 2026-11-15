@@ -113,6 +113,26 @@ for (const [mode, start] of gateways) {
       expect(refused.status).toBe(403)
     })
   }, 60000)
+  test(`[${mode}] the successor of one run token is replaced at most three times; a later renewal is refused without a mint`, async () => {
+    await withGateway(start, async (f, gateway) => {
+      const relay = client(gateway.port)
+      const grant = await opened(f, gateway, 200)
+      await f.tokenSeconds(300)
+      const first = await relay.renew(grant.token)
+      expect(first.status).toBe(200)
+      let newest = (await relay.grant(first)).token
+      for (let replaced = 1; replaced <= 3; replaced++) {
+        const again = await relay.renew(grant.token)
+        expect(again.status).toBe(200)
+        newest = (await relay.grant(again)).token
+      }
+      const minted = await f.mints()
+      const fourth = await relay.renew(grant.token)
+      expect(fourth.status).toBe(403)
+      expect(await f.mints()).toBe(minted)
+      expect(await (await relay.call(newest)).text()).toBe(sse)
+    })
+  }, 60000)
 }
 
 test("a renewal asked again after a gateway restart gives a working token, and the one it replaces stops", async () => {

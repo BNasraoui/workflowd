@@ -37,6 +37,8 @@ const SessionBinding = Schema.Struct({ ...Binding.fields, session: Schema.Int })
 const maxSessions = 8
 /** A run token is renewed only in its last 330 seconds: the relay's 180 to 300, and 30 of slack. */
 const renewalWindowMs = 330000
+/** A renewal asked again replaces the successor of one token at most this many times. */
+const maxReplacements = 3
 /** A successor must outlive its predecessor by this much, so renewals near the deadline end. */
 const minimumExtensionMs = 60000
 const SessionPolicy = Schema.Struct({
@@ -165,7 +167,8 @@ export const makeCapabilityStore = Effect.gen(function* () {
   /**
    * The authority of a run token that may be renewed now. A token with more than
    * `renewalWindowMs` left is not renewed, nor one whose successor would not outlive it by
-   * `minimumExtensionMs` (near the run's deadline), nor one whose successor has renewed already.
+   * `minimumExtensionMs` (near the run's deadline), nor one whose successor has renewed already,
+   * nor one whose successor was replaced `maxReplacements` times.
    */
   const renewable = Effect.fn("CapabilityStore.renewable")(function* (
     binding: CapabilityBinding,
@@ -188,13 +191,17 @@ export const makeCapabilityStore = Effect.gen(function* () {
     const earlier = successors[0]?.digest
     if (typeof earlier === "string") {
       const renewed = yield* sql`SELECT 1 FROM capability_tokens WHERE predecessor=${earlier}`
-      if (renewed.length > 0) return yield* Effect.fail(new CapabilityRefused())
+      const replaced =
+        yield* sql`SELECT 1 FROM capability_tokens WHERE digest=${predecessor} AND replaced>=${maxReplacements}`
+      if (renewed.length > 0 || replaced.length > 0)
+        return yield* Effect.fail(new CapabilityRefused())
     }
     return { ...authority, earlier: typeof earlier === "string" ? earlier : undefined }
   })
   /**
    * Renews a run token. A renewal asked again for the same predecessor (its answer was lost)
-   * replaces the successor that has not renewed itself, so exactly one successor stays valid.
+   * replaces the successor that has not renewed itself, so exactly one successor stays valid; it
+   * does so at most `maxReplacements` times for one predecessor.
    */
   const renew = Effect.fn("CapabilityStore.renew")(function* (
     binding: CapabilityBinding,
@@ -207,7 +214,10 @@ export const makeCapabilityStore = Effect.gen(function* () {
     yield* sql.withTransaction(
       Effect.gen(function* () {
         const { session, earlier } = yield* renewable(binding, predecessor, () => expiresAt, now)
-        if (earlier !== undefined) yield* sql`DELETE FROM capability_tokens WHERE digest=${earlier}`
+        if (earlier !== undefined) {
+          yield* sql`DELETE FROM capability_tokens WHERE digest=${earlier}`
+          yield* sql`UPDATE capability_tokens SET replaced=replaced+1 WHERE digest=${predecessor}`
+        }
         yield* sql`INSERT INTO capability_tokens(digest,run_id,predecessor,expires_at,session) VALUES(${successor},${binding.runId},${predecessor},${expiresAt},${session})`
       }),
     )
