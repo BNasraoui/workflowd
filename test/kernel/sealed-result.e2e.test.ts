@@ -517,7 +517,6 @@ test(
     const sealed = await sealWithResultPy(f, async (workspace) => {
       await writeFile(join(workspace, "result.txt"), "content\n")
     })
-    const result = await decode(sealed.json, sealed.bundle)
     const daemon = {
       GIT_DIR: join(f.root, "elsewhere.git"),
       GIT_SSH_COMMAND: `touch ${join(f.root, "executed")}`,
@@ -529,16 +528,50 @@ test(
       GIT_TRACE: trace,
       https_proxy: "http://127.0.0.1:9",
     }
-    const saved = Object.fromEntries(Object.keys(daemon).map((key) => [key, process.env[key]]))
-    try {
-      Object.assign(process.env, daemon)
-      const exit = await publish(result, options(f, { gitBinary: recorder.path }))
-      if (Exit.isFailure(exit)) throw Cause.squash(exit.cause)
-    } finally {
-      for (const [key, value] of Object.entries(saved))
-        if (value === undefined) delete process.env[key]
-        else process.env[key] = value
-    }
+    // The daemon is a process of its own that starts with these variables, so the
+    // environment of the test process never holds them.
+    const input = join(f.root, "daemon-input.json")
+    await writeFile(
+      input,
+      JSON.stringify({
+        json: new TextDecoder().decode(sealed.json),
+        bundle: Buffer.from(sealed.bundle).toString("base64"),
+        target,
+        options: { ...options(f, { gitBinary: recorder.path }), token: undefined },
+        token,
+      }),
+    )
+    const daemonProcess = Bun.spawn(
+      [
+        process.execPath,
+        "-e",
+        `import { Effect, Exit, Redacted } from "effect"
+import { checkSealedResult, decodeSealedResult, pushSealedResult } from "./src/kernel/sealed-result"
+const input = JSON.parse(await Bun.file(process.env.SEALED_RESULT_INPUT).text())
+const exit = await Effect.runPromiseExit(Effect.scoped(Effect.gen(function* () {
+  const result = yield* decodeSealedResult(new TextEncoder().encode(input.json), Buffer.from(input.bundle, "base64"))
+  const options = { ...input.options, token: Redacted.make(input.token) }
+  return yield* pushSealedResult(yield* checkSealedResult(result, input.target, options))
+})))
+console.log(Exit.isSuccess(exit) ? "pushed" : String(exit.cause))`,
+      ],
+      {
+        cwd: resolve("."),
+        env: { ...process.env, ...daemon, SEALED_RESULT_INPUT: input },
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    )
+    const [status, stdout, stderr] = await Promise.all([
+      daemonProcess.exited,
+      new Response(daemonProcess.stdout).text(),
+      new Response(daemonProcess.stderr).text(),
+    ])
+    expect({ status, stdout: stdout.trim(), stderr }).toEqual({
+      status: 0,
+      stdout: "pushed",
+      stderr: "",
+    })
     const calls = await recorder.calls()
     expect(calls.length).toBeGreaterThan(5)
     for (const call of calls) {
