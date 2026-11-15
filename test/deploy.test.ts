@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test"
-import { readFile } from "node:fs/promises"
+import { readdir, readFile } from "node:fs/promises"
+import { join } from "node:path"
 
 test("MCP unit uses the pinned Bun and stable release entrypoint", async () => {
   const [unit, packageJson] = await Promise.all([
@@ -55,4 +56,26 @@ test("remote runner ships as a hardened long-running systemd command", async () 
   expect(guide).not.toContain("exactly-once")
   expect(processSource).toContain("runRemoteRunnerLoop")
   expect(processSource).not.toContain("Effect.forever")
+})
+
+test("an OpenCode restart cannot stop workflowd: its units are wanted, never required", async () => {
+  const directory = "deploy/systemd/workflowd.service.d"
+  const units = await Promise.all(
+    [
+      "deploy/systemd/workflowd.service",
+      ...(await readdir(directory).catch(() => [])).map((name) => join(directory, name)),
+    ].map(async (path) => ({ path, text: await readFile(path, "utf8") })),
+  )
+  const directives = units.flatMap(({ path, text }) =>
+    text
+      .split("\n")
+      .filter((line) => /^(Requires|BindsTo|Requisite|PartOf)=/.test(line))
+      .map((line) => `${path}: ${line}`),
+  )
+  expect(directives.filter((line) => /opencode/.test(line))).toEqual([])
+  const lines = units.flatMap(({ text }) => text.split("\n"))
+  for (const unit of ["opencode-server.service", "opencode2-server.service"]) {
+    expect(lines.some((line) => /^Wants=/.test(line) && line.includes(unit))).toBe(true)
+    expect(lines.some((line) => /^After=/.test(line) && line.includes(unit))).toBe(true)
+  }
 })

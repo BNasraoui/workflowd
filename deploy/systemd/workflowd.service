@@ -2,7 +2,7 @@
 Description=Workflowd pull request automation controller
 After=network-online.target opencode-server.service
 Wants=network-online.target
-Requires=opencode-server.service
+Wants=opencode-server.service
 
 [Service]
 Type=simple
