@@ -91,6 +91,21 @@ const renewAt = (expiresAt: number) => Math.max(Date.now(), expiresAt - randomIn
 const denied = () => new Response(null, { status: 403 })
 const unavailable = () => new Response(null, { status: 503, headers: { "retry-after": "5" } })
 
+/**
+ * Ends the capability authority of a run in the store, inside the run-lifetime fence. It runs no
+ * loop; a gateway process aborts its own open streams of that run when it sees the revoke.
+ */
+export const makeCapabilityRevoke = Effect.gen(function* () {
+  const store = yield* makeCapabilityStore
+  const authority = runLifetime(yield* SqlClient.SqlClient)
+  return {
+    revoke: Effect.fn("CapabilityRevoke.revoke")((runId: string) =>
+      authority.change(runId, store.revoke(runId)),
+    ),
+  }
+})
+export type CapabilityRevoke = Effect.Success<typeof makeCapabilityRevoke>
+
 /** Owns run authority and stream lifetime. No administrative HTTP listener shares this interface. */
 export const makeCapabilityGateway = (
   config: GatewayConfiguration,

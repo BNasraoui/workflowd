@@ -34,9 +34,7 @@ export const finalCases = [
   ["P4-CD", "test/capability-gateway/git.launcher.test.ts"],
   ["P4-E", "test/sandbox/process-environment.test.ts"],
   ["P4-F", "test/sandbox/publication-parity.test.ts"],
-  ["P4-G1", "test/sandbox/reconciliation.test.ts"],
   ["P4-G4", "test/runtime-startup.test.ts"],
-  ["P4-G5", "test/sandbox/reconciliation-dispatch.test.ts"],
 ] as const
 
 export const suites: Readonly<Record<string, ReadonlyArray<readonly [string, string]>>> = {

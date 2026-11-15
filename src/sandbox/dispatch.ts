@@ -180,8 +180,6 @@ export const makeSandboxDispatch = (options: {
       Effect.gen(function* () {
         const lease = yield* store.read(run.runId)
         if (lease === null) return
-        // An actions-native lease has no harness process here to stop; release revokes its session.
-        if (lease.policy.privateBootstrap?.mode === "actions-native") return
         if (run.executorKind === "codex" || run.executorKind === "claude") {
           const cli = yield* Effect.try(() => nativeCli(run))
           if (
@@ -353,8 +351,8 @@ export const makeSandboxDispatch = (options: {
     const prepareNative: NonNullable<SandboxDispatchPort["prepareNative"]> = (run) =>
       Effect.gen(function* () {
         const policy = options.policies.find((entry) => entry.alias === run.repository)
-        // The runner now reaches the gateway by session, with no SSH peer to launch the harness
-        // through; the launch moves to that session in a later change. Until then no lease is made.
+        // A runner of an actions-native repository opens a gateway session and has no SSH peer
+        // to start the harness through, so such a run is refused before any lease or GitHub call.
         if (policy?.privateBootstrap?.mode === "actions-native")
           return yield* Effect.fail(failure(new Error("Actions-native harness start unavailable")))
         const cli = yield* Effect.try(() => nativeCli(run))
@@ -552,8 +550,6 @@ export const makeSandboxDispatch = (options: {
             finalMessage: null,
             diagnostic: "Sandbox deadline exceeded",
           })
-        // An actions-native lease runs no harness here, so nothing settles through it yet.
-        if (lease.policy.privateBootstrap?.mode === "actions-native") return
         // Native workers settle through their durable process observer. On restart the
         // startup sweep below revokes and stops them before releasing their lease.
         if (run.executorKind === "codex" || run.executorKind === "claude") return
@@ -615,7 +611,6 @@ export const makeSandboxDispatch = (options: {
       for (const lease of yield* store.active())
         if (
           lease.state === "ready" &&
-          lease.policy.privateBootstrap?.mode !== "actions-native" &&
           (lease.policy.publish === undefined || (yield* publications.read(lease.run_id)) === null)
         )
           yield* leases.heartbeat(lease.run_id).pipe(
@@ -631,7 +626,6 @@ export const makeSandboxDispatch = (options: {
         const run = yield* runs.read(lease.run_id)
         if (run !== null) yield* observe(run).pipe(Effect.ignore)
       }
-      // Lease service admission is shared with release; known cleanup remains independent.
       yield* leases.reconcile(options.policies)
       // Release confirmation may have arrived during reconciliation.
       for (const kind of ["opencode", "codex", "claude"] as const)
