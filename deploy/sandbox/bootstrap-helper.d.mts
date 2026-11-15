@@ -3,6 +3,8 @@ export interface SessionGrant {
   expiresAt: number
   renewAt: number
   deadline: number
+  /** The provider id of the model route that the relay calls. */
+  providerId: string
 }
 export type JobIdentity = ((audience: string, signal: AbortSignal) => Promise<string>) & {
   clear: () => void

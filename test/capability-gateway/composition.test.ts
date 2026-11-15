@@ -27,7 +27,7 @@ test("configured live composition settles prior leases, which revokes their gran
     storePath: join(root, "gateway.db"),
     controlSocket: socket,
     daemon: { uid: process.getuid!(), gid: process.getgid!() },
-    listen: { host: "127.0.0.1", port: 0 },
+    listen: { host: "127.0.0.1" as const, port: 0 },
   }
   const policy = {
     alias: "fixture",
@@ -195,4 +195,25 @@ test("the gateway config bounds its streams: an idle limit of 1 ms to ten minute
   expect(load({ staleSweepMs: 100 }).staleSweepMs).toBe(100)
   expect(load({ staleSweepMs: 60000 }).staleSweepMs).toBe(60000)
   expect(load({}).staleSweepMs).toBeUndefined()
+})
+
+test("the gateway listens only on a loopback address: 127.0.0.1 or ::1", () => {
+  const gateway = {
+    noscope: { binary: "/fixture/noscope", configHome: "/fixture" },
+    providerId: "anthropic",
+    credentialRole: "fixture",
+    maxStreams: 2,
+    maxStreamsPerRun: 2,
+    storePath: "/fixture/gateway.db",
+    controlSocket: "/fixture/control/gateway.sock",
+    daemon: { uid: 1000, gid: 1000 },
+  }
+  const load = (host: string) =>
+    loadCapabilityGatewayConfig({
+      WORKFLOWD_CAPABILITY_GATEWAY: JSON.stringify({ ...gateway, listen: { host, port: 0 } }),
+    }).listen
+  for (const host of ["10.0.0.1", "0.0.0.0", "gateway.example"])
+    expect(() => load(host)).toThrow('Expected "127.0.0.1" | "::1"\n  at ["listen"]["host"]')
+  expect(load("127.0.0.1")).toEqual({ host: "127.0.0.1", port: 0 })
+  expect(load("::1")).toEqual({ host: "::1", port: 0 })
 })

@@ -1,7 +1,15 @@
 import { expect, test } from "bun:test"
-import { readdir } from "node:fs/promises"
+import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { dirname, join } from "node:path"
 import { Schema } from "effect"
-import { gatewayTestDirectory, ownStep, suiteReport, suites } from "../scripts/capability-suites"
+import {
+  gatewayTestDirectory,
+  ownStep,
+  suiteReport,
+  suites,
+  testFilesBelow,
+} from "../scripts/capability-suites"
 
 /** Test files that only a suite runs; bunfig.toml keeps them out of the plain run. */
 const launcherTestPattern = "**/*.launcher.test.ts"
@@ -29,7 +37,7 @@ test("each launcher test file belongs to a capability suite or to a CI step of i
 })
 
 test("each gateway test file belongs to exactly one suite, or names the job that runs it instead", async () => {
-  const files = (await readdir(gatewayTestDirectory))
+  const files = (await readdir(gatewayTestDirectory, { recursive: true }))
     .filter((name) => name.endsWith(".test.ts"))
     .map((name) => `${gatewayTestDirectory}/${name}`)
   expect(files.length).toBeGreaterThan(10)
@@ -104,5 +112,29 @@ test("one step of the Tests job runs each own-step file, with loopback as its on
     expect(runs.map(({ job }) => job)).toEqual(["tests"])
     expect(runs[0]!.run).toStartWith("sudo /usr/bin/unshare --net /bin/sh -c")
     expect(runs[0]!.run).toContain("'ip link set lo up && exec setpriv --reuid=")
+  }
+})
+
+test("the gateway suites take the test files of each depth below the gateway directory", async () => {
+  const root = await mkdtemp(join(tmpdir(), "capability-suites-"))
+  try {
+    for (const file of [
+      "a.test.ts",
+      "a.e2e.test.ts",
+      "below/b.test.ts",
+      "below/deeper/c.test.ts",
+      "d.ts",
+    ])
+      await mkdir(join(root, "tests", dirname(file)), { recursive: true }).then(() =>
+        writeFile(join(root, "tests", file), ""),
+      )
+    expect(testFilesBelow(root, "tests")).toEqual([
+      "tests/a.e2e.test.ts",
+      "tests/a.test.ts",
+      "tests/below/b.test.ts",
+      "tests/below/deeper/c.test.ts",
+    ])
+  } finally {
+    await rm(root, { recursive: true, force: true })
   }
 })

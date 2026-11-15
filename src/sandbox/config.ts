@@ -2,7 +2,7 @@ import { Schema } from "effect"
 import { safePublication } from "../../deploy/sandbox/publication.mjs"
 import skills from "../../deploy/sandbox/skills/catalog.json"
 import { publicBootstrapFields } from "../../deploy/sandbox/public-status.mjs"
-import { maxStreamsPerRun } from "../../deploy/sandbox/capability-limits.mjs"
+import { maxStreamsPerRun, providerIdPattern } from "../../deploy/sandbox/capability-limits.mjs"
 
 const PublicationCoAuthor = Schema.String.check(
   Schema.makeFilter(
@@ -52,7 +52,7 @@ export const CapabilityGatewayConfig = Schema.Struct({
    * when the noscope provider `provider-access` names another.
    */
   login: Schema.optionalKey(Schema.Struct({ directory: AbsolutePath })),
-  providerId: Schema.NonEmptyString,
+  providerId: Schema.String.check(Schema.isPattern(providerIdPattern)),
   credentialRole: Schema.String.check(Schema.isPattern(/^[A-Za-z0-9_.-]{1,128}$/)),
   maxStreams: Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 512 })),
   maxStreamsPerRun: Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: maxStreamsPerRun })),
@@ -70,9 +70,9 @@ export const CapabilityGatewayConfig = Schema.Struct({
   staleSweepMs: Schema.optionalKey(
     Schema.Int.check(Schema.isBetween({ minimum: 100, maximum: 60000 })),
   ),
-  /** Where the gateway's process listens. */
+  /** Where the gateway's process listens. The listener is clear text, so it takes a loopback address only. */
   listen: Schema.Struct({
-    host: Schema.String.check(Schema.isPattern(/^(?:\d{1,3}(?:\.\d{1,3}){3}|[0-9a-f:]+)$/)),
+    host: Schema.Literals(["127.0.0.1", "::1"]),
     // Port 0 asks the kernel for a free port; the process prints the port it bound.
     port: Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 65535 })),
   }),

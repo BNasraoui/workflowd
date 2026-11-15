@@ -220,7 +220,7 @@ try {
     storePath: join(root, "gateway.db"),
     controlSocket,
     daemon: { uid: process.getuid!(), gid: process.getgid!() },
-    listen: { host: "127.0.0.1", port: 0 },
+    listen: { host: "127.0.0.1" as const, port: 0 },
     ...keys,
   }
   const env = {
@@ -526,6 +526,7 @@ export const client = (port: number) => {
         expiresAt: Schema.Number,
         renewAt: Schema.Number,
         deadline: Schema.optionalKey(Schema.Number),
+        providerId: Schema.optionalKey(Schema.String),
       }),
     )(await response.json())
   /** A Claude messages call with `body` as its exact text; `headers` add to or replace the usual. */

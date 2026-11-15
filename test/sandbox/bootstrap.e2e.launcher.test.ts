@@ -187,7 +187,7 @@ for (const race of [
       storePath: join(root, "gateway.db"),
       controlSocket: join(root, "control", "gateway.sock"),
       daemon: { uid: process.getuid!(), gid: process.getgid!() },
-      listen: { host: "127.0.0.1", port: 0 },
+      listen: { host: "127.0.0.1" as const, port: 0 },
     }
     /** A query on the gateway's own store, which the gateway process holds. */
     const gatewayStore = <A>(query: (sql: SqlClient.SqlClient) => Effect.Effect<A, unknown>) =>
@@ -312,7 +312,6 @@ await prepare({
             {
               env: {
                 PATH: "/usr/bin:/bin",
-                SANDBOX_AGENT_IMAGE: policy.agentImage,
                 GITHUB_SHA: policy.workflowSha,
                 GITHUB_REF: "refs/heads/workflowd/leases/lease",
                 GITHUB_REPOSITORY: policy.repository,
