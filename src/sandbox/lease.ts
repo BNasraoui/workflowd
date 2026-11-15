@@ -18,11 +18,7 @@ import {
 import { sandboxSshArguments, type SandboxTransport } from "./transport"
 import type { makeSandboxGithub } from "./github"
 import type { SavedSandboxPolicy } from "./saved-policy"
-import { discoverJobPeer, exchangeJobProof, githubJobKeys, verifyJobProof } from "./bootstrap"
-import { makeCapabilityStore, type CapabilityBinding } from "../capability-gateway/store"
 import type { CapabilityGateway } from "../capability-gateway/service"
-import type { makeCapabilityTransport } from "./capability-transport"
-import { ownedPromise } from "../capability-gateway/owned"
 import { makeNativeExecutionStore } from "./native-execution"
 import { makeNativeResultStore } from "./native-result"
 import { requireNativePublisherActivation, type PublisherContract } from "./publisher-contract"
@@ -227,184 +223,32 @@ export const makeSandboxLeaseService = (
     readonly publicationContract?: PublisherContract
     readonly native?: {
       readonly gateway: typeof CapabilityGateway.Service
-      readonly transport: Effect.Success<ReturnType<typeof makeCapabilityTransport>>
     }
-    readonly keys?: typeof githubJobKeys
-    readonly sshArguments?: typeof sandboxSshArguments
   },
 ) =>
   Effect.gen(function* () {
     const store = yield* makeSandboxStore
-    const bootstrapStore = yield* makeCapabilityStore
     const publications = yield* makePublishStore
     const native = yield* makeNativeExecutionStore
     const nativeResults = yield* makeNativeResultStore
     const cleanupGate = yield* Semaphore.make(1)
     const discoveryCursor = new Map<string, string>()
-    const privatePeer = Effect.fn("SandboxLease.privatePeer")(function* (
+    /**
+     * A private lease waits for its runner: the runner gets a challenge from the gateway and opens
+     * a session with its OIDC proof. The lease is ready once that session exists; until then this
+     * acquisition commits nothing. If committing fails, the run's binding is revoked.
+     */
+    const privatePeer = Effect.fn("SandboxLease.privatePeer")(function* <E>(
       lease: NonNullable<Effect.Success<ReturnType<typeof store.read>>>,
-      actionsRunId: number,
-      attempt: number,
-      handoff: (transport: SandboxTransport) => Effect.Effect<void, Error>,
+      ready: Effect.Effect<boolean, E>,
     ) {
-      const policy = lease.policy
-      const bootstrap = policy.privateBootstrap
-      if (!bootstrap || (bootstrap.mode === "actions-native" && !privateAccess?.native))
+      const native = privateAccess?.native
+      if (lease.policy.privateBootstrap?.mode !== "actions-native" || native === undefined)
         return yield* Effect.fail(
           new SandboxError({ message: "Private bootstrap policy unavailable" }),
         )
-      const peer = yield* Effect.tryPromise({
-        try: async (signal) =>
-          discoverJobPeer(
-            JSON.parse(
-              controlText(await command(["/usr/bin/tailscale", "status", "--json"], "", signal)),
-            ),
-            actionsRunId,
-            attempt,
-          ),
-        catch: () => new SandboxError({ message: "Private peer discovery unavailable" }),
-      })
-      if (peer === null) return null
-      return yield* Effect.acquireUseRelease(
-        Effect.tryPromise(async () => {
-          await mkdir(controlRoot, { recursive: true, mode: 0o700 })
-          return { directory: await mkdtemp(join(controlRoot, "bootstrap-")), retained: false }
-        }),
-        (owned) =>
-          Effect.gen(function* () {
-            const { directory } = owned
-            yield* ownedPromise(async (signal) => {
-              signal.throwIfAborted()
-              await writeFile(
-                join(directory, "known_hosts"),
-                peer.keys.map((key) => `${peer.address} ${key}\n`).join(""),
-                { mode: 0o600 },
-              )
-              signal.throwIfAborted()
-            })
-            const transport: SandboxTransport = {
-              leaseId: lease.lease_id,
-              peerId: peer.peerId,
-              address: peer.address,
-              port: 22,
-              repositoryPath: "/workspace/repository",
-              knownHostsFile: join(directory, "known_hosts"),
-              identityFile: "/dev/null",
-            }
-            let binding: CapabilityBinding | undefined
-            const operation = Effect.gen(function* () {
-              const challenge = yield* bootstrapStore.challenge(lease.run_id, transport, Date.now())
-              const audience = `workflowd:${challenge.channel}:${challenge.nonce}`
-              const keys = yield* Effect.tryPromise(privateAccess?.keys ?? githubJobKeys)
-              yield* ownedPromise((signal) =>
-                exchangeJobProof(
-                  [
-                    ...(privateAccess?.sshArguments ?? sandboxSshArguments)(transport).slice(0, -1),
-                    "exec /usr/local/bin/runner-control bootstrap",
-                  ],
-                  { audience, peerId: peer.peerId },
-                  async (value, signal) => {
-                    const proof = Schema.decodeUnknownSync(
-                      Schema.Struct({
-                        token: Schema.String,
-                        peerId: Schema.String,
-                        agentImage: Schema.String,
-                        workflowSha: Schema.String,
-                      }),
-                    )(value)
-                    if (
-                      proof.peerId !== peer.peerId ||
-                      proof.agentImage !== policy.agentImage ||
-                      proof.workflowSha !== policy.workflowSha
-                    )
-                      throw new Error("job proof refused")
-                    const ref = `refs/heads/workflowd/leases/${lease.lease_id}`
-                    const verified = verifyJobProof(
-                      proof.token,
-                      {
-                        audience,
-                        repository: policy.repository,
-                        repositoryId: policy.repositoryId,
-                        ownerId: bootstrap.repositoryOwnerId,
-                        actorId: policy.appActorId,
-                        ref,
-                        workflowSha: policy.workflowSha,
-                        toolingSha: policy.toolingSha ?? policy.workflowSha,
-                        workflowRef: `${policy.repository}/.github/workflows/agent-sandbox-caller.yml@${ref}`,
-                        jobWorkflowRef:
-                          policy.toolingSha === undefined
-                            ? `${policy.repository}/.github/workflows/agent-sandbox.yml@${ref}`
-                            : `BNasraoui/workflowd/.github/workflows/agent-sandbox.yml@${policy.toolingSha}`,
-                        runId: actionsRunId,
-                        attempt,
-                      },
-                      keys,
-                      Date.now(),
-                    )
-                    if (bootstrap.mode === "remote-tools") {
-                      await Effect.runPromise(
-                        bootstrapStore.acceptProof(challenge, verified.jti, Date.now()),
-                        { signal },
-                      )
-                      return { mode: "remote-tools" }
-                    }
-                    if (!privateAccess?.native) throw new Error("gateway unavailable")
-                    const grant = await Effect.runPromise(
-                      privateAccess.native.gateway.bind(challenge, verified.jti),
-                      { signal },
-                    )
-                    binding = grant.binding
-                    return {
-                      mode: "actions-native",
-                      token: grant.token,
-                      expiresAt: grant.expiresAt,
-                      renewAt: grant.renewAt,
-                      deadline: lease.deadline,
-                    }
-                  },
-                  signal,
-                ),
-              )
-              if (bootstrap.mode === "remote-tools") {
-                yield* Effect.tryPromise(() => rm(directory, { recursive: true, force: true }))
-                const connected = yield* connectPeer(lease, peer, controlRoot, command)
-                yield* handoff(connected)
-                return connected
-              }
-              if (!binding || !privateAccess?.native)
-                return yield* Effect.fail(new Error("gateway unavailable"))
-              yield* privateAccess.native.transport.connect(binding, transport, () =>
-                rm(directory, { recursive: true, force: true }),
-              )
-              yield* handoff(transport)
-              return transport
-            })
-            const connected = yield* operation.pipe(
-              Effect.onError(() =>
-                Effect.gen(function* () {
-                  if (binding && privateAccess?.native) {
-                    yield* privateAccess.native.gateway
-                      .revoke(lease.run_id)
-                      .pipe(
-                        Effect.ensuring(
-                          privateAccess.native.transport
-                            .disconnect(lease.run_id)
-                            .pipe(Effect.orDie),
-                        ),
-                      )
-                  }
-                }).pipe(Effect.orDie),
-              ),
-            )
-            owned.retained = true
-            return connected
-          }),
-        (owned) =>
-          owned.retained
-            ? Effect.void
-            : Effect.tryPromise(() => rm(owned.directory, { recursive: true, force: true })).pipe(
-                Effect.orDie,
-              ),
+      return yield* ready.pipe(
+        Effect.onError(() => native.gateway.revoke(lease.run_id).pipe(Effect.orDie)),
       )
     })
     const required = Effect.fn("SandboxLease.required")(function* (runId: string) {
@@ -559,10 +403,9 @@ export const makeSandboxLeaseService = (
     const release = Effect.fn("SandboxLease.release")(function* (runId: string) {
       const lease = yield* required(runId)
       if (lease.policy.privateBootstrap?.mode === "actions-native" && privateAccess?.native) {
-        yield* privateAccess.native.gateway.revoke(runId).pipe(
-          Effect.ensuring(privateAccess.native.transport.disconnect(runId).pipe(Effect.orDie)),
-          Effect.tapError((cause) => store.recordError(runId, cause)),
-        )
+        yield* privateAccess.native.gateway
+          .revoke(runId)
+          .pipe(Effect.tapError((cause) => store.recordError(runId, cause)))
       }
       yield* store.beginRelease(runId)
       const discovery = yield* Effect.gen(function* () {
@@ -629,8 +472,9 @@ export const makeSandboxLeaseService = (
               yield* commit(store.recordRun(runId, run.id, run.run_attempt))
               if (run.status !== "completed") {
                 if (lease.policy.privateBootstrap !== undefined) {
-                  yield* privatePeer(lease, run.id, run.run_attempt, (transport) =>
-                    commit(store.bind(runId, run.id, run.run_attempt, transport)),
+                  yield* privatePeer(
+                    lease,
+                    commit(store.bindSession(runId, run.id, run.run_attempt)),
                   )
                   return
                 }

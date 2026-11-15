@@ -1,11 +1,24 @@
-export function serveBootstrap(options: {
-  directory: string
-  identity: { peerId: string; agentImage: string; workflowSha: string }
+export interface SessionGrant {
+  token: string
+  expiresAt: number
+  renewAt: number
+  deadline: number
+}
+export type JobIdentity = ((audience: string, signal: AbortSignal) => Promise<string>) & {
+  clear: () => void
+}
+export function gatewayOrigin(value: string): string
+export function openSession(options: {
+  gateway: string
+  leaseId: string
   issue: (audience: string, signal: AbortSignal) => Promise<string>
-  activate: (grant: Record<string, unknown>, signal: AbortSignal) => Promise<void>
-  timeoutMs?: number
-}): Promise<{ completed: Promise<void>; close: () => void }>
+  send?: (url: URL, init: RequestInit) => Promise<Response>
+  attempts?: number
+  backoff?: (attempt: number) => number
+  signal?: AbortSignal
+}): Promise<SessionGrant>
 export function takeJobIdentity(
   environment: Record<string, string | undefined>,
   send?: (url: URL, init: RequestInit) => Promise<Response>,
-): (audience: string, signal: AbortSignal) => Promise<string>
+  limit?: number,
+): JobIdentity

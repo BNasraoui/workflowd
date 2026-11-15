@@ -1,23 +1,31 @@
-import { expect, test, spyOn } from "bun:test"
+import { expect, test } from "bun:test"
 import { fixtureExecutable } from "../helpers/fixture-executable.mjs"
-import * as filesystem from "node:fs/promises"
 import { generateKeyPairSync, sign } from "node:crypto"
-import { mkdtemp, mkdir, writeFile, rm, readdir, readFile } from "node:fs/promises"
+import { once } from "node:events"
+import { createServer as httpsServer } from "node:https"
+import { request as httpRequest } from "node:http"
+import type { AddressInfo } from "node:net"
+import { pipeline } from "node:stream"
+import { mkdtemp, mkdir, writeFile, rm, readFile } from "node:fs/promises"
 import { join, resolve } from "node:path"
 import { tmpdir } from "node:os"
-import { Effect, Fiber } from "effect"
+import { Effect } from "effect"
 import { SqlClient } from "effect/unstable/sql"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
 import { Octokit } from "@octokit/rest"
-import { serveBootstrap } from "../../deploy/sandbox/bootstrap-helper.mjs"
-import { disposableSsh } from "./fixtures/ssh.mjs"
 import { makeCapabilityGateway } from "../../src/capability-gateway/service"
-import { makeCapabilityTransport } from "../../src/sandbox/capability-transport"
 import { makeSandboxGithub } from "../../src/sandbox/github"
 import { makeSandboxLeaseService } from "../../src/sandbox/lease"
 import { makeSandboxStore } from "../../src/sandbox/store"
 import { AgentRunStore, AgentRunStoreLive } from "../../src/kernel/agent-run-store"
 import { runStoreMigrations } from "../../src/store/migrations"
+
+/** The bound port of a listening TCP server. */
+function portOf(server: { address(): string | AddressInfo | null }) {
+  const address = server.address()
+  if (address === null || typeof address === "string") throw new Error("listener unavailable")
+  return address.port
+}
 
 const hostileClaims: Record<string, Record<string, unknown>> = {
   fork: { repository: "fork/repo", repository_id: "99" },
@@ -32,32 +40,103 @@ const hostileClaims: Record<string, Record<string, unknown>> = {
   event: { event_name: "pull_request" },
   runner: { runner_environment: "self-hosted" },
   expired: { exp: 1 },
+  attempt: { run_attempt: "2" },
 }
+
+/** A self-signed certificate for 127.0.0.1: the gateway's TLS on loopback. */
+async function loopbackCertificate(root: string) {
+  const key = join(root, "tls.key")
+  const cert = join(root, "tls.pem")
+  const child = Bun.spawn(
+    [
+      "/usr/bin/openssl",
+      "req",
+      "-x509",
+      "-newkey",
+      "ec",
+      "-pkeyopt",
+      "ec_paramgen_curve:prime256v1",
+      "-nodes",
+      "-keyout",
+      key,
+      "-out",
+      cert,
+      "-days",
+      "1",
+      "-subj",
+      "/CN=127.0.0.1",
+      "-addext",
+      "subjectAltName=IP:127.0.0.1",
+    ],
+    { stdin: "ignore", stdout: "ignore", stderr: "pipe" },
+  )
+  if ((await child.exited) !== 0) throw new Error(await new Response(child.stderr).text())
+  return { key, cert }
+}
+
+/**
+ * TLS in front of the gateway process, as Tailscale Serve is in production. It drops the first
+ * session answer that the gateway grants: the gateway sends it, the runner never gets it.
+ */
+async function tlsFront(tls: { key: string; cert: string }, gatewayPort: number) {
+  let dropped = 0
+  const server = httpsServer(
+    { key: await readFile(tls.key), cert: await readFile(tls.cert) },
+    (incoming, outgoing) => {
+      const upstream = httpRequest(
+        {
+          host: "127.0.0.1",
+          port: gatewayPort,
+          path: incoming.url,
+          method: incoming.method,
+          headers: incoming.headers,
+        },
+        (reply) => {
+          if (
+            incoming.url === "/capabilities/v1/session" &&
+            reply.statusCode === 200 &&
+            dropped === 0
+          ) {
+            dropped++
+            reply.resume()
+            reply.once("end", () => incoming.socket.destroy())
+            return
+          }
+          outgoing.writeHead(reply.statusCode ?? 502, reply.headers)
+          pipeline(reply, outgoing, () => {})
+        },
+      )
+      upstream.once("error", () => outgoing.destroy())
+      pipeline(incoming, upstream, () => {})
+    },
+  )
+  server.listen(0, "127.0.0.1")
+  await once(server, "listening")
+  return {
+    port: portOf(server),
+    dropped: () => dropped,
+    close: () => {
+      server.closeAllConnections()
+      server.close()
+    },
+  }
+}
+
 for (const race of [
   false,
   true,
   "revoke-failure",
   "release-failure",
-  "filesystem",
   ...Object.keys(hostileClaims),
   "key",
-  "peer",
-  "host-key",
 ])
-  test(`signed private SSH/HTTP2/noscope/SQLite acquisition; bind race=${race}`, async () => {
+  test(`private HTTPS session bootstrap through the gateway process; bind race=${race}`, async () => {
     const node = fixtureExecutable("node")
-    const ssh = await disposableSsh(
-      (root) =>
-        `cd ${root} && exec ${node} ${resolve("test/sandbox/fixtures/capability-job.mjs")} attach .`,
-      "100.64.0.1",
-      22,
-    )
     const root = await mkdtemp(join(tmpdir(), "wfd-private-job-"))
-    await writeFile(
-      join(root, "foreign-host"),
-      "100.64.0.1 " + (await readFile(join(ssh.root, "client.pub"), "utf8")),
-      { mode: 0o600 },
-    )
+    const sandbox = join(root, "sandbox")
+    const database = join(root, "store.sqlite")
+    await mkdir(sandbox, { mode: 0o700 })
+    const tls = await loopbackCertificate(root)
     const policy = {
       alias: "fixture",
       repository: "fixture/repo",
@@ -80,10 +159,7 @@ for (const race of [
     const response = "event: message_start\ndata: {}\n\nevent: message_stop\ndata: {}\n\n"
     let upstreamEffects = 0
     let publicArtifacts = 0
-    let activated = 0
-    let beforeHandoff = async () => {}
-    let attempt = "2"
-    let relay: ReturnType<typeof Bun.spawn> | undefined
+    let proofs = 0
     const upstream = Bun.serve({
       hostname: "127.0.0.1",
       port: 0,
@@ -95,12 +171,62 @@ for (const race of [
         return new Response(response, { headers: { "content-type": "text/event-stream" } })
       },
     })
+    // The runner's OIDC issuer. A hostile race makes the first proof hostile; later proofs are good.
+    const issuer = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch(request) {
+        expect(request.headers.get("authorization")).toBe("Bearer fixture-request")
+        const audience = new URL(request.url).searchParams.get("audience")
+        const ref = "refs/heads/workflowd/leases/lease"
+        const now = Math.floor(Date.now() / 1000)
+        proofs++
+        const payload = {
+          iss: "https://token.actions.githubusercontent.com",
+          aud: audience,
+          sub: `repo:fixture@34/repo@12:ref:${ref}`,
+          jti: `fixture-jti-${proofs}`,
+          iat: now,
+          nbf: now,
+          exp: now + 120,
+          repository: "fixture/repo",
+          repository_id: "12",
+          repository_owner_id: "34",
+          repository_owner: "fixture",
+          actor_id: "56",
+          ref,
+          sha: policy.workflowSha,
+          workflow_ref: `fixture/repo/.github/workflows/agent-sandbox-caller.yml@${ref}`,
+          workflow_sha: policy.workflowSha,
+          job_workflow_ref: `fixture/repo/.github/workflows/agent-sandbox.yml@${ref}`,
+          job_workflow_sha: policy.workflowSha,
+          run_id: "78",
+          run_attempt: "1",
+          event_name: "push",
+          runner_environment: "github-hosted",
+        }
+        const hostile =
+          proofs === 1 && typeof race === "string" && (race in hostileClaims || race === "key")
+        const input = [
+          {
+            alg: "RS256",
+            typ: "JWT",
+            kid: hostile && race === "key" ? "untrusted-key" : "fixture",
+          },
+          hostile ? { ...payload, ...hostileClaims[String(race)] } : payload,
+        ]
+          .map((value) => Buffer.from(JSON.stringify(value)).toString("base64url"))
+          .join(".")
+        return Response.json({
+          value: `${input}.${sign("RSA-SHA256", Buffer.from(input), keys.privateKey).toString("base64url")}`,
+        })
+      },
+    })
     const github = Bun.serve({
       hostname: "127.0.0.1",
       port: 0,
       fetch(request) {
         const path = new URL(request.url).pathname
-        if (path === "/jwks") return Response.json(jwks)
         if (path.endsWith("/access_tokens"))
           return Response.json(
             { token: "fixture-github", expires_at: new Date(Date.now() + 3600000).toISOString() },
@@ -137,79 +263,19 @@ for (const race of [
         return new Response(null, { status: 404 })
       },
     })
-    const bootstrap = () =>
-      serveBootstrap({
-        directory: ssh.root,
-        identity: {
-          peerId: race === "peer" && attempt === "2" ? "foreign-peer" : "fixture-peer",
-          agentImage: policy.agentImage,
-          workflowSha: policy.workflowSha,
-        },
-        issue: async (audience) => {
-          const ref = "refs/heads/workflowd/leases/lease"
-          const now = Math.floor(Date.now() / 1000)
-          const payload = {
-            iss: "https://token.actions.githubusercontent.com",
-            aud: audience,
-            sub: `repo:fixture@34/repo@12:ref:${ref}`,
-            jti: `fixture-jti-${attempt}`,
-            iat: now,
-            nbf: now,
-            exp: now + 120,
-            repository: "fixture/repo",
-            repository_id: "12",
-            repository_owner_id: "34",
-            repository_owner: "fixture",
-            actor_id: "56",
-            ref,
-            sha: policy.workflowSha,
-            workflow_ref: `fixture/repo/.github/workflows/agent-sandbox-caller.yml@${ref}`,
-            workflow_sha: policy.workflowSha,
-            job_workflow_ref: `fixture/repo/.github/workflows/agent-sandbox.yml@${ref}`,
-            job_workflow_sha: policy.workflowSha,
-            run_id: "78",
-            run_attempt: attempt,
-            event_name: "push",
-            runner_environment: "github-hosted",
-          }
-          const hostile =
-            typeof race === "string" && (race in hostileClaims || race === "key") && attempt === "2"
-          const input = [
-            {
-              alg: "RS256",
-              typ: "JWT",
-              kid: hostile && race === "key" ? "untrusted-key" : "fixture",
-            },
-            hostile ? { ...payload, run_attempt: "1", ...hostileClaims[String(race)] } : payload,
-          ]
-            .map((value) => Buffer.from(JSON.stringify(value)).toString("base64url"))
-            .join(".")
-          return `${input}.${sign("RSA-SHA256", Buffer.from(input), keys.privateKey).toString("base64url")}`
-        },
-        activate: async (grant) => {
-          activated++
-          const child = Bun.spawn(
-            [node, resolve("test/sandbox/fixtures/capability-job.mjs"), "runner", "."],
-            {
-              cwd: ssh.root,
-              env: { PATH: "/usr/bin:/bin", HOME: root },
-              stdin: new Blob([JSON.stringify(grant)]),
-              stdout: "pipe",
-              stderr: "ignore",
-            },
-          )
-          relay = child
-          const ready = await child.stdout.getReader().read()
-          expect(ready.done).toBe(false)
-          expect(Buffer.from(ready.value ?? []).toString()).toBe("ready\n")
-          await beforeHandoff()
-        },
-      })
-    let helper = await bootstrap()
-    let completed = helper.completed.then(
-      () => "accepted",
-      () => "refused",
-    )
+    const config = {
+      nodeBinary: node,
+      noscope: { binary: fixtureExecutable("noscope"), configHome: root },
+      providerId: "anthropic",
+      credentialRole: "fixture",
+      maxStreams: 8,
+      maxStreamsPerRun: 2,
+      listen: { host: "127.0.0.1", port: 0 },
+    }
+    let gateway: ReturnType<typeof Bun.spawn> | undefined
+    let front: Awaited<ReturnType<typeof tlsFront>> | undefined
+    const relayPid = () =>
+      readFile(join(sandbox, "relay.pid"), "utf8").then(Number, () => undefined)
     try {
       await mkdir(join(root, "noscope/providers"), { recursive: true, mode: 0o700 })
       await writeFile(
@@ -218,19 +284,22 @@ for (const race of [
         { mode: 0o600 },
       )
       await writeFile(
-        join(root, "noscope/providers/run-capability.toml"),
-        `contract_version = 1\n[commands]\nmint = "${process.execPath} ${resolve("src/capability-gateway/noscope-provider.ts")} run {ttl}"\n`,
-        { mode: 0o600 },
+        join(root, "run.mjs"),
+        `import {randomBytes,randomUUID} from 'node:crypto';process.stdout.write(JSON.stringify({token:randomBytes(32).toString('base64url'),token_id:randomUUID(),expires_at:new Date(Date.now()+Number(process.argv[2])*1000).toISOString()}))`,
       )
       await writeFile(
         join(root, "access.mjs"),
         'process.stdout.write(JSON.stringify({token:"fixture-provider-access",token_id:"fixture",expires_at:new Date(Date.now()+120000).toISOString()}))',
       )
-      await writeFile(
-        join(root, "noscope/providers/provider-access.toml"),
-        `contract_version = 1\n[commands]\nmint = "${node} ${join(root, "access.mjs")}"\n`,
-        { mode: 0o600 },
-      )
+      for (const [name, script, argument] of [
+        ["run-capability", "run.mjs", " {ttl}"],
+        ["provider-access", "access.mjs", ""],
+      ] as const)
+        await writeFile(
+          join(root, `noscope/providers/${name}.toml`),
+          `contract_version = 1\n[commands]\nmint = "${node} ${join(root, script)}${argument}"\n`,
+          { mode: 0o600 },
+        )
       await Effect.runPromise(
         Effect.gen(function* () {
           yield* runStoreMigrations
@@ -263,28 +332,8 @@ for (const race of [
             sourceSha: "d".repeat(40),
             now: now.getTime(),
           })
-          const gateway = yield* makeCapabilityGateway(
-            {
-              noscope: { binary: fixtureExecutable("noscope"), configHome: root },
-              providerId: "anthropic",
-              credentialRole: "fixture",
-              maxStreams: 8,
-              maxStreamsPerRun: 2,
-            },
-            (url, input) => {
-              expect(url).toBe("https://api.anthropic.com/v1/messages")
-              return fetch(new URL("v1/messages", upstream.url), input)
-            },
-          )
-          const sshArguments = () => [
-            ...ssh.args.map((arg) =>
-              race === "host-key" && attempt === "2" && arg.startsWith("UserKnownHostsFile=")
-                ? `UserKnownHostsFile=${join(root, "foreign-host")}`
-                : arg,
-            ),
-            "exec /usr/local/bin/container-use stdio",
-          ]
-          const transport = yield* makeCapabilityTransport(gateway, node, root, sshArguments)
+          // workflowd's side: its own gateway (for revocation) and the lease service.
+          const local = yield* makeCapabilityGateway(config)
           const api = yield* makeSandboxGithub(
             { appId: 1, privateKeyPath: join(root, "app.pem") },
             Octokit.defaults({
@@ -295,132 +344,100 @@ for (const race of [
           const leases = yield* makeSandboxLeaseService(
             api,
             root,
-            async (args) => {
-              expect(args).toEqual(["/usr/bin/tailscale", "status", "--json"])
-              return JSON.stringify({
-                Peer: {
-                  fixture: {
-                    ID: "fixture-peer",
-                    HostName: "lease-78-1",
-                    Online: true,
-                    TailscaleIPs: ["100.64.0.1"],
-                    Tags: ["tag:agent-runner"],
-                    sshHostKeys: [ssh.key],
-                  },
-                },
-              })
-            },
+            () => Promise.reject(new Error("no controller command for a private lease")),
             {
-              native: { gateway, transport },
+              native: { gateway: local },
               publicationContract: { reference: "fixture-only:worktree", receipt: "fixed-v1" },
-              sshArguments,
-              keys: () => fetch(new URL("jwks", github.url)).then((response) => response.json()),
             },
           )
-          if (race === "filesystem") {
-            const original = filesystem.writeFile
-            const entered = Promise.withResolvers<void>()
-            const proceed = Promise.withResolvers<void>()
-            let block = false
-            const fault = spyOn(filesystem, "writeFile").mockImplementation(
-              async (path, data, options) => {
-                if (
-                  typeof path === "string" &&
-                  path.includes("/bootstrap-") &&
-                  path.endsWith("/known_hosts")
-                ) {
-                  if (block) {
-                    entered.resolve()
-                    await proceed.promise
-                  } else await mkdir(path)
-                }
-                return original(path, data, options)
+          // The run is recorded before the runner asks; with no session the lease stays starting.
+          expect((yield* leases.acquire("run")).state).toBe("starting")
+
+          // The gateway as its own process, behind TLS; then the real bootstrap and relay.
+          const child = Bun.spawn(
+            [
+              process.execPath,
+              "-e",
+              `import { runCapabilityGatewayServer } from ${JSON.stringify(resolve("src/capability-gateway-server.ts"))}
+import { Effect } from "effect"
+Effect.runFork(runCapabilityGatewayServer(process.env, {
+  keys: async () => (${JSON.stringify(jwks)}),
+  upstream: (url, init) => fetch(url.replace("https://api.anthropic.com", ${JSON.stringify(upstream.url.origin)}), init),
+}))`,
+            ],
+            {
+              cwd: resolve("."),
+              env: {
+                PATH: process.env.PATH,
+                HOME: root,
+                WORKFLOWD_DATABASE_PATH: database,
+                WORKFLOWD_CAPABILITY_GATEWAY: JSON.stringify(config),
               },
-            )
-            try {
-              expect((yield* Effect.exit(leases.acquire("run")))._tag).toBe("Failure")
-              expect(
-                (yield* Effect.promise(() => readdir(root))).filter((name) =>
-                  name.startsWith("bootstrap-"),
-                ),
-              ).toEqual([])
-              block = true
-              const pending = yield* leases.acquire("run").pipe(Effect.forkScoped)
-              yield* Effect.promise(() => entered.promise)
-              const interrupted = Effect.runPromise(Fiber.interrupt(pending))
-              proceed.resolve()
-              yield* Effect.promise(() => interrupted)
-              expect(
-                (yield* Effect.promise(() => readdir(root))).filter((name) =>
-                  name.startsWith("bootstrap-"),
-                ),
-              ).toEqual([])
-              const retained = yield* sql`SELECT owner FROM sandbox_lease_operations`
-              expect(retained[0]?.owner).not.toBeNull()
-              // Existing interrupted-acquisition custody must age out before
-              // trusted ref reconciliation can perform the positive retry.
-              yield* sql`UPDATE sandbox_lease_operations SET expires_at=0`
-            } finally {
-              proceed.resolve()
-              fault.mockRestore()
-            }
-          }
-          const refused = yield* Effect.result(leases.acquire("run"))
-          expect(refused._tag).toBe("Failure")
-          if (race === "host-key") helper.close()
-          expect(yield* Effect.promise(() => completed)).toBe("refused")
-          expect(activated).toBe(0)
-          expect(upstreamEffects).toBe(0)
-          helper.close()
-          attempt = "1"
-          helper = yield* Effect.promise(bootstrap)
-          completed = helper.completed.then(
-            () => "accepted",
-            () => "refused",
+              stdout: "pipe",
+              stderr: "inherit",
+            },
           )
-          if (race === true || race === "revoke-failure") {
-            beforeHandoff = () =>
-              Effect.runPromise(
-                Effect.gen(function* () {
-                  yield* sql`UPDATE sandbox_lease_operations SET owner='fixture-new-owner',generation=generation+1`
-                  if (race === "revoke-failure")
-                    yield* sql`CREATE TRIGGER fixture_revoke_failure BEFORE UPDATE OF revoked ON capability_bindings BEGIN SELECT RAISE(FAIL,'fixture revoke failure'); END`
-                }),
-              )
-            expect((yield* Effect.exit(leases.acquire("run")))._tag).toBe("Failure")
-            expect(activated).toBe(1)
-            expect(upstreamEffects).toBe(0)
-            const remaining = yield* Effect.promise(() => readdir(root))
-            expect(
-              remaining.filter(
-                (name) => name.startsWith("gateway-") || name.startsWith("bootstrap-"),
-              ),
-            ).toEqual([])
-            if (!relay) throw new Error("relay missing")
-            const child = relay
-            yield* Effect.promise(() => child.exited)
-            return
-          }
-          const lease = yield* leases.acquire("run")
-          expect(lease.state).toBe("ready")
-          expect(yield* Effect.promise(() => completed)).toBe("accepted")
-          expect(activated).toBe(1)
-          if (race === "release-failure") {
-            yield* sql`CREATE TRIGGER fixture_revoke_failure BEFORE UPDATE OF revoked ON capability_bindings BEGIN SELECT RAISE(FAIL,'fixture revoke failure'); END`
-            expect((yield* Effect.exit(leases.release("run")))._tag).toBe("Failure")
-            const remaining = yield* Effect.promise(() => readdir(root))
-            expect(
-              remaining.filter(
-                (name) => name.startsWith("gateway-") || name.startsWith("bootstrap-"),
-              ),
-            ).toEqual([])
-            expect((yield* store.read("run"))?.state).not.toBe("released")
-            yield* sql`DROP TRIGGER fixture_revoke_failure`
-            return
-          }
+          gateway = child
+          const listening = yield* Effect.promise(async () => {
+            const reader = child.stdout.getReader()
+            let text = ""
+            while (!text.includes("\n")) {
+              const part = await reader.read()
+              if (part.done) throw new Error("gateway process exited before listening")
+              text += Buffer.from(part.value).toString()
+            }
+            reader.releaseLock()
+            return Number(/^listening (\d+)$/m.exec(text)?.[1])
+          })
+          const tlsGateway = yield* Effect.promise(() => tlsFront(tls, listening))
+          front = tlsGateway
+          const bootstrap = Bun.spawn(
+            [
+              node,
+              "--input-type=module",
+              "-e",
+              `import { prepare } from ${JSON.stringify(resolve("deploy/sandbox/bootstrap.mjs"))}
+await prepare({
+  directory: ${JSON.stringify(sandbox)},
+  identity: (url, init) => fetch(${JSON.stringify(issuer.url.origin + "/token")} + url.search, init),
+})`,
+            ],
+            {
+              env: {
+                PATH: "/usr/bin:/bin",
+                SANDBOX_AGENT_IMAGE: policy.agentImage,
+                GITHUB_SHA: policy.workflowSha,
+                GITHUB_REF: "refs/heads/workflowd/leases/lease",
+                GITHUB_REPOSITORY: policy.repository,
+                SANDBOX_GATEWAY_URL: `https://127.0.0.1:${tlsGateway.port}`,
+                ACTIONS_ID_TOKEN_REQUEST_URL:
+                  "https://fixture.actions.githubusercontent.com/token?api-version=2",
+                ACTIONS_ID_TOKEN_REQUEST_TOKEN: "fixture-request",
+                NODE_EXTRA_CA_CERTS: tls.cert,
+              },
+              stdout: "ignore",
+              stderr: "pipe",
+            },
+          )
+          const [code, diagnostic] = yield* Effect.promise(() =>
+            Promise.all([bootstrap.exited, new Response(bootstrap.stderr).text()]),
+          )
+          expect({ code, diagnostic }).toEqual({ code: 0, diagnostic: "" })
+          // The gateway sent the first session and the runner lost it; a hostile first proof
+          // opened nothing. Two proofs opened sessions; the runner holds the second.
+          expect(tlsGateway.dropped()).toBe(1)
+          expect(
+            yield* sql`SELECT (SELECT count(*) FROM capability_proofs) AS proofs,
+              (SELECT session FROM capability_bindings) AS session`,
+          ).toEqual([{ proofs: 2, session: 2 }])
+          const hostileFirst = typeof race === "string" && (race in hostileClaims || race === "key")
+          expect(proofs).toBe(hostileFirst ? 3 : 2)
+          expect(
+            yield* Effect.promise(() => readFile(join(sandbox, "execution-mode"), "utf8")),
+          ).toBe("actions-native")
           const request = (sentinel: string) =>
             fetch("http://capability.invalid/v1/messages", {
-              unix: ssh.socketPath("gateway.sock"),
+              unix: join(sandbox, "gateway.sock"),
               method: "POST",
               body: native,
               headers: {
@@ -430,6 +447,35 @@ for (const race of [
                 "anthropic-beta": "oauth-2025-04-20",
               },
             })
+          if (race === true || race === "revoke-failure") {
+            if (race === "revoke-failure")
+              yield* sql`CREATE TRIGGER fixture_revoke_failure BEFORE UPDATE OF revoked ON capability_bindings BEGIN SELECT RAISE(FAIL,'fixture revoke failure'); END`
+            // A second acquirer takes the operation after this one records the run, before it
+            // commits the session.
+            yield* sql`CREATE TRIGGER fixture_owner_race AFTER UPDATE OF actions_run_id ON sandbox_leases
+              BEGIN UPDATE sandbox_lease_operations SET owner='fixture-new-owner',generation=generation+1; END`
+            expect((yield* Effect.exit(leases.acquire("run")))._tag).toBe("Failure")
+            expect((yield* store.read("run"))?.state).toBe("starting")
+            expect(yield* sql`SELECT revoked FROM capability_bindings`).toEqual([
+              { revoked: race === true ? 1 : 0 },
+            ])
+            if (race === true)
+              expect((yield* Effect.promise(() => request("workflowd-local"))).status).toBe(403)
+            expect(upstreamEffects).toBe(0)
+            return
+          }
+          let lease = yield* leases.acquire("run")
+          for (let tries = 0; lease.state !== "ready" && tries < 50; tries++)
+            lease = yield* leases.acquire("run")
+          expect(lease.state).toBe("ready")
+          expect(lease.transport).toBeNull()
+          if (race === "release-failure") {
+            yield* sql`CREATE TRIGGER fixture_revoke_failure BEFORE UPDATE OF revoked ON capability_bindings BEGIN SELECT RAISE(FAIL,'fixture revoke failure'); END`
+            expect((yield* Effect.exit(leases.release("run")))._tag).toBe("Failure")
+            expect((yield* store.read("run"))?.state).not.toBe("released")
+            yield* sql`DROP TRIGGER fixture_revoke_failure`
+            return
+          }
           expect((yield* Effect.promise(() => request("foreign"))).status).toBe(403)
           expect(upstreamEffects).toBe(0)
           const accepted = yield* Effect.promise(() => request("workflowd-local"))
@@ -437,27 +483,31 @@ for (const race of [
           expect(yield* Effect.promise(() => accepted.text())).toBe(response)
           expect(upstreamEffects).toBe(1)
           expect(publicArtifacts).toBe(0)
-          yield* gateway.revoke("run")
+          // workflowd revokes; the gateway process refuses the relay's next call.
+          yield* local.revoke("run")
           expect((yield* Effect.promise(() => request("workflowd-local"))).status).toBe(403)
           expect(upstreamEffects).toBe(1)
         }).pipe(
           Effect.provide(AgentRunStoreLive),
-          Effect.provide(SqliteClient.layer({ filename: join(root, "store.sqlite") })),
+          Effect.provide(SqliteClient.layer({ filename: database })),
           Effect.scoped,
         ),
       )
-      expect(
-        (await readdir(root)).filter(
-          (name) => name.startsWith("gateway-") || name.startsWith("bootstrap-"),
-        ),
-      ).toEqual([])
     } finally {
-      helper.close()
-      relay?.kill("SIGKILL")
-      await relay?.exited
+      const pid = await relayPid()
+      if (pid !== undefined) {
+        try {
+          process.kill(pid, "SIGKILL")
+        } catch {
+          // The relay already stopped.
+        }
+      }
+      front?.close()
+      gateway?.kill("SIGKILL")
+      await gateway?.exited
+      await issuer.stop(true)
       await github.stop(true)
       await upstream.stop(true)
-      await ssh.close()
       await rm(root, { recursive: true, force: true })
     }
   }, 30000)

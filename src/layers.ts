@@ -62,7 +62,6 @@ import { SandboxDispatch, makeSandboxDispatch } from "./sandbox/dispatch"
 import { makeSandboxGithub } from "./sandbox/github"
 import { makeSandboxLeaseService } from "./sandbox/lease"
 import { makeCapabilityGateway } from "./capability-gateway/service"
-import { makeCapabilityTransport } from "./sandbox/capability-transport"
 import { routeSandboxHandoffs, routeSandboxProvider } from "./sandbox/provider"
 import { WorkflowStoreLive } from "./store"
 import { WorkflowStore } from "./store/contracts"
@@ -364,15 +363,7 @@ const makeAutomationLayer = (config: Extract<AppConfig, { readonly mode?: "autom
             const native =
               gatewayConfig === undefined
                 ? undefined
-                : yield* Effect.gen(function* () {
-                    const gateway = yield* makeCapabilityGateway(gatewayConfig)
-                    const transport = yield* makeCapabilityTransport(
-                      gateway,
-                      gatewayConfig.nodeBinary,
-                      controlRoot,
-                    )
-                    return { gateway, transport }
-                  })
+                : { gateway: yield* makeCapabilityGateway(gatewayConfig) }
             const leases = yield* makeSandboxLeaseService(
               github,
               controlRoot,

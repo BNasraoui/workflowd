@@ -1,7 +1,7 @@
 import { expect, spyOn, test } from "bun:test"
 import { generateKeyPairSync, sign } from "node:crypto"
 import { createServer } from "node:http"
-import { discoverJobPeer, githubJobKeys, verifyJobProof } from "../../src/sandbox/bootstrap"
+import { githubJobKeys, verifyJobProof } from "../../src/sandbox/bootstrap"
 import { parseSandboxRepositories } from "../../src/sandbox/config"
 
 const { privateKey, publicKey } = generateKeyPairSync("rsa", { modulusLength: 2048 })
@@ -203,31 +203,6 @@ test("cancelling job key retrieval aborts the real upstream response", async () 
     issuer.closeAllConnections()
     await new Promise<void>((resolve) => issuer.close(() => resolve()))
   }
-})
-
-const peer = {
-  ID: "fixture-peer",
-  HostName: "lease-78-1",
-  Online: true,
-  TailscaleIPs: ["100.64.0.1"],
-  Tags: ["tag:agent-runner"],
-  sshHostKeys: ["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFixture"],
-}
-test("discovery uses an unambiguous authenticated peer hint, never a supplied address", () => {
-  expect(discoverJobPeer({ Peer: { a: peer } }, 78, 1)).toEqual({
-    peerId: peer.ID,
-    address: "100.64.0.1",
-    keys: peer.sshHostKeys,
-  })
-  expect(discoverJobPeer({ Peer: {} }, 78, 1)).toBeNull()
-  for (const value of [
-    { Peer: { a: peer, b: { ...peer, ID: "duplicate" } } },
-    { Peer: { a: { ...peer, Online: false } } },
-    { Peer: { a: { ...peer, Tags: [] } } },
-    { Peer: { a: { ...peer, sshHostKeys: [] } } },
-    { Peer: { a: { ...peer, TailscaleIPs: ["127.0.0.1"] } } },
-  ])
-    expect(() => discoverJobPeer(value, 78, 1)).toThrow("job peer refused")
 })
 
 test("private bootstrap selection is explicit and preserves its immutable owner and execution mode", () => {

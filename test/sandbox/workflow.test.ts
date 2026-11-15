@@ -1,5 +1,7 @@
 import { expect, test } from "bun:test"
-import { resolve } from "node:path"
+import { join, resolve } from "node:path"
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
+import { tmpdir } from "node:os"
 import { Schema } from "effect"
 
 const Step = Schema.Struct({
@@ -278,3 +280,67 @@ for (const tracked of [false, true]) {
     }
   })
 }
+
+test("a private runner gets the gateway URL and joins the tailnet without Tailscale SSH", async () => {
+  const workflow = Schema.decodeUnknownSync(
+    Schema.Struct({
+      jobs: Schema.Struct({
+        runner: Schema.Struct({
+          steps: Schema.Array(
+            Schema.Struct({
+              name: Schema.optionalKey(Schema.String),
+              env: Schema.optionalKey(Schema.Record(Schema.String, Schema.String)),
+            }),
+          ),
+        }),
+      }),
+    }),
+  )(Bun.YAML.parse(await Bun.file(`${root}/.github/workflows/agent-sandbox.yml`).text()))
+  const step = (name: string) => workflow.jobs.runner.steps.find((entry) => entry.name === name)
+  expect(step("Prepare private first contact")?.env?.SANDBOX_GATEWAY_URL).toBe(
+    "${{ inputs.gateway-url }}",
+  )
+  expect(step("Join the restricted tailnet")?.env?.SANDBOX_BOOTSTRAP_MODE).toBe(
+    "${{ inputs.bootstrap-mode }}",
+  )
+  const source = await Bun.file(`${root}/deploy/sandbox/tailscale.sh`).text()
+  const enroll = /python3 - <<'PY'\n([\s\S]*?)\nPY\n/.exec(source)?.[1]
+  if (enroll === undefined) throw new Error("enrollment script missing")
+  const directory = await mkdtemp(join(tmpdir(), "wfd-tailscale-join-"))
+  const issuer = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch: () => Response.json({ value: "fixture-id-token" }),
+  })
+  try {
+    await writeFile(
+      join(directory, "sudo"),
+      `#!/bin/sh\nprintf '%s\\n' "$@" > "${join(directory, "argv")}"\ncat > /dev/null\n`,
+      { mode: 0o700 },
+    )
+    for (const mode of ["private", "legacy-artifact"]) {
+      const child = Bun.spawn(["/usr/bin/python3", "-c", enroll], {
+        env: {
+          PATH: `${directory}:/usr/bin:/bin`,
+          ACTIONS_ID_TOKEN_REQUEST_URL: `http://127.0.0.1:${issuer.port}/token?api-version=2`,
+          ACTIONS_ID_TOKEN_REQUEST_TOKEN: "fixture-request",
+          SANDBOX_AUDIENCE: "fixture",
+          SANDBOX_TAILSCALE_CLIENT_ID: "fixture",
+          SANDBOX_BOOTSTRAP_MODE: mode,
+          GITHUB_RUN_ID: "78",
+          GITHUB_RUN_ATTEMPT: "1",
+        },
+        stdout: "ignore",
+        stderr: "pipe",
+      })
+      expect(await child.exited).toBe(0)
+      const argv = (await readFile(join(directory, "argv"), "utf8")).split("\n")
+      expect(argv.slice(0, 3)).toEqual(["-n", "tailscale", "up"])
+      expect(argv.includes("--ssh")).toBe(mode !== "private")
+      expect(argv).toContain("--advertise-tags=tag:agent-runner")
+    }
+  } finally {
+    await issuer.stop(true)
+    await rm(directory, { recursive: true, force: true })
+  }
+})

@@ -6,9 +6,18 @@ import { SqliteClient } from "@effect/sql-sqlite-bun"
 import { mkdtemp, mkdir, writeFile, readFile, rm } from "node:fs/promises"
 import { resolve, join } from "node:path"
 import { tmpdir } from "node:os"
+import { connect, type AddressInfo } from "node:net"
+import { once } from "node:events"
 import { AgentRunStoreLive } from "../../src/kernel/agent-run-store"
 import { makeCapabilityGateway } from "../../src/capability-gateway/service"
 import { seedCapabilityRun, transport } from "./fixture"
+
+/** The bound port of a listening TCP server. */
+function portOf(server: { address(): string | AddressInfo | null }) {
+  const address = server.address()
+  if (address === null || typeof address === "string") throw new Error("listener unavailable")
+  return address.port
+}
 
 test("bound streaming preserves native bytes, renews with noscope, and denies cross-run or proxy authority", async () => {
   const root = await mkdtemp(join(tmpdir(), "wfd-gateway-"))
@@ -383,3 +392,66 @@ test("a stream that falls silent for the idle limit is aborted upstream and rele
   expect(result.upstreamCancelled).toBe(true)
   expect(result.admitted).toBe(200)
 }, 20000)
+
+for (const attack of ["resets", "preface", "h2-preface", "truncated"] as const)
+  test(`D/R9: the gateway listener contains ${attack} and serves the next valid request`, async () => {
+    let served = 0
+    let partial = 0
+    const listener = capabilityHttpServer(async (request) => {
+      if (new URL(request.url).pathname !== "/valid") {
+        partial++
+        await request.arrayBuffer()
+      }
+      served++
+      return new Response("fixture-valid")
+    }, true)
+    listener.server.listen(0, "127.0.0.1")
+    await once(listener.server, "listening")
+    const port = portOf(listener.server)
+    const raw = (bytes: string, cut: boolean) =>
+      new Promise<string>((resolve) => {
+        const socket = connect(port, "127.0.0.1")
+        let answer = ""
+        socket.on("data", (chunk) => (answer += chunk.toString()))
+        socket.on("error", () => {})
+        socket.on("close", () => resolve(answer))
+        socket.write(bytes, () => {
+          if (cut) setTimeout(() => socket.destroy(), 20)
+        })
+      })
+    const valid = () =>
+      fetch(`http://127.0.0.1:${port}/valid`, { method: "POST", body: "{}" }).then((response) =>
+        response.text(),
+      )
+    const input = {
+      resets:
+        "POST /capabilities/v1/renew HTTP/1.1\r\nhost: foreign.invalid\r\ncontent-length: 100\r\n\r\n{}",
+      preface: "invalid-http2-preface\r\n\r\n",
+      "h2-preface": `PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n${String.fromCharCode(0, 0, 6, 4, 0)}`,
+      truncated: "POST /valid HTTP/1.1\r\nhost: 127.0.0.1\r\ncontent-le",
+    }[attack]
+    let hanging: ReturnType<typeof connect> | undefined
+    try {
+      for (let round = 0; round < 8; round++) {
+        const answer = await raw(input, attack === "resets" || attack === "truncated")
+        expect(answer).not.toContain("fixture-valid")
+        expect(await valid()).toBe("fixture-valid")
+      }
+      // A peer error in the body never reaches an answer; framing errors never reach the handler.
+      expect({ served, partial }).toEqual({ served: 8, partial: attack === "resets" ? 8 : 0 })
+      // Shutdown is bounded with a client still holding a half-sent request.
+      hanging = connect(port, "127.0.0.1")
+      hanging.on("error", () => {})
+      hanging.write("POST /valid HTTP/1.1\r\nhost: 127.0.0.1\r\ncontent-length: 10\r\n\r\n{")
+      await Bun.sleep(50)
+      expect(
+        await Promise.race([
+          listener.close().then(() => "closed"),
+          Bun.sleep(2000).then(() => "held"),
+        ]),
+      ).toBe("closed")
+    } finally {
+      hanging?.destroy()
+      await listener.close()
+    }
+  })

@@ -28,7 +28,7 @@ import { makePublishStore } from "./publish-store"
 import { makeNativeCli, makeNativeExecutionStore } from "./native-execution"
 import type { NativeControl, NativeControlReceipt } from "./native-control"
 import { makeNativeResultStore } from "./native-result"
-import { requireNativePublisherActivation, type PublisherContract } from "./publisher-contract"
+import type { PublisherContract } from "./publisher-contract"
 import { SqlClient } from "effect/unstable/sql"
 import {
   observeSandboxStage,
@@ -395,8 +395,10 @@ export const makeSandboxDispatch = (options: {
                   "Ben Nasraoui <81005232+BNasraoui@users.noreply.github.com>")))
         )
           return yield* Effect.fail(failure())
+        // The runner now reaches the gateway by session, with no SSH peer to launch the harness
+        // through; the launch moves to that session in a later change. Until then no lease is made.
         if (actionsNative)
-          yield* requireNativePublisherActivation(policy, options.publicationContract)
+          return yield* Effect.fail(failure(new Error("Actions-native harness start unavailable")))
         yield* Effect.tryPromise(async () => {
           await mkdir(dirname(run.directory), { recursive: true, mode: 0o700 })
           await mkdir(run.directory, { mode: 0o700 })

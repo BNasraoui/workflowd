@@ -3,7 +3,6 @@ export const coreCases = [
   ["A1", "test/sandbox/public-output.test.ts"],
   ["B1", "test/sandbox/bootstrap.test.ts"],
   ["B2", "test/sandbox/bootstrap-helper.test.ts"],
-  ["B2b", "test/sandbox/bootstrap-helper-ssh.launcher.test.ts"],
   ["B3", "test/sandbox/bootstrap.e2e.launcher.test.ts"],
   ["C1", "test/capability-gateway/authorization.test.ts"],
   ["C2", "test/capability-gateway/noscope.test.ts"],
@@ -13,8 +12,6 @@ export const coreCases = [
   ["C6", "test/capability-gateway/transaction.test.ts"],
   ["C7", "test/capability-gateway/composition.test.ts"],
   ["D1", "test/capability-gateway/transport-security.test.ts"],
-  ["D2", "test/sandbox/capability-acquisition.test.ts"],
-  ["D2b", "test/sandbox/capability-acquisition-ssh.launcher.test.ts"],
   ["D3", "test/sandbox/capability-relay.test.ts"],
 ] as const
 

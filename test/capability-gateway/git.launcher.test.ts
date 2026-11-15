@@ -10,8 +10,48 @@ import { makeCapabilityGateway } from "../../src/capability-gateway/service"
 import { makeTokenBroker } from "../../src/worker-identity/broker"
 import { seedCapabilityRun, transport } from "./fixture"
 import { fixtureExecutable } from "../helpers/fixture-executable.mjs"
-import { makeCapabilityTransport } from "../../src/sandbox/capability-transport"
-import { disposableSsh } from "../sandbox/fixtures/ssh.mjs"
+import { capabilityApi, capabilityHttpServer } from "../../src/capability-gateway/http"
+import { connect, type AddressInfo } from "node:net"
+import { createServer as tlsServer } from "node:tls"
+import { once } from "node:events"
+
+/** The bound port of a listening TCP server. */
+function portOf(server: { address(): string | AddressInfo | null }) {
+  const address = server.address()
+  if (address === null || typeof address === "string") throw new Error("listener unavailable")
+  return address.port
+}
+
+/** A self-signed certificate for 127.0.0.1: the gateway's TLS on loopback. */
+async function loopbackCertificate(root: string) {
+  const key = join(root, "tls.key")
+  const cert = join(root, "tls.pem")
+  const child = Bun.spawn(
+    [
+      "/usr/bin/openssl",
+      "req",
+      "-x509",
+      "-newkey",
+      "ec",
+      "-pkeyopt",
+      "ec_paramgen_curve:prime256v1",
+      "-nodes",
+      "-keyout",
+      key,
+      "-out",
+      cert,
+      "-days",
+      "1",
+      "-subj",
+      "/CN=127.0.0.1",
+      "-addext",
+      "subjectAltName=IP:127.0.0.1",
+    ],
+    { stdin: "ignore", stdout: "ignore", stderr: "pipe" },
+  )
+  if ((await child.exited) !== 0) throw new Error(await new Response(child.stderr).text())
+  return { key, cert }
+}
 
 async function git(cwd: string, ...args: string[]) {
   const child = Bun.spawn(
@@ -95,11 +135,10 @@ for (const authenticated of [false, true])
         return new Response(output.subarray(split + 4), { headers })
       },
     })
-    const ssh = await disposableSsh(
-      () =>
-        `${fixtureExecutable("node")} ${resolve("test/sandbox/fixtures/capability-job.mjs")} connect ${root}`,
-    )
+    const tls = await loopbackCertificate(root)
     let relay: ReturnType<typeof Bun.spawn> | undefined
+    let listener: ReturnType<typeof capabilityHttpServer> | undefined
+    let front: ReturnType<typeof tlsServer> | undefined
     try {
       await Effect.runPromise(
         Effect.gen(function* () {
@@ -133,6 +172,27 @@ for (const authenticated of [false, true])
           })
           const grant = yield* gateway.bind(yield* gateway.challenge("run", transport), "git-jti")
           yield* leases.bind("run", 78, 1, transport)
+          // The gateway's network listener, behind TLS on loopback.
+          const served = capabilityHttpServer(capabilityApi(gateway), true)
+          listener = served
+          served.server.listen(0, "127.0.0.1")
+          yield* Effect.promise(() => once(served.server, "listening"))
+          const backendPort = portOf(served.server)
+          const terminator = tlsServer(
+            {
+              key: yield* Effect.promise(() => readFile(tls.key)),
+              cert: yield* Effect.promise(() => readFile(tls.cert)),
+            },
+            (socket) => {
+              const plain = connect(backendPort, "127.0.0.1")
+              socket.pipe(plain).pipe(socket)
+              socket.on("error", () => plain.destroy())
+              plain.on("error", () => socket.destroy())
+            },
+          )
+          front = terminator
+          terminator.listen(0, "127.0.0.1")
+          yield* Effect.promise(() => once(terminator, "listening"))
           relay = Bun.spawn(
             [
               fixtureExecutable("node"),
@@ -141,13 +201,14 @@ for (const authenticated of [false, true])
               root,
             ],
             {
-              env: { PATH: "/usr/bin:/bin", HOME: root },
+              env: { PATH: "/usr/bin:/bin", HOME: root, NODE_EXTRA_CA_CERTS: tls.cert },
               stdin: new Blob([
                 JSON.stringify({
                   token: grant.token,
                   expiresAt: grant.expiresAt,
                   renewAt: grant.renewAt,
                   deadline: Date.now() + 3600000,
+                  gateway: `https://127.0.0.1:${portOf(terminator)}`,
                 }),
               ]),
               stdout: "pipe",
@@ -162,13 +223,6 @@ for (const authenticated of [false, true])
               (yield* Effect.promise(() => output.getReader().read())).value ?? [],
             ).toString(),
           ).toBe("ready\n")
-          const channel = yield* makeCapabilityTransport(
-            gateway,
-            fixtureExecutable("node"),
-            root,
-            () => [...ssh.args, "placeholder"],
-          )
-          yield* channel.connect(grant.binding, transport)
           const shim = Bun.spawn(
             [
               "python3",
@@ -258,7 +312,8 @@ with module.gateway({'socket':sys.argv[2]},'workflowd-local') as url:
     } finally {
       relay?.kill("SIGKILL")
       await relay?.exited
-      await ssh.close()
+      front?.close()
+      await listener?.close()
       await backend.stop(true)
       await rm(root, { recursive: true, force: true })
     }

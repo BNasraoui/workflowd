@@ -1,116 +1,175 @@
 import { expect, test } from "bun:test"
+import { Schema } from "effect"
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
-import { connect } from "node:net"
-import { serveBootstrap, takeJobIdentity } from "../../deploy/sandbox/bootstrap-helper.mjs"
+import { openSession, takeJobIdentity } from "../../deploy/sandbox/bootstrap-helper.mjs"
 import { join } from "node:path"
-import { fixtureExecutable } from "../helpers/fixture-executable.mjs"
 
-test("bootstrap proves once before activation and keeps proof off public output", async () => {
-  const root = await mkdtemp(join(tmpdir(), "wfd-bootstrap-"))
-  let activated = false
-  let issued = 0
-  const server = await serveBootstrap({
-    directory: root,
-    identity: { peerId: "fixture-peer", agentImage: "fixture-image", workflowSha: "fixture-sha" },
-    issue: async (audience) => {
-      issued++
-      expect(audience).toBe("workflowd:fixture")
-      return "fixture-signed-token"
-    },
-    activate: async () => {
-      activated = true
-    },
-    timeoutMs: 1000,
-  })
-  const socket = connect(`${root}/bootstrap.sock`)
-  try {
-    socket.write(JSON.stringify({ audience: "workflowd:fixture", peerId: "fixture-peer" }) + "\n")
-    const proof = await new Promise<string>((resolve) =>
-      socket.once("data", (bytes) => resolve(bytes.toString())),
-    )
-    expect(JSON.parse(proof).token).toBe("fixture-signed-token")
-    expect(activated).toBe(false)
-    socket.end(
-      JSON.stringify({
-        mode: "actions-native",
-        token: "a".repeat(43),
-        expiresAt: Date.now() + 10000,
-        renewAt: Date.now() + 5000,
-        deadline: Date.now() + 20000,
-      }) + "\n",
-    )
-    await server.completed
-    expect(activated).toBe(true)
-    expect(issued).toBe(1)
-  } finally {
-    socket.destroy()
-    server.close()
-    await rm(root, { recursive: true, force: true })
+const channel = "c".repeat(64)
+const grant = {
+  token: "a".repeat(43),
+  expiresAt: Date.now() + 10000,
+  renewAt: Date.now() + 5000,
+  deadline: Date.now() + 20000,
+}
+/** A gateway whose answers follow `plan`, one entry per request, and that records each request. */
+function scriptedGateway(plan: Array<"challenge" | "grant" | number | "lost">) {
+  const seen: string[] = []
+  let nonce = 0
+  const send = async (url: URL, init: RequestInit) => {
+    seen.push(`${init.method ?? "GET"} ${url.pathname}`)
+    const step = plan.shift()
+    if (step === undefined) throw new Error("unexpected request")
+    if (step === "lost") throw new TypeError("fetch failed")
+    if (typeof step === "number") return new Response(null, { status: step })
+    if (step === "grant") return Response.json(grant)
+    nonce++
+    return Response.json({ channel, nonce: String(nonce).repeat(64).slice(0, 64) })
   }
+  return { send, seen }
+}
+
+test("the runner proves itself for each challenge and keeps only the granted session", async () => {
+  const audiences: string[] = []
+  const issue = async (audience: string) => {
+    audiences.push(audience)
+    return `proof-${audiences.length}`
+  }
+  // The first session answer is lost after the gateway sent it; the runner proves itself again.
+  const gateway = scriptedGateway([
+    "challenge",
+    "lost",
+    503,
+    "challenge",
+    503,
+    "challenge",
+    "grant",
+  ])
+  expect(
+    await openSession({
+      gateway: "https://gateway.fixture.invalid",
+      leaseId: "lease",
+      issue,
+      send: gateway.send,
+      backoff: () => 0,
+    }),
+  ).toEqual(grant)
+  expect(gateway.seen).toEqual([
+    "GET /capabilities/v1/challenge",
+    "POST /capabilities/v1/session",
+    "GET /capabilities/v1/challenge",
+    "GET /capabilities/v1/challenge",
+    "POST /capabilities/v1/session",
+    "GET /capabilities/v1/challenge",
+    "POST /capabilities/v1/session",
+  ])
+  expect(audiences).toEqual([
+    `workflowd:${channel}:${"1".repeat(64)}`,
+    `workflowd:${channel}:${"2".repeat(64)}`,
+    `workflowd:${channel}:${"3".repeat(64)}`,
+  ])
 })
 
-test("helper timeout cannot activate late proof work", async () => {
-  const root = await mkdtemp(join(tmpdir(), "wfd-bootstrap-timeout-"))
-  const entered = Promise.withResolvers<void>()
-  const proceed = Promise.withResolvers<string>()
-  let activated = 0
-  const server = await serveBootstrap({
-    directory: root,
-    identity: { peerId: "fixture", agentImage: "fixture", workflowSha: "fixture" },
-    issue: async () => {
-      entered.resolve()
-      return await proceed.promise
-    },
-    activate: async () => {
-      activated++
-    },
-    timeoutMs: 40,
-  })
-  const completed = server.completed.catch(() => "refused")
-  const socket = connect(`${root}/bootstrap.sock`)
-  socket.on("error", () => {})
-  try {
-    socket.write(JSON.stringify({ audience: "workflowd:fixture", peerId: "fixture" }) + "\n")
-    await entered.promise
-    // Queue a grant while issue is blocked, then let the helper deadline expire.
-    socket.write(JSON.stringify({ mode: "remote-tools" }) + "\n")
-    expect(await completed).toBe("refused")
-    proceed.resolve("fixture-token")
-    await new Promise((resolve) => setTimeout(resolve, 10))
-    expect(activated).toBe(0)
-  } finally {
-    proceed.resolve("fixture-token")
-    socket.destroy()
-    server.close()
-    await rm(root, { recursive: true, force: true })
-  }
+test("a refused challenge ends the exchange, and refused sessions end it after five proofs", async () => {
+  let proofs = 0
+  const issue = async () => `proof-${++proofs}`
+  const refused = scriptedGateway([403])
+  await expect(
+    openSession({
+      gateway: "https://gateway.fixture.invalid",
+      leaseId: "lease",
+      issue,
+      send: refused.send,
+      backoff: () => 0,
+    }),
+  ).rejects.toThrow("lease refused")
+  expect(refused.seen).toEqual(["GET /capabilities/v1/challenge"])
+  expect(proofs).toBe(0)
+  const sessions = scriptedGateway(
+    Array.from({ length: 5 }, () => ["challenge", 403] as const).flat(),
+  )
+  await expect(
+    openSession({
+      gateway: "https://gateway.fixture.invalid",
+      leaseId: "lease",
+      issue,
+      send: sessions.send,
+      backoff: () => 0,
+    }),
+  ).rejects.toThrow("gateway session unavailable")
+  expect(proofs).toBe(5)
+  for (const gateway of ["http://gateway.fixture.invalid", "https://u@gateway.fixture.invalid"])
+    await expect(
+      openSession({ gateway, leaseId: "lease", issue, send: refused.send }),
+    ).rejects.toThrow("gateway refused")
+  await expect(
+    openSession({ gateway: "https://gateway.fixture.invalid", leaseId: "../x", issue }),
+  ).rejects.toThrow("lease refused")
 })
 
-test("capability job fixture fails visibly when its socket is absent", async () => {
-  const root = await mkdtemp(join(tmpdir(), "wfd-capability-job-"))
+test("the runner is admitted over HTTPS by a gateway it trusts, and not by one it does not", async () => {
+  const root = await mkdtemp(join(tmpdir(), "wfd-bootstrap-tls-"))
+  const key = join(root, "tls.key")
+  const cert = join(root, "tls.pem")
+  const openssl = Bun.spawn(
+    [
+      "/usr/bin/openssl",
+      "req",
+      "-x509",
+      "-newkey",
+      "ec",
+      "-pkeyopt",
+      "ec_paramgen_curve:prime256v1",
+      "-nodes",
+      "-keyout",
+      key,
+      "-out",
+      cert,
+      "-days",
+      "1",
+      "-subj",
+      "/CN=127.0.0.1",
+      "-addext",
+      "subjectAltName=IP:127.0.0.1",
+    ],
+    { stdin: "ignore", stdout: "ignore", stderr: "ignore" },
+  )
+  expect(await openssl.exited).toBe(0)
+  const proofs: string[] = []
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    tls: { key: Bun.file(key), cert: Bun.file(cert) },
+    async fetch(request) {
+      const url = new URL(request.url)
+      if (url.pathname === "/capabilities/v1/challenge") {
+        expect(url.searchParams.get("lease")).toBe("lease")
+        return Response.json({ channel, nonce: "d".repeat(64) })
+      }
+      expect(request.headers.get("content-type")).toBe("application/json")
+      proofs.push(
+        Schema.decodeUnknownSync(Schema.Struct({ token: Schema.String }))(await request.json())
+          .token,
+      )
+      return Response.json(grant)
+    },
+  })
   try {
-    const child = Bun.spawn(
-      [fixtureExecutable("node"), "test/sandbox/fixtures/capability-job.mjs", "attach", root],
-      {
-        env: {
-          PATH: "/usr/bin:/bin",
-          SSH_ORIGINAL_COMMAND: "exec /usr/local/bin/runner-control bootstrap",
-        },
-        stdin: "ignore",
-        stdout: "pipe",
-        stderr: "pipe",
-      },
-    )
-    const [exitCode, stdout, stderr] = await Promise.all([
-      child.exited,
-      new Response(child.stdout).text(),
-      new Response(child.stderr).text(),
-    ])
-    expect(exitCode).not.toBe(0)
-    expect(stdout).toBe("")
-    expect(stderr).toContain("capability fixture connect failed")
+    const ca = await Bun.file(cert).text()
+    const admit = (trusted: boolean) =>
+      openSession({
+        gateway: `https://127.0.0.1:${server.port}`,
+        leaseId: "lease",
+        issue: async (audience) => `proof-for-${audience}`,
+        send: (url, init) => fetch(url, { ...init, tls: trusted ? { ca } : {} }),
+        attempts: 1,
+      })
+    await expect(admit(false)).rejects.toThrow("gateway session unavailable")
+    expect(proofs).toEqual([])
+    expect(await admit(true)).toEqual(grant)
+    expect(proofs).toEqual([`proof-for-workflowd:${channel}:${"d".repeat(64)}`])
   } finally {
+    await server.stop(true)
     await rm(root, { recursive: true, force: true })
   }
 })
@@ -151,7 +210,32 @@ test("OIDC authority is removed before launch, consumed once, and refuses hostil
     expect(result).toBe(
       origin === "https://fixture.actions.githubusercontent.com/id" ? "fixture-signed" : "refused",
     )
-    await expect(issue("workflowd:fixture", new AbortController().signal)).rejects.toThrow()
-    expect(requests).toBe(origin === "https://fixture.actions.githubusercontent.com/id" ? 1 : 0)
+    if (origin !== "https://fixture.actions.githubusercontent.com/id") {
+      await expect(issue("workflowd:fixture", new AbortController().signal)).rejects.toThrow()
+      expect(requests).toBe(0)
+    }
   }
+})
+
+test("OIDC authority issues at most its limit of proofs, and none after clear", async () => {
+  const environment: Record<string, string | undefined> = {
+    ACTIONS_ID_TOKEN_REQUEST_TOKEN: "fixture-oidc",
+    ACTIONS_ID_TOKEN_REQUEST_URL: "https://fixture.actions.githubusercontent.com/id",
+  }
+  let requests = 0
+  const send = async () => {
+    requests++
+    return Response.json({ value: `fixture-signed-${requests}` })
+  }
+  const signal = new AbortController().signal
+  const limited = takeJobIdentity({ ...environment }, send)
+  for (let issued = 1; issued <= 5; issued++)
+    expect(await limited("workflowd:fixture", signal)).toBe(`fixture-signed-${issued}`)
+  await expect(limited("workflowd:fixture", signal)).rejects.toThrow("job identity unavailable")
+  expect(requests).toBe(5)
+  const cleared = takeJobIdentity({ ...environment }, send, 2)
+  expect(await cleared("workflowd:fixture", signal)).toBe("fixture-signed-6")
+  cleared.clear()
+  await expect(cleared("workflowd:fixture", signal)).rejects.toThrow("job identity unavailable")
+  expect(requests).toBe(6)
 })

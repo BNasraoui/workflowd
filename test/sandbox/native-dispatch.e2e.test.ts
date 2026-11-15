@@ -1,16 +1,22 @@
 import { SqlClient } from "effect/unstable/sql"
 import { sandboxDiagnostic } from "../../src/sandbox/diagnostics"
 import { expect, test } from "bun:test"
-import { Effect, ManagedRuntime } from "effect"
+import { Effect, ManagedRuntime, Scope } from "effect"
+import { FetchHttpClient } from "effect/unstable/http"
+import { SqliteClient } from "@effect/sql-sqlite-bun"
+import { OpenCode } from "@opencode-ai/client/effect"
+import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { readdir } from "node:fs/promises"
+import { mkdtemp, readdir, rm } from "node:fs/promises"
 import { dispatchRunnerFixture, sandboxGithubFixture, sandboxIngressFixtureLayer } from "./harness"
 import { sharedOpenCodeFixture } from "./opencode-fixture"
 import { nativeModelFixture, remoteEnvironment } from "./native-fixture"
 import { makeCodexCli } from "../../src/kernel/codex-session"
 import { makeClaudeDispatchCli } from "../../src/kernel/claude-dispatch"
 import { AgentRunIngress } from "../../src/kernel/agent-run-ingress"
-import { AgentRunStore } from "../../src/kernel/agent-run-store"
+import { AgentRunStore, AgentRunStoreLive } from "../../src/kernel/agent-run-store"
+import { makeOpenCodeSdkClient, SdkOpenCodeAdapter } from "../../src/opencode/adapter"
+import { runStoreMigrations } from "../../src/store/migrations"
 import { makeSandboxDispatch, SandboxDispatch } from "../../src/sandbox/dispatch"
 import { makeSandboxGithub } from "../../src/sandbox/github"
 import { makeSandboxLeaseService } from "../../src/sandbox/lease"
@@ -238,3 +244,73 @@ for (const [kind, mode] of [
     }
   }, 300000)
 }
+
+test("an actions-native harness start is refused before any lease or GitHub effect", async () => {
+  const native = {
+    ...policy,
+    privateBootstrap: { mode: "actions-native" as const, repositoryOwnerId: 1 },
+  }
+  const root = await mkdtemp(join(tmpdir(), "native-refusal-"))
+  const fixture = await sandboxGithubFixture(native)
+  let requests = 0
+  fixture.publication(async () => {
+    requests++
+    return undefined
+  })
+  try {
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* runStoreMigrations
+        const runs = yield* AgentRunStore
+        const store = yield* makeSandboxStore
+        const github = yield* makeSandboxGithub(fixture.github, fixture.OctokitClass)
+        const client = yield* OpenCode.make({ baseUrl: "http://127.0.0.1:1" }).pipe(
+          Effect.provide(FetchHttpClient.layer),
+        )
+        const dispatch = yield* makeSandboxDispatch({
+          nativeScope: yield* Scope.Scope,
+          publicationContract: { reference: "fixture-only:worktree", receipt: "fixed-v1" },
+          policies: [native],
+          github,
+          leases: yield* makeSandboxLeaseService(github, root),
+          client,
+          executor: new SdkOpenCodeAdapter(makeOpenCodeSdkClient(Effect.succeed(client))),
+          executorId: "opencode:unused",
+          endpointIdentity: "http://127.0.0.1:1",
+        })
+        const directory = join(root, "run")
+        yield* runs.create({
+          runId: "run",
+          directory,
+          route: "native",
+          providerId: "anthropic",
+          modelId: "fixture",
+          executorKind: "claude",
+          agent: "sandbox",
+          repository: native.alias,
+          prompt: "fixture",
+          promptSha256: "a".repeat(64),
+          parentSessionId: null,
+          resumePrompt: null,
+          maxAttempts: 1,
+          createdAt: new Date(),
+        })
+        const run = yield* runs.read("run")
+        if (run === null || dispatch.prepareNative === undefined)
+          return yield* Effect.die("fixture")
+        const refused = yield* Effect.flip(dispatch.prepareNative(run))
+        expect(yield* store.read("run")).toBeNull()
+        expect(yield* Effect.promise(() => readdir(root))).toEqual([])
+        expect(String(refused.message)).toContain("Actions-native harness start unavailable")
+      }).pipe(
+        Effect.scoped,
+        Effect.provide(AgentRunStoreLive),
+        Effect.provide(SqliteClient.layer({ filename: ":memory:" })),
+      ),
+    )
+    expect(requests).toBe(0)
+  } finally {
+    await fixture.close()
+    await rm(root, { recursive: true, force: true })
+  }
+})

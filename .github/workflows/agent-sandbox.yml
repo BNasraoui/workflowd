@@ -27,6 +27,11 @@ on:
         description: Trusted public federation audience; administrator config only, 1-256 URI characters, no query or userinfo.
         type: string
         required: true
+      gateway-url:
+        description: HTTPS origin of the capability gateway on the tailnet; administrator config only, private mode.
+        type: string
+        required: false
+        default: ""
 
 permissions: {}
 
@@ -61,6 +66,7 @@ jobs:
         env:
           SANDBOX_TAILSCALE_CLIENT_ID: ${{ inputs.tailscale-client-id }}
           SANDBOX_AUDIENCE: ${{ inputs.tailscale-audience }}
+          SANDBOX_BOOTSTRAP_MODE: ${{ inputs.bootstrap-mode }}
         run: node deploy/sandbox/public-output.mjs setup -- bash deploy/sandbox/tailscale.sh
       - name: Prepare the disposable tooling
         if: inputs.bootstrap-mode == 'legacy-artifact'
@@ -83,6 +89,7 @@ jobs:
           SANDBOX_AGENT_IMAGE: ${{ inputs.agent-image }}
           SANDBOX_TOOLING_SHA: ${{ inputs.tooling-sha || github.sha }}
           SANDBOX_AUDIENCE: ${{ inputs.tailscale-audience }}
+          SANDBOX_GATEWAY_URL: ${{ inputs.gateway-url }}
         run: node deploy/sandbox/public-output.mjs bootstrap -- bash deploy/sandbox/runner.sh prepare-private
       - name: Hold the privately authenticated lease
         # The runner injects OIDC variables after step env overrides. Strip them

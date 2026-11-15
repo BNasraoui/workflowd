@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test"
 import { Effect } from "effect"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
-import { writeFile } from "node:fs/promises"
+import { readlink, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import { AgentRunStoreLive } from "../../src/kernel/agent-run-store"
 import { makeNativeCli, makeNativeExecutionStore } from "../../src/sandbox/native-execution"
@@ -231,3 +231,26 @@ for (const scenario of [
     }
   }, 20000)
 }
+
+test("fixture namespace guard refuses missing, malformed and equal host namespace before SSH startup", async () => {
+  const original = process.env.WORKFLOWD_FIXTURE_HOST_NETNS
+  try {
+    for (const value of [
+      undefined,
+      "net:[]",
+      "net:[1]garbage",
+      await readlink("/proc/self/ns/net"),
+    ]) {
+      if (value === undefined) delete process.env.WORKFLOWD_FIXTURE_HOST_NETNS
+      else process.env.WORKFLOWD_FIXTURE_HOST_NETNS = value
+      await expect(
+        disposableSsh(() => {
+          throw new Error("SSH configuration reached")
+        }),
+      ).rejects.toThrow("SSH fixture requires isolated netns")
+    }
+  } finally {
+    if (original === undefined) delete process.env.WORKFLOWD_FIXTURE_HOST_NETNS
+    else process.env.WORKFLOWD_FIXTURE_HOST_NETNS = original
+  }
+})

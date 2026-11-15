@@ -458,6 +458,22 @@ export const makeSandboxStore = Effect.gen(function* () {
         new SandboxError({ message: "Sandbox lease changed before peer binding" }),
       )
   })
+  /**
+   * An actions-native lease is ready once its runner holds a gateway session: the binding has a
+   * session and is not revoked. One statement checks and sets it, so a revoke cannot interleave.
+   */
+  const bindSession = Effect.fn("SandboxStore.bindSession")(function* (
+    runId: string,
+    actionsRunId: number,
+    attempt: number,
+  ) {
+    const rows = yield* sql`UPDATE sandbox_leases SET state='ready'
+      WHERE run_id=${runId} AND state='starting' AND actions_run_id=${actionsRunId} AND actions_attempt=${attempt}
+      AND json_extract(policy,'$.privateBootstrap.mode')='actions-native'
+      AND EXISTS(SELECT 1 FROM capability_bindings b WHERE b.run_id=${runId} AND b.session>0
+        AND b.revoked=0 AND b.transport_digest IS NULL) RETURNING run_id`
+    return rows.length === 1
+  })
   const adopt = Effect.fn("SandboxStore.adopt")(function* (
     policy: SavedSandboxPolicy,
     owned: { leaseId: string; run: Pick<OwnedLeaseRun["run"], "id" | "run_attempt"> },
@@ -642,6 +658,7 @@ export const makeSandboxStore = Effect.gen(function* () {
     sessionCleanupError,
     sessionCleanupConfirmed,
     bind,
+    bindSession,
     adopt,
     adoptAll,
     cleanupRuns,

@@ -1,121 +1,130 @@
-import { createServer } from "node:net"
-import { chmod } from "node:fs/promises"
-
-export async function serveBootstrap({ directory, identity, issue, activate, timeoutMs = 60000 }) {
-  let claimed = false
-  const lifetime = new AbortController()
-  const sockets = new Set()
-  let resolveCompletion, rejectCompletion
-  const completed = new Promise((resolve, reject) => {
-    resolveCompletion = resolve
-    rejectCompletion = reject
-  })
-  const server = createServer({ allowHalfOpen: true }, (socket) => {
-    if (claimed) {
-      socket.destroy()
-      return
-    }
-    claimed = true
-    sockets.add(socket)
-    let data = ""
-    let phase = 0
-    let work = Promise.resolve()
-    const fail = () => {
-      rejectCompletion(new Error("private bootstrap refused"))
-      close()
-    }
-    socket.on("error", fail)
-    socket.on("close", () => {
-      sockets.delete(socket)
-      if (phase !== 2) fail()
-    })
-    socket.on("end", () => {
-      void work.then(() => {
-        if (phase !== 2) fail()
-      })
-    })
-    socket.on("data", (bytes) => {
-      data += bytes.toString("utf8")
-      if (data.length > 16384) {
-        fail()
-        return
-      }
-      const at = data.indexOf("\n")
-      if (at === -1) return
-      const line = data.slice(0, at)
-      data = data.slice(at + 1)
-      work = work
-        .then(async () => {
-          lifetime.signal.throwIfAborted()
-          const input = JSON.parse(line)
-          if (phase === 0) {
-            if (
-              Object.keys(input).sort().join(",") !== "audience,peerId" ||
-              input.peerId !== identity.peerId ||
-              typeof input.audience !== "string" ||
-              !/^workflowd:[A-Za-z0-9:._-]{1,512}$/.test(input.audience)
-            )
-              throw new Error()
-            const token = await issue(input.audience, lifetime.signal)
-            lifetime.signal.throwIfAborted()
-            if (typeof token !== "string" || token.length > 16384) throw new Error()
-            phase = 1
-            socket.write(
-              JSON.stringify({
-                token,
-                peerId: identity.peerId,
-                agentImage: identity.agentImage,
-                workflowSha: identity.workflowSha,
-              }) + "\n",
-            )
-          } else if (phase === 1) {
-            if (!["remote-tools", "actions-native"].includes(input.mode)) throw new Error()
-            await activate(input, lifetime.signal)
-            lifetime.signal.throwIfAborted()
-            phase = 2
-            socket.end('{"admitted":true}\n')
-            clearTimeout(timer)
-            server.close()
-            resolveCompletion()
-          } else throw new Error()
-        })
-        .catch(fail)
-    })
-  })
-  const close = () => {
-    rejectCompletion(new Error("private bootstrap refused"))
-    lifetime.abort()
-    clearTimeout(timer)
-    for (const socket of sockets) socket.destroy()
-    server.close()
-  }
-  const timer = setTimeout(() => {
-    rejectCompletion(new Error("private bootstrap timeout"))
-    close()
-  }, timeoutMs)
-  await new Promise((resolve, reject) => {
-    server.once("error", reject)
-    server.listen(`${directory}/bootstrap.sock`, resolve)
-  })
-  await chmod(`${directory}/bootstrap.sock`, 0o600)
-  return { completed, close }
+/** The gateway's origin: HTTPS only, with no credentials, path, query or fragment. */
+export function gatewayOrigin(value) {
+  const url = new URL(value)
+  if (
+    url.protocol !== "https:" ||
+    url.username ||
+    url.password ||
+    url.pathname !== "/" ||
+    url.search ||
+    url.hash
+  )
+    throw new Error("gateway refused")
+  return url.origin
 }
 
-/** Transfer the runner's one-shot OIDC authority into helper-local custody. */
-export function takeJobIdentity(environment, send = fetch) {
+async function boundedJson(response, limit) {
+  let text = ""
+  for await (const bytes of response.body ?? []) {
+    text += Buffer.from(bytes).toString("utf8")
+    if (text.length > limit) throw new Error("gateway answer refused")
+  }
+  return JSON.parse(text)
+}
+
+const pause = (milliseconds, signal) =>
+  new Promise((resolve, reject) => {
+    const timer = setTimeout(resolve, milliseconds)
+    signal?.addEventListener(
+      "abort",
+      () => {
+        clearTimeout(timer)
+        reject(signal.reason)
+      },
+      { once: true },
+    )
+  })
+
+/**
+ * Opens the run's gateway session: a challenge for the lease, an OIDC proof for that challenge,
+ * and the session post. An answer can be lost after the gateway sent it, so a network error, a
+ * 503 or a refused session costs a new challenge and a new proof, at most `attempts` times. A
+ * refused challenge ends the exchange: the lease is not open to this runner.
+ */
+export async function openSession({
+  gateway,
+  leaseId,
+  issue,
+  send = fetch,
+  attempts = 5,
+  backoff = (attempt) => Math.min(4000, 250 * 2 ** attempt),
+  signal,
+}) {
+  const origin = gatewayOrigin(gateway)
+  if (!/^[a-zA-Z0-9-]{1,80}$/.test(leaseId ?? "")) throw new Error("lease refused")
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    if (attempt > 0) await pause(backoff(attempt), signal)
+    const bounded = () => AbortSignal.any([AbortSignal.timeout(30000), ...(signal ? [signal] : [])])
+    let challenge
+    try {
+      const response = await send(new URL(`/capabilities/v1/challenge?lease=${leaseId}`, origin), {
+        redirect: "error",
+        signal: bounded(),
+      })
+      if (response.status === 403) throw Object.assign(new Error("lease refused"), { final: true })
+      if (response.status !== 200) continue
+      challenge = await boundedJson(response, 4096)
+    } catch (error) {
+      if (error?.final) throw error
+      continue
+    }
+    if (!/^[a-f0-9]{64}$/.test(challenge?.channel) || !/^[a-f0-9]{64}$/.test(challenge?.nonce))
+      throw new Error("challenge refused")
+    const token = await issue(`workflowd:${challenge.channel}:${challenge.nonce}`, bounded())
+    if (typeof token !== "string" || token.length > 16384) throw new Error("job identity refused")
+    try {
+      const response = await send(new URL("/capabilities/v1/session", origin), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ token }),
+        redirect: "error",
+        signal: bounded(),
+      })
+      if (response.status !== 200) continue
+      const grant = await boundedJson(response, 4096)
+      if (
+        /^[A-Za-z0-9_-]{43}$/.test(grant.token) &&
+        [grant.expiresAt, grant.renewAt, grant.deadline].every(Number.isSafeInteger) &&
+        grant.expiresAt <= grant.deadline
+      )
+        return {
+          token: grant.token,
+          expiresAt: grant.expiresAt,
+          renewAt: grant.renewAt,
+          deadline: grant.deadline,
+        }
+    } catch {
+      // The answer is lost; the next attempt proves the runner again.
+    }
+  }
+  throw new Error("gateway session unavailable")
+}
+
+/**
+ * Transfer the runner's OIDC request authority into helper-local custody. It issues at most
+ * `limit` proofs and is cleared after the last one, or on `clear()`.
+ */
+export function takeJobIdentity(environment, send = fetch, limit = 5) {
   let requestToken = environment.ACTIONS_ID_TOKEN_REQUEST_TOKEN
   let requestUrl = environment.ACTIONS_ID_TOKEN_REQUEST_URL
   delete environment.ACTIONS_ID_TOKEN_REQUEST_TOKEN
   delete environment.ACTIONS_ID_TOKEN_REQUEST_URL
-  return async (audience, signal) => {
+  let issued = 0
+  const clear = () => {
+    requestToken = undefined
+    requestUrl = undefined
+  }
+  const issue = async (audience, signal) => {
     try {
+      if (issued >= limit || !requestToken || !requestUrl)
+        throw new Error("job identity unavailable")
+      issued++
       const url = new URL(requestUrl)
       if (
         url.protocol !== "https:" ||
         !url.hostname.endsWith(".actions.githubusercontent.com") ||
         url.username ||
-        url.password ||
-        !requestToken
+        url.password
       )
         throw new Error("job identity unavailable")
       url.searchParams.set("audience", audience)
@@ -131,9 +140,12 @@ export function takeJobIdentity(environment, send = fetch) {
         if (text.length > 20000) throw new Error("job identity unavailable")
       }
       return JSON.parse(text).value
+    } catch (error) {
+      clear()
+      throw error
     } finally {
-      requestToken = undefined
-      requestUrl = undefined
+      if (issued >= limit) clear()
     }
   }
+  return Object.assign(issue, { clear })
 }

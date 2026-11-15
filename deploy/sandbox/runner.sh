@@ -130,15 +130,6 @@ PY
     sudo install -m 755 "$0" /usr/local/bin/container-use
     exec node /usr/local/lib/workflowd-sandbox/bootstrap.mjs prepare
     ;;
-  private-start)
-    boot
-    ;;
-  bootstrap)
-    exec node /usr/local/lib/workflowd-sandbox/bootstrap.mjs prove
-    ;;
-  capabilities)
-    exec node /usr/local/lib/workflowd-sandbox/capability-relay.mjs attach
-    ;;
   native-initialize|native-execute|native-stop|native-result|native-cleanup|native-evidence)
     exec env -i PATH=/usr/bin:/bin HOME=/nonexistent node /usr/local/lib/workflowd-sandbox/native-runner.mjs "$1"
     ;;
