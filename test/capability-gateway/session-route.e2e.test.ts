@@ -1,6 +1,30 @@
 import { expect, test } from "bun:test"
 import { randomBytes } from "node:crypto"
-import { client, gateways, proof, seedLease, withGateway } from "./gateway-process"
+import {
+  client,
+  gateways,
+  proof,
+  seedLease,
+  startGatewayProcess,
+  withGateway,
+} from "./gateway-process"
+
+test("a gateway process is ready at its full listening line, and one that ends first is refused", async () => {
+  const env = { PATH: process.env.PATH }
+  const partial = await startGatewayProcess(
+    [
+      process.execPath,
+      "-e",
+      `process.stdout.write("starting\\nlistening 4"); await Bun.sleep(200); process.stdout.write("31\\n"); await Bun.sleep(60000)`,
+    ],
+    env,
+  )
+  expect(partial.port).toBe(431)
+  await partial.stop()
+  await expect(
+    startGatewayProcess([process.execPath, "-e", `console.log("starting")`], env),
+  ).rejects.toThrow("gateway process exited before listening")
+})
 
 for (const [mode, start] of gateways) {
   test(`[${mode}] many challenge requests without a proof do not stop a run from opening its eight sessions`, async () => {

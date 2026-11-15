@@ -2,13 +2,13 @@ import { expect, test } from "bun:test"
 import { fixtureExecutable } from "../helpers/fixture-executable.mjs"
 import { Effect, Fiber } from "effect"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
-import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises"
+import { mkdtemp, writeFile, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { createServer, type Socket } from "node:net"
 import { AgentRunStoreLive } from "../../src/kernel/agent-run-store"
 import { makeCapabilityGateway } from "../../src/capability-gateway/service"
-import { bindRunSession, seedCapabilityRun } from "./fixture"
+import { bindRunSession, seedCapabilityRun, writeNoscopeProviders } from "./fixture"
 
 for (const [ending, phase] of [
   ["interrupt", "setup"],
@@ -23,21 +23,7 @@ for (const [ending, phase] of [
 ] as const) {
   test(`S1/R1: ${ending} aborts owned ${phase} and releases admission`, async () => {
     const root = await mkdtemp(join(tmpdir(), "gateway-lifetime-"))
-    await mkdir(join(root, "noscope/providers"), { recursive: true, mode: 0o700 })
-    await writeFile(
-      join(root, "noscope/providers/run-capability.toml"),
-      `contract_version = 1\n[commands]\nmint = "${process.execPath} ${resolve("src/capability-gateway/noscope-provider.ts")} run {ttl}"\n`,
-      { mode: 0o600 },
-    )
-    await writeFile(
-      join(root, "access.mjs"),
-      'console.log(JSON.stringify({token:"fixture-access",token_id:"fixture",expires_at:new Date(Date.now()+120000).toISOString()}))',
-    )
-    await writeFile(
-      join(root, "noscope/providers/provider-access.toml"),
-      `contract_version = 1\n[commands]\nmint = "${process.execPath} ${join(root, "access.mjs")}"\n`,
-      { mode: 0o600 },
-    )
+    await writeNoscopeProviders(root, 120000)
     const started = Promise.withResolvers<AbortSignal | undefined>()
     let upload: ReadableStreamDefaultController<Uint8Array> | undefined
     let firstRequest = true

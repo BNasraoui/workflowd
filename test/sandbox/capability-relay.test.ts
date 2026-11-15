@@ -1,46 +1,11 @@
 import { expect, test } from "bun:test"
-import { once } from "node:events"
 import { mkdtemp, readFile, rm } from "node:fs/promises"
-import { request as httpRequest } from "node:http"
-import { createServer as httpsServer } from "node:https"
-import type { AddressInfo } from "node:net"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
-import { pipeline } from "node:stream"
 import { client, processGateway, proof, withGateway } from "../capability-gateway/gateway-process"
 import { renewalRequests } from "../../deploy/sandbox/renewal.mjs"
 import { fixtureExecutable } from "../helpers/fixture-executable.mjs"
-
-/** A self-signed certificate for 127.0.0.1: the gateway's TLS on loopback. */
-async function loopbackCertificate(root: string) {
-  const key = join(root, "tls.key")
-  const cert = join(root, "tls.pem")
-  const child = Bun.spawn(
-    [
-      "/usr/bin/openssl",
-      "req",
-      "-x509",
-      "-newkey",
-      "ec",
-      "-pkeyopt",
-      "ec_paramgen_curve:prime256v1",
-      "-nodes",
-      "-keyout",
-      key,
-      "-out",
-      cert,
-      "-days",
-      "1",
-      "-subj",
-      "/CN=127.0.0.1",
-      "-addext",
-      "subjectAltName=IP:127.0.0.1",
-    ],
-    { stdin: "ignore", stdout: "ignore", stderr: "pipe" },
-  )
-  if ((await child.exited) !== 0) throw new Error(await new Response(child.stderr).text())
-  return { key, cert }
-}
+import { loopbackCertificate, tlsFront } from "../helpers/loopback-tls"
 
 for (const scenario of ["headers", "renewal", "git-refs", "git-upload"] as const) {
   test(`R6/R7: relay survives ${scenario} failure and serves the next valid request`, async () => {
@@ -207,62 +172,18 @@ test("the relay refuses a gateway that is not an HTTPS origin", async () => {
   }
 })
 
-function portOf(address: string | AddressInfo | null) {
-  if (address === null || typeof address === "string") throw new Error("front not listening")
-  return address.port
-}
-
-/**
- * TLS in front of the gateway process. Each renewal that the gateway grants is lost on the way
- * back: the gateway has replaced the successor, the relay never gets it.
- */
-async function lossyFront(tls: { key: string; cert: string }, gatewayPort: number) {
-  const renewals: Array<number | undefined> = []
-  const server = httpsServer(
-    { key: await readFile(tls.key), cert: await readFile(tls.cert) },
-    (incoming, outgoing) => {
-      const upstream = httpRequest(
-        {
-          host: "127.0.0.1",
-          port: gatewayPort,
-          path: incoming.url,
-          method: incoming.method,
-          headers: incoming.headers,
-        },
-        (reply) => {
-          if (incoming.url === "/capabilities/v1/renew") {
-            renewals.push(reply.statusCode)
-            if (reply.statusCode === 200) {
-              reply.resume()
-              reply.once("end", () => incoming.socket.destroy())
-              return
-            }
-          }
-          outgoing.writeHead(reply.statusCode ?? 502, reply.headers)
-          pipeline(reply, outgoing, () => {})
-        },
-      )
-      upstream.once("error", () => outgoing.destroy())
-      pipeline(incoming, upstream, () => {})
-    },
-  )
-  server.listen(0, "127.0.0.1")
-  await once(server, "listening")
-  return {
-    port: portOf(server.address()),
-    renewals: () => renewals,
-    close: () => {
-      server.closeAllConnections()
-      server.close()
-    },
-  }
-}
-
 test("the relay asks one renewal no more often than the gateway permits, and its last failure ends the session with a logged reason", async () => {
   await withGateway(processGateway, async (f, gateway) => {
     const root = await mkdtemp(join(tmpdir(), "relay-renewals-"))
     const tls = await loopbackCertificate(root)
-    const front = await lossyFront(tls, gateway.port)
+    // Each renewal that the gateway grants is lost on the way back: the gateway has replaced the
+    // successor, the relay never gets it.
+    const renewals: Array<number | undefined> = []
+    const front = await tlsFront(tls, gateway.port, (path, status) => {
+      if (path !== "/capabilities/v1/renew") return false
+      renewals.push(status)
+      return status === 200
+    })
     const runner = client(gateway.port)
     try {
       await f.tokenSeconds(200)
@@ -294,7 +215,7 @@ test("the relay asks one renewal no more often than the gateway permits, and its
       expect(ended).toBe(0)
       // The gateway permits one successor and three replacements of it: four renewals, all granted.
       expect(renewalRequests).toBe(4)
-      expect(front.renewals()).toEqual(Array.from({ length: renewalRequests }, () => 200))
+      expect(renewals).toEqual(Array.from({ length: renewalRequests }, () => 200))
       expect(await readFile(join(root, "relay-ended"), "utf8")).toBe("renewal\n")
     } finally {
       front.close()
