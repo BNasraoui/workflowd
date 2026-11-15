@@ -176,6 +176,8 @@ async function openDirectory(path: string): Promise<Directory | undefined> {
     if (absent(error)) return undefined
     if (code(error) === "ELOOP" || code(error) === "ENOTDIR")
       throw new CustodyRefused(`custody refused ${path}: not a directory`)
+    // A directory that this user cannot open has a fault that its owner or mode names.
+    if (code(error) === "EACCES") refuse(path, await lstat(path), "directory")
     throw error
   }
   try {
