@@ -65,7 +65,33 @@ INVISIBLE = re.compile('[' + UNICODE['forbidden'] + ']')
 LETTERS = re.compile('[' + UNICODE['letters'] + ']')
 STACKED_MARKS = re.compile('[' + UNICODE['marks'] + ']{3}')
 LANGUAGES = {'', 'text', 'diff', 'ts', 'typescript', 'tsx', 'js', 'json', 'sh', 'bash', 'python', 'rust', 'go', 'sql', 'yaml', 'toml'}
-CLOSING = re.compile(r'(?=(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)(?::\s*|\s+)(?:#[0-9]|gh-[0-9]|[a-z0-9_.-]+/[a-z0-9_.-]+#|https?://|github\.com/[^\s]*/(?:issues|pull)/))')
+KEYWORD = r'(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)(?::\s*|\s+)'
+CLOSING = re.compile(r'(?=' + KEYWORD + r'(?:#[0-9]|gh-[0-9]|[a-z0-9_.-]+/[a-z0-9_.-]+#|https?://))')
+GITHUB_CLOSING = re.compile(r'(?=(' + KEYWORD + r'github\.com/))')
+WHITESPACE = re.compile(r'\s')
+GITHUB_PATH = re.compile(r'/(?:issues|pull)/')
+
+
+def keyword_starts(pattern, text):
+    # Each match of `pattern` whose keyword does not follow a letter.
+    return (m for m in pattern.finditer(text) if m.start() == 0 or not LETTERS.fullmatch(text[m.start() - 1]))
+
+
+def closes_github_path(text):
+    # A closing keyword names a github.com path that holds /issues/ or /pull/ before the next
+    # white space. One pass: a later keyword reuses the searches of the one before it.
+    space = path = -1
+    for m in keyword_starts(GITHUB_CLOSING, text):
+        end = m.end(1)
+        if space < end:
+            found = WHITESPACE.search(text, end)
+            space = found.start() if found else len(text)
+        if path < end:
+            found = GITHUB_PATH.search(text, end)
+            path = found.start() if found else len(text)
+        if path < space:
+            return True
+    return False
 
 
 def safe_publication(value):
@@ -80,7 +106,7 @@ def safe_publication(value):
     normalized = ''.join(CASEFOLD.get(c, c) for c in unicodedata.normalize('NFKC', value))
     for separator in ('', ' '):
         folded = re.sub(r'[*_~`\[\]()]', separator, normalized)
-        if any(m.start() == 0 or not LETTERS.fullmatch(folded[m.start() - 1]) for m in CLOSING.finditer(folded)):
+        if any(keyword_starts(CLOSING, folded)) or closes_github_path(folded):
             raise ValueError('Closing issue reference')
     fence = None
     blank = True
@@ -94,7 +120,7 @@ def safe_publication(value):
         else:
             if ']:' in line:
                 raise ValueError('Link reference definition')
-            if re.match(r'^ {0,3}(?:> ?|(?:[-+*]|[0-9]+[.)]) +).*(?:`{3,}|~{3,})', line):
+            if re.match(r'^ {0,3}(?:>|(?:[-+*]|[0-9]+[.)]) ).*(?:`{3}|~{3})', line):
                 raise ValueError('Nested fence')
             opener = re.fullmatch(r'(`{3,}|~{3,})(.*)', line)
             if opener:

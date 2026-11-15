@@ -159,7 +159,9 @@ function decimalValue(text: string) {
   if (!parts) return undefined
   const fraction = parts[3] ?? ""
   const digits = `${parts[2]}${fraction}`.replace(/^0+/, "")
-  const significant = digits.replace(/0+$/, "")
+  let end = digits.length
+  while (end > 0 && digits.charCodeAt(end - 1) === 48) end--
+  const significant = digits.slice(0, end)
   if (significant === "") return "0"
   const exponent = Number(parts[4] ?? "0") - fraction.length + (digits.length - significant.length)
   return `${parts[1]}${significant}e${exponent}`
