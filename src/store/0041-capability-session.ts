@@ -2,7 +2,7 @@ import { Effect } from "effect"
 import { SqlClient } from "effect/unstable/sql"
 
 // Child tables reference capability_bindings; listed parent-first so drops run in reverse.
-const children = ["capability_tokens", "sandbox_native_executions", "sandbox_native_results"]
+const children = ["capability_tokens"]
 
 /**
  * A binding made by the gateway's own session has no SSH transport, so its transport digest is

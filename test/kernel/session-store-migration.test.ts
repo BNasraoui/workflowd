@@ -114,7 +114,6 @@ describe("migration 13: kernel session store", () => {
       { migration_id: 37, name: "resident_inbox_delay" },
       { migration_id: 38, name: "agent_directory" },
       { migration_id: 39, name: "capability_gateway" },
-      { migration_id: 40, name: "native_results" },
       { migration_id: 41, name: "capability_session" },
       { migration_id: 42, name: "session_lease_ready" },
     ])

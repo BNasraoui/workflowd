@@ -11,7 +11,6 @@ import { Migrator, SqlClient } from "effect/unstable/sql"
 import { Effect } from "effect"
 import { agentDirectory } from "./0038-agent-directory"
 import { capabilityGateway } from "./0039-capability-gateway"
-import { nativeResults } from "./0040-native-results"
 import { capabilitySession } from "./0041-capability-session"
 import { sessionLeaseReady } from "./0042-session-lease-ready"
 import { MAX_AGENT_LAUNCH_INTENT_BYTES, MAX_AGENT_OUTPUT_BYTES } from "../agent-payload"
@@ -1502,7 +1501,6 @@ export const runStoreMigrations = Migrator.make({})({
     }),
     "0038_agent_directory": agentDirectory,
     "0039_capability_gateway": capabilityGateway,
-    "0040_native_results": nativeResults,
     "0041_capability_session": capabilitySession,
     "0042_session_lease_ready": sessionLeaseReady,
   }),
