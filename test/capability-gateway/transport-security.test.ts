@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test"
-import { capabilityHttpServer } from "../../src/capability-gateway/http"
+import { capabilityApi, capabilityHttpServer } from "../../src/capability-gateway/http"
 import { fixtureExecutable } from "../helpers/fixture-executable.mjs"
 import { Effect, Schema } from "effect"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
@@ -199,7 +199,7 @@ test("bound streaming preserves native bytes, renews with noscope, and denies cr
         }
         const beforeRevocation = sent.length
         stalled = true
-        const http = capabilityHttpServer(() => Effect.runPromise(gateway.handle(request())))
+        const http = capabilityHttpServer(capabilityApi(gateway))
         yield* Effect.promise(
           () => new Promise<void>((resolve) => http.server.listen(0, "127.0.0.1", resolve)),
         )
@@ -207,7 +207,14 @@ test("bound streaming preserves native bytes, renews with noscope, and denies cr
           const address = http.server.address()
           if (!address || typeof address === "string")
             throw new Error("Fixture listener unavailable")
-          const response = yield* Effect.promise(() => fetch(`http://127.0.0.1:${address.port}`))
+          const sentRequest = request()
+          const response = yield* Effect.promise(() =>
+            fetch(`http://127.0.0.1:${address.port}${new URL(sentRequest.url).pathname}`, {
+              method: "POST",
+              headers: sentRequest.headers,
+              body: native,
+            }),
+          )
           expect(response.status).toBe(200)
           if (!response.body) throw new Error("missing streaming body")
           const reader = response.body.getReader()
@@ -251,7 +258,7 @@ for (const attack of ["resets", "preface", "h2-preface", "truncated"] as const)
       }
       served++
       return new Response("fixture-valid")
-    }, true)
+    })
     listener.server.listen(0, "127.0.0.1")
     await once(listener.server, "listening")
     const port = portOf(listener.server)

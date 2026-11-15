@@ -14,7 +14,6 @@ function validateGitHeaders(request: Request, upload: boolean, advertisement: bo
   checkHeaders(request, (name) =>
     [
       "authorization",
-      "host",
       "content-type",
       "content-length",
       "accept",

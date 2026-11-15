@@ -94,7 +94,7 @@ test("real Git clone/fetch, repository and write fences", async () => {
         })
         const grant = yield* bindRunSession(Date.now(), { jti: "git-jti" })
         // The gateway's network listener, behind TLS on loopback.
-        const served = capabilityHttpServer(capabilityApi(gateway), true)
+        const served = capabilityHttpServer(capabilityApi(gateway))
         listener = served
         served.server.listen(0, "127.0.0.1")
         yield* Effect.promise(() => once(served.server, "listening"))

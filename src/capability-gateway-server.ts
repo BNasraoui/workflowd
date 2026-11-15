@@ -38,7 +38,7 @@ export const serveCapabilityGateway = (
         undefined,
         options.keys,
       )
-      const { server, close } = capabilityHttpServer(capabilityApi(gateway), true)
+      const { server, close } = capabilityHttpServer(capabilityApi(gateway))
       yield* Effect.acquireRelease(
         Effect.tryPromise(
           () =>

@@ -60,12 +60,12 @@ export const capabilityApi =
     return Effect.runPromise(gateway.handle(request), { signal: request.signal })
   }
 
-/** Preserve incomplete responses as connection failures, including on Bun 1.3.14. */
-export function capabilityHttpServer(
-  handle: (request: Request) => Promise<Response>,
-  /** On the gateway's network listener, Host names the listener, not the capability origin. */
-  network = false,
-) {
+/**
+ * The gateway's network listener. Each request reaches `handle` at the capability origin, with
+ * no Host header: Host names this listener, not a capability. An incomplete response stays a
+ * connection failure, including on Bun 1.3.14.
+ */
+export function capabilityHttpServer(handle: (request: Request) => Promise<Response>) {
   const sockets = new Set<Socket>()
   const pending = new Set<Promise<void>>()
   const responses = new Set<ServerResponse>()
@@ -79,10 +79,10 @@ export function capabilityHttpServer(
         const headers = new Headers()
         for (let index = 0; index < incoming.rawHeaders.length; index += 2)
           headers.append(incoming.rawHeaders[index]!, incoming.rawHeaders[index + 1]!)
-        // These are the local relay's HTTP/1 framing, not agent capability headers.
+        // These are the relay's HTTP/1 framing and the listener's address, not capability headers.
         headers.delete("connection")
         headers.delete("transfer-encoding")
-        if (network) headers.delete("host")
+        headers.delete("host")
         const request = new Request(`${capabilityOrigin}${incoming.url}`, {
           method: incoming.method ?? "GET",
           headers,

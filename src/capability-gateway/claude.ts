@@ -118,7 +118,6 @@ function withoutCredential(body: ReadableStream<Uint8Array>, patterns: ReadonlyA
 /** Headers of the client's transport, accepted and not sent on. */
 const dropped = new Set([
   "authorization",
-  "host",
   "content-length",
   "accept-encoding",
   "anthropic-dangerous-direct-browser-access",

@@ -13,8 +13,7 @@ export class RequestRefused extends Error {
 
 /**
  * Checks each header of a request: in all at most `maxHeaderBytes` of names and values, each value
- * at most `maxHeaderValueBytes` with no CR, LF or NUL, each one `allowed`, and a host, when sent,
- * of the gateway origin.
+ * at most `maxHeaderValueBytes` with no CR, LF or NUL, and each one `allowed`.
  */
 export function checkHeaders(request: Request, allowed: (name: string, value: string) => boolean) {
   let bytes = 0
@@ -28,6 +27,4 @@ export function checkHeaders(request: Request, allowed: (name: string, value: st
     )
       throw new RequestRefused()
   }
-  const host = request.headers.get("host")
-  if (host !== null && `http://${host}` !== capabilityOrigin) throw new RequestRefused()
 }
