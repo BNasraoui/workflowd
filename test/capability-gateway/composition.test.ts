@@ -10,6 +10,7 @@ import { makeLiveLayer } from "../../src/layers"
 import { SandboxDispatch } from "../../src/sandbox/dispatch"
 import { bindRunSession, seedCapabilityRun } from "./fixture"
 import { makeCapabilityStore } from "../../src/capability-gateway/store"
+import { capabilityHttpServer } from "../../src/capability-gateway/http"
 import { requiredEnvironment } from "../helpers/config"
 import { AgentRunStoreLive } from "../../src/kernel/agent-run-store"
 import { fixtureExecutable } from "../helpers/fixture-executable.mjs"
@@ -151,7 +152,7 @@ test("configured live composition settles prior leases, which revokes their gran
   }
 })
 
-test("the gateway config bounds its streams: an idle limit of 1 ms to ten minutes, and at most maxStreams for a run", () => {
+test("the gateway config bounds its streams: an idle limit of 1 ms to the listener's socket timeout of two minutes, and at most maxStreams for a run", () => {
   const gateway = {
     noscope: { binary: "/fixture/noscope", configHome: "/fixture" },
     providerId: "anthropic",
@@ -166,9 +167,9 @@ test("the gateway config bounds its streams: an idle limit of 1 ms to ten minute
       "/fixture",
     ).gateway
   for (const [keys, reason] of [
-    [{ streamIdleMs: 0 }, 'Expected a value between 1 and 600000\n  at ["streamIdleMs"]'],
-    [{ streamIdleMs: -1 }, 'Expected a value between 1 and 600000\n  at ["streamIdleMs"]'],
-    [{ streamIdleMs: 600001 }, 'Expected a value between 1 and 600000\n  at ["streamIdleMs"]'],
+    [{ streamIdleMs: 0 }, 'Expected a value between 1 and 120000\n  at ["streamIdleMs"]'],
+    [{ streamIdleMs: -1 }, 'Expected a value between 1 and 120000\n  at ["streamIdleMs"]'],
+    [{ streamIdleMs: 120001 }, 'Expected a value between 1 and 120000\n  at ["streamIdleMs"]'],
     [{ streamIdleMs: 1.5 }, 'Expected an integer\n  at ["streamIdleMs"]'],
     [{ streamIdleMs: "1000" }, 'Expected number\n  at ["streamIdleMs"]'],
     [{ maxStreams: 513 }, 'Expected a value between 1 and 512\n  at ["maxStreams"]'],
@@ -179,7 +180,9 @@ test("the gateway config bounds its streams: an idle limit of 1 ms to ten minute
   ] as const)
     expect(() => load(keys)).toThrow(reason)
   expect(load({ streamIdleMs: 1 }).streamIdleMs).toBe(1)
-  expect(load({ streamIdleMs: 600000 }).streamIdleMs).toBe(600000)
+  expect(load({ streamIdleMs: 120000 }).streamIdleMs).toBe(120000)
+  // A socket idle this long is destroyed under a silent stream, so the bound is this timeout.
+  expect(capabilityHttpServer(async () => new Response(null)).server.timeout).toBe(120000)
   expect(load({}).streamIdleMs).toBeUndefined()
 })
 
@@ -196,7 +199,16 @@ test("the gateway listens only on a loopback address: 127.0.0.1 or ::1", () => {
       { WORKFLOWD_CAPABILITY_GATEWAY: JSON.stringify({ ...gateway, listen: { host, port: 0 } }) },
       "/fixture",
     ).gateway.listen
-  for (const host of ["10.0.0.1", "0.0.0.0", "gateway.example"])
+  for (const host of [
+    "10.0.0.1",
+    "0.0.0.0",
+    "gateway.example",
+    "::",
+    "localhost",
+    "127.0.0.2",
+    "::ffff:127.0.0.1",
+    "::1%lo",
+  ])
     expect(() => load(host)).toThrow('Expected "127.0.0.1" | "::1"\n  at ["listen"]["host"]')
   expect(load("127.0.0.1")).toEqual({ host: "127.0.0.1", port: 0 })
   expect(load("::1")).toEqual({ host: "::1", port: 0 })
