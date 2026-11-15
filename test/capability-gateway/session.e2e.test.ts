@@ -4,7 +4,7 @@ import { Cause, Effect, Exit, Schema } from "effect"
 import { SqlClient } from "effect/unstable/sql"
 import { AgentRunStore } from "../../src/kernel/agent-run-store"
 import { capabilityDigest, makeCapabilityStore } from "../../src/capability-gateway/store"
-import { makeCapabilityGateway } from "../../src/capability-gateway/service"
+import { makeCapabilityRevoke } from "../../src/capability-gateway/service"
 import { makeSandboxStore } from "../../src/sandbox/store"
 import { serveCapabilityGateway } from "../../src/capability-gateway-server"
 import {
@@ -147,8 +147,9 @@ async function scenario(start: (f: Fixture) => Promise<Gateway>) {
     gateway = await start(f)
     expect(await (await call(next.token)).text()).toBe(sse)
 
-    // workflowd builds its own gateway on the same store when it starts; that revokes nothing.
-    await f.store(makeCapabilityGateway(f.config).pipe(Effect.andThen(Effect.sleep("10 millis"))))
+    // When it starts, workflowd builds only the revoke of the capability store, on the same
+    // store; building it revokes nothing.
+    await f.store(makeCapabilityRevoke.pipe(Effect.andThen(Effect.sleep("10 millis"))))
     expect(await (await call(next.token)).text()).toBe(sse)
 
     // (e) A new session, opened through another gateway on the same store, ends a live stream
