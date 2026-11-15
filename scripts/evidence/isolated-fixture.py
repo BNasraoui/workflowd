@@ -34,18 +34,9 @@ def main():
     evidence = Path(tempfile.mkdtemp(prefix="wfd-isolated-", dir=evidence_parent))
     scratch = evidence / "scratch"
     scratch.mkdir(mode=0o700)
-    pinned_publisher = os.environ.get('WORKFLOWD_FIXTURE_PINNED_PUBLISHER') == '1'
-    if pinned_publisher:
-        target = evidence / 'pinned-publisher'
-        target.mkdir(mode=0o700)
-        for name in ['publish.mjs', 'publication.mjs', 'publication-unicode.json', 'result.py', 'casefold.json']:
-            data = subprocess.check_output(['git', 'show', 'f74e0505155bc32aa2cedef00ba8b08ef1b90007:deploy/sandbox/' + name], cwd=repo, timeout=10)
-            (target / name).write_bytes(data)
     binaries = {name: executable(name) for name in ["bun", "node", "noscope"]}
     binds = []
     fixture_env = []
-    if pinned_publisher:
-        fixture_env.extend(['--setenv', 'WORKFLOWD_FIXTURE_PINNED_PUBLISHER', '/tmp/opencode/evidence/pinned-publisher'])
     for name, path in binaries.items():
         # Individual executable files only, never a user's package/config directory.
         binds.extend(["--ro-bind", path, "/opt/wfd-fixture/bin/" + name])

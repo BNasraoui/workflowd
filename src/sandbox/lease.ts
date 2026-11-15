@@ -19,7 +19,6 @@ import { sandboxSshArguments, type SandboxTransport } from "./transport"
 import type { makeSandboxGithub } from "./github"
 import type { SavedSandboxPolicy } from "./saved-policy"
 import type { CapabilityGateway } from "../capability-gateway/service"
-import { requireNativePublisherActivation, type PublisherContract } from "./publisher-contract"
 
 type Github = Effect.Success<ReturnType<typeof makeSandboxGithub>>
 
@@ -218,7 +217,6 @@ export const makeSandboxLeaseService = (
   controlRoot = join(homedir(), ".local/share/workflowd/sandboxes"),
   command = controlCommand,
   privateAccess?: {
-    readonly publicationContract?: PublisherContract
     readonly native?: {
       readonly gateway: typeof CapabilityGateway.Service
     }
@@ -435,7 +433,6 @@ export const makeSandboxLeaseService = (
     const acquire = Effect.fn("SandboxLease.acquire")(function* (runId: string) {
       let lease = yield* required(runId)
       yield* Schema.decodeUnknownEffect(SandboxPolicy)(lease.policy)
-      yield* requireNativePublisherActivation(lease.policy, privateAccess?.publicationContract)
       if (lease.state === "ready") return lease
       if (lease.state === "requested") {
         if (!(yield* store.beginStart(runId))) return yield* required(runId)

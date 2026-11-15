@@ -15,7 +15,6 @@ export const coreCases = [
 
 export const publicationCases = [
   ["F1", "test/sandbox/publisher-http.e2e.test.ts"],
-  ["F1b", "test/sandbox/publisher-pinned.e2e.launcher.test.ts"],
   ["F2", "test/sandbox/publish.e2e.test.ts"],
   ["F3", "test/sandbox/publish-recovery.e2e.test.ts"],
   ["F4", "test/sandbox/ci-policy.test.ts"],

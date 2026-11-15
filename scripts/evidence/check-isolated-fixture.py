@@ -35,8 +35,6 @@ def main():
             "p.write_text('owned'); assert p.read_text() == 'owned'; p.unlink()",
         ]
         environment = {**os.environ, "WORKFLOWD_FIXTURE_EVIDENCE": str(evidence / "invocations")}
-        # Minimal copies deliberately contain neither Git history nor native fixtures.
-        environment.pop("WORKFLOWD_FIXTURE_PINNED_PUBLISHER", None)
         with (evidence / (case + ".log")).open("w") as log:
             result = subprocess.run(command, env=environment, stdout=log, stderr=log, timeout=220)
         passed = result.returncode == 0 if case != "symlink" else result.returncode != 0

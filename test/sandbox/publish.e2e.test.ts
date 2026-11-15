@@ -44,7 +44,7 @@ const metadata = {
   manifestSha256: "e".repeat(64),
 }
 
-test("native mode refuses incompatible approved publisher before lease or approval effects", async () => {
+test("the publisher refuses an actions-native lease before any approval effect", async () => {
   const configured = {
     ...policy,
     privateBootstrap: { mode: "actions-native" as const, repositoryOwnerId: 1 },
@@ -63,13 +63,6 @@ test("native mode refuses incompatible approved publisher before lease or approv
           sourceSha: metadata.sourceSha,
           now: Date.now(),
         })
-        const github = yield* makeSandboxGithub(fixture.github, fixture.OctokitClass)
-        const remote = yield* makeSandboxLeaseService(github)
-        const acquired = yield* remote.acquire("run-1").pipe(Effect.result)
-        expect(acquired._tag).toBe("Failure")
-        expect(JSON.stringify(acquired)).toContain("reviewed publisher pin")
-        expect(fixture.tokenRequests).toHaveLength(0)
-        expect((yield* leases.read("run-1"))?.state).toBe("requested")
         yield* leases.beginStart("run-1")
         yield* leases.recordRun("run-1", 41, 1)
         const publications = yield* makePublishStore
@@ -81,8 +74,13 @@ test("native mode refuses incompatible approved publisher before lease or approv
           baseRef: "main",
           deadline: Date.now() + 60000,
         })
-        const publisher = yield* makeSandboxPublisher(github, remote)
-        expect((yield* publisher.poll("run-1").pipe(Effect.result))._tag).toBe("Failure")
+        const github = yield* makeSandboxGithub(fixture.github, fixture.OctokitClass)
+        const publisher = yield* makeSandboxPublisher(
+          github,
+          yield* makeSandboxLeaseService(github),
+        )
+        const refused = yield* publisher.poll("run-1").pipe(Effect.flip)
+        expect(refused.message).toBe("Actions-native leases do not publish through the publisher")
         expect(publication.posts).toBe(0)
         expect(fixture.tokenRequests).toHaveLength(0)
       }).pipe(Effect.provide(SqliteClient.layer({ filename: ":memory:" }))),
@@ -371,7 +369,7 @@ test("live publication verifier binds submission, approved job, revoked receipt 
     const marker = "<!-- workflowd-publication:"+Buffer.from(JSON.stringify(binding)).toString("base64")+" -->"
     const repo = {id:policy.repositoryId,full_name:policy.repository}
     const job = {id:42,name:"agent-publish",run_id:41,run_attempt:1,head_sha:policy.workflowSha,status:"completed",conclusion:"success"}
-    const receipt = {v:1,...intent.receipt,binding,repository:policy.repository,failed:false}
+    const receipt = {...intent.receipt,binding,repository:policy.repository,branch:metadata.branch,marker}
     const valid = {
       policy,intent,sourceSha:metadata.sourceSha,
       commit:{sha:"2".repeat(40),tree:{sha:metadata.treeSha},parents:[{sha:metadata.sourceSha}],message:metadata.commitMessage+"\\n\\nCo-authored-by: "+policy.publish.coAuthor,verification:{verified:true}},

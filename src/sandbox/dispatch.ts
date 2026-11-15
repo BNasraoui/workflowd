@@ -25,7 +25,6 @@ import type { CliPort, CliSpawnInput } from "../kernel/cli-process-contract"
 import { compileSandboxBridge } from "./bridge"
 import { makeSandboxPublisher, SandboxTerminal as Terminal } from "./publish"
 import { makePublishStore } from "./publish-store"
-import type { PublisherContract } from "./publisher-contract"
 import {
   observeSandboxStage,
   observeSandboxTelemetry,
@@ -86,14 +85,13 @@ export const makeSandboxDispatch = (options: {
   readonly executorId: string
   readonly endpointIdentity: string
   readonly nativeExecutors?: Partial<Record<"codex" | "claude", CliPort>>
-  readonly publicationContract?: PublisherContract
 }) =>
   Effect.gen(function* () {
     const store = yield* makeSandboxStore
     const runs = yield* AgentRunStore
     const { github, leases } = options
     const publications = yield* makePublishStore
-    const publisher = yield* makeSandboxPublisher(github, leases, options.publicationContract)
+    const publisher = yield* makeSandboxPublisher(github, leases)
     const continuePublication = publisher.continuePublication
     const cancelling = new Set<string>()
     const executor = makeSandboxOpenCode(options.client, options.executor)
