@@ -10,7 +10,8 @@ import { normalizeError, OBSERVATION_EVIDENCE } from "../errors"
 import { runWorkspaceCommand } from "../workspace/command"
 import { WorkspaceError } from "../workspace/errors"
 import type { CodexCliPort, CodexExit, CodexPreflightError } from "./codex-cli-port"
-import { cleanupFinishedCustody, incrementalLines } from "./codex-output"
+import { cleanupFinishedCustody } from "./codex-output"
+import { localRecordSource, readEventRecord } from "./event-record"
 import { readSandboxBinding } from "../sandbox/binding"
 export type {
   CodexCliPort,
@@ -397,8 +398,8 @@ export const makeDurableCliProcess = (
           return null
         }
 
-        const events = incrementalLines({
-          path: manifest.eventsPath,
+        const events = readEventRecord({
+          source: localRecordSource(manifest.eventsPath),
           pollIntervalMs,
           shouldStop: async () =>
             (await terminal()) !== null || Date.now() - attachedAt >= observationTimeoutMs,

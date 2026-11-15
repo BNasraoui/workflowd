@@ -203,7 +203,8 @@ function requestAgentHostResponse(path: string, request: import("./protocol").Ho
   })
 }
 
-import { HostResponse, type OwnedProcess, type HostStart } from "./protocol"
+import { HostResponse, type HostExchangeFile, type OwnedProcess, type HostStart } from "./protocol"
+import { readEventRecord, type RecordSource } from "../kernel/event-record"
 import type { CliEvent, CliRunProcess } from "../kernel/cli-process-contract"
 import { normalizeError, OBSERVATION_EVIDENCE } from "../errors"
 
@@ -220,7 +221,7 @@ export async function inspectAgentHost(socket: string, runId: string) {
 async function hostBytes(
   socket: string,
   process: OwnedProcess,
-  file: "events" | "stderr" | "result",
+  file: HostExchangeFile,
   offset: number,
 ) {
   const response = await requestAgentHost(socket, {
@@ -233,6 +234,21 @@ async function hostBytes(
   if (!Buffer.isBuffer(response)) throw new Error("unexpected host observation")
   return response
 }
+
+/** The event record of a host launch, read through the host's exchange. */
+const hostRecordSource =
+  (socket: string, process: OwnedProcess): RecordSource =>
+  (file, offset) =>
+    hostBytes(
+      socket,
+      process,
+      file.kind === "head"
+        ? "events"
+        : file.kind === "index"
+          ? "events.index.json"
+          : `events.${file.n}`,
+      offset,
+    )
 
 export async function startAgentHost(socket: string, input: Omit<HostStart, "operation">) {
   const response = await requestAgentHost(socket, { operation: "start", ...input })
@@ -264,26 +280,18 @@ export function observeAgentHost(
     launch: { launchId: process.launchId, invocationId: process.invocationId },
     events: {
       async *[Symbol.asyncIterator]() {
-        let offset = 0
-        let buffered = ""
-        const decoder = new TextDecoder()
-        for (;;) {
-          const current = await observe()
-          const bytes = await hostBytes(socket, process, "events", offset)
-          offset += bytes.length
-          buffered += decoder.decode(bytes, { stream: true })
-          let end: number
-          while ((end = buffered.indexOf("\n")) >= 0) {
-            yield parse(buffered.slice(0, end))
-            buffered = buffered.slice(end + 1)
-          }
-          if (buffered.length > 10 * 1024 * 1024) throw new Error("host event exceeds output limit")
-          if (!current.active && bytes.length === 0) {
-            if (buffered) yield parse(buffered)
-            return
-          }
-          if (bytes.length === 0) await new Promise((resolve) => setTimeout(resolve, 100))
-        }
+        // A launch that is no longer this host custody is evidence before any read.
+        await observe()
+        yield* readEventRecord({
+          source: hostRecordSource(socket, process),
+          pollIntervalMs: 100,
+          shouldStop: async () => !(await observe()).active,
+          parse,
+          // The worker's last line may have no newline; it is decoded at the end.
+          flushPartialAtEnd: true,
+          // Bounds the daemon's memory for one line of a record without segments.
+          maxPendingLength: 10 * 1024 * 1024,
+        })
       },
     },
     exited: Effect.tryPromise({
