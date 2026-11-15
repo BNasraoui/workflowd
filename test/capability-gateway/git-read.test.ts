@@ -3,12 +3,18 @@ import { SqlClient } from "effect/unstable/sql"
 import { gitHttpBackend } from "./git-backend"
 import { Effect } from "effect"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
-import { mkdtemp, mkdir, writeFile, rm, readFile } from "node:fs/promises"
+import { mkdtemp, writeFile, rm, readFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
-import { join, resolve } from "node:path"
+import { join } from "node:path"
 import { AgentRunStoreLive } from "../../src/kernel/agent-run-store"
 import { makeCapabilityGateway } from "../../src/capability-gateway/service"
-import { bindRunSession, grantLiveRuns, seedCapabilityRun } from "./fixture"
+import {
+  bindRunSession,
+  grantLiveRuns,
+  runCapabilityMint,
+  seedCapabilityRun,
+  writeNoscopeProvider,
+} from "./fixture"
 import { fixtureExecutable } from "../helpers/fixture-executable.mjs"
 
 async function git(cwd: string, ...args: string[]) {
@@ -80,12 +86,7 @@ const setup = () =>
     )
     const source = join(root, "source")
     yield* Effect.promise(async () => {
-      await mkdir(join(root, "noscope/providers"), { recursive: true, mode: 0o700 })
-      await writeFile(
-        join(root, "noscope/providers/run-capability.toml"),
-        `contract_version = 1\n[commands]\nmint = "${process.execPath} ${resolve("src/capability-gateway/noscope-provider.ts")} run {ttl}"\n`,
-        { mode: 0o600 },
-      )
+      await writeNoscopeProvider(root, "run-capability", runCapabilityMint)
       await git(root, "init", "--initial-branch=main", "source")
       await writeFile(join(source, "public.txt"), "first\n")
       await git(source, "add", ".")
@@ -187,7 +188,7 @@ const setup = () =>
   })
 
 test(
-  `G1: git clone and fetch read the saved repository through the gateway`,
+  `git clone and fetch read the saved repository through the gateway`,
   () =>
     withGitGateway(({ root, source, state, base }) =>
       Effect.promise(async () => {
@@ -209,7 +210,7 @@ test(
   20000,
 )
 
-test(`G2: foreign repositories, receive-pack and non-canonical paths are refused before the upstream`, () =>
+test(`foreign repositories, receive-pack and non-canonical paths are refused before the upstream`, () =>
   withGitGateway(({ state, direct, call }) =>
     Effect.gen(function* () {
       for (const [suffix, method] of [
@@ -225,7 +226,7 @@ test(`G2: foreign repositories, receive-pack and non-canonical paths are refused
     }),
   ))
 
-test(`G3: unsafe Git headers and a spoofed host are refused before the upstream`, () =>
+test(`unsafe Git headers and a spoofed host are refused before the upstream`, () =>
   withGitGateway(({ state, direct, call }) =>
     Effect.gen(function* () {
       for (const headers of [
@@ -241,7 +242,7 @@ test(`G3: unsafe Git headers and a spoofed host are refused before the upstream`
     }),
   ))
 
-test(`G4: an upload larger than 1 MiB is refused before the upstream`, () =>
+test(`an upload larger than 1 MiB is refused before the upstream`, () =>
   withGitGateway(({ state, direct, call }) =>
     Effect.gen(function* () {
       const response = yield* call(
@@ -256,7 +257,7 @@ test(`G4: an upload larger than 1 MiB is refused before the upstream`, () =>
     }),
   ))
 
-test(`G5: a changed saved repository is refused and the policy row is immutable`, () =>
+test(`a changed saved repository is refused and the policy row is immutable`, () =>
   withGitGateway(({ state, sql, direct, call }) =>
     Effect.gen(function* () {
       expect(
@@ -272,7 +273,7 @@ test(`G5: a changed saved repository is refused and the policy row is immutable`
     }),
   ))
 
-test(`G6: redirects and slow streams stay inside run authority`, () =>
+test(`redirects and slow streams stay inside run authority`, () =>
   withGitGateway(({ state, runs, sql, direct, call }) =>
     Effect.gen(function* () {
       state.fault = "redirect"

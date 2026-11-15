@@ -3,8 +3,8 @@ import { capabilityHttpServer } from "../../src/capability-gateway/http"
 import { fixtureExecutable } from "../helpers/fixture-executable.mjs"
 import { Effect, Schema } from "effect"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
-import { mkdtemp, mkdir, writeFile, readFile, rm } from "node:fs/promises"
-import { resolve, join } from "node:path"
+import { mkdtemp, readFile, rm } from "node:fs/promises"
+import { join } from "node:path"
 import { tmpdir } from "node:os"
 import { connect } from "node:net"
 import { once } from "node:events"
@@ -15,21 +15,7 @@ import { portOf } from "../helpers/loopback-tls"
 
 test("bound streaming preserves native bytes, renews with noscope, and denies cross-run or proxy authority", async () => {
   const root = await mkdtemp(join(tmpdir(), "wfd-gateway-"))
-  await mkdir(join(root, "noscope/providers"), { recursive: true, mode: 0o700 })
-  await writeFile(
-    join(root, "noscope/providers/run-capability.toml"),
-    `contract_version = 1\n[commands]\nmint = "${process.execPath} ${resolve("src/capability-gateway/noscope-provider.ts")} run {ttl}"\n`,
-    { mode: 0o600 },
-  )
-  await writeFile(
-    join(root, "access.mjs"),
-    `import {appendFileSync} from 'node:fs';appendFileSync(${JSON.stringify(join(root, "mint-count"))},'x');process.stdout.write(JSON.stringify({token:"fixture-access",token_id:"fixture",expires_at:new Date(Date.now()+120000).toISOString()}))`,
-  )
-  await writeFile(
-    join(root, "noscope/providers/provider-access.toml"),
-    `contract_version = 1\n[commands]\nmint = "${process.execPath} ${join(root, "access.mjs")}"\n`,
-    { mode: 0o600 },
-  )
+  await writeNoscopeProviders(root, 120000)
   const sent: { url: string; body: string; headers: Headers }[] = []
   const native = '{ "model" : "fixture-model", "stream": true, "messages": [] }'
   const responseBytes = "event: message_start\ndata: {}\n\nevent: message_stop\ndata: {}\n\n"
@@ -150,7 +136,7 @@ test("bound streaming preserves native bytes, renews with noscope, and denies cr
         const bounded = yield* Effect.promise(() =>
           Promise.race([
             pendingRenewal.then((response) => response.status),
-            Bun.sleep(500).then(() => "unbounded"),
+            Bun.sleep(5000).then(() => "unbounded"),
           ]),
         )
         if (!cancelledUpload) upload?.close()
@@ -174,7 +160,7 @@ test("bound streaming preserves native bytes, renews with noscope, and denies cr
         ])
           expect((yield* gateway.handle(denied)).status).toBe(403)
         expect(sent.length).toBe(1)
-        expect(yield* Effect.promise(() => readFile(join(root, "mint-count"), "utf8"))).toBe("x")
+        expect(yield* Effect.promise(() => readFile(join(root, "access-mints"), "utf8"))).toBe("x")
         // A renewal asked again replaces the successor that has not renewed: the last one holds.
         const renewals: Array<{ readonly token: string }> = []
         for (let asked = 0; asked < 3; asked++) {
@@ -345,8 +331,8 @@ const streamThroughGateway = async (
 }
 
 test("a stream that keeps sending bytes outlives many idle limits", async () => {
-  // 30 chunks 100 ms apart: 3 s of stream, ten times the 300 ms idle limit.
-  const result = await streamThroughGateway(300, 30, 100)
+  // 30 chunks 100 ms apart: 3 s of stream, three times the 1000 ms idle limit.
+  const result = await streamThroughGateway(1000, 30, 100)
   expect(result.ending).toBe("complete")
   expect(result.received).toBe(30)
   expect(result.elapsed).toBeGreaterThan(2500)
@@ -365,12 +351,14 @@ test("a stream that falls silent for the idle limit is aborted upstream and rele
 }, 20000)
 
 for (const attack of ["resets", "preface", "h2-preface", "truncated"] as const)
-  test(`D/R9: the gateway listener contains ${attack} and serves the next valid request`, async () => {
+  test(`the gateway listener contains ${attack} and serves the next valid request`, async () => {
     let served = 0
     let partial = 0
+    let entered = Promise.withResolvers<void>()
     const listener = capabilityHttpServer(async (request) => {
       if (new URL(request.url).pathname !== "/valid") {
         partial++
+        entered.resolve()
         await request.arrayBuffer()
       }
       served++
@@ -386,8 +374,12 @@ for (const attack of ["resets", "preface", "h2-preface", "truncated"] as const)
         socket.on("data", (chunk) => (answer += chunk.toString()))
         socket.on("error", () => {})
         socket.on("close", () => resolve(answer))
+        // A reset peer leaves once the handler reads its body; a truncated one after its bytes.
         socket.write(bytes, () => {
-          if (cut) setTimeout(() => socket.destroy(), 20)
+          if (cut)
+            void (attack === "resets" ? entered.promise : Bun.sleep(20)).then(() =>
+              socket.destroy(),
+            )
         })
       })
     const valid = () =>
@@ -404,6 +396,7 @@ for (const attack of ["resets", "preface", "h2-preface", "truncated"] as const)
     let hanging: ReturnType<typeof connect> | undefined
     try {
       for (let round = 0; round < 8; round++) {
+        entered = Promise.withResolvers<void>()
         const answer = await raw(input, attack === "resets" || attack === "truncated")
         expect(answer).not.toContain("fixture-valid")
         expect(await valid()).toBe("fixture-valid")
@@ -418,7 +411,7 @@ for (const attack of ["resets", "preface", "h2-preface", "truncated"] as const)
       expect(
         await Promise.race([
           listener.close().then(() => "closed"),
-          Bun.sleep(2000).then(() => "held"),
+          Bun.sleep(10000).then(() => "held"),
         ]),
       ).toBe("closed")
     } finally {

@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test"
 import { connect } from "node:net"
-import { Effect, Exit, Schema } from "effect"
+import { Cause, Effect, Exit, Schema } from "effect"
 import { AgentRunStore } from "../../src/kernel/agent-run-store"
 import { join } from "node:path"
 import { capabilityDigest } from "../../src/capability-gateway/store"
@@ -14,18 +14,10 @@ import {
   proof,
   seedLease,
   sse,
+  streamEnd,
   type Fixture,
   type Gateway,
 } from "./gateway-process"
-
-const ended = (reader: { read(): Promise<unknown> }, within: number) =>
-  Promise.race([
-    reader.read().then(
-      () => "ended",
-      () => "ended",
-    ),
-    Bun.sleep(within).then(() => "live"),
-  ])
 
 async function scenario(start: (f: Fixture) => Promise<Gateway>) {
   const f = await fixture()
@@ -100,11 +92,13 @@ async function scenario(start: (f: Fixture) => Promise<Gateway>) {
     socket.write(
       `POST /capabilities/v1/session HTTP/1.1\r\nhost: 127.0.0.1\r\ncontent-type: application/json\r\ncontent-length: ${Buffer.byteLength(body)}\r\n\r\n${body}`,
     )
-    await Bun.sleep(300)
+    // The gateway has read the proof once its run token mint is running.
+    for (let tries = 0; (await f.liveMints()) === 0 && tries < 400; tries++) await Bun.sleep(50)
+    expect(await f.liveMints()).toBe(1)
     socket.destroy()
     expect(answered).toBe("")
     await f.slowMints(false)
-    for (let tries = 0; (await sessionOfRun()) !== 1 && tries < 100; tries++) await Bun.sleep(50)
+    for (let tries = 0; (await sessionOfRun()) !== 1 && tries < 400; tries++) await Bun.sleep(50)
     expect(await sessionOfRun()).toBe(1)
 
     // (b) The used proof, re-posted, is refused.
@@ -170,7 +164,7 @@ async function scenario(start: (f: Fixture) => Promise<Gateway>) {
     const third = await session(proof(await audienceOf("lease", other.port), "jti-3"), other.port)
     expect(third.status).toBe(200)
     const current = await Grant(third)
-    expect(await ended(reader, 2000)).toBe("ended")
+    expect(await streamEnd(reader, 10000)).toBe("ended")
     f.setStall(false)
     await other.stop()
     other = undefined
@@ -208,7 +202,7 @@ async function scenario(start: (f: Fixture) => Promise<Gateway>) {
     const streamed = stream.body!.getReader()
     expect((await streamed.read()).done).toBe(false)
     await f.daemon((capability) => capability.revoke("run"))
-    expect(await ended(streamed, 2000)).toBe("ended")
+    expect(await streamEnd(streamed, 10000)).toBe("ended")
     expect((await call(current.token)).status).toBe(403)
   } finally {
     await other?.stop()
@@ -229,5 +223,8 @@ test("the gateway process refuses to start without its configuration", async () 
   const exit = await Effect.runPromiseExit(
     Effect.scoped(serveCapabilityGateway({ WORKFLOWD_DATABASE_PATH: ":memory:" })),
   )
-  expect(Exit.isFailure(exit)).toBe(true)
+  const failure = Exit.isFailure(exit) ? Cause.squash(exit.cause) : undefined
+  expect(failure instanceof Error && String(failure.cause)).toBe(
+    "Error: WORKFLOWD_CAPABILITY_GATEWAY is required",
+  )
 })

@@ -84,6 +84,11 @@ test("configured live composition settles prior leases, which revokes their gran
       loadCapabilityGatewayConfig({ WORKFLOWD_CAPABILITY_GATEWAY: JSON.stringify(gateway) }),
     ).toEqual(gateway)
     expect(() => loadCapabilityGatewayConfig({})).toThrow("is required")
+    expect(() =>
+      loadCapabilityGatewayConfig({
+        WORKFLOWD_CAPABILITY_GATEWAY: JSON.stringify({ ...gateway, maxStreamsPerRun: 5 }),
+      }),
+    ).toThrow('Expected a value between 1 and 4\n  at ["maxStreamsPerRun"]')
     const { listen: _listen, ...unlistened } = gateway
     for (const bad of [
       unlistened,

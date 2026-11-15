@@ -9,10 +9,12 @@ import { AgentRunStore, AgentRunStoreLive } from "../../src/kernel/agent-run-sto
 import { makeSandboxStore } from "../../src/sandbox/store"
 import { serveCapabilityGateway } from "../../src/capability-gateway-server"
 import { fixtureExecutable } from "../helpers/fixture-executable.mjs"
-import { seedCapabilityRun } from "./fixture"
+import { seedCapabilityRun, writeNoscopeProvider } from "./fixture"
 import { makeDaemonCapability, type DaemonCapability } from "../../src/sandbox/capability-control"
 
 const { privateKey, publicKey } = generateKeyPairSync("rsa", { modulusLength: 2048 })
+/** The private key of `jwks`: it signs the fixture's job proofs. */
+export const signingKey = privateKey
 export const jwks = {
   keys: [{ ...publicKey.export({ format: "jwk" }), kid: "fixture", alg: "RS256", use: "sig" }],
 }
@@ -110,7 +112,6 @@ export interface UpstreamRequest {
  */
 export async function fixture() {
   const root = await mkdtemp(join(tmpdir(), "wfd-gateway-process-"))
-  await mkdir(join(root, "noscope/providers"), { recursive: true, mode: 0o700 })
   await mkdir(join(root, "live"))
   await writeFile(
     join(root, "run.mjs"),
@@ -131,15 +132,12 @@ try {
     join(root, "access.mjs"),
     `process.stdout.write(JSON.stringify({token:"fixture-access",token_id:"fixture",expires_at:new Date(Date.now()+120000).toISOString()}))`,
   )
-  for (const [name, script, argument] of [
-    ["run-capability", "run.mjs", " {ttl}"],
-    ["provider-access", "access.mjs", ""],
-  ] as const)
-    await writeFile(
-      join(root, `noscope/providers/${name}.toml`),
-      `contract_version = 1\n[commands]\nmint = "${process.execPath} ${join(root, script)}${argument}"\n`,
-      { mode: 0o600 },
-    )
+  await writeNoscopeProvider(root, "run-capability", [
+    process.execPath,
+    join(root, "run.mjs"),
+    "{ttl}",
+  ])
+  await writeNoscopeProvider(root, "provider-access", [process.execPath, join(root, "access.mjs")])
   let stall = false
   let onUpstream: ((request: Request) => Promise<void>) | undefined
   const received: UpstreamRequest[] = []
@@ -640,3 +638,24 @@ export const storedAccess = (text: string) =>
       Schema.Struct({ claudeAiOauth: Schema.Struct({ accessToken: Schema.String }) }),
     ),
   )(text).claudeAiOauth.accessToken
+
+/**
+ * "ended" once the stream of `reader` is done or fails within `within` milliseconds, reading
+ * past each data chunk; "live" when it has not ended by then.
+ */
+export async function streamEnd(
+  reader: { read(): Promise<{ readonly done: boolean }> },
+  within: number,
+): Promise<"ended" | "live"> {
+  const deadline = Bun.sleep(within).then(() => "live" as const)
+  for (;;) {
+    const next = await Promise.race([
+      reader.read().then(
+        (item) => (item.done ? ("ended" as const) : ("chunk" as const)),
+        () => "ended" as const,
+      ),
+      deadline,
+    ])
+    if (next !== "chunk") return next
+  }
+}

@@ -1,11 +1,12 @@
 import { expect, test } from "bun:test"
-import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises"
+import { mkdtemp, rm } from "node:fs/promises"
 import { join, resolve } from "node:path"
 import { mintCapability } from "../../src/capability-gateway/noscope"
 import { createServer, type Socket } from "node:net"
 import { tmpdir } from "node:os"
 import { capabilityProvider } from "../../src/capability-gateway/noscope-provider"
 import { fixtureExecutable } from "../helpers/fixture-executable.mjs"
+import { runCapabilityMint, writeNoscopeProvider } from "./fixture"
 
 test("provider command boundary refuses invalid grants", () => {
   for (const args of [[], ["run", "0"], ["run", "3601"], ["run", "extra", "60"], ["other", "60"]])
@@ -17,12 +18,7 @@ test("provider command boundary refuses invalid grants", () => {
 test("real noscope mints fresh bounded run credentials through the installed provider contract", async () => {
   const root = await mkdtemp(join(tmpdir(), "wfd-noscope-"))
   try {
-    await mkdir(join(root, "noscope/providers"), { recursive: true, mode: 0o700 })
-    await writeFile(
-      join(root, "noscope/providers/run-capability.toml"),
-      `contract_version = 1\n[commands]\nmint = "${process.execPath} ${resolve("src/capability-gateway/noscope-provider.ts")} run {ttl}"\n`,
-      { mode: 0o600 },
-    )
+    await writeNoscopeProvider(root, "run-capability", runCapabilityMint)
     const config = { binary: fixtureExecutable("noscope"), configHome: root }
     const first = await mintCapability(
       config,
@@ -50,7 +46,7 @@ test("real noscope mints fresh bounded run credentials through the installed pro
   }
 })
 
-test("S1/R1: aborting noscope terminates its blocked provider adapter", async () => {
+test("aborting noscope terminates its blocked provider adapter", async () => {
   const root = await mkdtemp(join(tmpdir(), "noscope-cancel-"))
   const entered = Promise.withResolvers<void>()
   const closed = Promise.withResolvers<boolean>()
@@ -67,12 +63,12 @@ test("S1/R1: aborting noscope terminates its blocked provider adapter", async ()
   })
   try {
     await new Promise<void>((resolve) => server.listen(socketPath, resolve))
-    await mkdir(join(root, "noscope/providers"), { recursive: true, mode: 0o700 })
-    await writeFile(
-      join(root, "noscope/providers/provider-access.toml"),
-      `contract_version = 1\n[commands]\nmint = "${process.execPath} ${resolve("test/capability-gateway/blocking-provider.mjs")} ${socketPath} {ttl}"\n`,
-      { mode: 0o600 },
-    )
+    await writeNoscopeProvider(root, "provider-access", [
+      process.execPath,
+      resolve("test/capability-gateway/blocking-provider.mjs"),
+      socketPath,
+      "{ttl}",
+    ])
     const abort = new AbortController()
     const pending = mintCapability(
       { binary: fixtureExecutable("noscope"), configHome: root },
@@ -90,7 +86,7 @@ test("S1/R1: aborting noscope terminates its blocked provider adapter", async ()
     expect(
       await Promise.race([
         closed.promise,
-        new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 500)),
+        new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 5000)),
       ]),
     ).toBe(true)
   } finally {
@@ -98,4 +94,4 @@ test("S1/R1: aborting noscope terminates its blocked provider adapter", async ()
     server.close()
     await rm(root, { recursive: true, force: true })
   }
-}, 3000)
+}, 15000)

@@ -20,10 +20,11 @@ for (const [mode, start] of gateways) {
     await withGateway(start, async (_f, gateway) => {
       const runner = client(gateway.port)
       const live = await runner.audience()
-      // Issued 11 seconds or more ahead (rounded up to a whole second): refused.
-      const ahead = Math.ceil((Date.now() + 11000) / 1000)
+      // Issued 15 seconds ahead: refused, however long the gateway takes to check it. The exact
+      // leeway is pinned with a set clock in test/sandbox/bootstrap.test.ts.
+      const ahead = Math.ceil((Date.now() + 15000) / 1000)
       expect(
-        (await runner.session(proof(live.audience, "jti-11", { issuedAt: ahead }))).status,
+        (await runner.session(proof(live.audience, "jti-15", { issuedAt: ahead }))).status,
       ).toBe(403)
       // Expired a second ago: refused, with no leeway.
       const expired = Math.floor(Date.now() / 1000) - 1

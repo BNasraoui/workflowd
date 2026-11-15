@@ -142,7 +142,6 @@ for (const { commit, metadata, receipt } of history.publications) {
 
 test("current saved policy round-trips every field; schema changes require a new frozen fixture", async () => {
   // Adding, removing or changing a policy field requires an explicit persistence decision.
-  // Preserve the pre-capability snapshot and historical policy bytes as separate evidence.
   expect(Schema.toJsonSchemaDocument(SandboxPolicy)).toMatchSnapshot("capability-v1")
   const policy = Schema.decodeUnknownSync(SandboxPolicy)(capabilityPolicy)
   expectEveryField(SandboxPolicy.ast, policy, "policy")

@@ -8,7 +8,7 @@ import { fixtureExecutable } from "../helpers/fixture-executable.mjs"
 import { loopbackCertificate, tlsFront } from "../helpers/loopback-tls"
 
 for (const scenario of ["headers", "renewal", "git-refs", "git-upload"] as const) {
-  test(`R6/R7: relay survives ${scenario} failure and serves the next valid request`, async () => {
+  test(`the relay survives ${scenario} failure and serves the next valid request`, async () => {
     const root = await mkdtemp(join(tmpdir(), "relay-regression-"))
     const now = Date.now()
     const first = "a".repeat(43)
@@ -106,7 +106,7 @@ for (const scenario of ["headers", "renewal", "git-refs", "git-upload"] as const
   }, 10000)
 }
 
-test("R7: accelerated clock expiry refuses renewal resurrection", async () => {
+test("after a clock jump past its expiry, the relay sends no renewal of the expired token and ends for expiry", async () => {
   const root = await mkdtemp(join(tmpdir(), "relay-clock-tls-"))
   try {
     const tls = await loopbackCertificate(root)

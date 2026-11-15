@@ -10,26 +10,47 @@ import { liveGrants } from "../../src/sandbox/capability-control"
 import { mkdir, writeFile } from "node:fs/promises"
 import { join, resolve } from "node:path"
 
+/** The mint command of the real run-capability provider. */
+export const runCapabilityMint = [
+  process.execPath,
+  resolve("src/capability-gateway/noscope-provider.ts"),
+  "run",
+  "{ttl}",
+] as const
+
 /**
- * The noscope providers of a gateway test under `root`: run tokens from the real run-capability
- * provider, and a fixed provider credential that lives `accessMs`.
+ * Writes the noscope provider `name` under `root`, whose mint runs `mint`: its words joined by
+ * spaces. Each provider file of a gateway test is written here.
  */
-export async function writeNoscopeProviders(root: string, accessMs: number) {
+export async function writeNoscopeProvider(
+  root: string,
+  name: "run-capability" | "provider-access",
+  mint: ReadonlyArray<string>,
+) {
   await mkdir(join(root, "noscope/providers"), { recursive: true, mode: 0o700 })
   await writeFile(
-    join(root, "noscope/providers/run-capability.toml"),
-    `contract_version = 1\n[commands]\nmint = "${process.execPath} ${resolve("src/capability-gateway/noscope-provider.ts")} run {ttl}"\n`,
+    join(root, `noscope/providers/${name}.toml`),
+    `contract_version = 1\n[commands]\nmint = "${mint.join(" ")}"\n`,
     { mode: 0o600 },
   )
+}
+
+/**
+ * The noscope providers of a gateway test under `root`: run tokens from `run` (the real
+ * run-capability provider unless named), and a fixed provider credential that lives `accessMs`.
+ * The credential's script appends a line to `access-mints` at each mint.
+ */
+export async function writeNoscopeProviders(
+  root: string,
+  accessMs: number,
+  run: ReadonlyArray<string> = runCapabilityMint,
+) {
+  await writeNoscopeProvider(root, "run-capability", run)
   await writeFile(
     join(root, "access.mjs"),
-    `process.stdout.write(JSON.stringify({token:"fixture-access",token_id:"fixture",expires_at:new Date(Date.now()+${accessMs}).toISOString()}))`,
+    `import {appendFileSync} from 'node:fs';appendFileSync(${JSON.stringify(join(root, "access-mints"))},'x');process.stdout.write(JSON.stringify({token:"fixture-access",token_id:"fixture",expires_at:new Date(Date.now()+${accessMs}).toISOString()}))`,
   )
-  await writeFile(
-    join(root, "noscope/providers/provider-access.toml"),
-    `contract_version = 1\n[commands]\nmint = "${process.execPath} ${join(root, "access.mjs")}"\n`,
-    { mode: 0o600 },
-  )
+  await writeNoscopeProvider(root, "provider-access", [process.execPath, join(root, "access.mjs")])
 }
 
 /**
