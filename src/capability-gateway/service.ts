@@ -1,4 +1,4 @@
-import { Context, Effect, Option, Redacted, Schema, Semaphore } from "effect"
+import { Context, Effect, Option, Schema, Semaphore } from "effect"
 import { SqlClient } from "effect/unstable/sql"
 import { randomInt } from "node:crypto"
 import { mintCapability, type NoscopeConfiguration } from "./noscope"
@@ -8,7 +8,6 @@ import { githubJobKeys, verifyJobProof } from "../sandbox/bootstrap"
 import { runLifetime } from "../store/run-lifetime"
 import { ownedPromise } from "./owned"
 import { gitReadRequest, type GitUpstream } from "./git"
-import type { makeTokenBroker } from "../worker-identity/broker"
 
 export interface GatewayConfiguration {
   readonly gitRead?: boolean
@@ -96,10 +95,7 @@ const unavailable = () => new Response(null, { status: 503, headers: { "retry-af
 export const makeCapabilityGateway = (
   config: GatewayConfiguration,
   upstream: ClaudeUpstream = fetch,
-  git?: {
-    readonly broker?: Effect.Success<ReturnType<typeof makeTokenBroker>>
-    readonly upstream?: GitUpstream
-  },
+  gitUpstream: GitUpstream = fetch,
   keys: typeof githubJobKeys = githubJobKeys,
 ) =>
   Effect.gen(function* () {
@@ -391,25 +387,8 @@ export const makeCapabilityGateway = (
                     return await started.response
                   }
                   const selected = isGit
-                    ? await gitReadRequest(
-                        request,
-                        target,
-                        grant,
-                        async () => {
-                          if (!git?.broker) return undefined
-                          const snapshot = await Effect.runPromise(
-                            git.broker({
-                              repository: grant.repositoryName,
-                              installationId: grant.installationId,
-                              permissions: { contents: "read" },
-                            }),
-                            { signal },
-                          )
-                          ownership.providerExpiry(snapshot.expiresAt)
-                          return Redacted.value(snapshot.token)
-                        },
-                        signal,
-                        (url, input) => send(() => (git?.upstream ?? fetch)(url, input)),
+                    ? await gitReadRequest(request, target, grant, signal, (url, input) =>
+                        send(() => gitUpstream(url, input)),
                       )
                     : await claudeRequest(
                         request,
