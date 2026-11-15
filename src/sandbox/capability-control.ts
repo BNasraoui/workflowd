@@ -40,9 +40,13 @@ const send = <A, I, B, O>(
         new Promise<string>((resolve, reject) => {
           const connection = createConnection(socket)
           let answer = Buffer.alloc(0)
+          const complete = () => answer.length >= 4 && answer.readUInt32BE(0) === answer.length - 4
+          // A complete answer stands, whatever the connection does after it: the gateway answers
+          // a refused caller before it reads the request, so the request's write can fail.
           const fail = (error: unknown) => {
             connection.destroy()
-            reject(error instanceof Error ? error : new Error(String(error)))
+            if (complete()) resolve(answer.subarray(4).toString("utf8"))
+            else reject(error instanceof Error ? error : new Error(String(error)))
           }
           signal.addEventListener("abort", () => fail(new Error("aborted")))
           connection.setTimeout(10000, () => fail(new Error("control socket timed out")))
@@ -53,8 +57,7 @@ const send = <A, I, B, O>(
             if (answer.length > maxControlFrame + 4) fail(new Error("control answer too long"))
           })
           connection.on("end", () => {
-            const length = answer.length >= 4 ? answer.readUInt32BE(0) : -1
-            if (length !== answer.length - 4) return fail(new Error("control answer cut short"))
+            if (!complete()) return fail(new Error("control answer cut short"))
             resolve(answer.subarray(4).toString("utf8"))
           })
         }),
