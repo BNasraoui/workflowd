@@ -1,7 +1,7 @@
 import "../resources/preload"
 import { strict as assert } from "node:assert"
 import { chmod, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises"
-import { dirname, join } from "node:path"
+import { join } from "node:path"
 import {
   claudeLogin,
   client,
@@ -37,10 +37,12 @@ function runnerGroup() {
 }
 
 /**
- * The image's user reaches the fixture through the runner's group: it writes its store, makes its
- * control directory, writes the mint records and their directories, and reads the noscope
- * providers, which noscope accepts with group read and no access for others. The providers start
- * their scripts with the image's Bun.
+ * The fixture root is the image user's, with the runner's group and mode 01770, as the gateway
+ * requires of each directory above its control directory: the runner writes its fixtures there
+ * through its group, and the sticky bit keeps it from replacing an entry of the image's user. The
+ * image's user writes its store, makes its control directory, writes the mint records and their
+ * directories, and reads the noscope providers, which noscope accepts with group read and no
+ * access for others. The providers start their scripts with the image's Bun.
  */
 async function fixtureForImageUser(f: Fixture) {
   for (const name of ["run-capability", "provider-access"]) {
@@ -50,9 +52,40 @@ async function fixtureForImageUser(f: Fixture) {
   }
   for (const directory of ["noscope", "noscope/providers"])
     await chmod(join(f.root, directory), 0o750)
-  for (const directory of [".", "live"]) await chmod(join(f.root, directory), 0o770)
+  await chmod(join(f.root, "live"), 0o770)
   for (const entry of await readdir(f.root, { withFileTypes: true }))
     if (entry.isFile()) await chmod(join(f.root, entry.name), 0o660)
+  await asRoot(
+    f,
+    `const fs = require("node:fs"); fs.chownSync(${JSON.stringify(f.root)}, ${imageUser}, ${runnerGroup()}); fs.chmodSync(${JSON.stringify(f.root)}, 0o1770)`,
+  )
+}
+
+/** A container of the image as root, which may change the owner of a fixture path. */
+async function asRoot(f: Fixture, source: string) {
+  const child = Bun.spawn(
+    [
+      "docker",
+      "run",
+      "--rm",
+      "--network",
+      "none",
+      "--read-only",
+      "--security-opt",
+      "no-new-privileges",
+      "--user",
+      "0:0",
+      "--volume",
+      `${f.root}:${f.root}`,
+      "--entrypoint",
+      "/bin/bun",
+      image,
+      "-e",
+      source,
+    ],
+    { stdout: "ignore", stderr: "inherit" },
+  )
+  if ((await child.exited) !== 0) throw new Error("a container as root failed on the fixture")
 }
 
 /** The ids of the container's first process, the gateway, as /proc shows them inside. */
@@ -247,34 +280,15 @@ async function imageCommand(
 }
 
 /**
- * The gateway's control directory and login directory are the image user's, so the runner cannot
- * remove what is in them. A container of the image, as that user, removes them.
+ * The fixture root and what the image's user made in it go back to the runner, which then
+ * removes them.
  */
-async function removeControlDirectory(f: Fixture) {
-  const removal = Bun.spawn(
-    [
-      "docker",
-      "run",
-      "--rm",
-      "--network",
-      "none",
-      "--cap-drop",
-      "ALL",
-      "--security-opt",
-      "no-new-privileges",
-      "--group-add",
-      runnerGroup(),
-      "--volume",
-      `${f.root}:${f.root}`,
-      "--entrypoint",
-      "/bin/bun",
-      image,
-      "-e",
-      `for (const path of ${JSON.stringify([dirname(f.config.controlSocket), loginDirectory(f)])}) require("node:fs").rmSync(path, { recursive: true, force: true })`,
-    ],
-    { stdout: "ignore", stderr: "inherit" },
+async function returnFixtureRoot(f: Fixture) {
+  await asRoot(
+    f,
+    `const fs = require("node:fs"); const walk = (path) => { fs.lchownSync(path, ${process.getuid!()}, ${runnerGroup()}); if (fs.lstatSync(path).isDirectory()) for (const name of fs.readdirSync(path)) walk(path + "/" + name) }
+walk(${JSON.stringify(f.root)}); fs.chmodSync(${JSON.stringify(f.root)}, 0o700)`,
   )
-  if ((await removal.exited) !== 0) throw new Error("cannot remove the gateway's control directory")
 }
 
 const loginDirectory = (f: Fixture) => join(f.root, "login")
@@ -482,7 +496,7 @@ process.stdout.write(Buffer.concat(fs.readdirSync(root).filter((n) => /[.]db(-wa
   )
 } finally {
   for (const gateway of gateways) await gateway.stop()
-  await removeControlDirectory(f)
+  await returnFixtureRoot(f)
   await oauth.stop()
   await f.close()
 }

@@ -1,4 +1,4 @@
-import { chmod, chown, lstat, mkdir, rm } from "node:fs/promises"
+import { chmod, chown, lstat, mkdir, realpath, rm } from "node:fs/promises"
 import { createServer, type Socket } from "node:net"
 import { dirname } from "node:path"
 import { Cause, Effect, Exit, Schema } from "effect"
@@ -14,6 +14,13 @@ import {
 } from "../capability-control/protocol"
 import { claimSocketPath, peerCredentials } from "../peer-socket"
 import { CapabilityRefused } from "./store"
+
+/** The daemon's connections that the gateway holds open at once; another one gets `unavailable`. */
+export const maxControlConnections = 16
+/** A connection ends this long after the gateway accepted it, whatever it sent. */
+export const controlConnectionMs = 10000
+/** A refused connection ends at most this long after its answer. */
+const refusedGraceMs = 1000
 
 /** A failure of the gateway's store or a refusal; a refusal is a CapabilityRefused. */
 export interface ControlFailure {
@@ -95,11 +102,36 @@ const answer = (target: ControlTarget, text: string) =>
   })
 
 /**
+ * Refuses a control directory that a user other than root and the gateway could replace. Its
+ * parent is named by its real path (no symbolic link above the directory), and each directory from
+ * the parent up to `/` is owned by root (uid 0) or the gateway's uid, and either lets neither its
+ * group nor others write to it (mode & 0o022 is 0) or has the sticky bit (mode & 0o1000). The
+ * sticky bit lets only an entry's owner, the directory's owner and root rename or remove the
+ * entry, and each entry on the path is owned by root or the gateway.
+ */
+const checkAncestors = async (directory: string, uid: number) => {
+  const parent = dirname(directory)
+  if ((await realpath(parent)) !== parent)
+    throw new Error("control socket directory must be named by its real path")
+  for (let above = parent; ; above = dirname(above)) {
+    const info = await lstat(above)
+    if (
+      !info.isDirectory() ||
+      (info.uid !== 0 && info.uid !== uid) ||
+      ((info.mode & 0o022) !== 0 && (info.mode & 0o1000) === 0)
+    )
+      throw new Error(`${above} lets another user replace the control socket directory`)
+    if (above === "/") return
+  }
+}
+
+/**
  * The directory of the socket is the gateway's own: owned by its uid, with the daemon's group,
  * mode 0710, so only that group reaches the socket. The gateway makes it when it is missing and
  * refuses to start when it is anything else.
  */
 const claimDirectory = async (directory: string, uid: number, gid: number) => {
+  await checkAncestors(directory, uid)
   const existing = await lstat(directory).catch(() => null)
   if (existing === null) {
     await mkdir(directory, { mode: 0o700 })
@@ -112,8 +144,10 @@ const claimDirectory = async (directory: string, uid: number, gid: number) => {
 }
 
 /**
- * Serves the control socket. Each caller's uid comes from the kernel (SO_PEERCRED on the
- * accepted socket); a caller whose uid is not the daemon's gets `caller` and nothing else.
+ * Serves the control socket. The gateway reads each caller's uid from the kernel (SO_PEERCRED)
+ * as it accepts the connection, before it reads a byte: a caller whose uid is not the daemon's
+ * gets `caller`, and the connection ends. It holds at most `maxControlConnections` of the
+ * daemon's connections, and ends each `controlConnectionMs` after it accepted it.
  */
 export const serveControl = (options: {
   readonly socket: string
@@ -127,11 +161,27 @@ export const serveControl = (options: {
       await claimDirectory(dirname(options.socket), uid, options.daemon.gid)
       const release = await claimSocketPath(options.socket)
       const sockets = new Set<Socket>()
+      const refused = new Set<Socket>()
       const server = createServer((socket) => {
-        sockets.add(socket)
-        socket.on("close", () => sockets.delete(socket))
+        const deadline = setTimeout(() => socket.destroy(), controlConnectionMs)
+        socket.on("close", () => {
+          clearTimeout(deadline)
+          sockets.delete(socket)
+          refused.delete(socket)
+        })
         socket.on("error", () => socket.destroy())
-        socket.setTimeout(10000, () => socket.destroy())
+        // A refused caller's bytes are read and dropped, so that its answer is not lost to a reset;
+        // the connection ends a second later at most.
+        const refuse = (error: ControlError) => {
+          if (refused.size >= maxControlConnections) return socket.destroy()
+          refused.add(socket)
+          socket.on("data", () => undefined)
+          socket.end(controlFrame({ ok: false, error }))
+          setTimeout(() => socket.destroy(), refusedGraceMs).unref()
+        }
+        if (peerCredentials(socket)?.uid !== options.daemon.uid) return refuse("caller")
+        if (sockets.size >= maxControlConnections) return refuse("unavailable")
+        sockets.add(socket)
         let buffer = Buffer.alloc(0)
         let handled = false
         const reply = (value: unknown) => {
@@ -146,8 +196,6 @@ export const serveControl = (options: {
           if (length > maxControlFrame) return reply({ ok: false, error: "length" })
           if (buffer.length < 4 + length) return
           if (buffer.length > 4 + length) return reply({ ok: false, error: "length" })
-          if (peerCredentials(socket)?.uid !== options.daemon.uid)
-            return reply({ ok: false, error: "caller" })
           handled = true
           void Effect.runPromise(answer(options.target, buffer.subarray(4).toString("utf8"))).then(
             (value) => socket.end(controlFrame(value)),
@@ -167,10 +215,10 @@ export const serveControl = (options: {
         await release()
         throw error
       }
-      return { server, sockets, release }
+      return { server, sockets, refused, release }
     }),
-    ({ server, sockets, release }) => {
-      for (const socket of sockets) socket.destroy()
+    ({ server, sockets, refused, release }) => {
+      for (const socket of [...sockets, ...refused]) socket.destroy()
       return Effect.promise(() =>
         new Promise<void>((resolve) => server.close(() => resolve()))
           .then(() => rm(options.socket, { force: true }))
