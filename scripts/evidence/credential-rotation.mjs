@@ -19,6 +19,7 @@ import { connect } from "node:net"
 import { fullDaemonEnvironment } from "./credential-rotation-full.mjs"
 import { Database } from "bun:sqlite"
 import { agentRunIdentifiers } from "../../src/kernel/agent-run-ingress.ts"
+import { readEventRecordText } from "./event-record.mjs"
 if (process.env.CI) throw new Error("This manual evidence runner must not run in CI")
 const full = process.argv.includes("--full")
 const selected = process.argv.find((arg) => arg.startsWith("--scenario="))?.slice(11)
@@ -189,7 +190,7 @@ const complete = async (runId) => {
       .get(runId).n,
     1,
   )
-  const output = await readFile(join(root, "agent-processes", runId, "events.jsonl"), "utf8")
+  const output = await readEventRecordText(join(root, "agent-processes", runId, "events.jsonl"))
   log("worker-output", output)
   assert.equal(output.split("full-final-output").length - 1, 1)
   assert.equal(r.last_output_tokens, 42)
@@ -406,7 +407,7 @@ try {
     const runId = id(s)
     await post(s)
     await wait(async () =>
-      (await readFile(join(root, "agent-processes", runId, "events.jsonl"), "utf8")).includes(
+      (await readEventRecordText(join(root, "agent-processes", runId, "events.jsonl"))).includes(
         "child-ready",
       ),
     )
@@ -428,16 +429,19 @@ try {
     const pending = post(s)
     await wait(() => exists(join(root, "agent-processes", runId, "events.jsonl")))
     await wait(async () =>
-      (await readFile(join(root, "agent-processes", runId, "events.jsonl"), "utf8")).includes(
+      (await readEventRecordText(join(root, "agent-processes", runId, "events.jsonl"))).includes(
         '"par',
       ),
     )
     assert.equal(row(runId).state, "spawning")
     await snapshot(runId, "partial-line-pending")
-    log("half-line", await readFile(join(root, "agent-processes", runId, "events.jsonl"), "utf8"))
+    log(
+      "half-line",
+      await readEventRecordText(join(root, "agent-processes", runId, "events.jsonl")),
+    )
     log("dispatch", await pending)
     await complete(runId)
-    const output = await readFile(join(root, "agent-processes", runId, "events.jsonl"), "utf8")
+    const output = await readEventRecordText(join(root, "agent-processes", runId, "events.jsonl"))
     assert.equal(output.split("partial-once").length - 1, 1)
     const parsed = (
       await Promise.all(
@@ -536,7 +540,7 @@ try {
     await wait(async () => {
       try {
         return (
-          await readFile(join(root, "agent-processes", runId, "events.jsonl"), "utf8")
+          await readEventRecordText(join(root, "agent-processes", runId, "events.jsonl"))
         ).includes("command_execution")
       } catch {
         return false
@@ -565,7 +569,7 @@ try {
         .get(runId).n,
       1,
     )
-    const output = await readFile(join(root, "agent-processes", runId, "events.jsonl"), "utf8")
+    const output = await readEventRecordText(join(root, "agent-processes", runId, "events.jsonl"))
     log("real-output", output)
     const messages = output
       .trim()
