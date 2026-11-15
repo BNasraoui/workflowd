@@ -1,7 +1,7 @@
 import { lstat, mkdtemp, readdir, rm } from "node:fs/promises"
 import { join } from "node:path"
 import { inflateSync } from "node:zlib"
-import { Data, Effect, Redacted, Schema, type Scope } from "effect"
+import { Data, Effect, Redacted, Schema, Semaphore, type Scope } from "effect"
 import type { AgentGitConfig } from "../agent-git/config"
 import { PublicationMessage } from "../sandbox/config"
 
@@ -31,8 +31,13 @@ export const sealedResultLimits = {
   finalMessageBytes: 64 * 1024,
   /** Wall clock for the whole check, and again for the push; a git child is killed at it. */
   timeLimitMs: 120_000,
-  /** No file a git child writes may pass it, and the scratch directory may not hold more. */
+  /**
+   * The scratch directory of one check holds no more at any moment: each git child
+   * may write a third of what is left of it per file (see `fileLimitBlocks`).
+   */
   diskBytes: 128 * MiB,
+  /** Checks that hold a scratch directory at one time; a further check waits. */
+  concurrentChecks: 4,
   /** Address space of each git child. */
   memoryBytes: 1024 * MiB,
 } as const
@@ -361,12 +366,16 @@ type GitRun = {
   readonly stdout: Uint8Array
   readonly stderr: string
   readonly timedOut: boolean
+  /** A file the child, or a git child of it, wrote reached the limit of one file. */
+  readonly diskFull: boolean
 }
 
 type GitContext = {
   readonly binary: string
   readonly env: Record<string, string>
   readonly cwd: string
+  /** The scratch directory of the check, whose size bounds what a child may write. */
+  readonly scratch: string
   readonly deadline: number
   readonly timeLimitMs: number
   readonly secrets: ReadonlyArray<string>
@@ -437,14 +446,51 @@ const killGroup = (pid: number) => {
   }
 }
 
+/** The total size of the files below a directory, and the size of the largest one. */
+const directoryBytes = async (path: string) => {
+  let total = 0
+  let largest = 0
+  for (const entry of await readdir(path, { recursive: true })) {
+    const { size } = await lstat(join(path, entry))
+    total += size
+    largest = Math.max(largest, size)
+  }
+  return { total, largest }
+}
+
+// Room for the files of a few bytes a child writes: config, HEAD, refs, shallow, locks.
+const smallFilesBytes = 64 * 1024
+
+/**
+ * The size limit, in the 512-byte blocks of `ulimit -f`, of each file a git child
+ * may write. A child of the check writes at most three files that grow (a pack,
+ * its index and its reverse index) and small files inside `smallFilesBytes`, so
+ * a third of what is left of `diskBytes` per file keeps the scratch below it.
+ */
+const fileLimitBlocks = async (scratch: string) =>
+  Math.floor(
+    (sealedResultLimits.diskBytes - smallFilesBytes - (await directoryBytes(scratch)).total) /
+      3 /
+      512,
+  )
+
 const spawnGit = async (
   context: GitContext,
   args: ReadonlyArray<string>,
   input: Uint8Array | undefined,
 ): Promise<GitRun> => {
   const remaining = context.deadline - Date.now()
-  if (remaining <= 0) return { status: -1, stdout: new Uint8Array(), stderr: "", timedOut: true }
-  const limits = `ulimit -f ${sealedResultLimits.diskBytes / 512} && ulimit -v ${sealedResultLimits.memoryBytes / 1024} && exec "$0" "$@"`
+  const ended = {
+    status: -1,
+    stdout: new Uint8Array(),
+    stderr: "",
+    timedOut: false,
+    diskFull: false,
+  }
+  if (remaining <= 0) return { ...ended, timedOut: true }
+  const fileBlocks = await fileLimitBlocks(context.scratch)
+  if (fileBlocks <= 0) return { ...ended, diskFull: true }
+  const limits = `ulimit -f ${fileBlocks} && ulimit -v ${sealedResultLimits.memoryBytes / 1024} && exec "$0" "$@"`
   const child = Bun.spawn(["/bin/sh", "-c", limits, context.binary, ...gitConfig, ...args], {
     cwd: context.cwd,
     env: context.env,
@@ -464,7 +510,13 @@ const spawnGit = async (
       readBounded(child.stdout, 16 * MiB),
       readBounded(child.stderr, 64 * 1024),
     ])
-    return { status, stdout, stderr: stderr.toString("utf8"), timedOut }
+    // A git child of the child (index-pack under fetch) ends by SIGXFSZ with no word in
+    // the output of its parent, and leaves its file at the limit.
+    const diskFull =
+      status !== 0 &&
+      (child.signalCode === "SIGXFSZ" ||
+        (await directoryBytes(context.scratch)).largest >= fileBlocks * 512)
+    return { status, stdout, stderr: stderr.toString("utf8"), timedOut, diskFull }
   } finally {
     clearTimeout(timer)
     killGroup(child.pid)
@@ -488,7 +540,9 @@ const git = (
     Effect.flatMap((run) =>
       run.timedOut
         ? Effect.fail(refused("time_limit", `the bound is ${context.timeLimitMs} ms`))
-        : Effect.succeed(run),
+        : run.diskFull
+          ? Effect.fail(refused("disk_limit", `the bound is ${sealedResultLimits.diskBytes} bytes`))
+          : Effect.succeed(run),
     ),
   )
 
@@ -509,25 +563,7 @@ const gitOk = (context: GitContext, args: ReadonlyArray<string>, input?: Uint8Ar
     ),
   )
 
-const directoryBytes = async (path: string) => {
-  let total = 0
-  for (const entry of await readdir(path, { recursive: true }))
-    total += (await lstat(join(path, entry))).size
-  return total
-}
-
-const checkDisk = (scratch: string) =>
-  Effect.tryPromise({
-    try: () => directoryBytes(scratch),
-    catch: () =>
-      new SealedResultFault({ operation: "disk", message: "Scratch directory size unreadable" }),
-  }).pipe(
-    Effect.flatMap((bytes) =>
-      bytes > sealedResultLimits.diskBytes
-        ? Effect.fail(refused("disk_limit", `the bound is ${sealedResultLimits.diskBytes} bytes`))
-        : Effect.void,
-    ),
-  )
+const checks = Semaphore.makeUnsafe(sealedResultLimits.concurrentChecks)
 
 const targetRef = /^refs\/heads\/(?!-)[A-Za-z0-9._/-]{1,200}$/
 
@@ -749,6 +785,8 @@ export const checkSealedResult = (
     const base = target.expectedHead ?? options.sourceSha
     const bundle = checkBundle(result, base)
     if (bundle instanceof SealedResultRefused) return yield* bundle
+    // The permit is held until the scratch directory is gone.
+    yield* Effect.acquireRelease(checks.take(1), () => checks.release(1))
     const scratch = yield* Effect.acquireRelease(
       Effect.tryPromise({
         try: () => mkdtemp(join(options.scratchRoot, "sealed-result-")),
@@ -773,6 +811,7 @@ export const checkSealedResult = (
       binary: options.gitBinary ?? "/usr/bin/git",
       env,
       cwd: scratch,
+      scratch,
       deadline: Date.now() + timeLimitMs,
       timeLimitMs,
       secrets,
@@ -815,7 +854,6 @@ export const checkSealedResult = (
     const commit = yield* git(inRepository, ["cat-file", "-t", bundle.resultSha])
     if (commit.status !== 0 || new TextDecoder().decode(commit.stdout).trim() !== "commit")
       return yield* refused("ref", "the ref of the bundle names no commit of its pack")
-    yield* checkDisk(scratch)
     const commits = yield* checkHistory(inRepository, base, bundle.resultSha)
     yield* checkCommits(inRepository, commits, options.agentGit)
     yield* checkChanges(inRepository, commits, base)

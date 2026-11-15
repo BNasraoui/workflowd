@@ -1,7 +1,17 @@
 import { expect, test } from "bun:test"
 import { Cause, Effect, Exit, Redacted, Schema } from "effect"
-import { chmod, mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises"
-import { createHash } from "node:crypto"
+import {
+  chmod,
+  lstat,
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises"
+import { createHash, randomBytes } from "node:crypto"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { constants as zlibConstants, deflateRawSync, deflateSync } from "node:zlib"
@@ -599,12 +609,15 @@ const deltaSize = (size: number) => {
     if (rest < 128) return Uint8Array.from(bytes)
   }
 }
-const blobId = (content: Uint8Array) =>
+const objectTypes = { commit: 1, tree: 2, blob: 3 } as const
+const objectId = (type: keyof typeof objectTypes, content: Uint8Array) =>
   createHash("sha1")
-    .update(concat(`blob ${content.byteLength}\0`, content))
+    .update(concat(`${type} ${content.byteLength}\0`, content))
     .digest()
-const blobEntry = (content: Uint8Array) =>
-  concat(objectHeader(3, content.byteLength), deflateSync(content))
+const blobId = (content: Uint8Array) => objectId("blob", content)
+const objectEntry = (type: keyof typeof objectTypes, content: Uint8Array) =>
+  concat(objectHeader(objectTypes[type], content.byteLength), deflateSync(content))
+const blobEntry = (content: Uint8Array) => objectEntry("blob", content)
 const refDeltaEntry = (base: Uint8Array, delta: Uint8Array) =>
   concat(objectHeader(7, delta.byteLength), base, deflateSync(delta))
 const pack = (
@@ -763,6 +776,131 @@ test(
       refusedCheck(await publish(await decode(manifest(f.sourceSha), lines(17)), options(f))),
     ).toBe("bundle_format")
   }),
+)
+
+/** A source commit with `mebibytes` MiB of random bytes in big.bin, stored uncompressed in the remote. */
+async function bigSource(f: Fixture, mebibytes: number) {
+  await writeFile(join(f.work, "big.bin"), randomBytes(mebibytes * MiB))
+  await f.git(f.work, "-c", "core.compression=0", "add", "big.bin")
+  await f.git(f.work, "commit", "-q", "-m", "big")
+  await f.git(f.remote, "config", "receive.unpackLimit", "1")
+  await f.git(f.work, "-c", "core.compression=0", "push", "-q", f.remote, "HEAD:refs/heads/main")
+  return f.git(f.work, "rev-parse", "HEAD")
+}
+
+/**
+ * A thin bundle of one commit that adds a 1-byte file as a delta against big.bin of
+ * the source: index-pack --fix-thin copies the whole base into the scratch.
+ */
+async function thinBundle(f: Fixture, sourceSha: string) {
+  const big = await readFile(join(f.work, "big.bin"))
+  const small = big.subarray(0, 1)
+  const entries = (await f.git(f.work, "ls-tree", sourceSha)).split("\n").map((line) => {
+    const [meta, name] = line.split("\t")
+    const [mode, , sha] = meta!.split(" ")
+    return { mode: mode!, name: name!, sha: Buffer.from(sha!, "hex") }
+  })
+  entries.push({ mode: "100644", name: "small.txt", sha: blobId(small) })
+  entries.sort((left, right) => Buffer.compare(Buffer.from(left.name), Buffer.from(right.name)))
+  const tree = concat(...entries.map((entry) => concat(`${entry.mode} ${entry.name}\0`, entry.sha)))
+  const commit = Buffer.from(
+    `tree ${objectId("tree", tree).toString("hex")}\nparent ${sourceSha}\nauthor ${agentLine}\ncommitter ${agentLine}\n\nAdd a small file\n`,
+  )
+  // Copy one byte at offset 0 of the base.
+  const delta = concat(deltaSize(big.byteLength), deltaSize(1), Uint8Array.from([0x90, 0x01]))
+  const packBytes = pack([
+    objectEntry("commit", commit),
+    objectEntry("tree", tree),
+    refDeltaEntry(blobId(big), delta),
+  ])
+  return concat(
+    `# v2 git bundle\n-${sourceSha} base\n${objectId("commit", commit).toString("hex")} refs/workflowd/result\n\n`,
+    packBytes,
+  )
+}
+
+/** The bytes below a directory, read again every few milliseconds while `work` runs. */
+async function peakBytes<A>(directory: string, work: () => Promise<A>) {
+  let peak = 0
+  let sampling = true
+  const size = async () => {
+    let total = 0
+    for (const entry of await readdir(directory, { recursive: true }).catch(() => []))
+      total += await lstat(join(directory, entry)).then(
+        (stat) => stat.size,
+        () => 0,
+      )
+    return total
+  }
+  const sampler = (async () => {
+    while (sampling) {
+      peak = Math.max(peak, await size())
+      await Bun.sleep(2)
+    }
+  })()
+  try {
+    const value = await work()
+    return { value, peak }
+  } finally {
+    sampling = false
+    await sampler
+  }
+}
+
+for (const [name, mebibytes] of [
+  ["a source whose pack is above a third of the disk bound", 70],
+  ["a thin bundle whose bases fill what the source left of the disk bound", 36],
+] as const)
+  test(
+    `the scratch of a check stays below the disk bound at each moment: ${name}`,
+    withFixture(async (f) => {
+      const sourceSha = await bigSource(f, mebibytes)
+      const result = await decode(manifest(sourceSha), await thinBundle(f, sourceSha))
+      const { value: exit, peak } = await peakBytes(f.scratchRoot, () =>
+        publish(result, options(f, { sourceSha })),
+      )
+      expect(peak).toBeGreaterThan(0)
+      expect(peak).toBeLessThan(sealedResultLimits.diskBytes)
+      expect(refusedCheck(exit)).toBe("disk_limit")
+      expect(await remoteRef(f)).toBe("")
+    }),
+    60_000,
+  )
+
+test(
+  `at most ${sealedResultLimits.concurrentChecks} checks hold a scratch directory at one time`,
+  withFixture(async (f) => {
+    const slow = join(f.root, "slow-init-git")
+    await writeFile(
+      slow,
+      '#!/bin/sh\nfor arg; do [ "$arg" = init ] && sleep 1; done\nexec /usr/bin/git "$@"\n',
+    )
+    await chmod(slow, 0o755)
+    const sealed = await sealWithResultPy(f, async (workspace) => {
+      await writeFile(join(workspace, "result.txt"), "content\n")
+    })
+    const result = await decode(sealed.json, sealed.bundle)
+    let most = 0
+    let sampling = true
+    const sampler = (async () => {
+      while (sampling) {
+        most = Math.max(most, (await readdir(f.scratchRoot)).length)
+        await Bun.sleep(5)
+      }
+    })()
+    const runs = Array.from({ length: sealedResultLimits.concurrentChecks + 1 }, (_, index) =>
+      publish(result, options(f, { gitBinary: slow }), undefined, {
+        ref: `refs/heads/agent-run/run-${index}`,
+        expectedHead: null,
+      }),
+    )
+    const exits = await Promise.all(runs)
+    sampling = false
+    await sampler
+    for (const exit of exits) expect(Exit.isSuccess(exit)).toBe(true)
+    expect(most).toBe(sealedResultLimits.concurrentChecks)
+  }),
+  30_000,
 )
 
 test(
