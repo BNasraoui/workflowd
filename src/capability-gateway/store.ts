@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from "node:crypto"
 import { Effect, Schema } from "effect"
 import { SqlClient } from "effect/unstable/sql"
+import { renewalReplacements } from "../../deploy/sandbox/renewal.mjs"
 
 export class CapabilityRefused extends Schema.TaggedError<CapabilityRefused>()(
   "CapabilityRefused",
@@ -36,7 +37,7 @@ const maxSessions = 8
 /** A run token is renewed only in its last 330 seconds: the relay's 180 to 300, and 30 of slack. */
 const renewalWindowMs = 330000
 /** A renewal asked again replaces the successor of one token at most this many times. */
-const maxReplacements = 3
+const maxReplacements = renewalReplacements
 /** A successor must outlive its predecessor by this much, so renewals near the deadline end. */
 const minimumExtensionMs = 60000
 const SessionPolicy = Schema.Struct({

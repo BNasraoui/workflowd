@@ -2,6 +2,7 @@ import { expect, test } from "bun:test"
 import { mkdtemp, writeFile, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
+import { fixtureExecutable } from "../helpers/fixture-executable.mjs"
 
 const root = resolve(import.meta.dir, "../..")
 
@@ -223,6 +224,48 @@ test("release logs out even when container cleanup fails and preserves the failu
     expect(await Bun.file(join(directory, "calls")).text()).toBe(
       "tailscale logout\nsystemctl stop workflowd-tailscaled\n",
     )
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
+test("the hold of a session fails with the reason renewal when the relay ended on a failed renewal", async () => {
+  const source = await Bun.file(`${root}/deploy/sandbox/runner.sh`).text()
+  const script = source.split("    python3 -c '\n")[1]?.split('\n\' "$1"')[0]
+  if (!script?.includes('Path("/run/workflowd-sandbox")')) throw new Error("Missing hold script")
+  const directory = await mkdtemp(join(tmpdir(), "sandbox-hold-relay-"))
+  try {
+    const ended = Bun.spawn(["true"])
+    await ended.exited
+    await writeFile(join(directory, "execution-mode"), "actions-native")
+    await writeFile(join(directory, "relay.pid"), String(ended.pid))
+    await writeFile(join(directory, "native-deadline"), String(Date.now() + 600000))
+    const hold = script.replace(
+      'Path("/run/workflowd-sandbox")',
+      `Path(${JSON.stringify(directory)})`,
+    )
+    const receipt = async () => {
+      const child = Bun.spawn(
+        [
+          fixtureExecutable("node"),
+          `${root}/deploy/sandbox/public-output.mjs`,
+          "audit",
+          "--",
+          "python3",
+          "-c",
+          hold,
+          "hold",
+        ],
+        { env: { PATH: "/usr/bin:/bin" }, stdout: "pipe", stderr: "pipe" },
+      )
+      const [code, stdout] = await Promise.all([child.exited, new Response(child.stdout).text()])
+      const { outcome, reason } = JSON.parse(stdout)
+      return { code, outcome, reason }
+    }
+    // A relay that ends with no reason (the run finished its work or its deadline) is not a fault.
+    expect(await receipt()).toEqual({ code: 0, outcome: "ok", reason: "none" })
+    await writeFile(join(directory, "relay-ended"), "renewal\n")
+    expect(await receipt()).toEqual({ code: 1, outcome: "failed", reason: "renewal" })
   } finally {
     await rm(directory, { recursive: true, force: true })
   }

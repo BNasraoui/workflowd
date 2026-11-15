@@ -338,7 +338,7 @@ provider acceptance or complete the Phase 4 mint cutover.
 
 
 Before Phase 4, the Claude CLI used by agents (`launch.claude`, normally
-`/usr/local/bin/claude`) must match the credential tests' pinned 2.1.296, or the
+`/usr/local/bin/claude`) must match the version in `test/resources/claude-code-version`, or the
 credential refresh/relink tests must be re-run at mint's installed version
 (2.1.299 at review) and the pin raised. Ben's Claude shares that credential file:
 disable its auto-update or re-run the credential tests after each version change.

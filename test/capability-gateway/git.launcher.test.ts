@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test"
+import { gitHttpBackend } from "./git-backend"
 import { Effect } from "effect"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
 import { mkdtemp, mkdir, writeFile, rm, readFile } from "node:fs/promises"
@@ -9,49 +10,13 @@ import { makeCapabilityGateway } from "../../src/capability-gateway/service"
 import { makeTokenBroker } from "../../src/worker-identity/broker"
 import { bindRunSession, seedCapabilityRun } from "./fixture"
 import { fixtureExecutable } from "../helpers/fixture-executable.mjs"
+import { loopbackCertificate, portOf } from "../helpers/loopback-tls"
 import { capabilityApi, capabilityHttpServer } from "../../src/capability-gateway/http"
-import { connect, createServer, type AddressInfo } from "node:net"
+import { connect, createServer } from "node:net"
 import { createServer as tlsServer } from "node:tls"
 import { once } from "node:events"
 
 /** The bound port of a listening TCP server. */
-function portOf(server: { address(): string | AddressInfo | null }) {
-  const address = server.address()
-  if (address === null || typeof address === "string") throw new Error("listener unavailable")
-  return address.port
-}
-
-/** A self-signed certificate for 127.0.0.1: the gateway's TLS on loopback. */
-async function loopbackCertificate(root: string) {
-  const key = join(root, "tls.key")
-  const cert = join(root, "tls.pem")
-  const child = Bun.spawn(
-    [
-      "/usr/bin/openssl",
-      "req",
-      "-x509",
-      "-newkey",
-      "ec",
-      "-pkeyopt",
-      "ec_paramgen_curve:prime256v1",
-      "-nodes",
-      "-keyout",
-      key,
-      "-out",
-      cert,
-      "-days",
-      "1",
-      "-subj",
-      "/CN=127.0.0.1",
-      "-addext",
-      "subjectAltName=IP:127.0.0.1",
-    ],
-    { stdin: "ignore", stdout: "ignore", stderr: "pipe" },
-  )
-  if ((await child.exited) !== 0) throw new Error(await new Response(child.stderr).text())
-  return { key, cert }
-}
-
 async function git(cwd: string, ...args: string[]) {
   const child = Bun.spawn(
     ["git", "-c", "http.extraHeader=Authorization: Bearer workflowd-local", ...args],
@@ -100,38 +65,9 @@ for (const authenticated of [false, true])
       port: 0,
       async fetch(request) {
         calls++
-        const url = new URL(request.url)
-        const child = Bun.spawn(["git", "http-backend"], {
-          env: {
-            ...process.env,
-            GIT_PROJECT_ROOT: root,
-            GIT_HTTP_EXPORT_ALL: "1",
-            PATH_INFO: url.pathname,
-            QUERY_STRING: url.search.slice(1),
-            REQUEST_METHOD: request.method,
-            CONTENT_TYPE: request.headers.get("content-type") ?? "",
-            GIT_PROTOCOL: request.headers.get("git-protocol") ?? "",
-          },
-          stdin: request.method === "POST" ? new Blob([await request.arrayBuffer()]) : "ignore",
-          stdout: "pipe",
-          stderr: "pipe",
-        })
-        const [bytes, errors, exit] = await Promise.all([
-          new Response(child.stdout).arrayBuffer(),
-          new Response(child.stderr).text(),
-          child.exited,
-        ])
-        expect(exit).toBe(0)
-        expect(errors).toBe("")
-        const output = Buffer.from(bytes),
-          split = output.indexOf("\r\n\r\n")
-        expect(split).toBeGreaterThan(0)
-        const headers = new Headers()
-        for (const line of output.subarray(0, split).toString().split("\r\n")) {
-          const colon = line.indexOf(":")
-          headers.set(line.slice(0, colon), line.slice(colon + 1).trim())
-        }
-        return new Response(output.subarray(split + 4), { headers })
+        const response = await gitHttpBackend(root, request)
+        expect(response.status).toBe(200)
+        return response
       },
     })
     const tls = await loopbackCertificate(root)

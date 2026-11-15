@@ -1,9 +1,11 @@
 import { createServer as httpServer } from "node:http"
 import { Agent, request as httpsRequest } from "node:https"
 import { pipeline } from "node:stream"
+import { writeFileSync } from "node:fs"
 import { chmod } from "node:fs/promises"
 import { pathToFileURL } from "node:url"
 import { gatewayOrigin } from "./bootstrap-helper.mjs"
+import { renewalRequests } from "./renewal.mjs"
 
 const root = "/run/workflowd-sandbox"
 
@@ -186,24 +188,32 @@ export async function serveRunnerRelay(config, directory = root) {
       expiry = setTimeout(stop, next.expiresAt - Date.now())
       renewal = setTimeout(renew, next.renewAt - Date.now())
     } catch {
-      const remaining = credential.expiresAt - Date.now()
       if (closed) return
-      if (!retryable || remaining <= 0) {
-        stop()
+      // Retry only renewal of the same predecessor, never inference, and never more often than
+      // the gateway permits. A refusal, or the last permitted request failing, ends the session.
+      failures++
+      const remaining = credential.expiresAt - Date.now()
+      const delay = Math.min(30000, 1000 * 2 ** (failures - 1))
+      const jittered = delay + Math.floor((Math.random() * delay) / 4)
+      if (!retryable || failures >= renewalRequests || jittered >= remaining) {
+        end("renewal")
         return
       }
-      // Retry only renewal of the same predecessor, never inference. Exhaustion
-      // leaves existing authority usable until its original expiry timer fires.
-      if (failures++ < 6) {
-        const delay = Math.min(30000, 1000 * 2 ** (failures - 1))
-        const jittered = delay + Math.floor((Math.random() * delay) / 4)
-        if (jittered < remaining) renewal = setTimeout(renew, jittered)
-      }
+      renewal = setTimeout(renew, jittered)
     }
   }
   renewal = setTimeout(renew, Math.max(0, credential.renewAt - Date.now()))
   const deadline = setTimeout(() => stop(), Math.max(0, config.deadline - Date.now()))
   let expiry = setTimeout(() => stop(), Math.max(0, config.expiresAt - Date.now()))
+  /** Ends the session and leaves its fixed reason for the job's hold step. */
+  function end(reason) {
+    try {
+      writeFileSync(`${directory}/relay-ended`, `${reason}\n`, { mode: 0o600 })
+    } catch {
+      // The hold still sees the relay end; only the reason is lost.
+    }
+    stop()
+  }
   function stop() {
     if (closed) return
     closed = true

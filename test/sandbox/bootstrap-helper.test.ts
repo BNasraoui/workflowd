@@ -241,7 +241,7 @@ await prepare({
   }
 }, 30000)
 
-test("a challenge is waited for after a 503, a refused connection, a reset and a timeout, and after nothing else", async () => {
+test("a challenge is waited for after a 503, a refused connection, a reset, a timeout and a name that does not resolve yet, and after nothing else", async () => {
   const closed = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response() })
   const refusedUrl = `http://127.0.0.1:${closed.port}/`
   await closed.stop(true)
@@ -256,6 +256,17 @@ test("a challenge is waited for after a 503, a refused connection, a reset and a
     const faults: Array<() => Promise<Response>> = [
       () => fetch(refusedUrl),
       () => fetch(resetUrl),
+      // The gateway's name before the runner has joined the tailnet, as Node's fetch and Bun's
+      // fetch report it.
+      () =>
+        Promise.reject(
+          Object.assign(new TypeError("fetch failed"), { cause: { code: "ENOTFOUND" } }),
+        ),
+      () => Promise.reject(Object.assign(new TypeError("fetch failed"), { code: "ENOTFOUND" })),
+      () =>
+        Promise.reject(
+          Object.assign(new TypeError("fetch failed"), { cause: { code: "EAI_AGAIN" } }),
+        ),
       () => Promise.reject(new DOMException("The operation timed out.", "TimeoutError")),
       async () => new Response(null, { status: 503 }),
     ]
@@ -273,7 +284,14 @@ test("a challenge is waited for after a 503, a refused connection, a reset and a
         },
       })
     expect(await open((url, init) => faults.shift()?.() ?? gateway.send(url, init))).toEqual(grant)
-    expect(waits).toHaveLength(4)
+    expect(waits).toHaveLength(7)
+    expect(proofs).toBe(1)
+    waits.length = 0
+    // A name that never resolves is waited for only inside the same total limit.
+    const unresolved = () =>
+      Promise.reject(Object.assign(new TypeError("fetch failed"), { cause: { code: "ENOTFOUND" } }))
+    await expect(open(unresolved)).rejects.toThrow("gateway session unavailable")
+    expect(waits.reduce((sum, wait) => sum + wait, 0)).toBe(180000)
     expect(proofs).toBe(1)
     waits.length = 0
     for (const answer of [
@@ -287,7 +305,7 @@ test("a challenge is waited for after a 503, a refused connection, a reset and a
   } finally {
     reset.close()
   }
-})
+}, 30000)
 
 test("OIDC authority is removed before launch, consumed once, and refuses hostile origins", async () => {
   for (const origin of [

@@ -1,13 +1,14 @@
 import { expect, test } from "bun:test"
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
+import { readFileSync } from "node:fs"
 import { join } from "node:path"
 import { claudeBetas } from "../../src/capability-gateway/claude"
 import { fixtureExecutable } from "../helpers/fixture-executable.mjs"
 import { client, processGateway, proof, sse, withGateway } from "./gateway-process"
 
-/** The Claude Code that CI pins (`ci.yml`, "Install pinned native sandbox CLIs"). */
-const pinned = "2.1.296 (Claude Code)"
+/** The one Claude Code version of the repository, which CI installs. */
+const pinned = `${readFileSync("test/resources/claude-code-version", "utf8").trim()} (Claude Code)`
 const claude = fixtureExecutable("claude")
 
 /** A request that the pinned client sent: its anthropic-beta values and its body text. */

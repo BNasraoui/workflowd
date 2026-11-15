@@ -1,39 +1,11 @@
 import { expect, test } from "bun:test"
-import { mkdtemp, rm } from "node:fs/promises"
+import { mkdtemp, readFile, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
+import { client, processGateway, proof, withGateway } from "../capability-gateway/gateway-process"
+import { renewalRequests } from "../../deploy/sandbox/renewal.mjs"
 import { fixtureExecutable } from "../helpers/fixture-executable.mjs"
-
-/** A self-signed certificate for 127.0.0.1: the gateway's TLS on loopback. */
-async function loopbackCertificate(root: string) {
-  const key = join(root, "tls.key")
-  const cert = join(root, "tls.pem")
-  const child = Bun.spawn(
-    [
-      "/usr/bin/openssl",
-      "req",
-      "-x509",
-      "-newkey",
-      "ec",
-      "-pkeyopt",
-      "ec_paramgen_curve:prime256v1",
-      "-nodes",
-      "-keyout",
-      key,
-      "-out",
-      cert,
-      "-days",
-      "1",
-      "-subj",
-      "/CN=127.0.0.1",
-      "-addext",
-      "subjectAltName=IP:127.0.0.1",
-    ],
-    { stdin: "ignore", stdout: "ignore", stderr: "pipe" },
-  )
-  if ((await child.exited) !== 0) throw new Error(await new Response(child.stderr).text())
-  return { key, cert }
-}
+import { loopbackCertificate, tlsFront } from "../helpers/loopback-tls"
 
 for (const scenario of ["headers", "renewal", "git-refs", "git-upload"] as const) {
   test(`R6/R7: relay survives ${scenario} failure and serves the next valid request`, async () => {
@@ -199,3 +171,57 @@ test("the relay refuses a gateway that is not an HTTPS origin", async () => {
     await rm(root, { recursive: true, force: true })
   }
 })
+
+test("the relay asks one renewal no more often than the gateway permits, and its last failure ends the session with a logged reason", async () => {
+  await withGateway(processGateway, async (f, gateway) => {
+    const root = await mkdtemp(join(tmpdir(), "relay-renewals-"))
+    const tls = await loopbackCertificate(root)
+    // Each renewal that the gateway grants is lost on the way back: the gateway has replaced the
+    // successor, the relay never gets it.
+    const renewals: Array<number | undefined> = []
+    const front = await tlsFront(tls, gateway.port, (path, status) => {
+      if (path !== "/capabilities/v1/renew") return false
+      renewals.push(status)
+      return status === 200
+    })
+    const runner = client(gateway.port)
+    try {
+      // A token that lives 180 seconds is due for renewal at once: renewAt is 180 to 300 seconds
+      // before its expiry, and never later.
+      await f.tokenSeconds(180)
+      const { audience } = await runner.audience()
+      const answer = await runner.session(proof(audience, "jti-relay"))
+      expect(answer.status).toBe(200)
+      const grant = await runner.grant(answer)
+      // Each successor outlives its predecessor, so the gateway grants each permitted renewal.
+      await f.tokenSeconds(300)
+      const child = Bun.spawn(
+        [
+          fixtureExecutable("node"),
+          resolve("test/sandbox/fixtures/capability-job.mjs"),
+          "runner",
+          root,
+        ],
+        {
+          env: { PATH: "/usr/bin:/bin", HOME: root, NODE_EXTRA_CA_CERTS: tls.cert },
+          stdin: new Blob([
+            JSON.stringify({ ...grant, gateway: `https://127.0.0.1:${front.port}` }),
+          ]),
+          stdout: "pipe",
+          stderr: "pipe",
+        },
+      )
+      // The relay ends by itself once its last permitted renewal is lost.
+      const ended = await Promise.race([child.exited, Bun.sleep(25000).then(() => "live")])
+      child.kill("SIGKILL")
+      expect(ended).toBe(0)
+      // The gateway permits one successor and three replacements of it: four renewals, all granted.
+      expect(renewalRequests).toBe(4)
+      expect(renewals).toEqual(Array.from({ length: renewalRequests }, () => 200))
+      expect(await readFile(join(root, "relay-ended"), "utf8")).toBe("renewal\n")
+    } finally {
+      front.close()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+}, 40000)

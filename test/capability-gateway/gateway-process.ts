@@ -274,38 +274,72 @@ export interface Gateway {
   stop(): Promise<void>
 }
 
-/** The gateway as its own process: its real entry and network listener, with the fixture's servers. */
-export async function processGateway(f: Fixture): Promise<Gateway> {
-  const child = Bun.spawn(
-    [
-      process.execPath,
-      "-e",
-      `import { runCapabilityGatewayServer } from ${JSON.stringify(resolve("src/capability-gateway-server.ts"))}
+/**
+ * The `bun -e` source of a gateway process: the real entry `src/capability-gateway-server.ts`,
+ * which reads its configuration from the environment, with the job keys of the fixture key
+ * server at `keysUrl` and the model upstream at `upstreamUrl` in place of api.anthropic.com.
+ */
+export const gatewaySource = (servers: {
+  readonly keysUrl: string
+  readonly upstreamUrl: string
+}) =>
+  `import { runCapabilityGatewayServer } from ${JSON.stringify(resolve("src/capability-gateway-server.ts"))}
 import { Effect } from "effect"
 Effect.runFork(runCapabilityGatewayServer(process.env, {
-  keys: async (signal) => (await fetch(${JSON.stringify(f.keysUrl)}, { signal })).json(),
-  upstream: (url, init) => fetch(url.replace("https://api.anthropic.com", ${JSON.stringify(f.upstreamUrl)}), init),
-}))`,
-    ],
-    { cwd: resolve("."), env: f.env, stdout: "pipe", stderr: "inherit" },
-  )
-  const reader = child.stdout.getReader()
-  let text = ""
-  while (!text.includes("\n")) {
-    const part = await reader.read()
-    if (part.done) throw new Error("gateway process exited before listening")
-    text += Buffer.from(part.value).toString()
-  }
-  reader.releaseLock()
+  keys: async (signal) => (await fetch(${JSON.stringify(servers.keysUrl)}, { signal })).json(),
+  upstream: (url, init) => fetch(url.replace("https://api.anthropic.com", ${JSON.stringify(servers.upstreamUrl)}), init),
+}))`
+
+/**
+ * Starts a gateway process from `argv` and `env`, in the repository root, and returns once its
+ * standard output has given the line `listening <port>`. It fails, and leaves no process, when
+ * the process ends first. `stop` kills the process and waits for its end.
+ */
+export async function startGatewayProcess(
+  argv: ReadonlyArray<string>,
+  env: Readonly<Record<string, string | undefined>>,
+): Promise<Gateway> {
+  const child = Bun.spawn([...argv], {
+    cwd: resolve("."),
+    env: { ...env },
+    stdout: "pipe",
+    stderr: "inherit",
+  })
   const stop = async () => {
     child.kill("SIGKILL")
     await child.exited
   }
-  await f.reconcile().catch(async (error: unknown) => {
+  const reader = child.stdout.getReader()
+  let text = ""
+  let port: number | undefined
+  try {
+    while (port === undefined) {
+      const part = await reader.read()
+      if (part.done) throw new Error("gateway process exited before listening")
+      text += Buffer.from(part.value).toString()
+      const listening = /^listening (\d+)\n/m.exec(text)?.[1]
+      if (listening !== undefined) port = Number(listening)
+    }
+  } catch (error) {
     await stop()
     throw error
+  } finally {
+    reader.releaseLock()
+  }
+  return { port, stop }
+}
+
+/**
+ * The gateway as its own process: its real entry and network listener, with the fixture's servers.
+ * Once it listens, workflowd's side grants its live runs on the control socket.
+ */
+export async function processGateway(f: Fixture): Promise<Gateway> {
+  const gateway = await startGatewayProcess([process.execPath, "-e", gatewaySource(f)], f.env)
+  await f.reconcile().catch(async (error: unknown) => {
+    await gateway.stop()
+    throw error
   })
-  return { port: Number(/^listening (\d+)$/m.exec(text)?.[1]), stop }
+  return gateway
 }
 
 /** The same server and listener in this process, so its routes count toward coverage. */

@@ -7,6 +7,30 @@ import { capabilityDigest, makeCapabilityStore } from "../../src/capability-gate
 import { randomBytes } from "node:crypto"
 import { runGatewayMigrations } from "../../src/capability-gateway/migrations"
 import { liveGrants } from "../../src/capability-gateway/control-client"
+import { mkdir, writeFile } from "node:fs/promises"
+import { join, resolve } from "node:path"
+
+/**
+ * The noscope providers of a gateway test under `root`: run tokens from the real run-capability
+ * provider, and a fixed provider credential that lives `accessMs`.
+ */
+export async function writeNoscopeProviders(root: string, accessMs: number) {
+  await mkdir(join(root, "noscope/providers"), { recursive: true, mode: 0o700 })
+  await writeFile(
+    join(root, "noscope/providers/run-capability.toml"),
+    `contract_version = 1\n[commands]\nmint = "${process.execPath} ${resolve("src/capability-gateway/noscope-provider.ts")} run {ttl}"\n`,
+    { mode: 0o600 },
+  )
+  await writeFile(
+    join(root, "access.mjs"),
+    `process.stdout.write(JSON.stringify({token:"fixture-access",token_id:"fixture",expires_at:new Date(Date.now()+${accessMs}).toISOString()}))`,
+  )
+  await writeFile(
+    join(root, "noscope/providers/provider-access.toml"),
+    `contract_version = 1\n[commands]\nmint = "${process.execPath} ${join(root, "access.mjs")}"\n`,
+    { mode: 0o600 },
+  )
+}
 
 /**
  * workflowd grants each of its live native runs to the gateway store, as its control client does

@@ -110,3 +110,71 @@ if name=='systemd-run': sys.exit(subprocess.run(sys.argv[sys.argv.index('cargo')
     await rm(root, { recursive: true, force: true })
   }
 }, 15000)
+
+/** The steps of `job` in the CI workflow, by name. */
+async function ciSteps(job: string) {
+  const workflow = Schema.decodeUnknownSync(
+    Schema.Struct({
+      jobs: Schema.Record(
+        Schema.String,
+        // A job that calls a reusable workflow has no steps of its own.
+        Schema.Struct({
+          steps: Schema.optionalKey(
+            Schema.Array(
+              Schema.Struct({ name: Schema.String, run: Schema.optionalKey(Schema.String) }),
+            ),
+          ),
+        }),
+      ),
+    }),
+  )(Bun.YAML.parse(await Bun.file(".github/workflows/ci.yml").text()))
+  return workflow.jobs[job]?.steps ?? []
+}
+
+test("the tests job and the credential-host job run the one copy of their shared setup", async () => {
+  const shared = ["clients", "namespaces", "identities"].map(
+    (phase) => `bash scripts/evidence/credential-host-setup.sh ${phase}`,
+  )
+  for (const job of ["tests", "credential-host"]) {
+    const runs = (await ciSteps(job)).map((step) => step.run)
+    expect(shared.filter((run) => runs.includes(run))).toEqual(shared)
+  }
+  // No CI step names a Claude Code version or installs Claude Code itself.
+  const source = await Bun.file(".github/workflows/ci.yml").text()
+  expect(source).not.toMatch(/claude-code@|\(Claude Code\)/)
+})
+
+test("the shared setup installs the one Claude Code version that the repository names", async () => {
+  const pinned = (await readFile("test/resources/claude-code-version", "utf8")).trim()
+  expect(pinned).toMatch(/^\d+\.\d+\.\d+$/)
+  const root = await mkdtemp(join(tmpdir(), "ci-clients-"))
+  try {
+    const bin = join(root, "bin")
+    await mkdir(bin)
+    const calls = join(root, "calls")
+    const shims: Record<string, string> = {
+      bun: `printf '%s\\n' "$*" >> ${JSON.stringify(calls)}`,
+      opencode2: "exit 0",
+      sha256sum: "cat >/dev/null",
+      codex: "echo 'codex-cli 0.159.1'",
+      claude: `echo '${pinned} (Claude Code)'`,
+    }
+    for (const [name, body] of Object.entries(shims))
+      await writeFile(join(bin, name), `#!/bin/bash\n${body}\n`, { mode: 0o755 })
+    const child = Bun.spawn(
+      ["/bin/bash", resolve("scripts/evidence/credential-host-setup.sh"), "clients"],
+      {
+        env: { PATH: `${bin}:/usr/bin:/bin` },
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    )
+    expect(await child.exited).toBe(0)
+    const installs = (await readFile(calls, "utf8")).trim().split("\n")
+    expect(installs.filter((line) => line.includes("claude-code"))).toEqual([
+      `add --global --trust @openai/codex@0.159.1 @anthropic-ai/claude-code@${pinned}`,
+    ])
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})

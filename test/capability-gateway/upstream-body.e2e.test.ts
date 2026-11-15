@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test"
+import { readFileSync } from "node:fs"
 import { claudeBetas } from "../../src/capability-gateway/claude"
 import { client, gateways, proof, sse, withGateway, type Fixture } from "./gateway-process"
 
@@ -18,7 +19,7 @@ const pinnedHeaders = {
   accept: "application/json",
   "anthropic-beta": [...claudeBetas].join(","),
   "anthropic-dangerous-direct-browser-access": "true",
-  "user-agent": "claude-cli/2.1.296 (external, sdk-cli)",
+  "user-agent": `claude-cli/${readFileSync("test/resources/claude-code-version", "utf8").trim()} (external, sdk-cli)`,
   "x-app": "cli",
   "x-claude-code-session-id": "3f2b8c1e-4a5d-4e6f-8a7b-9c0d1e2f3a4b",
   "x-stainless-arch": "x64",
@@ -50,6 +51,30 @@ for (const [mode, start] of gateways) {
       const body = sent(f)[0]!.body
       expect(members(body, "model")).toBe(1)
       expect(JSON.parse(body)).toEqual({ model: "fixture-model", stream: true, messages: [] })
+    })
+  }, 60000)
+
+  test(`[${mode}] a number that its JSON text would change is refused; one that keeps its value is sent`, async () => {
+    await withGateway(start, async (f, gateway) => {
+      const token = await runToken(gateway.port)
+      for (const number of ["9007199254740993", "1e400", "1e-400", "0.10000000000000000000001"])
+        expect(
+          (
+            await client(gateway.port).provider(
+              token,
+              `{"model":"fixture-model","stream":true,"messages":[],"max_tokens":${number}}`,
+            )
+          ).status,
+        ).toBe(403)
+      expect(sent(f)).toEqual([])
+      const answer = await client(gateway.port).provider(
+        token,
+        '{"model":"fixture-model","stream":true,"messages":[],"temperature":1.0,"top_k":1e3,"top_p":-0.5E0,"max_tokens":9007199254740992}',
+      )
+      expect(answer.status).toBe(200)
+      expect(sent(f).map((request) => request.body)).toEqual([
+        '{"model":"fixture-model","stream":true,"messages":[],"temperature":1,"top_k":1000,"top_p":-0.5,"max_tokens":9007199254740992}',
+      ])
     })
   }, 60000)
 
