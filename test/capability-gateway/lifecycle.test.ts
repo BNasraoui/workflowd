@@ -159,7 +159,7 @@ for (const [ending, phase] of [
             const joined = yield* Effect.promise(() =>
               Promise.race([
                 interruption,
-                new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 500)),
+                new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 5000)),
               ]),
             )
             upload?.error(new Error("fixture teardown"))

@@ -439,3 +439,24 @@ export async function withGateway(
     await f.close()
   }
 }
+
+/**
+ * "ended" once the stream of `reader` is done or fails within `within` milliseconds, reading
+ * past each data chunk; "live" when it has not ended by then.
+ */
+export async function streamEnd(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  within: number,
+): Promise<"ended" | "live"> {
+  const deadline = Bun.sleep(within).then(() => "live" as const)
+  for (;;) {
+    const next = await Promise.race([
+      reader.read().then(
+        (item) => (item.done ? ("ended" as const) : ("chunk" as const)),
+        () => "ended" as const,
+      ),
+      deadline,
+    ])
+    if (next !== "chunk") return next
+  }
+}

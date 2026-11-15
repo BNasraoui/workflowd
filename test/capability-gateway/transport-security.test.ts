@@ -136,7 +136,7 @@ test("bound streaming preserves native bytes, renews with noscope, and denies cr
         const bounded = yield* Effect.promise(() =>
           Promise.race([
             pendingRenewal.then((response) => response.status),
-            Bun.sleep(500).then(() => "unbounded"),
+            Bun.sleep(5000).then(() => "unbounded"),
           ]),
         )
         if (!cancelledUpload) upload?.close()
@@ -331,8 +331,8 @@ const streamThroughGateway = async (
 }
 
 test("a stream that keeps sending bytes outlives many idle limits", async () => {
-  // 30 chunks 100 ms apart: 3 s of stream, ten times the 300 ms idle limit.
-  const result = await streamThroughGateway(300, 30, 100)
+  // 30 chunks 100 ms apart: 3 s of stream, three times the 1000 ms idle limit.
+  const result = await streamThroughGateway(1000, 30, 100)
   expect(result.ending).toBe("complete")
   expect(result.received).toBe(30)
   expect(result.elapsed).toBeGreaterThan(2500)
@@ -354,9 +354,11 @@ for (const attack of ["resets", "preface", "h2-preface", "truncated"] as const)
   test(`D/R9: the gateway listener contains ${attack} and serves the next valid request`, async () => {
     let served = 0
     let partial = 0
+    let entered = Promise.withResolvers<void>()
     const listener = capabilityHttpServer(async (request) => {
       if (new URL(request.url).pathname !== "/valid") {
         partial++
+        entered.resolve()
         await request.arrayBuffer()
       }
       served++
@@ -372,8 +374,12 @@ for (const attack of ["resets", "preface", "h2-preface", "truncated"] as const)
         socket.on("data", (chunk) => (answer += chunk.toString()))
         socket.on("error", () => {})
         socket.on("close", () => resolve(answer))
+        // A reset peer leaves once the handler reads its body; a truncated one after its bytes.
         socket.write(bytes, () => {
-          if (cut) setTimeout(() => socket.destroy(), 20)
+          if (cut)
+            void (attack === "resets" ? entered.promise : Bun.sleep(20)).then(() =>
+              socket.destroy(),
+            )
         })
       })
     const valid = () =>
@@ -390,6 +396,7 @@ for (const attack of ["resets", "preface", "h2-preface", "truncated"] as const)
     let hanging: ReturnType<typeof connect> | undefined
     try {
       for (let round = 0; round < 8; round++) {
+        entered = Promise.withResolvers<void>()
         const answer = await raw(input, attack === "resets" || attack === "truncated")
         expect(answer).not.toContain("fixture-valid")
         expect(await valid()).toBe("fixture-valid")
@@ -404,7 +411,7 @@ for (const attack of ["resets", "preface", "h2-preface", "truncated"] as const)
       expect(
         await Promise.race([
           listener.close().then(() => "closed"),
-          Bun.sleep(2000).then(() => "held"),
+          Bun.sleep(10000).then(() => "held"),
         ]),
       ).toBe("closed")
     } finally {

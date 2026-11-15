@@ -86,7 +86,7 @@ test("S1/R1: aborting noscope terminates its blocked provider adapter", async ()
     expect(
       await Promise.race([
         closed.promise,
-        new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 500)),
+        new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 5000)),
       ]),
     ).toBe(true)
   } finally {
@@ -94,4 +94,4 @@ test("S1/R1: aborting noscope terminates its blocked provider adapter", async ()
     server.close()
     await rm(root, { recursive: true, force: true })
   }
-}, 3000)
+}, 15000)

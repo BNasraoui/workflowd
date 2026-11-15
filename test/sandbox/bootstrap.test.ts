@@ -71,6 +71,9 @@ test("signature, immutable job context and fresh challenge are all required", ()
   expect(
     verifyJobProof(token({ iat: now / 1000 + 10, nbf: now / 1000 + 10 }), expected, jwks, now).jti,
   ).toBe("fixture-jti")
+  // One millisecond more ahead, by a clock one millisecond behind, it is refused.
+  for (const ahead of [{ iat: now / 1000 + 10 }, { nbf: now / 1000 + 10 }])
+    expect(() => verifyJobProof(token(ahead), expected, jwks, now - 1)).toThrow("job proof refused")
   expect(verifyJobProof(token({}, { x5t: "thumbprint" }), expected, jwks, now).jti).toBe(
     "fixture-jti",
   )
