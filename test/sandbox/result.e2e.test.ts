@@ -489,6 +489,8 @@ const native = {
   finalMessage: "Done.",
 }
 const secret = "fixture-sensitive-value-93b28a5d"
+// The identity the daemon gives agent runs; the seal commits with it.
+const identity = { name: "Fixture Agent", email: "agent@example.invalid" }
 
 async function nativeSource(root: string) {
   const work = join(root, "work")
@@ -515,12 +517,12 @@ const nativeSeal = async (root: string, source: string, request: unknown) => {
     stdout: "pipe",
     stderr: "pipe",
   })
-  const [status, stdout] = await Promise.all([
+  const [status, stdout, stderr] = await Promise.all([
     child.exited,
     new Response(child.stdout).text(),
     new Response(child.stderr).text(),
   ])
-  return { status, stdout }
+  return { status, stdout, stderr: stderr.trim() }
 }
 
 test("native export restores only bounded regular files and drops .git", async () => {
@@ -585,17 +587,22 @@ for (const variant of ["ignored", "selected", "negative size"] as const)
     }
   })
 
-for (const variant of [
-  "ordinary",
-  "encoded canary",
-  "metadata canary",
-  "symlink",
-  "forbidden path",
-  "branch key",
-  "missing final message",
-  "NUL in the final message",
-  "newline in the title",
-] as const)
+// Each refused variant and the reason the seal gives for it.
+const refusedSeals = new Map([
+  ["encoded canary", "Sensitive public content"],
+  ["metadata canary", "Sensitive public content"],
+  ["symlink", "Selected export link"],
+  ["forbidden path", "Unsafe path component"],
+  ["branch key", "Invalid native metadata"],
+  ["missing final message", "Invalid native metadata"],
+  ["NUL in the final message", "Invalid final message"],
+  ["newline in the title", "Invalid publication text"],
+  ["an identity with an angle bracket", "Invalid identity"],
+  ["no identity", "Invalid native request"],
+])
+const sealVariants = ["ordinary", ...refusedSeals.keys()]
+
+for (const variant of sealVariants)
   test(`native seal checks before it writes a result: ${variant}`, async () => {
     const root = await mkdtemp(join(tmpdir(), "native-seal-"))
     try {
@@ -626,7 +633,9 @@ for (const variant of [
       )
       if (variant === "symlink") {
         // A selected link is refused at export, before any seal.
-        await expect(exported).rejects.toThrow()
+        await expect(exported).rejects.toThrow(
+          `Sandbox result sealing failed: ${refusedSeals.get("symlink")}`,
+        )
         expect(await Bun.file(join(root, "result")).exists()).toBe(false)
         return
       }
@@ -642,13 +651,18 @@ for (const variant of [
         "NUL in the final message": { ...native, finalMessage: "a\u0000b" },
         "newline in the title": { ...native, title: "one\ntwo" },
       }
+      const identities: Record<string, unknown> = {
+        "an identity with an angle bracket": { name: "Fixture <Agent>", email: identity.email },
+      }
       const sealed = await nativeSeal(root, source, {
         completion: completions[variant] ?? native,
         sensitiveValues: [secret],
+        ...(variant === "no identity" ? {} : { identity: identities[variant] ?? identity }),
       })
       expect(await Bun.file(join(root, "executed")).exists()).toBe(false)
       if (variant !== "ordinary") {
         expect(sealed.status).not.toBe(0)
+        expect(sealed.stderr).toBe(`Sandbox result sealing failed: ${refusedSeals.get(variant)}`)
         expect(await Bun.file(join(root, "result/result.bundle")).exists()).toBe(false)
         expect(await Bun.file(join(root, "result/result.json")).exists()).toBe(false)
         return
@@ -656,7 +670,9 @@ for (const variant of [
       expect(sealed.status).toBe(0)
       const json = await Bun.file(join(root, "result/result.json")).bytes()
       const bundle = await Bun.file(join(root, "result/result.bundle")).bytes()
-      expect(JSON.parse(new TextDecoder().decode(json))).toEqual({ sourceSha: source, ...native })
+      // The commit message is in the commit object only.
+      const { commitMessage: _commitMessage, ...wording } = native
+      expect(JSON.parse(new TextDecoder().decode(json))).toEqual({ sourceSha: source, ...wording })
       const metadata = Schema.decodeUnknownSync(
         Schema.Struct({
           sourceSha: Schema.String,
@@ -688,9 +704,9 @@ for (const variant of [
       expect(await command(["git", "log", "-1", "--format=%B", "result"], clean)).toBe(
         native.commitMessage,
       )
-      expect(await command(["git", "show", "-s", "--format=%an <%ae>", "result"], clean)).toBe(
-        "Workflowd Agent <agent@workflowd.invalid>",
-      )
+      expect(
+        await command(["git", "show", "-s", "--format=%an <%ae>%n%cn <%ce>", "result"], clean),
+      ).toBe(`${identity.name} <${identity.email}>\n${identity.name} <${identity.email}>`)
       expect(await command(["git", "show", "result:result.txt"], clean)).toBe(
         "intended public content",
       )

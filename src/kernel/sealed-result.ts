@@ -1,7 +1,9 @@
 import { lstat, mkdtemp, readdir, rm } from "node:fs/promises"
 import { join } from "node:path"
 import { inflateSync } from "node:zlib"
-import { Data, Effect, Redacted, type Scope } from "effect"
+import { Data, Effect, Redacted, Schema, type Scope } from "effect"
+import type { AgentGitConfig } from "../agent-git/config"
+import { PublicationMessage } from "../sandbox/config"
 
 /**
  * The daemon's check of a sealed result from a run placed off the host, and its
@@ -23,6 +25,8 @@ export const sealedResultLimits = {
   blobBytes: MiB,
   titleCharacters: 200,
   commitMessageBytes: 10 * 1024,
+  /** A commit object: its four headers and its message. */
+  commitBytes: 16 * 1024,
   bodyBytes: 32 * 1024,
   finalMessageBytes: 64 * 1024,
   /** Wall clock for the whole check, and again for the push; a git child is killed at it. */
@@ -33,12 +37,14 @@ export const sealedResultLimits = {
   memoryBytes: 1024 * MiB,
 } as const
 
-/** The shape a run sends back. result.json holds every key but the bundle, and no other key. */
+/**
+ * The shape a run sends back. result.json holds every key but the bundle, and no
+ * other key. The commit message is in the commit objects of the bundle only.
+ */
 export type SealedResult = {
   readonly sourceSha: string
   readonly bundle: Uint8Array
   readonly title: string
-  readonly commitMessage: string
   readonly body: string
   readonly finalMessage: string
 }
@@ -56,8 +62,12 @@ export type SealedResultOptions = {
   /** The source commit the daemon chose at start. */
   readonly sourceSha: string
   /** The installation token; it reaches git only through the environment. */
-  readonly token?: Redacted.Redacted<string>
-  readonly blockedEmails: ReadonlyArray<string>
+  readonly token: Redacted.Redacted<string>
+  /**
+   * The identity the daemon gives agent runs: the author and the committer of each
+   * commit, and the addresses no commit message may name.
+   */
+  readonly agentGit: AgentGitConfig
   /** A directory of the daemon in which each check makes and removes its scratch repository. */
   readonly scratchRoot: string
   readonly gitBinary?: string
@@ -90,6 +100,7 @@ export type SealedResultCheck =
   | "changed_paths"
   | "blob_size"
   | "identity"
+  | "commit_format"
   | "target_exists"
   | "target_moved"
 
@@ -124,7 +135,7 @@ const commitId = /^[0-9a-f]{40}$/
 const controlOrFormat = /[\p{Cc}\p{Cf}\u2028\u2029]/u
 const controlButNewline = /(?![\n])[\p{Cc}\p{Cf}]/u
 
-const manifestKeys = ["sourceSha", "title", "commitMessage", "body", "finalMessage"] as const
+const manifestKeys = ["sourceSha", "title", "body", "finalMessage"] as const
 
 const textChecks: ReadonlyArray<
   readonly [(typeof manifestKeys)[number], SealedResultCheck, (value: string) => boolean]
@@ -137,14 +148,6 @@ const textChecks: ReadonlyArray<
       value.length > 0 &&
       [...value].length <= sealedResultLimits.titleCharacters &&
       !controlOrFormat.test(value),
-  ],
-  [
-    "commitMessage",
-    "commit_message",
-    (value) =>
-      value.length > 0 &&
-      utf8Bytes(value) <= sealedResultLimits.commitMessageBytes &&
-      !controlButNewline.test(value),
   ],
   [
     "body",
@@ -198,7 +201,6 @@ export const decodeSealedResult = (
       sourceSha: text.sourceSha!,
       bundle,
       title: text.title!,
-      commitMessage: text.commitMessage!,
       body: text.body!,
       finalMessage: text.finalMessage!,
     })
@@ -391,7 +393,7 @@ const gitConfig = [
   "protocol.https.allow=always",
 ].flatMap((entry) => ["-c", entry])
 
-const gitEnvironment = (remote: string, token: Redacted.Redacted<string> | undefined) => {
+const gitEnvironment = (remote: string, token: Redacted.Redacted<string>) => {
   const env: Record<string, string> = {
     PATH: "/usr/bin:/bin",
     HOME: "/nonexistent",
@@ -403,7 +405,6 @@ const gitEnvironment = (remote: string, token: Redacted.Redacted<string> | undef
     GIT_NO_REPLACE_OBJECTS: "1",
     GIT_ALLOW_PROTOCOL: "file:https",
   }
-  if (token === undefined) return { env, secrets: [] }
   const basic = Buffer.from(`x-access-token:${Redacted.value(token)}`).toString("base64")
   // The token is a header of the target URL only, set through the environment.
   env.GIT_CONFIG_COUNT = "1"
@@ -650,22 +651,75 @@ const checkHistory = (context: GitContext, base: string, resultSha: string) =>
     return commits
   })
 
-const checkIdentity = (
+const isCommitMessage = Schema.is(PublicationMessage)
+const commitHeaders = "tree parent author committer"
+const identityLine = /^(?:author|committer) (.*) <([^<>]*)> [0-9]+ [+-][0-9]{4}$/
+
+/**
+ * One commit object in the strict form of the seal: the headers tree, parent,
+ * author and committer and no other (no signature, encoding or merge tag); the
+ * author and the committer are the agent identity; the message passes the rules
+ * of a commit message and names no blocked address.
+ */
+const checkCommit = (
+  sha: string,
+  raw: Uint8Array,
+  agentGit: AgentGitConfig,
+): SealedResultRefused | undefined => {
+  let text: string
+  try {
+    text = decoder.decode(raw)
+  } catch {
+    return refused("commit_format", `${sha} is not UTF-8`)
+  }
+  const split = text.indexOf("\n\n")
+  const headers = split < 0 ? [] : text.slice(0, split).split("\n")
+  if (headers.map((line) => line.split(" ", 1)[0]).join(" ") !== commitHeaders)
+    return refused("commit_format", `${sha} has a header other than ${commitHeaders}`)
+  for (const line of headers.slice(2)) {
+    const identity = identityLine.exec(line)
+    if (identity?.[1] !== agentGit.name || identity[2] !== agentGit.email)
+      return refused("identity", `${sha} is not by ${agentGit.name} <${agentGit.email}>`)
+  }
+  const message = text.slice(split + 2)
+  const folded = message.toLowerCase()
+  if (agentGit.blockedEmails.some((email) => folded.includes(email.toLowerCase())))
+    return refused("commit_message", `${sha} names a blocked address`)
+  if (!isCommitMessage(message))
+    return refused("commit_message", `${sha} breaks the text rules of a commit message`)
+  return undefined
+}
+
+/** Reads each commit of the result as a raw object and holds it to the strict form. */
+const checkCommits = (
   context: GitContext,
-  base: string,
-  resultSha: string,
-  blockedEmails: ReadonlyArray<string>,
+  commits: ReadonlyArray<string>,
+  agentGit: AgentGitConfig,
 ) =>
   Effect.gen(function* () {
-    const blocked = new Set(blockedEmails.map((email) => email.trim().toLowerCase()))
-    const emails = (yield* gitOk(context, [
-      "log",
-      "--format=%ae%x00%ce%x00",
-      `${base}..${resultSha}`,
-    ]))
-      .split("\0")
-      .map((email) => email.trim().toLowerCase())
-    if (emails.some((email) => blocked.has(email))) return yield* refused("identity")
+    const input = new TextEncoder().encode(commits.map((sha) => `${sha}\n`).join(""))
+    const sizes = (yield* gitOk(context, ["cat-file", "--batch-check=%(objectsize)"], input))
+      .trim()
+      .split("\n")
+    const large = sizes.findIndex((size) => Number(size) > sealedResultLimits.commitBytes)
+    if (large >= 0)
+      return yield* refused(
+        "commit_format",
+        `${commits[large]} is over ${sealedResultLimits.commitBytes} bytes`,
+      )
+    const raw = (yield* git(context, ["cat-file", "--batch"], input)).stdout
+    // Each object is `<sha> commit <size>\n<content>\n`, in the order of the input.
+    let offset = 0
+    for (const sha of commits) {
+      const end = raw.indexOf(0x0a, offset)
+      const header = new TextDecoder().decode(raw.subarray(offset, end)).split(" ")
+      const size = Number(header[2])
+      if (header[0] !== sha || header[1] !== "commit")
+        return yield* new SealedResultFault({ operation: "cat-file", message: "Unexpected object" })
+      const refusal = checkCommit(sha, raw.subarray(end + 1, end + 1 + size), agentGit)
+      if (refusal !== undefined) return yield* refusal
+      offset = end + 1 + size + 1
+    }
   })
 
 export type CheckedSealedResult = {
@@ -764,8 +818,8 @@ export const checkSealedResult = (
       return yield* refused("ref", "the ref of the bundle names no commit of its pack")
     yield* checkDisk(scratch)
     const commits = yield* checkHistory(inRepository, base, bundle.resultSha)
+    yield* checkCommits(inRepository, commits, options.agentGit)
     yield* checkChanges(inRepository, commits, base)
-    yield* checkIdentity(inRepository, base, bundle.resultSha, options.blockedEmails)
     return {
       resultSha: bundle.resultSha,
       target,

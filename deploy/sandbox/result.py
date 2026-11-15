@@ -31,7 +31,7 @@ def commit_id(value):
     return value
 
 
-def git(repo, *args, input=None):
+def git(repo, *args, input=None, identity=None):
     def bounds():
         resource.setrlimit(resource.RLIMIT_AS, (1024**3, 1024**3))
         resource.setrlimit(resource.RLIMIT_FSIZE, (128 * 1024**2, 128 * 1024**2))
@@ -47,10 +47,7 @@ def git(repo, *args, input=None):
             env={'PATH': '/usr/bin:/bin', 'HOME': '/nonexistent',
                  'GIT_CONFIG_NOSYSTEM': '1', 'GIT_CONFIG_GLOBAL': '/dev/null',
                  'GIT_NO_REPLACE_OBJECTS': '1', 'GIT_TERMINAL_PROMPT': '0',
-                 'GIT_AUTHOR_NAME': 'Workflowd Agent', 'GIT_COMMITTER_NAME': 'Workflowd Agent',
-                 'GIT_AUTHOR_EMAIL': 'agent@workflowd.invalid', 'GIT_COMMITTER_EMAIL': 'agent@workflowd.invalid',
-                 'GIT_AUTHOR_DATE': '2000-01-01T00:00:00Z', 'GIT_COMMITTER_DATE': '2000-01-01T00:00:00Z',
-                 'GIT_ALLOW_PROTOCOL': 'https:file'},
+                 'GIT_ALLOW_PROTOCOL': 'https:file', **(identity or {})},
             input=input, stdout=output, stderr=subprocess.DEVNULL, timeout=60,
             check=True, preexec_fn=bounds)
         if output.tell() > 16 * 1024**2:
@@ -216,6 +213,19 @@ def content_check(data, sensitive):
             raise ValueError('Sensitive public content')
 
 
+def agent_identity(identity):
+    if not isinstance(identity, dict) or set(identity) != {'name', 'email'}:
+        raise ValueError('Invalid identity')
+    name, email = identity['name'], identity['email']
+    if not isinstance(name, str) or not name.strip() or re.search(r'[\r\n\0<>]', name) or len(name) > 200:
+        raise ValueError('Invalid identity')
+    if not isinstance(email, str) or not re.fullmatch(r'[^\s<>@\0]+@[^\s<>@\0]+', email) or len(email) > 200:
+        raise ValueError('Invalid identity')
+    return {'GIT_AUTHOR_NAME': name, 'GIT_COMMITTER_NAME': name,
+            'GIT_AUTHOR_EMAIL': email, 'GIT_COMMITTER_EMAIL': email,
+            'GIT_AUTHOR_DATE': '2000-01-01T00:00:00Z', 'GIT_COMMITTER_DATE': '2000-01-01T00:00:00Z'}
+
+
 def native_seal(source):
     """Called only after the supervisor stops the container and exports its fixed workspace.
 
@@ -227,8 +237,10 @@ def native_seal(source):
     raw = sys.stdin.buffer.read(262145)
     if len(raw) > 262144: raise ValueError('Native input exceeded bound')
     request = json.loads(raw)
-    if set(request) != {'completion', 'sensitiveValues'}: raise ValueError('Invalid native request')
+    if set(request) != {'completion', 'sensitiveValues', 'identity'}: raise ValueError('Invalid native request')
     completion, sensitive = request['completion'], request['sensitiveValues']
+    # The daemon gives the identity of agent runs; its check requires each commit to carry it.
+    author = agent_identity(request['identity'])
     if not isinstance(completion, dict) or set(completion) != {'title', 'commitMessage', 'body', 'finalMessage'}:
         raise ValueError('Invalid native metadata')
     if not isinstance(sensitive, list) or len(sensitive) > 32 or any(not isinstance(v, str) or not 16 <= len(v) <= 4096 for v in sensitive):
@@ -275,7 +287,7 @@ def native_seal(source):
             return
         # The message is stdin data, never an argument.
         result = git(repo, 'commit-tree', tree, '-p', source,
-                     input=completion['commitMessage'].encode('utf8')).decode().strip()
+                     input=completion['commitMessage'].encode('utf8'), identity=author).decode().strip()
         inspect_changes(repo, source, result, sensitive)
         # Only validated, source-relative objects become an intended-public artifact.
         root = Path('result')
@@ -285,7 +297,9 @@ def native_seal(source):
         git(repo, 'bundle', 'create', str(bundle.absolute()), 'refs/workflowd/result', '^' + source)
         if bundle.stat().st_size > 16 * 1024**2: raise ValueError('Bundle exceeded bound')
         # result.json holds exactly the SealedResult keys; the daemon refuses any other.
-        manifest = {'sourceSha': source, **completion}
+        # The commit message is in the commit object only.
+        manifest = {'sourceSha': source, 'title': completion['title'], 'body': completion['body'],
+                    'finalMessage': completion['finalMessage']}
         encoded = json.dumps(manifest, ensure_ascii=True, separators=(',', ':')).encode()
         (root / 'result.json').write_bytes(encoded)
         print(json.dumps({'sourceSha': source, 'resultSha': result, 'bundleSha256': sha(bundle.read_bytes()),
@@ -508,5 +522,11 @@ if __name__ == '__main__':
         elif sys.argv[1] == 'validate': validate(*sys.argv[2:])
         elif sys.argv[1] == 'tree': tree(*sys.argv[2:])
         else: raise ValueError('Unknown operation')
+    except ValueError as error:
+        # Only the fixed reasons of this script are printed: a reason of Python itself
+        # (lower case, quoted) or of a ValueError subclass may hold input text.
+        reason = error.args[0] if type(error) is ValueError and len(error.args) == 1 else ''
+        fixed = isinstance(reason, str) and re.fullmatch(r'[A-Z][A-Za-z0-9 ,./-]{0,80}', reason)
+        sys.exit('Sandbox result sealing failed' + (': ' + reason if fixed else ''))
     except Exception:
         sys.exit('Sandbox result sealing failed')

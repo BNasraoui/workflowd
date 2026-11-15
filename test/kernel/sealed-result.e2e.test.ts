@@ -21,12 +21,47 @@ import { command } from "../sandbox/harness"
 const script = resolve("deploy/sandbox/result.py")
 const target = { ref: "refs/heads/agent-run/run-1", expectedHead: null }
 const token = "ghs_FixtureInstallationToken0123456789"
-const identity = ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid"]
+// The identity the daemon gives agent runs; the seal commits as it and the check requires it.
+const agentGit = {
+  name: "Fixture Agent",
+  email: "agent@example.invalid",
+  blockedEmails: ["owner@example.invalid"],
+}
+const asAgent = {
+  GIT_AUTHOR_NAME: agentGit.name,
+  GIT_AUTHOR_EMAIL: agentGit.email,
+  GIT_COMMITTER_NAME: agentGit.name,
+  GIT_COMMITTER_EMAIL: agentGit.email,
+}
+// result.json holds the wording; the commit message reaches the daemon only in the commit.
 const wording = {
   title: "Add the result file",
-  commitMessage: "Add the result file\n\nThe run wrote one file.\n",
   body: "## Result\n\nOne file.",
   finalMessage: "Done: one file added.",
+}
+const completion = { ...wording, commitMessage: "Add the result file\n\nThe run wrote one file.\n" }
+
+/** Runs a command of the fixture as the agent identity, with optional stdin. */
+async function run(
+  args: ReadonlyArray<string>,
+  cwd: string,
+  input?: string | Uint8Array,
+  env: Record<string, string> = {},
+): Promise<string> {
+  const child = Bun.spawn([...args], {
+    cwd,
+    env: { ...process.env, ...asAgent, ...env },
+    stdin: input === undefined ? "ignore" : new Blob([input]),
+    stdout: "pipe",
+    stderr: "pipe",
+  })
+  const [status, stdout, stderr] = await Promise.all([
+    child.exited,
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+  ])
+  if (status !== 0) throw new Error(`${args.join(" ")} exited ${status}: ${stderr}`)
+  return stdout.trim()
 }
 
 type Fixture = {
@@ -45,7 +80,8 @@ async function fixture(): Promise<Fixture> {
   const scratchRoot = join(root, "scratch")
   await mkdir(work)
   await mkdir(scratchRoot)
-  const git = (cwd: string, ...args: string[]) => command(["git", ...identity, ...args], cwd)
+  const git = (cwd: string, ...args: string[]) =>
+    run(["git", "-c", "commit.gpgsign=false", ...args], cwd)
   await git(work, "init", "-q", "-b", "main")
   await writeFile(join(work, "README.md"), "fixture\n")
   await writeFile(join(work, "run.sh"), "#!/bin/sh\n")
@@ -61,7 +97,7 @@ const options = (f: Fixture, extra: Partial<SealedResultOptions> = {}): SealedRe
   remote: f.remote,
   sourceSha: f.sourceSha,
   token: Redacted.make(token),
-  blockedEmails: ["owner@example.invalid"],
+  agentGit,
   scratchRoot: f.scratchRoot,
   ...extra,
 })
@@ -73,7 +109,7 @@ const manifest = (sourceSha: string, fields: Record<string, unknown> = {}) =>
 async function sealWithResultPy(
   f: Fixture,
   change: (workspace: string) => Promise<void>,
-  completion: Record<string, unknown> = wording,
+  sealed: Record<string, unknown> = completion,
 ): Promise<{ json: Uint8Array; bundle: Uint8Array }> {
   const workspace = join(f.root, "workspace")
   const seal = join(f.root, "seal")
@@ -85,7 +121,13 @@ async function sealWithResultPy(
   await command(["python3", "-I", script, "native-export", "workspace.tar", f.sourceSha], seal)
   const child = Bun.spawn(["python3", "-I", script, "native-seal", f.sourceSha], {
     cwd: seal,
-    stdin: new Blob([JSON.stringify({ completion, sensitiveValues: [] })]),
+    stdin: new Blob([
+      JSON.stringify({
+        completion: sealed,
+        sensitiveValues: [],
+        identity: { name: agentGit.name, email: agentGit.email },
+      }),
+    ]),
     stdout: "pipe",
     stderr: "pipe",
   })
@@ -104,7 +146,7 @@ async function sealWithResultPy(
 /** A bundle made by hand, as a misbehaving runner could send it. */
 async function handBundle(
   f: Fixture,
-  build: (git: (...args: string[]) => Promise<string>, dir: string) => Promise<void>,
+  build: (git: (...args: string[]) => Promise<string>, dir: string) => Promise<unknown>,
   bundleArgs?: (resultSha: string) => string[],
 ): Promise<Uint8Array> {
   const dir = join(f.root, `hand-${crypto.randomUUID()}`)
@@ -201,7 +243,7 @@ test(
       "intended public content",
     )
     expect(await command(["git", "log", "-1", "--format=%B", pushed], f.remote)).toBe(
-      wording.commitMessage.trim(),
+      completion.commitMessage.trim(),
     )
   }),
 )
@@ -223,7 +265,8 @@ test(
       dashed,
     )
     const result = await decode(sealed.json, sealed.bundle)
-    expect(result).toMatchObject(dashed)
+    const { commitMessage: _commitMessage, ...dashedWording } = dashed
+    expect(result).toMatchObject(dashedWording)
     const exit = await publish(result, options(f))
     expect(Exit.isSuccess(exit)).toBe(true)
     const pushed = await remoteRef(f)
@@ -240,7 +283,6 @@ test(
 for (const [name, fields, check] of [
   ["a newline in the title", { title: "one\ntwo" }, "title"],
   ["a NUL in the title", { title: "one\u0000two" }, "title"],
-  ["a NUL in the commit message", { commitMessage: "one\u0000two" }, "commit_message"],
   ["a NUL in the body", { body: "one\u0000two" }, "body"],
   ["a NUL in the final message", { finalMessage: "one\u0000two" }, "final_message"],
   ["an empty title", { title: "" }, "title"],
@@ -263,6 +305,16 @@ test("result.json with a key outside SealedResult is refused by the name of the 
   )
   expect(error.check).toBe("unknown_key")
   expect(error.message).toBe('result_refused: unknown_key "branch"')
+  // The commit object is the one source of the commit message.
+  const message = await Effect.runPromise(
+    Effect.flip(
+      decodeSealedResult(
+        manifest("a".repeat(40), { commitMessage: "m" }),
+        new Uint8Array([1, 2, 3]),
+      ),
+    ),
+  )
+  expect(message.message).toBe('result_refused: unknown_key "commitMessage"')
   const missing = await Effect.runPromise(
     Effect.flip(
       decodeSealedResult(
@@ -473,8 +525,8 @@ test(
     const result = await decode(sealed.json, sealed.bundle)
     await command(["git", "update-ref", target.ref, f.sourceSha], f.remote)
     expect(refusedCheck(await publish(result, options(f)))).toBe("target_exists")
-    const moved = await command(
-      ["git", ...identity, "commit-tree", "-m", "moved", `${f.sourceSha}^{tree}`],
+    const moved = await run(
+      ["git", "commit-tree", "-m", "moved", `${f.sourceSha}^{tree}`],
       f.remote,
     )
     await command(["git", "update-ref", "refs/heads/agent-run/run-2", moved], f.remote)
@@ -550,6 +602,7 @@ const refusals: ReadonlyArray<
     string,
     SealedResultCheck,
     (f: Fixture) => Promise<{ bundle: Uint8Array; json?: Uint8Array }>,
+    detail?: string,
   ]
 > = [
   [
@@ -735,39 +788,145 @@ const refusals: ReadonlyArray<
     }),
   ],
   [
-    "a blocked author address",
+    "a commit message with terminal control sequences and a blocked co-author",
+    "commit_message",
+    async (f) => ({
+      bundle: await handBundle(f, (_git, dir) =>
+        commitObject(
+          f,
+          dir,
+          "",
+          "title \u001b[2J \u001b]8;;http://x \u001b\\link\n\nCo-authored-by: Owner <owner@example.invalid>\n",
+        ),
+      ),
+    }),
+    "names a blocked address",
+  ],
+  [
+    "a commit message that names a blocked address in other letters",
+    "commit_message",
+    async (f) => ({
+      bundle: await handBundle(f, (_git, dir) =>
+        commitObject(f, dir, "", "Change\n\nCo-authored-by: Owner <OWNER@Example.INVALID>\n"),
+      ),
+    }),
+    "names a blocked address",
+  ],
+  [
+    "a commit message with a terminal control sequence",
+    "commit_message",
+    async (f) => ({
+      bundle: await handBundle(f, (_git, dir) => commitObject(f, dir, "", "title \u001b[2J\n")),
+    }),
+    "the text rules of a commit message",
+  ],
+  [
+    "a commit message over 10 KiB",
+    "commit_message",
+    async (f) => ({
+      bundle: await handBundle(f, (_git, dir) =>
+        commitObject(f, dir, "", `${"a".repeat(sealedResultLimits.commitMessageBytes)}\n`),
+      ),
+    }),
+    "the text rules of a commit message",
+  ],
+  [
+    "a commit by a person whose address is not blocked",
     "identity",
     async (f) => ({
-      bundle: await handBundle(f, async (git, dir) => {
-        await writeFile(join(dir, "a.txt"), "a\n")
-        await git("add", "a.txt")
-        await git("commit", "-q", "--author=Owner <Owner@Example.invalid>", "-m", "blocked")
-      }),
+      bundle: await handBundle(f, (_git, dir) =>
+        commitObject(f, dir, "", "Change\n", "Ada Lovelace <ada@example.invalid>"),
+      ),
     }),
   ],
   [
-    "a blocked committer address",
+    "a commit whose committer is not the agent",
     "identity",
     async (f) => ({
-      bundle: await handBundle(f, async (git, dir) => {
-        await writeFile(join(dir, "a.txt"), "a\n")
-        await git("add", "a.txt")
-        // The committer comes from the environment, which wins over any config.
-        const child = Bun.spawn(["git", "commit", "-q", "-m", "blocked"], {
-          cwd: dir,
-          env: {
-            ...process.env,
-            GIT_AUTHOR_NAME: "Fixture",
-            GIT_AUTHOR_EMAIL: "fixture@example.invalid",
-            GIT_COMMITTER_NAME: "Owner",
-            GIT_COMMITTER_EMAIL: "owner@example.invalid",
-          },
-        })
-        expect(await child.exited).toBe(0)
-      }),
+      bundle: await handBundle(f, (_git, dir) =>
+        commitObject(f, dir, "", "Change\n", undefined, "Fixture Agent <other@example.invalid>"),
+      ),
+    }),
+  ],
+  [
+    "a commit with a signature header",
+    "commit_format",
+    async (f) => ({
+      bundle: await handBundle(f, (_git, dir) =>
+        commitObject(
+          f,
+          dir,
+          "gpgsig -----BEGIN PGP SIGNATURE-----\n \n AAAA\n -----END PGP SIGNATURE-----\n",
+          "Change\n",
+        ),
+      ),
+    }),
+  ],
+  [
+    "a commit with an encoding header",
+    "commit_format",
+    async (f) => ({
+      bundle: await handBundle(f, (_git, dir) =>
+        commitObject(f, dir, "encoding ISO-8859-1\n", "Change\n"),
+      ),
+    }),
+  ],
+  [
+    "a commit with a merge tag header",
+    "commit_format",
+    async (f) => ({
+      bundle: await handBundle(f, (_git, dir) =>
+        commitObject(f, dir, `mergetag object ${f.sourceSha}\n type commit\n`, "Change\n"),
+      ),
+    }),
+  ],
+  [
+    "a commit with an unknown header",
+    "commit_format",
+    async (f) => ({
+      bundle: await handBundle(f, (_git, dir) =>
+        commitObject(f, dir, "x-note anything\n", "Change\n"),
+      ),
     }),
   ],
 ]
+
+const agentLine = `${agentGit.name} <${agentGit.email}> 946684800 +0000`
+
+/** Writes a commit object by hand on top of HEAD, with its tree, and moves HEAD to it. */
+async function commitObject(
+  f: Fixture,
+  dir: string,
+  headers: string,
+  message: string,
+  author = agentLine,
+  committer = agentLine,
+): Promise<string> {
+  await writeFile(join(dir, `${crypto.randomUUID()}.txt`), "change\n")
+  await f.git(dir, "add", "-A")
+  const tree = await f.git(dir, "write-tree")
+  const parent = await f.git(dir, "rev-parse", "HEAD")
+  const stamp = (who: string) => (who.includes(" +0000") ? who : `${who} 946684800 +0000`)
+  const raw = `tree ${tree}\nparent ${parent}\nauthor ${stamp(author)}\ncommitter ${stamp(committer)}\n${headers}\n${message}`
+  const commit = await run(["git", "hash-object", "-t", "commit", "-w", "--stdin"], dir, raw)
+  await f.git(dir, "reset", "-q", "--soft", commit)
+  return commit
+}
+
+test(
+  "each commit of the result is checked: a fault in the first of two commits is refused",
+  withFixture(async (f) => {
+    let first = ""
+    const bundle = await handBundle(f, async (git, dir) => {
+      first = await commitObject(f, dir, "", "first \u001b[31mred\n")
+      await commitFile(git, dir, "second.txt")
+    })
+    const exit = await publish(await decode(manifest(f.sourceSha), bundle), options(f))
+    expect(refusedCheck(exit)).toBe("commit_message")
+    expect(refusal(exit).detail).toContain(first)
+    expect(await remoteRef(f)).toBe("")
+  }),
+)
 
 /** `git mktree` in the hand repository, with its input on stdin. */
 async function mktree(cwd: string, input: string): Promise<string> {
@@ -782,7 +941,7 @@ async function mktree(cwd: string, input: string): Promise<string> {
   return stdout.trim()
 }
 
-for (const [name, check, make] of refusals)
+for (const [name, check, make, detail] of refusals)
   test(
     `the daemon refuses ${name}: result_refused: ${check}`,
     withFixture(async (f) => {
@@ -791,6 +950,7 @@ for (const [name, check, make] of refusals)
       const exit = await publish(result, options(f))
       expect(refusedCheck(exit)).toBe(check)
       expect(refusal(exit).message).toStartWith(`result_refused: ${check}`)
+      if (detail !== undefined) expect(refusal(exit).detail).toContain(detail)
       expect(await remoteRef(f)).toBe("")
     }),
     30_000,
