@@ -290,7 +290,7 @@ export const makeCapabilityStore = Effect.gen(function* () {
     expiresAt: number,
     now: number,
     /** When the proof itself expires; until then its jti stays recorded. */
-    proofExpiresAt = now + 610000,
+    proofExpiresAt: number,
   ) {
     yield* Schema.decodeUnknownEffect(Challenge)(challenge)
     yield* Schema.decodeUnknownEffect(Digest)(digest)

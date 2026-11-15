@@ -43,6 +43,3 @@ export const suites: Readonly<Record<string, ReadonlyArray<readonly [string, str
   adapters: adapterCases,
   "final-local": finalCases,
 }
-
-/** Test files that only a suite runs; bunfig.toml keeps them out of the plain run. */
-export const launcherTestPattern = "**/*.launcher.test.ts"

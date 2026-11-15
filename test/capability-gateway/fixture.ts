@@ -103,6 +103,7 @@ export const bindRunSession = (
       options.digest ?? capabilityDigest(token),
       expiresAt,
       now,
+      now + 610000,
     )
     yield* (yield* makeSandboxStore).bindSession("run", 78, 1)
     // The session answer names when to renew; production picks 10 to 12 minutes in.
