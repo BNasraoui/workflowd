@@ -98,10 +98,6 @@ export type AgentRunIngressError =
   | Schema.SchemaError
 
 export type AgentRunIngressPort = {
-  readonly nativeControl?: (
-    runId: string,
-    input: import("../sandbox/native-control").NativeControl,
-  ) => Effect.Effect<import("../sandbox/native-control").NativeControlReceipt, AgentRunIngressError>
   readonly register: (
     input: AgentRunSubmissionType,
     now: Date,
@@ -1147,35 +1143,7 @@ const make = (options: AgentRunIngressOptions) =>
         yield* store.cancel({ runId, now })
       })
 
-    const nativeControl: NonNullable<AgentRunIngressPort["nativeControl"]> = (runId, input) =>
-      Effect.gen(function* () {
-        const run = yield* store.read(runId)
-        const nativeRuns =
-          run?.executorKind === "claude"
-            ? claudeRuns
-            : run?.executorKind === "codex"
-              ? codexRuns
-              : openCodeNativeRuns
-        if (
-          !run ||
-          run.state !== "verified" ||
-          !sandbox?.nativeControl ||
-          !sandbox.resumeNative ||
-          !nativeRuns
-        )
-          return yield* refuse("run_conflict", "Native controller custody unavailable")
-        if (input.operation === "resume") {
-          const cli = yield* sandbox
-            .resumeNative(run, input.nonce)
-            .pipe(Effect.mapError(sandboxFailure))
-          yield* nativeRuns.resumeNative(run, cli, input.prompt)
-          return yield* sandbox
-            .nativeControl(run, { operation: "status" })
-            .pipe(Effect.mapError(sandboxFailure))
-        }
-        return yield* sandbox.nativeControl(run, input).pipe(Effect.mapError(sandboxFailure))
-      })
-    return AgentRunIngress.of({ register, cancel, nativeControl })
+    return AgentRunIngress.of({ register, cancel })
   })
 
 export const AgentRunIngressLive = (options: AgentRunIngressOptions) =>

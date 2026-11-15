@@ -968,65 +968,8 @@ export const makeAgentRunCliDispatcher = (dependencies: {
       yield* store.cancel({ runId: run.runId, now })
     })
 
-  const resumeNative = (run: AgentRunRecord, execution: CliPort, prompt: string) =>
-    Effect.suspend(() => {
-      let process: CliRunProcess | undefined
-      return Effect.gen(function* () {
-        process = yield* execution
-          .spawn({ runId: run.runId, directory: run.directory, model: run.modelId, prompt })
-          .pipe(Effect.mapError(sandboxFailure))
-        const observed = yield* observeFirstToken(
-          process,
-          dependencies.verifyTimeoutMs,
-          kind,
-          execution.ownership === "transient-exec"
-            ? { attach: execution.attach, runId: run.runId, retryMs }
-            : undefined,
-          supervision,
-        )
-        if (execution.ownership !== "transient-exec")
-          return yield* Effect.fail(refuse("run_conflict", "Native resume needs process custody"))
-        if (
-          observed.result.outcome !== "generating" ||
-          observed.result.threadId !== run.nativeSessionId
-        )
-          return yield* Effect.fail(refuse("run_conflict", "Native resume verification failed"))
-        yield* recordModelEvidence(run, observed.result.model, new Date())
-        yield* supervise(
-          complete({
-            runId: run.runId,
-            iterator: observed.iterator,
-            exited: observed.exited,
-            cancel: observed.cancel,
-            initialFinalMessage: observed.result.firstMessage,
-            stallWindowMs: dependencies.progressWindowMs,
-            attach: execution.attach,
-            launch: process.launch,
-            sandboxRun: run,
-          }).pipe(
-            Effect.catchCause((cause) =>
-              Effect.logError(`${kind} resumed completion failed`, { runId: run.runId, cause }),
-            ),
-          ),
-        )
-      }).pipe(
-        Effect.onExit((exit) =>
-          Exit.isSuccess(exit)
-            ? Effect.void
-            : Effect.gen(function* () {
-                if (process) yield* process.cancel.pipe(Effect.ignore)
-                yield* finishSandbox(run, {
-                  state: "operator_required",
-                  finalMessage: null,
-                  diagnostic: sandboxDiagnostic("native.resume", exit.cause).message,
-                })
-              }),
-        ),
-      )
-    })
-
   /** Interrupts every supervisor without settling its run; recover() takes them next start. */
   const shutdown = Scope.close(supervision, Exit.void)
 
-  return { dispatch, recover, cancel, resumeNative, shutdown }
+  return { dispatch, recover, cancel, shutdown }
 }

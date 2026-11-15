@@ -8,13 +8,6 @@ import { CapabilityRefused, capabilityDigest, makeCapabilityStore } from "./stor
 import { githubJobKeys, verifyJobProof } from "../sandbox/bootstrap"
 import { runLifetime } from "../store/run-lifetime"
 import { ownedPromise } from "./owned"
-import {
-  makeNativeResultStore,
-  NativeResultRequest,
-  NativeFinalizationRequest,
-} from "../sandbox/native-result"
-import { makeNativeExecutionStore } from "../sandbox/native-execution"
-import { nativeResponseObservation } from "./native-observation"
 import { codexRequest } from "./codex"
 import { opencodeRequest } from "./opencode"
 import type { CapabilityGatewayConfig } from "../sandbox/config"
@@ -83,8 +76,6 @@ export const makeCapabilityGateway = (
     )
       return yield* Effect.fail(new Error("gateway limits refused"))
     const store = yield* makeCapabilityStore
-    const results = yield* makeNativeResultStore
-    const native = yield* makeNativeExecutionStore
     const sql = yield* SqlClient.SqlClient
     const authority = runLifetime(sql)
     // Each live stream, by run, with the session of the token that opened it.
@@ -286,28 +277,14 @@ export const makeCapabilityGateway = (
           )
         }
         const prefix = `/capabilities/v1/providers/${config.providerId}`
-        const isResult = target === "/capabilities/v1/result"
         const isGit = config.gitRead === true && target.startsWith("/capabilities/v1/git/")
-        if (!isResult && !isGit && !target.startsWith(`${prefix}/`)) return denied()
-        const running = yield* native.read(binding.runId)
-        if (running && !["launching", "running"].includes(running.state)) return denied()
-        if (
-          config.native &&
-          (!running ||
-            !config.native.models.some(
-              (model) =>
-                model.id === grant.modelId &&
-                model.efforts.some((effort) => effort === running.effort),
-            ))
-        )
-          return denied()
+        if (!isGit && !target.startsWith(`${prefix}/`)) return denied()
+        // A native provider protocol serves a harness invocation, and no invocation exists here.
+        if (config.native) return denied()
         return yield* Effect.acquireUseRelease(
           authority.withPermit(
             Effect.gen(function* () {
               yield* store.authorize(binding, digest, Date.now())
-              const invocation = yield* native.read(binding.runId)
-              if (invocation && !["launching", "running"].includes(invocation.state))
-                return yield* Effect.fail(new Error("Native invocation inactive"))
               const owned = active.get(binding.runId) ?? new Map<AbortController, number>()
               if (count >= config.maxStreams || owned.size >= config.maxStreamsPerRun) return null
               const controller = new AbortController()
@@ -335,7 +312,6 @@ export const makeCapabilityGateway = (
                 controller.abort()
               }
               return {
-                invocation,
                 controller,
                 release,
                 transferred: false,
@@ -358,66 +334,6 @@ export const makeCapabilityGateway = (
               if (!ownership)
                 return new Response(null, { status: 429, headers: { "retry-after": "1" } })
               const { controller, release } = ownership
-              if (isResult) {
-                if (
-                  request.method !== "POST" ||
-                  request.headers.get("content-type") !== "application/json"
-                )
-                  return new Response(null, { status: 400 })
-                const decoded = yield* ownedPromise((signal) =>
-                  readRequestBody(
-                    request,
-                    AbortSignal.any([
-                      signal,
-                      controller.signal,
-                      request.signal,
-                      AbortSignal.timeout(10000),
-                    ]),
-                    65536,
-                  ),
-                ).pipe(
-                  Effect.flatMap((body) =>
-                    Schema.decodeUnknownEffect(
-                      Schema.fromJsonString(
-                        Schema.Union([NativeResultRequest, NativeFinalizationRequest]),
-                      ),
-                    )(body.toString("utf8"), { onExcessProperty: "error" }),
-                  ),
-                  Effect.result,
-                )
-                if (decoded._tag === "Failure") return new Response(null, { status: 400 })
-                const revision = yield* authority.withPermit(
-                  Effect.gen(function* () {
-                    const currentGrant = yield* store.authorize(binding, digest, Date.now())
-                    const invocation = yield* native.read(binding.runId)
-                    if (
-                      controller.signal.aborted ||
-                      request.signal.aborted ||
-                      invocation?.nonce !== ownership.invocation?.nonce ||
-                      invocation?.generation !== ownership.invocation?.generation ||
-                      (invocation &&
-                        (invocation.channel !== binding.channel ||
-                          invocation.model !== currentGrant.modelId ||
-                          !["launching", "running"].includes(invocation.state)))
-                    )
-                      return null
-                    if ("operation" in decoded.success)
-                      return invocation
-                        ? yield* native.requestFinalization(
-                            binding,
-                            invocation.nonce,
-                            invocation.generation,
-                            decoded.success.revision,
-                          )
-                        : null
-                    return yield* results.submit(binding, decoded.success)
-                  }),
-                )
-                return revision === null
-                  ? new Response(null, { status: 409 })
-                  : Response.json({ revision }, { headers: { "cache-control": "no-store" } })
-              }
-              const invocation = ownership.invocation
               const result = yield* Effect.result(
                 ownedPromise(async (interruption) => {
                   const signal = AbortSignal.any([controller.signal, request.signal, interruption])
@@ -427,15 +343,6 @@ export const makeCapabilityGateway = (
                       authority.withPermit(
                         Effect.gen(function* () {
                           yield* store.authorize(binding, digest, Date.now())
-                          const current = yield* native.read(binding.runId)
-                          if (
-                            current &&
-                            (current.nonce !== invocation?.nonce ||
-                              current.generation !== invocation?.generation ||
-                              current.channel !== binding.channel ||
-                              !["launching", "running"].includes(current.state))
-                          )
-                            return yield* Effect.fail(new Error("Native invocation inactive"))
                           return yield* Effect.try(() => {
                             signal.throwIfAborted()
                             return { response: start() }
@@ -490,11 +397,8 @@ export const makeCapabilityGateway = (
                         },
                         signal,
                         (url, input) => send(() => upstream(url, input)),
-                        invocation?.channel === binding.channel &&
-                          ["launching", "running"].includes(invocation.state)
-                          ? invocation.session_id
-                          : undefined,
-                        invocation?.effort,
+                        undefined,
+                        undefined,
                         async (evidence) => {
                           const rows = await Effect.runPromise(
                             sql`SELECT directory FROM kernel_agent_runs WHERE run_id=${binding.runId}`,
@@ -526,26 +430,6 @@ export const makeCapabilityGateway = (
                     })
                   }
                   const reader = selected.response.body.getReader()
-                  const observe =
-                    invocation &&
-                    selected.selectionObserved &&
-                    selected.response.status === 200 &&
-                    selected.headers.get("content-type")?.startsWith("text/event-stream")
-                      ? nativeResponseObservation(
-                          invocation.model,
-                          (tokens) =>
-                            Effect.runPromise(
-                              native.observeResponse(
-                                binding.runId,
-                                invocation.nonce,
-                                invocation.model,
-                                tokens,
-                              ),
-                              { signal },
-                            ),
-                          config.native?.protocol,
-                        )
-                      : undefined
                   let bytes = 0
                   const abort = () => {
                     void reader.cancel().then(release, release)
@@ -569,7 +453,6 @@ export const makeCapabilityGateway = (
                           ownership.touch()
                           bytes += chunk.length
                           if (bytes > 32 * 1048576) throw new Error("response capacity")
-                          await observe?.(chunk)
                           destination.enqueue(chunk)
                         } catch {
                           destination.error(new Error("capability stream interrupted"))

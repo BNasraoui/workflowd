@@ -590,9 +590,6 @@ export function startHookService(
                     token: config.agentRuns.token,
                     register: Option.getOrThrow(agentRuns).register,
                     cancel: Option.getOrThrow(agentRuns).cancel,
-                    ...(Option.getOrThrow(agentRuns).nativeControl === undefined
-                      ? {}
-                      : { nativeControl: Option.getOrThrow(agentRuns).nativeControl }),
                   },
                 }),
             ...(config.executionCapabilities === undefined

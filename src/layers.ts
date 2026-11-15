@@ -1,6 +1,6 @@
 import { App } from "@octokit/app"
 import { Octokit } from "@octokit/rest"
-import { Cause, Effect, Layer, Option, Scope } from "effect"
+import { Cause, Effect, Layer, Option } from "effect"
 import { SqlClient } from "effect/unstable/sql"
 import { readFile } from "node:fs/promises"
 import { dirname, join } from "node:path"
@@ -371,7 +371,6 @@ const makeAutomationLayer = (config: Extract<AppConfig, { readonly mode?: "autom
               native === undefined ? undefined : { native },
             )
             return yield* makeSandboxDispatch({
-              nativeScope: yield* Scope.Scope,
               policies: sandboxPolicies,
               github,
               leases,

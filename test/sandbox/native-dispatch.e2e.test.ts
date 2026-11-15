@@ -1,7 +1,7 @@
 import { SqlClient } from "effect/unstable/sql"
 import { sandboxDiagnostic } from "../../src/sandbox/diagnostics"
 import { expect, test } from "bun:test"
-import { Effect, ManagedRuntime, Scope } from "effect"
+import { Effect, ManagedRuntime } from "effect"
 import { FetchHttpClient } from "effect/unstable/http"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
 import { OpenCode } from "@opencode-ai/client/effect"
@@ -268,7 +268,6 @@ test("an actions-native harness start is refused before any lease or GitHub effe
           Effect.provide(FetchHttpClient.layer),
         )
         const dispatch = yield* makeSandboxDispatch({
-          nativeScope: yield* Scope.Scope,
           publicationContract: { reference: "fixture-only:worktree", receipt: "fixed-v1" },
           policies: [native],
           github,

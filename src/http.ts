@@ -1,7 +1,6 @@
 import { Effect, Schema } from "effect"
 import { createHash, timingSafeEqual } from "node:crypto"
 import { AgentRunSubmission } from "./agent-run-contract"
-import { NativeControl } from "./sandbox/native-control"
 import type { CiStore } from "./ci/store"
 import type { ExecutionCapabilities } from "./execution-capability-contract"
 import type { InstallationGuard } from "./installation-guard"
@@ -50,7 +49,7 @@ type AgentWaitIngressBinding = Pick<AgentWaitIngressPort, "register"> & {
   readonly token: string
 }
 
-type AgentRunIngressBinding = Pick<AgentRunIngressPort, "register" | "cancel" | "nativeControl"> & {
+type AgentRunIngressBinding = Pick<AgentRunIngressPort, "register" | "cancel"> & {
   readonly token: string
 }
 
@@ -147,8 +146,10 @@ function routeApplicationRequest(
       options.maxBodyBytes ?? 1_048_576,
     )
   }
-  const agentRunResponse = routeAgentRunRequest(request, pathname, options)
-  if (agentRunResponse !== undefined) return agentRunResponse
+  const agentRunCancel = /^\/workflows\/agent-runs\/(agent-run-[a-zA-Z0-9_-]+)$/.exec(pathname)
+  if (agentRunCancel !== null && request.method === "DELETE" && options.agentRuns !== undefined) {
+    return handleAgentRunCancel(request, options.agentRuns, agentRunCancel[1]!, options.now)
+  }
   if (
     pathname === "/workflows/agent-runs" &&
     request.method === "POST" &&
@@ -171,77 +172,6 @@ function routeApplicationRequest(
   const testJobResponse = routeTestJobRequest(request, pathname, options)
   if (testJobResponse !== undefined) return testJobResponse
   return Effect.succeed(Response.json({ error: "not found" }, { status: 404 }))
-}
-
-/** Routes one agent run's cancel and native-control requests. */
-function routeAgentRunRequest(
-  request: Request,
-  pathname: string,
-  options: WebhookHandlerOptions,
-): Effect.Effect<Response, never, WorkflowStorePort | WorkSignalPort> | undefined {
-  const agentRuns = options.agentRuns
-  if (agentRuns === undefined) return undefined
-  const nativeControl = /^\/workflows\/agent-runs\/(agent-run-[a-zA-Z0-9_-]+)\/native$/.exec(
-    pathname,
-  )
-  if (nativeControl && request.method === "POST" && agentRuns.nativeControl)
-    return handleAgentRunNativeControl(
-      request,
-      { ...agentRuns, nativeControl: agentRuns.nativeControl },
-      nativeControl[1]!,
-    )
-  const agentRunCancel = /^\/workflows\/agent-runs\/(agent-run-[a-zA-Z0-9_-]+)$/.exec(pathname)
-  if (agentRunCancel !== null && request.method === "DELETE")
-    return handleAgentRunCancel(request, agentRuns, agentRunCancel[1]!, options.now)
-  return undefined
-}
-
-/** Bounded authenticated native-control body for one agent run. */
-function handleAgentRunNativeControl(
-  request: Request,
-  ingress: AgentRunIngressBinding & {
-    readonly nativeControl: NonNullable<AgentRunIngressBinding["nativeControl"]>
-  },
-  runId: string,
-) {
-  return Effect.gen(function* () {
-    if (!authorized(request.headers.get("authorization"), ingress.token))
-      return Response.json({ error: "unauthorized" }, { status: 401 })
-    const reader = request.body?.getReader()
-    if (!reader) return Response.json({ error: "invalid native control" }, { status: 400 })
-    const chunks: Uint8Array[] = []
-    let size = 0
-    try {
-      for (;;) {
-        const chunk = yield* Effect.tryPromise(() => reader.read())
-        if (chunk.done) break
-        const value: unknown = chunk.value
-        if (!(value instanceof Uint8Array))
-          return Response.json({ error: "invalid native control" }, { status: 400 })
-        size += value.byteLength
-        if (size > 1048576) return Response.json({ error: "payload too large" }, { status: 413 })
-        chunks.push(value)
-      }
-    } finally {
-      yield* Effect.promise(() => reader.cancel().catch(() => undefined))
-      reader.releaseLock()
-    }
-    const input = yield* Schema.decodeUnknownEffect(Schema.fromJsonString(NativeControl))(
-      Buffer.concat(chunks).toString("utf8"),
-      { onExcessProperty: "error" },
-    ).pipe(Effect.result)
-    if (input._tag === "Failure")
-      return Response.json({ error: "invalid native control" }, { status: 400 })
-    return yield* ingress
-      .nativeControl(runId, input.success)
-      .pipe(
-        Effect.match({ onSuccess: (value) => Response.json(value), onFailure: agentRunFailure }),
-      )
-  }).pipe(
-    Effect.catch(() =>
-      Effect.succeed(Response.json({ error: "invalid native control" }, { status: 400 })),
-    ),
-  )
 }
 
 function handleAgentRunCancel(

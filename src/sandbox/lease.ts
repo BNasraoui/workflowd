@@ -19,8 +19,6 @@ import { sandboxSshArguments, type SandboxTransport } from "./transport"
 import type { makeSandboxGithub } from "./github"
 import type { SavedSandboxPolicy } from "./saved-policy"
 import type { CapabilityGateway } from "../capability-gateway/service"
-import { makeNativeExecutionStore } from "./native-execution"
-import { makeNativeResultStore } from "./native-result"
 import { requireNativePublisherActivation, type PublisherContract } from "./publisher-contract"
 
 type Github = Effect.Success<ReturnType<typeof makeSandboxGithub>>
@@ -229,8 +227,6 @@ export const makeSandboxLeaseService = (
   Effect.gen(function* () {
     const store = yield* makeSandboxStore
     const publications = yield* makePublishStore
-    const native = yield* makeNativeExecutionStore
-    const nativeResults = yield* makeNativeResultStore
     const cleanupGate = yield* Semaphore.make(1)
     const discoveryCursor = new Map<string, string>()
     /**
@@ -633,88 +629,22 @@ export const makeSandboxLeaseService = (
           Effect.andThen(store.heartbeat(runId, Date.now())),
         )
       })
-    const initializeNative = Effect.fn("SandboxLease.initializeNative")(function* (runId: string) {
-      const lease = yield* required(runId)
-      if (lease.policy.privateBootstrap?.mode !== "actions-native" || lease.state !== "ready")
-        return yield* Effect.fail(new SandboxError({ message: "Native source custody refused" }))
-      const source = yield* remote(
-        runId,
-        "exec /usr/local/bin/runner-control native-initialize",
-        4096,
-        JSON.stringify({ repository: lease.policy.repository, sourceSha: lease.source_sha }),
-      )
-      if (controlText(source).trim() !== lease.source_sha)
-        return yield* Effect.fail(new SandboxError({ message: "Native source mismatch" }))
-    })
-    const stopNative = Effect.fn("SandboxLease.stopNative")(function* (runId: string) {
-      const invocation = yield* native.read(runId)
-      if (invocation === null || invocation.state === "stopped") return
-      const marked = yield* native.uncertain(runId).pipe(Effect.exit)
-      const stopped = yield* Effect.gen(function* () {
-        const raw = yield* remote(runId, "exec /usr/local/bin/runner-control native-stop", 4096)
-        yield* Schema.decodeUnknownEffect(
-          Schema.fromJsonString(
-            Schema.Struct({
-              nonce: Schema.Literal(invocation.nonce),
-              session: Schema.Literal(invocation.session_id),
-              stopped: Schema.Literal(true),
-            }),
-          ),
-        )(controlText(raw), { onExcessProperty: "error" })
-      }).pipe(Effect.exit)
-      if (marked._tag === "Failure" || stopped._tag === "Failure")
-        return yield* Effect.fail(
-          new SandboxError({
-            ...sandboxDiagnostic(
-              "native.stop",
-              new AggregateError(
-                [marked, stopped],
-                "Native cleanup or durable revocation unconfirmed",
-              ),
-            ),
-            uncertain: true,
-          }),
-        )
-      yield* native.closed(runId, invocation.nonce, "cancelled", null)
-    })
     const finishResult = (runId: string, completion: string) =>
       Effect.gen(function* () {
         const lease = yield* required(runId)
-        const invocation =
-          lease.policy.privateBootstrap?.mode === "actions-native"
-            ? yield* native.read(runId)
-            : null
-        const candidate = invocation === null ? null : yield* nativeResults.read(runId)
-        if (
-          lease.policy.privateBootstrap?.mode === "actions-native" &&
-          (!invocation ||
-            invocation.state !== "stopped" ||
-            invocation.outcome !== "completed" ||
-            !candidate?.frozen ||
-            candidate.channel !== invocation.channel)
-        )
-          return yield* Effect.fail(new SandboxError({ message: "Native result custody refused" }))
         const json = completion.trim().replace(/^```(?:json)?[ \t]*\r?\n([\s\S]*?)\r?\n```$/, "$1")
-        const selected =
-          candidate?.completion ??
-          (yield* Schema.decodeUnknownEffect(Schema.fromJsonString(SandboxCompletion))(json, {
-            onExcessProperty: "error",
-          }).pipe(
-            Effect.mapError(
-              (cause) => new SandboxError(sandboxDiagnostic("result.completion", cause)),
-            ),
-          ))
+        const selected = yield* Schema.decodeUnknownEffect(
+          Schema.fromJsonString(SandboxCompletion),
+        )(json, { onExcessProperty: "error" }).pipe(
+          Effect.mapError(
+            (cause) => new SandboxError(sandboxDiagnostic("result.completion", cause)),
+          ),
+        )
         const response = yield* remote(
           runId,
-          invocation === null
-            ? "exec /usr/local/bin/runner-control finish-result"
-            : "exec /usr/local/bin/runner-control native-result",
+          "exec /usr/local/bin/runner-control finish-result",
           262144,
-          JSON.stringify(
-            invocation === null
-              ? selected
-              : { nonce: invocation.nonce, session: invocation.session_id, completion: selected },
-          ),
+          JSON.stringify(selected),
         )
         const value: unknown = yield* Effect.try((): unknown => JSON.parse(controlText(response)))
         const result = yield* Schema.decodeUnknownEffect(
@@ -739,39 +669,6 @@ export const makeSandboxLeaseService = (
     const audit = (runId: string, directory: string) =>
       Effect.gen(function* () {
         const lease = yield* required(runId)
-        if (lease.policy.privateBootstrap?.mode === "actions-native") {
-          const invocation = yield* native.read(runId)
-          if (invocation === null || invocation.state !== "stopped")
-            return yield* Effect.fail(
-              new SandboxError({ message: "Native audit custody unconfirmed" }),
-            )
-          const raw = yield* remote(
-            runId,
-            "exec /usr/local/bin/runner-control native-evidence",
-            2 * 1048576,
-          )
-          const evidence = yield* Schema.decodeUnknownEffect(
-            Schema.fromJsonString(
-              Schema.Struct({
-                nonce: Schema.Literal(invocation.nonce),
-                session: Schema.Literal(invocation.session_id),
-                pty: Schema.String.check(
-                  Schema.isMaxLength(1398104),
-                  Schema.isPattern(/^[A-Za-z0-9+/]*={0,2}$/),
-                ),
-              }),
-            ),
-          )(controlText(raw), { onExcessProperty: "error" })
-          yield* Effect.tryPromise(async () => {
-            await mkdir(`${directory}.sandbox`, { recursive: true, mode: 0o700 })
-            await saveSandboxFile(
-              `${directory}.sandbox`,
-              "native-evidence.json",
-              JSON.stringify(evidence),
-            )
-          })
-          return
-        }
         const transport = lease.transport
         if (transport === null)
           return yield* Effect.fail(
@@ -861,8 +758,6 @@ export const makeSandboxLeaseService = (
       reconcileRejectedCreation,
       heartbeat,
       finishResult,
-      initializeNative,
-      stopNative,
       finish,
       audit,
       revalidateReleased,
