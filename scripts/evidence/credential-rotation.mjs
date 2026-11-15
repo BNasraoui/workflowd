@@ -473,12 +473,31 @@ try {
     const s = input("limit")
     const runId = id(s)
     await post(s)
-    await terminal(runId)
+    const r = await terminal(runId)
     await snapshot(runId, "before-retention-cleanup")
     const path = join(root, "agent-processes", runId)
-    const bytes = (await stat(join(path, "events.jsonl"))).size
-    log("bounded-bytes", bytes)
-    assert.equal(bytes, full ? 10 * 1024 * 1024 : 4096)
+    // The limit bounds all record files together: the head, the segments and
+    // the index. The fixture's line of 11 MiB is over the line limit (a tenth
+    // of the total), so the record holds a marker in its place.
+    const limit = full ? 10 * 1024 * 1024 : 4096
+    let bytes = 0
+    for (const name of await readdir(path))
+      if (name.startsWith("events")) bytes += (await stat(join(path, name))).size
+    log("bounded-record-bytes", { bytes, limit })
+    assert.ok(bytes <= limit)
+    const lines = (await readEventRecordText(join(path, "events.jsonl")))
+      .split("\n")
+      .filter(Boolean)
+      .map(JSON.parse)
+    const dropped = lines.filter((line) => line.type === "workflowd.line_dropped")
+    log("line-dropped", dropped)
+    assert.deepEqual(dropped, [{ type: "workflowd.line_dropped", bytes: 11 * 1024 * 1024 }])
+    assert.equal(r.state, "completed")
+    const end = JSON.parse(
+      db.query("SELECT prompt FROM resident_inbox WHERE id=?").get(`agent-run-end-${runId}`).prompt,
+    )
+    log("final-message", end.final_message)
+    assert.equal(end.final_message, "full-final-output")
     const stderrBytes = (await stat(join(path, "stderr.log"))).size
     assert.equal(stderrBytes, full ? 10 * 1024 * 1024 : 4096)
     log("bounded-stderr-bytes", stderrBytes)
@@ -519,7 +538,8 @@ try {
     const source = await readFile(resolve("src/kernel/codex-session.ts"), "utf8")
     assert.ok(source.includes('options.unitPrefix ?? "workflowd-agent-"'))
     log("defaults", {
-      codex: "transient-exec, default workflowd-agent- prefix, 10 MiB/file, 7 day retention",
+      codex:
+        "transient-exec, default workflowd-agent- prefix, 10 MiB event record across its files with a 1 MiB line limit, 10 MiB stderr, 7 day retention",
       nonCodex:
         "production ingress dispatches OpenCode protocol fixture with manager unavailable; no unit created",
     })
