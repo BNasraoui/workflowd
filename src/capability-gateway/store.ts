@@ -8,6 +8,11 @@ export class CapabilityRefused extends Schema.TaggedError<CapabilityRefused>()(
   "CapabilityRefused",
   {},
 ) {}
+/** The lease cannot be challenged yet: it is unknown, or its Actions run is not recorded. */
+class CapabilityNotReady extends Schema.TaggedError<CapabilityNotReady>()(
+  "CapabilityNotReady",
+  {},
+) {}
 export const capabilityDigest = (value: string) => createHash("sha256").update(value).digest("hex")
 const Digest = Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/))
 const Authority = Schema.Struct({
@@ -28,8 +33,8 @@ const Authority = Schema.Struct({
 })
 const Binding = Schema.Struct({ runId: Schema.String, channel: Digest })
 const SessionBinding = Schema.Struct({ ...Binding.fields, session: Schema.Int })
-/** A run gets at most this many challenges; a ninth is refused. */
-const maxChallenges = 8
+/** A run opens at most this many sessions; only a verified proof opens one. */
+const maxSessions = 8
 const SessionPolicy = Schema.Struct({
   privateBootstrap: Schema.Struct({
     mode: Schema.Literal("actions-native"),
@@ -53,7 +58,7 @@ const Row = Schema.Struct({
   jti_digest: Schema.NullOr(Digest),
   revoked: Schema.Int,
   session: Schema.Int,
-  challenges: Schema.Int,
+  nonce: Schema.NullOr(Digest),
 })
 const Current = Schema.Struct({
   runId: Schema.String,
@@ -171,9 +176,10 @@ export const makeCapabilityStore = Effect.gen(function* () {
     )
   })
   /**
-   * A runner's challenge for its lease. The binding's channel stays (the native tables name it);
-   * each challenge sets a new nonce and replaces an unused earlier one, at most `maxChallenges`
-   * times for one run.
+   * A runner's challenge for its lease. While an unused challenge is alive, every request gets
+   * that same nonce and expiry back, so asking again costs the run nothing; otherwise a new nonce
+   * replaces it. A lease that does not exist and a lease whose Actions run is not recorded yet get
+   * the same answer: the runner may ask before the daemon records its run.
    */
   const leaseChallenge = Effect.fn("CapabilityStore.leaseChallenge")(function* (
     leaseId: string,
@@ -182,26 +188,37 @@ export const makeCapabilityStore = Effect.gen(function* () {
     if (!/^[a-zA-Z0-9-]{1,80}$/.test(leaseId)) return yield* Effect.fail(new CapabilityRefused())
     return yield* sql.withTransaction(
       Effect.gen(function* () {
-        const rows = yield* sql<{ readonly run_id: unknown }>`SELECT run_id FROM sandbox_leases
+        const rows = yield* sql<{
+          readonly run_id: unknown
+          readonly actions_run_id: unknown
+        }>`SELECT run_id,actions_run_id FROM sandbox_leases
           WHERE lease_id=${leaseId} AND json_extract(policy,'$.privateBootstrap.mode')='actions-native'`
         const runId = rows[0]?.run_id
-        if (rows.length !== 1 || typeof runId !== "string")
-          return yield* Effect.fail(new CapabilityRefused())
+        if (
+          rows.length !== 1 ||
+          typeof runId !== "string" ||
+          typeof rows[0]?.actions_run_id !== "number"
+        )
+          return yield* Effect.fail(new CapabilityNotReady())
         const value = yield* current(runId, now)
+        const bound = yield* sql`SELECT * FROM capability_bindings WHERE run_id=${runId}`
         const nonce = randomBytes(32).toString("hex")
         const expiresAt = Math.min(now + 60000, value.deadline)
-        const updated = yield* sql<{ readonly channel: unknown }>`UPDATE capability_bindings
-          SET challenge=${capabilityDigest(nonce)},challenge_expires=${expiresAt},challenges=challenges+1
-          WHERE run_id=${runId} AND revoked=0 AND transport_digest IS NULL
-          AND challenges<${maxChallenges} RETURNING channel`
-        const kept = updated[0]?.channel
-        if (typeof kept === "string") return { channel: kept, nonce, expiresAt }
-        const existing = yield* sql`SELECT 1 FROM capability_bindings WHERE run_id=${runId}`
-        if (existing.length > 0) return yield* Effect.fail(new CapabilityRefused())
+        if (bound.length > 0) {
+          const row = yield* Schema.decodeUnknownEffect(Row)(bound[0])
+          if (row.revoked !== 0 || row.transport_digest !== null)
+            return yield* Effect.fail(new CapabilityRefused())
+          if (row.nonce !== null && row.challenge_expires > now)
+            return { channel: row.channel, nonce: row.nonce, expiresAt: row.challenge_expires }
+          yield* sql`UPDATE capability_bindings
+            SET challenge=${capabilityDigest(nonce)},nonce=${nonce},challenge_expires=${expiresAt}
+            WHERE run_id=${runId}`
+          return { channel: row.channel, nonce, expiresAt }
+        }
         const authority = yield* Schema.decodeUnknownEffect(Authority)({ ...value, peerId: "" })
         const channel = randomBytes(32).toString("hex")
-        yield* sql`INSERT INTO capability_bindings(run_id,channel,challenge,challenge_expires,authority,challenges)
-          VALUES(${runId},${channel},${capabilityDigest(nonce)},${expiresAt},${JSON.stringify(authority)},1)`
+        yield* sql`INSERT INTO capability_bindings(run_id,channel,challenge,nonce,challenge_expires,authority)
+          VALUES(${runId},${channel},${capabilityDigest(nonce)},${nonce},${expiresAt},${JSON.stringify(authority)})`
         return { channel, nonce, expiresAt }
       }),
     )
@@ -229,6 +246,7 @@ export const makeCapabilityStore = Effect.gen(function* () {
           row.transport_digest !== null ||
           row.challenge !== capabilityDigest(challenge.nonce) ||
           row.challenge_expires <= now ||
+          row.session >= maxSessions ||
           row.authority.recipientId !== challenge.recipientId ||
           !jti ||
           jti.length > 256 ||
@@ -239,22 +257,30 @@ export const makeCapabilityStore = Effect.gen(function* () {
           return yield* Effect.fail(new CapabilityRefused())
         const session = row.session + 1
         yield* sql`INSERT INTO capability_proofs(jti_digest,run_id) VALUES(${proof},${row.run_id})`
-        yield* sql`UPDATE capability_bindings SET session=${session},challenge_expires=0 WHERE run_id=${row.run_id}`
+        yield* sql`UPDATE capability_bindings SET session=${session},challenge_expires=0,nonce=NULL WHERE run_id=${row.run_id}`
         yield* sql`INSERT INTO capability_tokens(digest,run_id,expires_at,session) VALUES(${digest},${row.run_id},${expiresAt},${session})`
         return { runId: row.run_id, channel: row.channel, session }
       }),
     )
   })
-  /** What a session proof must match. The channel comes from an unverified audience: it only selects. */
+  /**
+   * What a session proof must match. The channel, nonce and jti come from the unverified proof:
+   * they only select, and refuse before any key is fetched or token minted. A proof for a nonce
+   * that is not the live one, a used proof and a run whose sessions are spent go no further.
+   */
   const sessionContext = Effect.fn("CapabilityStore.sessionContext")(function* (
-    channel: string,
+    proof: { readonly channel: string; readonly nonce: string; readonly jti: string },
     now: number,
   ) {
     const rows = yield* sql`SELECT b.run_id AS runId,l.lease_id AS leaseId,l.policy,
       b.challenge_expires AS challengeExpires,json_extract(b.authority,'$.recipientId') AS recipientId
       FROM capability_bindings b JOIN sandbox_leases l ON l.run_id=b.run_id
-      WHERE b.channel=${channel} AND b.revoked=0 AND b.transport_digest IS NULL`
+      WHERE b.channel=${proof.channel} AND b.challenge=${capabilityDigest(proof.nonce)}
+      AND b.session<${maxSessions} AND b.revoked=0 AND b.transport_digest IS NULL`
     if (rows.length !== 1) return yield* Effect.fail(new CapabilityRefused())
+    const used =
+      yield* sql`SELECT 1 FROM capability_proofs WHERE jti_digest=${capabilityDigest(proof.jti)}`
+    if (used.length > 0) return yield* Effect.fail(new CapabilityRefused())
     const row = yield* Schema.decodeUnknownEffect(
       Schema.Struct({
         runId: Schema.String,

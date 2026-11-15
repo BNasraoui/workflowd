@@ -29,15 +29,23 @@ const RenewalKey = Schema.Struct({
 })
 const SessionProof = Schema.Struct({ token: Schema.String.check(Schema.isMaxLength(16384)) })
 const SessionAudience = /^workflowd:([a-f0-9]{64}):([a-f0-9]{64})$/
-/** Reads the audience of an unverified proof only to select its challenge; verification follows. */
-const proofAudience = (token: string) => {
+/**
+ * Reads the audience and jti of an unverified proof only to select its challenge and to refuse a
+ * used proof early; verification follows.
+ */
+const proofClaims = (token: string) => {
   try {
     const value: unknown = JSON.parse(
       Buffer.from(token.split(".")[1] ?? "", "base64url").toString("utf8"),
     )
-    const audience: unknown =
-      typeof value === "object" && value !== null ? Reflect.get(value, "aud") : undefined
-    return typeof audience === "string" ? SessionAudience.exec(audience) : null
+    const claim = (name: string): unknown =>
+      typeof value === "object" && value !== null ? Reflect.get(value, name) : undefined
+    const audience = claim("aud")
+    const jti = claim("jti")
+    const match = typeof audience === "string" ? SessionAudience.exec(audience) : null
+    return match?.[1] && match[2] && typeof jti === "string" && jti.length <= 256
+      ? { audience: match[0], channel: match[1], nonce: match[2], jti }
+      : null
   } catch {
     return null
   }
@@ -156,9 +164,9 @@ export const makeCapabilityGateway = (
       const { token } = yield* Schema.decodeUnknownEffect(SessionProof)(proof, {
         onExcessProperty: "error",
       }).pipe(Effect.mapError(() => new CapabilityRefused()))
-      const audience = proofAudience(token)
-      if (!audience?.[1] || !audience[2]) return yield* Effect.fail(new CapabilityRefused())
-      const job = yield* store.sessionContext(audience[1], Date.now())
+      const claims = proofClaims(token)
+      if (!claims) return yield* Effect.fail(new CapabilityRefused())
+      const job = yield* store.sessionContext(claims, Date.now())
       const jwks = yield* ownedPromise(keys)
       const policy = job.policy
       const ref = `refs/heads/workflowd/leases/${job.leaseId}`
@@ -168,7 +176,7 @@ export const makeCapabilityGateway = (
           verifyJobProof(
             token,
             {
-              audience: audience[0],
+              audience: claims.audience,
               repository: policy.repository,
               repositoryId: policy.repositoryId,
               ownerId: policy.privateBootstrap.repositoryOwnerId,
@@ -193,8 +201,8 @@ export const makeCapabilityGateway = (
         store.bindSession(
           {
             runId: job.runId,
-            channel: audience[1],
-            nonce: audience[2],
+            channel: claims.channel,
+            nonce: claims.nonce,
             recipientId: job.recipientId,
           },
           verified.jti,

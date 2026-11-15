@@ -324,10 +324,11 @@ async function scenario(start: (f: Fixture) => Promise<{ port: number; stop(): P
         }),
       )
 
-    // (g) An unknown lease, a malformed query and a lease that is not actions-native get nothing.
-    expect((await challenge("other")).status).toBe(403)
+    // (g) An unknown lease and a lease that is not actions-native are not ready for a challenge;
+    // a malformed query gets nothing.
+    expect((await challenge("other")).status).toBe(503)
     expect((await fetch(url("/capabilities/v1/challenge?lease=lease&x=1"))).status).toBe(403)
-    expect((await challenge("lease-d")).status).toBe(403)
+    expect((await challenge("lease-d")).status).toBe(503)
     const first = await audienceOf("lease")
 
     // (c) Another Actions run's proof, and malformed proofs, are refused and consume nothing.
@@ -425,11 +426,8 @@ async function scenario(start: (f: Fixture) => Promise<{ port: number; stop(): P
     expect((await session(proof(replaced, "jti-2"))).status).toBe(403)
     expect(await (await call(current.token)).text()).toBe(sse)
 
-    // (f) A newer challenge replaces an unused one, and a run gets at most eight challenges.
-    await audienceOf("lease")
-    expect((await session(proof(replaced, "jti-4"))).status).toBe(403)
-    for (let issued = 5; issued < 8; issued++) await audienceOf("lease")
-    expect((await challenge("lease")).status).toBe(403)
+    // (f) Asking again gives the same unused challenge; asking costs the run nothing.
+    for (let asked = 0; asked < 10; asked++) expect(await audienceOf("lease")).toBe(replaced)
     expect(await (await call(current.token)).text()).toBe(sse)
 
     // (g) A releasing lease and an ended run get no challenge.

@@ -186,6 +186,7 @@ test("the session migration keeps bindings, their tokens and revocation triggers
       yield* sql`ALTER TABLE capability_tokens DROP COLUMN session`
       yield* sql`ALTER TABLE capability_bindings DROP COLUMN session`
       yield* sql`ALTER TABLE capability_bindings DROP COLUMN challenges`
+      yield* sql`ALTER TABLE capability_bindings DROP COLUMN nonce`
       yield* sql.withTransaction(capabilitySession)
       expect(yield* count()).toEqual([{ tokens: 2, indexes: 1 }])
       expect(yield* sql`SELECT session,challenges FROM capability_bindings`).toEqual([

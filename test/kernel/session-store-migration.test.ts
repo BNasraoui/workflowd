@@ -116,6 +116,7 @@ describe("migration 13: kernel session store", () => {
       { migration_id: 39, name: "capability_gateway" },
       { migration_id: 40, name: "capability_session" },
       { migration_id: 41, name: "session_lease_ready" },
+      { migration_id: 42, name: "capability_renewal" },
     ])
     expect(result.preserved).toEqual([{ instance_id: "preserved" }])
     expect(result.tables).toHaveLength(14)
