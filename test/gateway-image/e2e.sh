@@ -34,8 +34,14 @@ if find "$root/fs" -regextype posix-extended -iregex \
   echo "credential-like path in the image" >&2
   exit 1
 fi
-if grep -rlE 'BEGIN ([A-Z]+ )?PRIVATE KEY|sk-ant-[A-Za-z0-9_-]{20}|gh[opsu]_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{20}' "$root/fs"; then
-  echo "key or token material in the image" >&2
+if grep -rlE 'sk-ant-[A-Za-z0-9_-]{20}|gh[opsu]_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{20}' "$root/fs"; then
+  echo "provider or GitHub token in the image" >&2
+  exit 1
+fi
+# Public npm packages carry PEM parsers and test keys. Their files are those of bun.lock's
+# integrity hashes, fixed again by the output hash of nix/workflowd-modules.nix.
+if grep -rlE 'BEGIN ([A-Z]+ )?PRIVATE KEY' --exclude-dir='*-workflowd-node-modules' "$root/fs"; then
+  echo "private key in the image" >&2
   exit 1
 fi
 [[ -z $(ls -A "$root/fs/var/lib/workflowd-gateway") ]]
