@@ -21,20 +21,20 @@ export const publicationCases = [
 ] as const
 
 export const adapterCases = [
-  ["P3-A", "test/sandbox/public-output.test.ts"],
-  ["P3-B", "test/sandbox/bootstrap.e2e.launcher.test.ts"],
-  ["P3-D1", "test/capability-gateway/transport-security.test.ts"],
-  ["P3-D2", "test/sandbox/capability-relay.test.ts"],
+  ["H1", "test/sandbox/public-output.test.ts"],
+  ["H2", "test/sandbox/bootstrap.e2e.launcher.test.ts"],
+  ["H3", "test/capability-gateway/transport-security.test.ts"],
+  ["H4", "test/sandbox/capability-relay.test.ts"],
 ] as const
 
 export const finalCases = [
-  ["P4-A", "test/sandbox/public-output.test.ts"],
-  ["P4-A2", "test/sandbox/ci-setup.test.ts"],
-  ["P4-C", "test/capability-gateway/git-read.test.ts"],
-  ["P4-CD", "test/capability-gateway/git.launcher.test.ts"],
-  ["P4-E", "test/sandbox/process-environment.test.ts"],
-  ["P4-F", "test/sandbox/publication-parity.test.ts"],
-  ["P4-G4", "test/runtime-startup.test.ts"],
+  ["J1", "test/sandbox/public-output.test.ts"],
+  ["J2", "test/sandbox/ci-setup.test.ts"],
+  ["J3", "test/capability-gateway/git-read.test.ts"],
+  ["J4", "test/capability-gateway/git.launcher.test.ts"],
+  ["J5", "test/sandbox/process-environment.test.ts"],
+  ["J6", "test/sandbox/publication-parity.test.ts"],
+  ["J7", "test/runtime-startup.test.ts"],
 ] as const
 
 export const suites: Readonly<Record<string, ReadonlyArray<readonly [string, string]>>> = {

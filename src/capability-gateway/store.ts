@@ -237,8 +237,9 @@ export const makeCapabilityStore = Effect.gen(function* () {
   /**
    * A runner's challenge for its lease. While an unused challenge is alive, every request gets
    * that same nonce and expiry back, so asking again costs the run nothing; otherwise a new nonce
-   * replaces it. A lease that does not exist and a lease whose Actions run is not recorded yet get
-   * the same answer: the runner may ask before the daemon records its run.
+   * replaces it. A lease that does not exist, whose Actions run is not recorded, whose run has
+   * ended or whose binding is revoked gets the same answer: the runner may ask before the daemon
+   * records its run.
    */
   const leaseChallenge = Effect.fn("CapabilityStore.leaseChallenge")(function* (
     leaseId: string,

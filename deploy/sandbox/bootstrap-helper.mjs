@@ -112,7 +112,7 @@ export async function openSession({
   throw new Error("gateway session unavailable")
 }
 
-/** One challenge for the lease: its JSON, or undefined when it is not ready yet. */
+/** One challenge for the lease: its JSON, or undefined when the gateway has none ready. */
 async function askChallenge(send, origin, leaseId, bounded, signal) {
   let response
   try {

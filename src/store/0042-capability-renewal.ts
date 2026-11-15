@@ -4,7 +4,8 @@ import { SqlClient } from "effect/unstable/sql"
 /**
  * A binding keeps its live challenge nonce, so a repeated challenge request gets the same one
  * back. A used proof keeps the expiry of its proof, so its row can go once the proof is refused
- * anyway; a proof from before this column lives at most 610 seconds from now.
+ * anyway; a row that the migration finds gets 610 seconds from the migration, the longest life
+ * of a proof and its leeway.
  */
 export const capabilityRenewal = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient
