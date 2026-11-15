@@ -1,4 +1,4 @@
-import { lstat, mkdtemp, readdir, rm } from "node:fs/promises"
+import { lstat, mkdir, mkdtemp, readdir, rm } from "node:fs/promises"
 import { join } from "node:path"
 import { inflateSync } from "node:zlib"
 import { Data, Effect, Redacted, Schema, Semaphore, type Scope } from "effect"
@@ -73,7 +73,11 @@ export type SealedResultOptions = {
    * commit, and the addresses no commit message may name.
    */
   readonly agentGit: AgentGitConfig
-  /** A directory of the daemon in which each check makes and removes its scratch repository. */
+  /**
+   * The daemon's root of scratch directories, mode 0700: each check makes its scratch
+   * repository below it and removes it; `removeSealedResultScratch` removes what an
+   * earlier process left.
+   */
   readonly scratchRoot: string
   readonly gitBinary?: string
   readonly timeLimitMs?: number
@@ -478,6 +482,7 @@ const spawnGit = async (
   context: GitContext,
   args: ReadonlyArray<string>,
   input: Uint8Array | undefined,
+  signal: AbortSignal,
 ): Promise<GitRun> => {
   const remaining = context.deadline - Date.now()
   const ended = {
@@ -490,6 +495,7 @@ const spawnGit = async (
   if (remaining <= 0) return { ...ended, timedOut: true }
   const fileBlocks = await fileLimitBlocks(context.scratch)
   if (fileBlocks <= 0) return { ...ended, diskFull: true }
+  if (signal.aborted) return ended
   const limits = `ulimit -f ${fileBlocks} && ulimit -v ${sealedResultLimits.memoryBytes / 1024} && exec "$0" "$@"`
   const child = Bun.spawn(["/bin/sh", "-c", limits, context.binary, ...gitConfig, ...args], {
     cwd: context.cwd,
@@ -504,6 +510,8 @@ const spawnGit = async (
     timedOut = true
     killGroup(child.pid)
   }, remaining)
+  const stop = () => killGroup(child.pid)
+  signal.addEventListener("abort", stop)
   try {
     const [status, stdout, stderr] = await Promise.all([
       child.exited,
@@ -519,23 +527,43 @@ const spawnGit = async (
     return { status, stdout, stderr: stderr.toString("utf8"), timedOut, diskFull }
   } finally {
     clearTimeout(timer)
+    signal.removeEventListener("abort", stop)
     killGroup(child.pid)
   }
 }
 
-/** Runs git; a time-out refuses, any other failure is passed to `onFailure`. */
+/**
+ * Runs git; a time-out or a full disk refuses, a failure to run it is a fault. An
+ * interruption kills the process group of the child at once and waits until the
+ * child has ended, so the scratch directory is removed after it.
+ */
 const git = (
   context: GitContext,
   args: ReadonlyArray<string>,
   input?: Uint8Array,
 ): Effect.Effect<GitRun, SealedResultError> =>
-  Effect.tryPromise({
-    try: () => spawnGit(context, args, input),
-    catch: (cause) =>
-      new SealedResultFault({
-        operation: args[0] ?? "git",
-        message: redact(`git ${args[0]} failed: ${String(cause)}`, context.secrets),
-      }),
+  Effect.callback<GitRun, SealedResultFault>((resume) => {
+    const controller = new AbortController()
+    const running = spawnGit(context, args, input, controller.signal)
+    void running.then(
+      (run) => resume(Effect.succeed(run)),
+      (cause: unknown) =>
+        resume(
+          Effect.fail(
+            new SealedResultFault({
+              operation: args[0] ?? "git",
+              message: redact(`git ${args[0]} failed: ${String(cause)}`, context.secrets),
+            }),
+          ),
+        ),
+    )
+    return Effect.promise(() => {
+      controller.abort()
+      return running.then(
+        () => undefined,
+        () => undefined,
+      )
+    })
   }).pipe(
     Effect.flatMap((run) =>
       run.timedOut
@@ -564,6 +592,52 @@ const gitOk = (context: GitContext, args: ReadonlyArray<string>, input?: Uint8Ar
   )
 
 const checks = Semaphore.makeUnsafe(sealedResultLimits.concurrentChecks)
+
+const scratchPrefix = "sealed-result-"
+
+/**
+ * The root of the scratch directories: made with mode 0700 when it does not exist,
+ * else a directory (not a link) of the daemon's user that no other user may use.
+ */
+const scratchRootReady = (root: string) =>
+  Effect.tryPromise({
+    try: async () => {
+      await mkdir(root, { mode: 0o700 }).catch((error: unknown) => {
+        if (!isRecord(error) || error.code !== "EEXIST") throw error
+      })
+      const stat = await lstat(root)
+      if (!stat.isDirectory() || stat.uid !== process.getuid?.() || (stat.mode & 0o077) !== 0)
+        throw new Error("unsafe scratch root")
+    },
+    catch: () =>
+      new SealedResultFault({
+        operation: "scratch",
+        message: "Scratch root is not a directory that only the daemon can use",
+      }),
+  })
+
+/**
+ * Removes the scratch directories an earlier process of the daemon left below the
+ * root (a daemon that was killed does not remove them). Call it before the first
+ * check of the process: it also removes the scratch of a check that runs.
+ */
+export const removeSealedResultScratch = (root: string): Effect.Effect<void, SealedResultFault> =>
+  scratchRootReady(root).pipe(
+    Effect.andThen(
+      Effect.tryPromise({
+        try: async () => {
+          for (const entry of await readdir(root))
+            if (entry.startsWith(scratchPrefix))
+              await rm(join(root, entry), { recursive: true, force: true })
+        },
+        catch: () =>
+          new SealedResultFault({
+            operation: "scratch",
+            message: "Scratch directories of an earlier process remain",
+          }),
+      }),
+    ),
+  )
 
 const targetRef = /^refs\/heads\/(?!-)[A-Za-z0-9._/-]{1,200}$/
 
@@ -787,9 +861,10 @@ export const checkSealedResult = (
     if (bundle instanceof SealedResultRefused) return yield* bundle
     // The permit is held until the scratch directory is gone.
     yield* Effect.acquireRelease(checks.take(1), () => checks.release(1))
+    yield* scratchRootReady(options.scratchRoot)
     const scratch = yield* Effect.acquireRelease(
       Effect.tryPromise({
-        try: () => mkdtemp(join(options.scratchRoot, "sealed-result-")),
+        try: () => mkdtemp(join(options.scratchRoot, scratchPrefix)),
         catch: () =>
           new SealedResultFault({ operation: "scratch", message: "Scratch directory unavailable" }),
       }),

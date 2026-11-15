@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test"
-import { Cause, Effect, Exit, Redacted, Schema } from "effect"
+import { Cause, Effect, Exit, Fiber, Redacted, Schema } from "effect"
 import {
   chmod,
   lstat,
@@ -19,6 +19,7 @@ import {
   checkSealedResult,
   decodeSealedResult,
   pushSealedResult,
+  removeSealedResultScratch,
   SealedResultFault,
   SealedResultRefused,
   sealedResultLimits,
@@ -91,7 +92,8 @@ async function fixture(): Promise<Fixture> {
   const remote = join(root, "remote.git")
   const scratchRoot = join(root, "scratch")
   await mkdir(work)
-  await mkdir(scratchRoot)
+  // The daemon's root of scratch directories: only its own user may use it.
+  await mkdir(scratchRoot, { mode: 0o700 })
   const git = (cwd: string, ...args: string[]) =>
     run(["git", "-c", "commit.gpgsign=false", ...args], cwd)
   await git(work, "init", "-q", "-b", "main")
@@ -975,6 +977,75 @@ test(
     expect(refusedCheck(exit)).toBe("time_limit")
     expect(Date.now() - started).toBeLessThan(10_000)
     expect(await remoteRef(f)).toBe("")
+  }),
+)
+
+const alive = (pid: number) => {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch {
+    return false
+  }
+}
+
+test(
+  "an interrupted check kills the process group of its git child at once and removes its scratch directory",
+  withFixture(async (f) => {
+    const sealed = await sealWithResultPy(f, async (workspace) => {
+      await writeFile(join(workspace, "result.txt"), "content\n")
+    })
+    const result = await decode(sealed.json, sealed.bundle)
+    // A git that never ends, with a child of its own in its process group.
+    const pids = join(f.root, "pids")
+    const endless = join(f.root, "endless-git")
+    await writeFile(endless, `#!/bin/sh\nsleep 300 &\necho "$$ $!" > ${pids}\nwait\n`)
+    await chmod(endless, 0o755)
+    const fiber = Effect.runFork(
+      Effect.scoped(checkSealedResult(result, target, options(f, { gitBinary: endless }))),
+    )
+    while (!(await Bun.file(pids).exists()) || (await Bun.file(pids).text()) === "")
+      await Bun.sleep(10)
+    const [git, child] = (await Bun.file(pids).text()).trim().split(" ").map(Number)
+    expect(alive(git!) && alive(child!)).toBe(true)
+    const started = Date.now()
+    await Effect.runPromise(Fiber.interrupt(fiber))
+    expect(Date.now() - started).toBeLessThan(2_000)
+    expect(alive(git!)).toBe(false)
+    expect(alive(child!)).toBe(false)
+    expect(await readdir(f.scratchRoot)).toEqual([])
+  }),
+)
+
+test(
+  "what an earlier process left below the scratch root is removed, and a root others can use is a fault",
+  withFixture(async (f) => {
+    const stale = join(f.scratchRoot, "sealed-result-earlier")
+    await mkdir(join(stale, "repository.git"), { recursive: true })
+    await writeFile(join(stale, "repository.git", "pack"), "left by a process that ended\n")
+    await Effect.runPromise(removeSealedResultScratch(f.scratchRoot))
+    expect(await readdir(f.scratchRoot)).toEqual([])
+    const sealed = await sealWithResultPy(f, async (workspace) => {
+      await writeFile(join(workspace, "result.txt"), "content\n")
+    })
+    const result = await decode(sealed.json, sealed.bundle)
+    await chmod(f.scratchRoot, 0o755)
+    try {
+      const shared = await publish(result, options(f))
+      expect(failure(shared)).toBeInstanceOf(SealedResultFault)
+      expect(String(failure(shared))).toContain("Scratch root")
+      expect(
+        failure(await Effect.runPromiseExit(removeSealedResultScratch(f.scratchRoot))),
+      ).toBeInstanceOf(SealedResultFault)
+    } finally {
+      await chmod(f.scratchRoot, 0o700)
+    }
+    // A root that does not exist yet is made with mode 0700.
+    const fresh = join(f.root, "fresh-root")
+    const exit = await publish(result, options(f, { scratchRoot: fresh }))
+    if (Exit.isFailure(exit)) throw Cause.squash(exit.cause)
+    expect((await lstat(fresh)).mode & 0o777).toBe(0o700)
+    expect(await readdir(fresh)).toEqual([])
   }),
 )
 
