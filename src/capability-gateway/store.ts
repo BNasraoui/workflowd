@@ -55,7 +55,7 @@ const SessionPolicy = Schema.Struct({
   workflowSha: Schema.String,
   toolingSha: Schema.optionalKey(Schema.String),
 })
-export type CapabilityBinding = typeof Binding.Type
+type CapabilityBinding = typeof Binding.Type
 const Challenge = Schema.Struct({ ...Binding.fields, nonce: Digest, recipientId: Schema.String })
 const Row = Schema.Struct({
   run_id: Schema.String,

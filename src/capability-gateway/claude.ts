@@ -230,7 +230,7 @@ export async function claudeRequest(
 }
 
 /** Same bounded credential-reflection exclusion for every native protocol. */
-export async function safeProviderResponse(response: Response, secrets: ReadonlyArray<string>) {
+async function safeProviderResponse(response: Response, secrets: ReadonlyArray<string>) {
   const patterns = credentialPatterns(secrets)
   if (
     (response.status >= 300 && response.status < 400) ||

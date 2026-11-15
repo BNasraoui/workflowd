@@ -1,7 +1,7 @@
 import { readRequestBody } from "./claude"
 import { checkHeaders, RequestRefused } from "./headers"
 
-export interface GitRequest {
+interface GitRequest {
   readonly method: "GET" | "POST"
   readonly body?: Uint8Array<ArrayBuffer>
   readonly headers: Headers
