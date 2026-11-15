@@ -39,11 +39,13 @@ const pause = (milliseconds, signal) =>
 /**
  * Network failures that can clear by a wait: a refused connection, a reset, a timeout, and a
  * name that does not resolve yet (the first seconds after the runner joins the tailnet), by the
- * codes of Node's fetch and of Bun's.
+ * codes of Node's fetch and of Bun's. Bun 1.3 reports a name that does not resolve as
+ * ConnectionRefused or FailedToOpenSocket.
  */
 const passing = new Set([
   "ECONNREFUSED",
   "ConnectionRefused",
+  "FailedToOpenSocket",
   "ConnectionClosed",
   "ECONNRESET",
   "ETIMEDOUT",
