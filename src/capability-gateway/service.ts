@@ -98,6 +98,15 @@ const tokenLifeMs = 900000
 /** Its holder renews it within the renewal lead before it expires, or now when less is left. */
 const renewAt = (expiresAt: number) =>
   Math.max(Date.now(), expiresAt - randomInt(renewLeadMinMs, renewLeadMaxMs + 1))
+/** The kind of a failure for the log: its tag or its class name, never its text or values. */
+const failureKind = (error: unknown) =>
+  typeof error === "object" && error !== null && "_tag" in error && typeof error._tag === "string"
+    ? error._tag
+    : error instanceof Error
+      ? error.name
+      : typeof error
+const logFailure = (message: string) => (error: unknown) =>
+  Effect.logWarning(message, { kind: failureKind(error) })
 const denied = () => new Response(null, { status: 403 })
 const unavailable = () => new Response(null, { status: 503, headers: { "retry-after": "5" } })
 
@@ -168,14 +177,14 @@ export const makeCapabilityGateway = (
     // second gateway) revokes or opens a new session through the store, so live streams follow it.
     yield* Effect.suspend(() => store.staleAmong(streams())).pipe(
       Effect.tap((stale) => Effect.sync(() => abortStale(stale))),
-      Effect.ignore,
+      Effect.catch(logFailure("Capability stream check failed")),
       Effect.andThen(Effect.sleep("1 second")),
       Effect.forever,
       Effect.forkScoped,
     )
     // Rows of expired run tokens and of expired used proofs go, now and every minute.
     yield* Effect.suspend(() => store.sweep(Date.now())).pipe(
-      Effect.ignore,
+      Effect.catch(logFailure("Capability sweep failed")),
       Effect.andThen(Effect.sleep("60 seconds")),
       Effect.forever,
       Effect.forkScoped,
@@ -495,10 +504,12 @@ export const makeCapabilityGateway = (
                     headers: selected.headers,
                   })
                 }).pipe(
-                  Effect.mapError((error) =>
+                  Effect.catch((error) =>
                     error instanceof RequestRefused
-                      ? ("refused" as const)
-                      : ("unavailable" as const),
+                      ? Effect.fail("refused" as const)
+                      : logFailure("Capability route failed")(error).pipe(
+                          Effect.andThen(Effect.fail("unavailable" as const)),
+                        ),
                   ),
                 ),
               )
@@ -515,7 +526,9 @@ export const makeCapabilityGateway = (
             }),
         )
       },
-      Effect.catch(() => Effect.succeed(unavailable())),
+      Effect.catch((error) =>
+        logFailure("Capability request failed")(error).pipe(Effect.as(unavailable())),
+      ),
     )
     return { sessionChallenge, session, revoke, handle }
   })

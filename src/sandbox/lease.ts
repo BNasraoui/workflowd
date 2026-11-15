@@ -241,13 +241,13 @@ export const makeSandboxLeaseService = (
         )
       return yield* ready.pipe(
         Effect.onError(() =>
-          native.gateway
-            .revoke(lease.run_id)
-            .pipe(
-              Effect.catchCause((cause) =>
-                Effect.logError("Capability revoke after a failed session binding failed", cause),
-              ),
+          native.gateway.revoke(lease.run_id).pipe(
+            Effect.catch((error) =>
+              Effect.logError("Capability revoke after a failed session binding failed", {
+                kind: error._tag,
+              }),
             ),
+          ),
         ),
       )
     })
