@@ -68,8 +68,10 @@ completion or failure in the existing agent-run store.
 
 Prompts never appear in the transient unit's argument vector. Custody
 directories and files are created with owner-only permissions. The wrapper
-captures stdout and stderr with a 10 MiB limit per file; the observer reads only
-newly appended, newline-terminated bytes. Finished custody is removed at
+keeps stdout as an event record of at most 10 MiB across its files: a 1 MiB head,
+1 MiB tail segments that rotate out the oldest, and an index. A line over 1 MiB is
+stored as a `workflowd.line_dropped` marker. It captures stderr with a 10 MiB
+limit. The observer reads only newly appended, newline-terminated bytes. Finished custody is removed at
 startup after seven days, while active run IDs are protected.
 
 ## Execution ownership seam

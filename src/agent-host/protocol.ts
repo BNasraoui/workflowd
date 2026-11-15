@@ -98,6 +98,13 @@ export const HostStart = Schema.Struct({
   ),
 })
 export type HostStart = typeof HostStart.Type
+/** The files of one host launch that its controller may read: the event
+ * record (head, index, tail segments), stderr and the result. */
+export const HostExchangeFile = Schema.Union([
+  Schema.Literals(["events", "events.index.json", "stderr", "result"]),
+  Schema.String.check(Schema.isPattern(/^events\.[1-9][0-9]{0,8}$/)),
+])
+export type HostExchangeFile = typeof HostExchangeFile.Type
 export const HostRequest = Schema.Union([
   Schema.Struct({
     operation: Schema.Literal("listOwned"),
@@ -111,7 +118,7 @@ export const HostRequest = Schema.Union([
     operation: Schema.Literal("exchange"),
     runId: HostId,
     launchId: Schema.String,
-    file: Schema.Literals(["events", "stderr", "result"]),
+    file: HostExchangeFile,
     offset: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
   }),
 ])

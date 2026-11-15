@@ -6,6 +6,12 @@ import { CodexRetryTurn } from "./codex-retry"
 import { constants } from "node:fs"
 import { open, readFile, rename, stat, writeFile } from "node:fs/promises"
 import { nativeSandboxArguments } from "../sandbox/native"
+import {
+  EVENT_RECORD_BYTES,
+  eventRecordBytes,
+  openEventRecord,
+  type EventRecordWriter,
+} from "./event-record-files"
 import { codexProjectArguments } from "../execution/project-config"
 
 export type CliWorkerOptions = {
@@ -63,6 +69,22 @@ const drainBounded = async (
   }
 }
 
+/** Drains the CLI's stdout into its event record. The record bounds the
+ * bytes on disk by rotating, so every later line still reaches the observer. */
+const drainRecord = async (
+  stream: ReadableStream<Uint8Array>,
+  record: EventRecordWriter,
+  observe?: (chunk: Uint8Array) => void,
+) => {
+  const reader = stream.getReader()
+  for (;;) {
+    const next = await reader.read()
+    if (next.done) return
+    observe?.(next.value)
+    await record.write(next.value)
+  }
+}
+
 /** Runs inside a transient user service and durably captures bounded output. */
 export async function runCodexWorker(options: CliWorkerOptions): Promise<number> {
   return runCliWorker(
@@ -102,10 +124,21 @@ export async function runCliWorker(
   retryProvider = false,
 ): Promise<number> {
   const prompt = await readFile(options.promptFile)
-  await writeFile(options.eventsFile, "", {
-    mode: 0o600,
-    flag: constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | constants.O_NOFOLLOW,
-  })
+  const record = await openEventRecord(options.eventsFile, options.maxOutputBytes)
+  try {
+    return await runAttempts(options, command, retryProvider, prompt, record)
+  } finally {
+    await record.close()
+  }
+}
+
+const runAttempts = async (
+  options: CliWorkerOptions,
+  command: ReadonlyArray<string>,
+  retryProvider: boolean,
+  prompt: Buffer,
+  record: EventRecordWriter,
+): Promise<number> => {
   let args = [...command]
   for (let attempt = 0; ; attempt++) {
     await writeFile(options.stderrFile, "", {
@@ -122,12 +155,7 @@ export async function runCliWorker(
     })
     const [status] = await Promise.all([
       child.exited,
-      drainBounded(
-        child.stdout,
-        options.eventsFile,
-        options.maxOutputBytes,
-        retryProvider ? (bytes) => turn.chunk(bytes) : undefined,
-      ),
+      drainRecord(child.stdout, record, retryProvider ? (bytes) => turn.chunk(bytes) : undefined),
       drainBounded(child.stderr, options.stderrFile, options.maxOutputBytes),
     ])
     const exitCode = typeof status === "number" ? status : -1
@@ -135,10 +163,12 @@ export async function runCliWorker(
       retryProvider &&
       process.env.WORKFLOWD_AGENT_HOST_SOCKET === undefined &&
       exitCode === 1 &&
-      (await stat(options.eventsFile)).size < options.maxOutputBytes
+      !record.rotated()
         ? turn.retryDelay(attempt)
         : undefined
     if (delay === undefined || turn.threadId === undefined) {
+      // The last line is stored before the result says the run ended.
+      await record.close()
       await writeResult(options.resultFile, exitCode)
       return exitCode
     }
@@ -169,7 +199,7 @@ export const parseCodexWorkerArguments = (arguments_: ReadonlyArray<string>): Cl
     resultFile: required("--result-file"),
     eventsFile: required("--events-file"),
     stderrFile: required("--stderr-file"),
-    maxOutputBytes: Number.parseInt(required("--max-output-bytes"), 10),
+    maxOutputBytes: eventRecordBytes(Number(required("--max-output-bytes"))),
     model: values.get("--model") ?? null,
     ...(values.has("--effort") ? { effort: required("--effort") } : {}),
     ...(values.has("--provider") ? { provider: required("--provider") } : {}),
@@ -250,7 +280,7 @@ export async function runHostWorker(inputPath: string, binary: string, io = proc
     resultFile: join(io, "result"),
     eventsFile: join(io, "events"),
     stderrFile: join(io, "stderr"),
-    maxOutputBytes: 10 * 1024 * 1024,
+    maxOutputBytes: EVENT_RECORD_BYTES,
     model: request.model,
     ...(request.effort === undefined ? {} : { effort: request.effort }),
     ...(request.provider === undefined ? {} : { provider: request.provider }),

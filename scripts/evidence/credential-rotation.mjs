@@ -19,6 +19,7 @@ import { connect } from "node:net"
 import { fullDaemonEnvironment } from "./credential-rotation-full.mjs"
 import { Database } from "bun:sqlite"
 import { agentRunIdentifiers } from "../../src/kernel/agent-run-ingress.ts"
+import { readEventRecordText } from "./event-record.mjs"
 if (process.env.CI) throw new Error("This manual evidence runner must not run in CI")
 const full = process.argv.includes("--full")
 const selected = process.argv.find((arg) => arg.startsWith("--scenario="))?.slice(11)
@@ -189,7 +190,7 @@ const complete = async (runId) => {
       .get(runId).n,
     1,
   )
-  const output = await readFile(join(root, "agent-processes", runId, "events.jsonl"), "utf8")
+  const output = await readEventRecordText(join(root, "agent-processes", runId, "events.jsonl"))
   log("worker-output", output)
   assert.equal(output.split("full-final-output").length - 1, 1)
   assert.equal(r.last_output_tokens, 42)
@@ -406,7 +407,7 @@ try {
     const runId = id(s)
     await post(s)
     await wait(async () =>
-      (await readFile(join(root, "agent-processes", runId, "events.jsonl"), "utf8")).includes(
+      (await readEventRecordText(join(root, "agent-processes", runId, "events.jsonl"))).includes(
         "child-ready",
       ),
     )
@@ -428,16 +429,19 @@ try {
     const pending = post(s)
     await wait(() => exists(join(root, "agent-processes", runId, "events.jsonl")))
     await wait(async () =>
-      (await readFile(join(root, "agent-processes", runId, "events.jsonl"), "utf8")).includes(
+      (await readEventRecordText(join(root, "agent-processes", runId, "events.jsonl"))).includes(
         '"par',
       ),
     )
     assert.equal(row(runId).state, "spawning")
     await snapshot(runId, "partial-line-pending")
-    log("half-line", await readFile(join(root, "agent-processes", runId, "events.jsonl"), "utf8"))
+    log(
+      "half-line",
+      await readEventRecordText(join(root, "agent-processes", runId, "events.jsonl")),
+    )
     log("dispatch", await pending)
     await complete(runId)
-    const output = await readFile(join(root, "agent-processes", runId, "events.jsonl"), "utf8")
+    const output = await readEventRecordText(join(root, "agent-processes", runId, "events.jsonl"))
     assert.equal(output.split("partial-once").length - 1, 1)
     const parsed = (
       await Promise.all(
@@ -469,12 +473,31 @@ try {
     const s = input("limit")
     const runId = id(s)
     await post(s)
-    await terminal(runId)
+    const r = await terminal(runId)
     await snapshot(runId, "before-retention-cleanup")
     const path = join(root, "agent-processes", runId)
-    const bytes = (await stat(join(path, "events.jsonl"))).size
-    log("bounded-bytes", bytes)
-    assert.equal(bytes, full ? 10 * 1024 * 1024 : 4096)
+    // The limit bounds all record files together: the head, the segments and
+    // the index. The fixture's line of 11 MiB is over the line limit (a tenth
+    // of the total), so the record holds a marker in its place.
+    const limit = full ? 10 * 1024 * 1024 : 4096
+    let bytes = 0
+    for (const name of await readdir(path))
+      if (name.startsWith("events")) bytes += (await stat(join(path, name))).size
+    log("bounded-record-bytes", { bytes, limit })
+    assert.ok(bytes <= limit)
+    const lines = (await readEventRecordText(join(path, "events.jsonl")))
+      .split("\n")
+      .filter(Boolean)
+      .map(JSON.parse)
+    const dropped = lines.filter((line) => line.type === "workflowd.line_dropped")
+    log("line-dropped", dropped)
+    assert.deepEqual(dropped, [{ type: "workflowd.line_dropped", bytes: 11 * 1024 * 1024 }])
+    assert.equal(r.state, "completed")
+    const end = JSON.parse(
+      db.query("SELECT prompt FROM resident_inbox WHERE id=?").get(`agent-run-end-${runId}`).prompt,
+    )
+    log("final-message", end.final_message)
+    assert.equal(end.final_message, "full-final-output")
     const stderrBytes = (await stat(join(path, "stderr.log"))).size
     assert.equal(stderrBytes, full ? 10 * 1024 * 1024 : 4096)
     log("bounded-stderr-bytes", stderrBytes)
@@ -515,7 +538,8 @@ try {
     const source = await readFile(resolve("src/kernel/codex-session.ts"), "utf8")
     assert.ok(source.includes('options.unitPrefix ?? "workflowd-agent-"'))
     log("defaults", {
-      codex: "transient-exec, default workflowd-agent- prefix, 10 MiB/file, 7 day retention",
+      codex:
+        "transient-exec, default workflowd-agent- prefix, 10 MiB event record across its files with a 1 MiB line limit, 10 MiB stderr, 7 day retention",
       nonCodex:
         "production ingress dispatches OpenCode protocol fixture with manager unavailable; no unit created",
     })
@@ -536,7 +560,7 @@ try {
     await wait(async () => {
       try {
         return (
-          await readFile(join(root, "agent-processes", runId, "events.jsonl"), "utf8")
+          await readEventRecordText(join(root, "agent-processes", runId, "events.jsonl"))
         ).includes("command_execution")
       } catch {
         return false
@@ -565,7 +589,7 @@ try {
         .get(runId).n,
       1,
     )
-    const output = await readFile(join(root, "agent-processes", runId, "events.jsonl"), "utf8")
+    const output = await readEventRecordText(join(root, "agent-processes", runId, "events.jsonl"))
     log("real-output", output)
     const messages = output
       .trim()

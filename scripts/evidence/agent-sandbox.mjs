@@ -26,6 +26,7 @@ import { sandboxBridgeName, isSandboxBridgeNamespace } from "../../src/sandbox/b
 import proofTasks from "./agent-sandbox-proof.json"
 import { approvalComment } from "../../src/sandbox/publish.ts"
 import { readSandboxSubmission } from "../../src/sandbox/submission.ts"
+import { readEventRecordText } from "./event-record.mjs"
 
 import {
   collectListeners,
@@ -1261,7 +1262,7 @@ async function probeLive(policy) {
       const manifest = JSON.parse(await readFile(join(custody, "manifest.json"), "utf8"))
       assert.equal(manifest.executionId, binding.sessionId)
       assert.equal(manifest.runId, run.runId)
-      frames = (await readFile(manifest.eventsPath, "utf8"))
+      frames = (await readEventRecordText(manifest.eventsPath))
         .trim()
         .split("\n")
         .filter(Boolean)

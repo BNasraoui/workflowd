@@ -11,6 +11,8 @@ export type CliEvent =
   | { readonly type: "turn.completed"; readonly outputTokens: number | null }
   | { readonly type: "turn.failed"; readonly message: string; readonly codexErrorInfo?: unknown }
   | { readonly type: "error"; readonly message: string; readonly codexErrorInfo?: unknown }
+  /** The worker replaced one line of the CLI that exceeded the line limit. */
+  | { readonly type: "record.line_dropped"; readonly bytes: number }
   | { readonly type: "other" }
 
 export type CliPreflightError = {
