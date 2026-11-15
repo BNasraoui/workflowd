@@ -149,9 +149,30 @@ const refused = (check: SealedResultCheck, detail = "") =>
     message: detail === "" ? `result_refused: ${check}` : `result_refused: ${check} ${detail}`,
   })
 
-/** Text of the result inside a refusal: quoted, printable and short. */
-const quoted = (value: string) =>
-  JSON.stringify(value.length > 64 ? `${value.slice(0, 64)}…` : value)
+/**
+ * A value the run controls, as text of a refusal, a log line or an error: printable
+ * ASCII of at most `limit` characters. Each code point outside U+0020–U+007E, and each
+ * `\` and `"`, is an escape, so no control, format or bidi character of the run
+ * reaches a reader. A longer text ends in `...`.
+ */
+export const printable = (value: string, limit: number) => {
+  let text = ""
+  for (const character of value) {
+    const code = character.codePointAt(0)!
+    const shown =
+      character === "\\" || character === '"'
+        ? `\\${character}`
+        : code >= 0x20 && code <= 0x7e
+          ? character
+          : `\\u{${code.toString(16)}}`
+    if (text.length + shown.length > limit - 3) return `${text}...`
+    text += shown
+  }
+  return text
+}
+
+/** A value of the result inside a refusal: quoted, printable and short. */
+const quoted = (value: string) => `"${printable(value, 120)}"`
 
 const decoder = new TextDecoder("utf-8", { fatal: true })
 const utf8Bytes = (value: string) => new TextEncoder().encode(value).byteLength
@@ -482,11 +503,12 @@ const networkContext = (
   }
 }
 
+const withoutSecrets = (text: string, secrets: ReadonlyArray<string>) =>
+  secrets.reduce((value, secret) => value.split(secret).join("[redacted]"), text)
+
+/** The output of a git child inside a fault: no secret, and printable. */
 const redact = (text: string, secrets: ReadonlyArray<string>) =>
-  secrets
-    .reduce((value, secret) => value.split(secret).join("[redacted]"), text)
-    .replace(/[^\x20-\x7e\n]/g, "?")
-    .slice(0, 2000)
+  printable(withoutSecrets(text, secrets), 2000)
 
 const readBounded = async (stream: ReadableStream<Uint8Array>, limit: number) => {
   const chunks: Uint8Array[] = []
@@ -1087,7 +1109,7 @@ export const makeSealedResultGit = (
         if (unpack.status !== 0)
           return yield* refused(
             "fsck",
-            JSON.stringify(redact(unpack.stderr, offline.secrets).split("\n")[0] ?? ""),
+            quoted(withoutSecrets(unpack.stderr, offline.secrets).split("\n")[0]!),
           )
         const commit = yield* git(offline, ["cat-file", "-t", bundle.resultSha])
         if (commit.status !== 0 || new TextDecoder().decode(commit.stdout).trim() !== "commit")

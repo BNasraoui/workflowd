@@ -26,8 +26,48 @@ const cases = (
   values: ReadonlyArray<string>,
 ): ReadonlyArray<SealedTextCase> => values.map((value) => ({ field, value, accepted }))
 
+const codePoints = (first: number, last: number) =>
+  Array.from({ length: last - first + 1 }, (_, index) => String.fromCodePoint(first + index))
+
+/** The controls of the C0 set but NUL, which no path or JSON key of a run can hold. */
+export const c0Controls = codePoints(0x01, 0x1f)
+export const c1Controls = codePoints(0x80, 0x9f)
+export const bidiControls = [
+  "\u061c",
+  "\u200e",
+  "\u200f",
+  ...codePoints(0x202a, 0x202e),
+  ...codePoints(0x2066, 0x2069),
+]
+
+/**
+ * Characters by which a value of a run could change what a reader of a refusal, a log
+ * line or a pushed result sees: C0 and C1 controls (CSI and NEL among them), DEL, the
+ * bidi controls, the line and paragraph separators and the byte order mark.
+ */
+export const hostileCharacters: ReadonlyArray<string> = [
+  ...c0Controls,
+  "\u007f",
+  ...c1Controls,
+  ...bidiControls,
+  "\u2028",
+  "\u2029",
+  "\ufeff",
+]
+
+/** The values of a run that a refusal must show as printable ASCII of a bounded length. */
+export const hostileValues: ReadonlyArray<string> = [
+  ...hostileCharacters.map((character) => `a${character}b`),
+  "lone \ud800 surrogate",
+  `${"x".repeat(5000)}\u009b2J`,
+]
+
+/** A path in a directory whose name holds a character, so the rule reads each component. */
+const hostilePath = (character: string) => `src/a${character}b.txt`
+
 export const sealedTextCases: ReadonlyArray<SealedTextCase> = [
   ...cases("title", true, ["Add the result file", "x".repeat(200), "雪".repeat(200)]),
+  ...cases("title", false, hostileValues),
   ...cases("title", false, [
     "",
     "x".repeat(201),
@@ -101,6 +141,12 @@ export const sealedTextCases: ReadonlyArray<SealedTextCase> = [
     ".GitHub/workflows/x.yml",
     ".github\\workflows/x.yml",
   ]),
+  ...cases(
+    "path",
+    false,
+    [...c0Controls, "\u007f", ...c1Controls].map((character) => hostilePath(character)),
+  ),
+  ...cases("path", false, [`src/\u009b2J${"x".repeat(3000)}.txt`]),
   { field: "path", value: "not UTF-8 (0xff)", pathHex: "6e6f74ff2e747874", accepted: false },
   {
     field: "path",

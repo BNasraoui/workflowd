@@ -19,6 +19,7 @@ import {
   checkSealedResult,
   decodeSealedResult,
   makeSealedResultGit,
+  printable,
   pushSealedResult,
   SealedResultFault,
   SealedResultGit,
@@ -33,7 +34,12 @@ import {
 } from "../../src/kernel/sealed-result"
 import { githubApiStub } from "../sandbox/github-api-stub"
 import { command } from "../sandbox/harness"
-import { pathBytes, sealedTextCases, type SealedTextField } from "./sealed-text-cases"
+import {
+  hostileValues,
+  pathBytes,
+  sealedTextCases,
+  type SealedTextField,
+} from "./sealed-text-cases"
 
 // The real sealing script of the runner, and a daemon check that pushes into a bare
 // fixture remote on disk. Nothing here reaches GitHub.
@@ -263,6 +269,17 @@ const refusal = (exit: Exit.Exit<unknown, unknown>) => {
 
 const refusedCheck = (exit: Exit.Exit<unknown, unknown>) => refusal(exit).check
 
+// A refusal shows a value of the run quoted, in at most 122 characters, after a fixed text.
+const refusalDetailCharacters = 200
+const printableAscii = /^[\x20-\x7e]*$/
+
+/** The detail and the message of a refusal are printable ASCII, and the detail is short. */
+const expectPrintable = (error: SealedResultRefused) => {
+  expect(error.detail).toMatch(printableAscii)
+  expect(error.message).toMatch(printableAscii)
+  expect(error.detail.length).toBeLessThanOrEqual(refusalDetailCharacters)
+}
+
 const remoteRef = (f: Fixture, ref = target.ref) =>
   command(["git", "for-each-ref", "--format=%(objectname)", ref], f.remote)
 
@@ -418,6 +435,36 @@ test("result.json with a key outside SealedResult is refused by the name of the 
     )
     expect(invalid.check).toBe("manifest")
   }
+})
+
+test("a key of result.json is shown in its refusal as printable ASCII of a bounded length", async () => {
+  for (const key of hostileValues) {
+    const error = await Effect.runPromise(
+      Effect.flip(
+        decodeSealedResult(manifest("a".repeat(40), { [key]: "x" }), new Uint8Array([1, 2, 3])),
+      ),
+    )
+    expect(error.check).toBe("unknown_key")
+    expectPrintable(error)
+  }
+  const shownKey = await Effect.runPromise(
+    Effect.flip(
+      decodeSealedResult(manifest("a".repeat(40), { '\u009b2J\u202e\\"': 1 }), new Uint8Array()),
+    ),
+  )
+  expect(shownKey.detail).toBe('"\\u{9b}2J\\u{202e}\\\\\\""')
+})
+
+test("printable writes each code point outside printable ASCII as an escape and bounds the length", () => {
+  for (const value of hostileValues) {
+    const shown = printable(value, 120)
+    expect(shown).toMatch(printableAscii)
+    expect(shown.length).toBeLessThanOrEqual(120)
+  }
+  expect(printable("a\u0000\u{1f600}\ud800z", 120)).toBe("a\\u{0}\\u{1f600}\\u{d800}z")
+  expect(printable("x".repeat(200), 10)).toBe("xxxxxxx...")
+  // An escape is not cut: the text ends before it.
+  expect(printable("xxxxxx\u009b", 10)).toBe("xxxxxx...")
 })
 
 test(
@@ -1992,15 +2039,21 @@ for (const [name, check, make, detail] of refusals)
   )
 
 /** A commit on HEAD whose tree holds one file at `path`, a path of any bytes. */
-async function pathCommit(f: Fixture, dir: string, path: Uint8Array) {
+async function pathCommit(
+  f: Fixture,
+  dir: string,
+  path: Uint8Array,
+  mode = "100644",
+  content: Uint8Array = Buffer.from("content\n"),
+) {
   const hashed = async (type: string, content: Uint8Array) =>
     run(["git", "hash-object", "-t", type, "-w", "--literally", "--stdin"], dir, content)
   const components = nulFreeSplit(path)
   let entry = concat(
-    "100644 ",
+    `${mode} `,
     components.at(-1)!,
     "\0",
-    Buffer.from(await hashed("blob", Buffer.from("content\n")), "hex"),
+    Buffer.from(await hashed("blob", content), "hex"),
   )
   for (const component of components.slice(0, -1).reverse()) {
     const tree = await hashed("tree", entry)
@@ -2057,7 +2110,76 @@ for (const item of sealedTextCases)
         : decoded
       if (item.accepted) {
         if (Exit.isFailure(exit)) throw Cause.squash(exit.cause)
-      } else expect(textChecks[item.field]).toContain(refusedCheck(exit))
+      } else {
+        expect(textChecks[item.field]).toContain(refusedCheck(exit))
+        expectPrintable(refusal(exit))
+      }
     }),
     30_000,
   )
+
+// A long path with format characters that the path rule accepts, as a refusal shows it.
+const longPath = `\u00ad\u200d${"x".repeat(3000)}.txt`
+
+const pathRefusals: ReadonlyArray<
+  readonly [SealedResultCheck, (f: Fixture, dir: string) => Promise<void>]
+> = [
+  ["github_path", (f, dir) => pathCommit(f, dir, Buffer.from(`.github/${longPath}`))],
+  ["file_mode", (f, dir) => pathCommit(f, dir, Buffer.from(longPath), "120000")],
+  [
+    "mode_change",
+    async (f, dir) => {
+      await pathCommit(f, dir, Buffer.from(longPath))
+      await pathCommit(f, dir, Buffer.from(longPath), "100755")
+    },
+  ],
+  [
+    "blob_size",
+    (f, dir) =>
+      pathCommit(
+        f,
+        dir,
+        Buffer.from(longPath),
+        "100644",
+        new Uint8Array(sealedResultLimits.blobBytes + 1),
+      ),
+  ],
+]
+
+for (const [check, build] of pathRefusals)
+  test(
+    `the path in a refusal ${check} is printable ASCII of a bounded length`,
+    withFixture(async (f) => {
+      const bundle = await handBundle(f, (_git, dir) => build(f, dir))
+      const exit = await publish(await decode(manifest(f.sourceSha), bundle), options(f))
+      expect(refusedCheck(exit)).toBe(check)
+      expectPrintable(refusal(exit))
+      expect(refusal(exit).detail).toContain("\\u{ad}\\u{200d}")
+    }),
+    30_000,
+  )
+
+test(
+  "the error output of index-pack is shown in a refusal fsck as printable ASCII of a bounded length",
+  withFixture(async (f) => {
+    const stderr = join(f.root, "stderr")
+    await writeFile(stderr, hostileValues.join(""))
+    const failing = join(f.root, "failing-index-pack-git")
+    await writeFile(
+      failing,
+      `#!/bin/sh\nfor arg; do [ "$arg" = index-pack ] && { cat ${stderr} >&2; exit 1; }; done\nexec /usr/bin/git "$@"\n`,
+    )
+    await chmod(failing, 0o755)
+    const sealed = await sealWithResultPy(f, async (workspace) => {
+      await writeFile(join(workspace, "result.txt"), "content\n")
+    })
+    const exit = await publish(
+      await decode(sealed.json, sealed.bundle),
+      options(f, { binary: failing }),
+    )
+    expect(refusedCheck(exit)).toBe("fsck")
+    expectPrintable(refusal(exit))
+    expect(refusal(exit).detail).toStartWith('"a\\u{1}b')
+  }),
+  30_000,
+)
