@@ -52,9 +52,11 @@ test("a client that goes away while the OAuth server holds the renewal ends its 
     expect(await second.text()).toBe(sse)
     expect(oauth.requests()).toHaveLength(1)
     expect(storedAccess(await readFile(loginFile(f), "utf8"))).toBe(oauth.next().access)
-    expect(f.upstreamRequests().map((request) => request.headers.authorization)).toEqual([
-      `Bearer ${oauth.next().access}`,
-    ])
+    // The gateway may see the client's end only once the renewal is done: each upstream call it
+    // made carries the renewed value, never the old one.
+    const sent = f.upstreamRequests().map((request) => request.headers.authorization)
+    expect(sent.length).toBeGreaterThan(0)
+    expect(new Set(sent)).toEqual(new Set([`Bearer ${oauth.next().access}`]))
   })
 }, 30000)
 

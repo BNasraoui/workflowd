@@ -176,13 +176,15 @@ export const serveControl = (options: {
           refused.delete(socket)
         })
         socket.on("error", () => socket.destroy())
-        // A refused caller's bytes are read and dropped, so that its answer is not lost to a reset;
-        // the connection ends a second later at most.
+        // A refused caller gets its answer at once; the connection ends once the caller's request
+        // has come and been dropped, so the caller's write never meets a closed socket and its
+        // answer is not lost to a reset. It ends a second later at most.
         const refuse = (error: ControlError) => {
           if (refused.size >= maxControlConnections) return socket.destroy()
           refused.add(socket)
+          socket.once("data", () => socket.end())
           socket.on("data", () => undefined)
-          socket.end(controlFrame({ ok: false, error }))
+          socket.write(controlFrame({ ok: false, error }))
           setTimeout(() => socket.destroy(), refusedGraceMs).unref()
         }
         if (peerCredentials(socket)?.uid !== options.daemon.uid) return refuse("caller")
