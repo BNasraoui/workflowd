@@ -429,9 +429,7 @@ const makeAutomationLayer = (config: Extract<AppConfig, { readonly mode?: "autom
             claudeRoutes: config.agentRuns.claudeRoutes,
             repositories: config.agentRuns.repositories,
             sandboxRepositories: config.agentRuns.sandboxRepositories ?? [],
-            ...(config.agentRuns.placements === undefined
-              ? {}
-              : { placements: config.agentRuns.placements }),
+            placements: config.agentRuns.placements,
             agent: config.agentRuns.agent,
             worktreeRoot: config.workspace.worktreeRoot,
             verifyTimeoutMs: config.agentRuns.verifyTimeoutMs,

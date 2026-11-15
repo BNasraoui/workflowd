@@ -135,7 +135,7 @@ export const AgentRunProvider = Context.Service<AgentRunProviderPort>(
 export type AgentRunIngressOptions = {
   readonly sandboxRepositories?: ReadonlyArray<SandboxPolicy>
   /** A repository's placement; an alias that is absent is `host`. */
-  readonly placements?: Readonly<Record<string, Placement>>
+  readonly placements?: Readonly<Record<string, Placement>> | undefined
   readonly routes: ReadonlyArray<AgentRunRoute>
   /** Codex CLI routes, resolved after `routes` and refused ambiguous when a
    * name or bare model id is served by both providers. */
