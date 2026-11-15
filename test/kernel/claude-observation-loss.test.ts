@@ -273,10 +273,12 @@ const harness = async (
     readonly maxOutputBytes?: number
     /** The fake CLI's script; see fakeNative. */
     readonly script?: string
+    /** The directory for the run's temporary root. */
+    readonly scratch?: string
     readonly wrap?: (cli: Transient) => Transient
   } = {},
 ) => {
-  const root = await mkdtemp(join(tmpdir(), "workflowd-8wo4-"))
+  const root = await mkdtemp(join(options.scratch ?? tmpdir(), "workflowd-8wo4-"))
   const binary = join(root, kind)
   await writeFile(binary, fakeNative(kind, root, options.script), { mode: 0o700 })
   if (options.gated !== true) await writeFile(join(root, "go"), "")
@@ -981,12 +983,21 @@ test("a host re-attach that finds another launch does not adopt its result", asy
  */
 const RECORD_LIMIT = 64 * 1024
 
-/** Three times the record limit in 2 KiB lines, one each 20 ms. */
+/**
+ * The observer's stall window in these tests. Each rotation creates a segment
+ * and renames the index. On a disk busy with other builds one rename took 2.6 s,
+ * so these runs keep their files in memory (tmpfs) where the host has it.
+ */
+const STALL_WINDOW_MS = 1_000
+const SCRATCH = existsSync("/dev/shm") ? "/dev/shm" : tmpdir()
+
+/** Three times the record limit in 2 KiB lines, one each 30 ms: about 2.9 s,
+ * and about 1.9 s after a record that stops at the limit is full. */
 const FLOOD = `start()
 message("working")
 for (let line = 0; line < ${(3 * RECORD_LIMIT) / 2048}; line++) {
   noise(2048)
-  await Bun.sleep(20)
+  await Bun.sleep(30)
 }
 flag("flooded")`
 
@@ -1003,7 +1014,8 @@ for (const kind of ["claude", "codex"] as const)
   test(`a ${kind} worker that writes three times the record limit completes with its final message`, async () => {
     const h = await harness(kind, {
       maxOutputBytes: RECORD_LIMIT,
-      progressWindowMs: 300,
+      scratch: SCRATCH,
+      progressWindowMs: STALL_WINDOW_MS,
       script: `${FLOOD}
 message("final answer")
 end(0)
@@ -1024,7 +1036,8 @@ for (const kind of ["claude", "codex"] as const)
   test(`a ${kind} worker that stops writing is still reported as stalled`, async () => {
     const h = await harness(kind, {
       maxOutputBytes: RECORD_LIMIT,
-      progressWindowMs: 300,
+      scratch: SCRATCH,
+      progressWindowMs: STALL_WINDOW_MS,
       script: `start()
 message("working")
 await until("release")`,
@@ -1047,6 +1060,7 @@ for (const kind of ["claude", "codex"] as const)
   test(`a restarted controller recovers a live ${kind} worker whose record already rotated`, async () => {
     const h = await harness(kind, {
       maxOutputBytes: RECORD_LIMIT,
+      scratch: SCRATCH,
       script: `${FLOOD}
 await until("release")
 message("final answer")
@@ -1147,7 +1161,7 @@ const ioHost = async (kind: Kind, root: string) => {
 
 for (const kind of ["claude", "codex"] as const)
   test(`a ${kind} worker behind the agent host that writes three times the record limit completes`, async () => {
-    const root = await mkdtemp(join(tmpdir(), "workflowd-ripk-host-"))
+    const root = await mkdtemp(join(SCRATCH, "workflowd-ripk-host-"))
     const host = await ioHost(kind, root)
     try {
       await writeFile(
@@ -1168,7 +1182,7 @@ process.exit(0)`,
         kind,
         kind === "claude" ? parseClaudeDispatchEvent : parseCodexExecEvent,
       )
-      const supervised = supervisor(kind, root, cli, { progressWindowMs: 500 })
+      const supervised = supervisor(kind, root, cli, { progressWindowMs: STALL_WINDOW_MS })
       await supervised.dispatch()
       await supervised.firstTerminal()
       expect(supervised.terminals).toEqual([{ kind: "complete", finalMessage: "final answer" }])
@@ -1193,7 +1207,8 @@ for (const kind of ["claude", "codex"] as const)
   test(`a ${kind} run whose final message exceeds the line limit ends with the line limit reason`, async () => {
     const h = await harness(kind, {
       maxOutputBytes: RECORD_LIMIT,
-      progressWindowMs: 300,
+      scratch: SCRATCH,
+      progressWindowMs: STALL_WINDOW_MS,
       script: `start()
 message("working")
 message("y".repeat(${OVERSIZED}))
@@ -1222,7 +1237,8 @@ for (const kind of ["claude", "codex"] as const)
   test(`a ${kind} run with a dropped line and a later final message completes with that message`, async () => {
     const h = await harness(kind, {
       maxOutputBytes: RECORD_LIMIT,
-      progressWindowMs: 300,
+      scratch: SCRATCH,
+      progressWindowMs: STALL_WINDOW_MS,
       script: `start()
 message("working")
 message("y".repeat(${OVERSIZED}))
