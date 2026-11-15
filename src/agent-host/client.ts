@@ -203,8 +203,13 @@ function requestAgentHostResponse(path: string, request: import("./protocol").Ho
   })
 }
 
-import { HostResponse, type HostExchangeFile, type OwnedProcess, type HostStart } from "./protocol"
-import { readEventRecord, recordEventParser, type RecordSource } from "../kernel/event-record"
+import { HostExchangeFile, HostResponse, type OwnedProcess, type HostStart } from "./protocol"
+import {
+  eventRecordPaths,
+  readEventRecord,
+  recordEventParser,
+  type RecordSource,
+} from "../kernel/event-record"
 import type { CliEvent, CliRunProcess } from "../kernel/cli-process-contract"
 import { normalizeError, OBSERVATION_EVIDENCE } from "../errors"
 
@@ -236,19 +241,11 @@ async function hostBytes(
 }
 
 /** The event record of a host launch, read through the host's exchange. */
-const hostRecordSource =
-  (socket: string, process: OwnedProcess): RecordSource =>
-  (file, offset) =>
-    hostBytes(
-      socket,
-      process,
-      file.kind === "head"
-        ? "events"
-        : file.kind === "index"
-          ? "events.index.json"
-          : `events.${file.n}`,
-      offset,
-    )
+const hostRecordSource = (socket: string, process: OwnedProcess): RecordSource => {
+  const names = eventRecordPaths("events")
+  return (file, offset) =>
+    hostBytes(socket, process, Schema.decodeUnknownSync(HostExchangeFile)(names.of(file)), offset)
+}
 
 export async function startAgentHost(socket: string, input: Omit<HostStart, "operation">) {
   const response = await requestAgentHost(socket, { operation: "start", ...input })

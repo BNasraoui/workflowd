@@ -12,6 +12,24 @@ import type { CliEvent } from "./cli-process-contract"
 type LinesFile = { readonly kind: "head" } | { readonly kind: "segment"; readonly n: number }
 export type RecordFile = LinesFile | { readonly kind: "index" }
 
+/** The file names of a record whose head is `eventsPath`: `events.jsonl`,
+ * `events.index.json` and `events.N.jsonl` on the controller, `events`,
+ * `events.index.json` and `events.N` on the agent host. */
+export const eventRecordPaths = (eventsPath: string) => {
+  const extension = eventsPath.endsWith(".jsonl") ? ".jsonl" : ""
+  const stem = eventsPath.slice(0, eventsPath.length - extension.length)
+  const index = `${stem}.index.json`
+  const segment = (n: number) => `${stem}.${n}${extension}`
+  return {
+    head: eventsPath,
+    index,
+    segment,
+    /** The path of one record file. */
+    of: (file: RecordFile) =>
+      file.kind === "head" ? eventsPath : file.kind === "index" ? index : segment(file.n),
+  }
+}
+
 /** Bytes of one record file from an offset; empty at its end or when it is absent. */
 export type RecordSource = (file: RecordFile, offset: number) => Promise<Uint8Array>
 

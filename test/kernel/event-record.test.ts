@@ -4,8 +4,10 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { Schema } from "effect"
 import { observationUnavailable } from "../../src/kernel/cli-process-contract"
+import { HostExchangeFile } from "../../src/agent-host/protocol"
 import {
   decodeRecordIndex,
+  eventRecordPaths,
   readEventRecord,
   recordEventParser,
   type RecordSource,
@@ -13,7 +15,6 @@ import {
 import {
   encodeRecordIndex,
   eventRecordLimits,
-  eventRecordPaths,
   EVENT_RECORD_LIMITS,
   lineDroppedMarker,
   localRecordSource,
@@ -57,6 +58,22 @@ test("record file names follow the head file", () => {
   const host = eventRecordPaths("/io/events")
   expect(host.index).toBe("/io/events.index.json")
   expect(host.segment(12)).toBe("/io/events.12")
+})
+
+test("the agent host exchange accepts each record file name of a host launch, and no other", () => {
+  const names = eventRecordPaths("events")
+  const accepts = (name: string) => Schema.is(HostExchangeFile)(name)
+  for (const file of [
+    { kind: "head" },
+    { kind: "index" },
+    { kind: "segment", n: 1 },
+    { kind: "segment", n: 999_999_999 },
+  ] as const)
+    expect(accepts(names.of(file))).toBe(true)
+  expect(accepts(names.of({ kind: "segment", n: 1_000_000_000 }))).toBe(false)
+  expect(accepts(eventRecordPaths("events.jsonl").segment(1))).toBe(false)
+  expect(accepts("events.0")).toBe(false)
+  expect(accepts("../events")).toBe(false)
 })
 
 test("a record without an index is its head file only, as before segments", async () =>

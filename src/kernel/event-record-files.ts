@@ -1,22 +1,16 @@
 import { constants } from "node:fs"
 import { open, readdir, rename, rm, writeFile } from "node:fs/promises"
-import { basename, dirname, join } from "node:path"
-import { LINE_DROPPED_TYPE, type RecordIndex, type RecordSource } from "./event-record"
+import { dirname, join } from "node:path"
+import {
+  eventRecordPaths,
+  LINE_DROPPED_TYPE,
+  type RecordIndex,
+  type RecordSource,
+} from "./event-record"
 
 /**
  * The files of an event record (see event-record.ts) and the worker's writer.
  */
-
-/** The file names of a record whose head is `eventsPath`. */
-export const eventRecordPaths = (eventsPath: string) => {
-  const extension = eventsPath.endsWith(".jsonl") ? ".jsonl" : ""
-  const stem = eventsPath.slice(0, eventsPath.length - extension.length)
-  return {
-    head: eventsPath,
-    index: `${stem}.index.json`,
-    segment: (n: number) => `${stem}.${n}${extension}`,
-  }
-}
 
 const READ_CHUNK_BYTES = 64 * 1024
 
@@ -24,14 +18,8 @@ const READ_CHUNK_BYTES = 64 * 1024
 export const localRecordSource = (eventsPath: string): RecordSource => {
   const paths = eventRecordPaths(eventsPath)
   return async (file, offset) => {
-    const path =
-      file.kind === "head"
-        ? paths.head
-        : file.kind === "index"
-          ? paths.index
-          : paths.segment(file.n)
     try {
-      const handle = await open(path, "r")
+      const handle = await open(paths.of(file), "r")
       try {
         const bytes = Buffer.alloc(READ_CHUNK_BYTES)
         const read = await handle.read(bytes, 0, bytes.length, offset)
@@ -125,16 +113,11 @@ export const openEventRecord = async (
   // A record left in this directory by an earlier launch is not this record.
   await rm(paths.index, { force: true })
   const directory = dirname(eventsPath)
-  const head = basename(eventsPath)
-  const extension = head.endsWith(".jsonl") ? ".jsonl" : ""
-  const stem = head.slice(0, head.length - extension.length)
-  for (const name of await readdir(directory))
-    if (
-      name.startsWith(`${stem}.`) &&
-      name.endsWith(extension) &&
-      /^[0-9]+$/.test(name.slice(stem.length + 1, name.length - extension.length))
-    )
+  for (const name of await readdir(directory)) {
+    const n = /\.([1-9][0-9]*)(?:\.jsonl)?$/.exec(name)?.[1]
+    if (n !== undefined && join(directory, name) === paths.segment(Number(n)))
       await rm(join(directory, name), { force: true })
+  }
 
   let file = await create(paths.head)
   let headBytes = 0
