@@ -1,4 +1,4 @@
-import { Cache, Context, Duration, Effect, Exit, Redacted, Schema } from "effect"
+import { Cache, Context, Duration, Effect, Exit, Option, Redacted, Schema, Semaphore } from "effect"
 import { SqlClient } from "effect/unstable/sql"
 import { randomInt } from "node:crypto"
 import { mintCapability, type NoscopeConfiguration } from "./noscope"
@@ -35,21 +35,63 @@ const SessionAudience = /^workflowd:([a-f0-9]{64}):([a-f0-9]{64})$/
  */
 const proofClaims = (token: string) => {
   try {
-    const value: unknown = JSON.parse(
-      Buffer.from(token.split(".")[1] ?? "", "base64url").toString("utf8"),
-    )
-    const claim = (name: string): unknown =>
+    const [header, payload] = token
+      .split(".")
+      .slice(0, 2)
+      .map((part): unknown => JSON.parse(Buffer.from(part, "base64url").toString("utf8")))
+    const field = (value: unknown, name: string): unknown =>
       typeof value === "object" && value !== null ? Reflect.get(value, name) : undefined
-    const audience = claim("aud")
-    const jti = claim("jti")
+    const audience = field(payload, "aud")
+    const jti = field(payload, "jti")
+    const kid = field(header, "kid")
     const match = typeof audience === "string" ? SessionAudience.exec(audience) : null
-    return match?.[1] && match[2] && typeof jti === "string" && jti.length <= 256
-      ? { audience: match[0], channel: match[1], nonce: match[2], jti }
+    return match?.[1] &&
+      match[2] &&
+      typeof jti === "string" &&
+      jti.length <= 256 &&
+      typeof kid === "string"
+      ? { audience: match[0], channel: match[1], nonce: match[2], jti, kid }
       : null
   } catch {
     return null
   }
 }
+/** The job key set is kept this long; a key id it does not hold fetches again at most once a minute. */
+const keySetMs = 600000
+const keyRefetchMs = 60000
+const holdsKey = (keys: unknown, kid: string) => {
+  const list: unknown = typeof keys === "object" && keys !== null ? Reflect.get(keys, "keys") : null
+  return Array.isArray(list) && list.some((key: unknown) => Reflect.get(Object(key), "kid") === kid)
+}
+/**
+ * One job key set for every proof. A fetch is shared by the proofs that wait for it, and a failed
+ * fetch is not kept, so the next proof tries again. A key id that the set does not hold fetches
+ * again only when no such fetch ran in the last minute.
+ */
+const cachedJobKeys = (keys: typeof githubJobKeys) => {
+  let held: { readonly at: number; readonly value: Promise<unknown> } | undefined
+  let missedAt = -Infinity
+  const refresh = (seen: typeof held) => {
+    if (held !== undefined && held !== seen) return held.value
+    const entry = { at: Date.now(), value: keys(AbortSignal.timeout(10000)) }
+    held = entry
+    entry.value.catch(() => {
+      if (held === entry) held = undefined
+    })
+    return entry.value
+  }
+  return async (kid: string) => {
+    const seen = held
+    if (!seen || Date.now() - seen.at >= keySetMs) return refresh(seen)
+    const value = await seen.value
+    if (holdsKey(value, kid) || Date.now() - missedAt < keyRefetchMs) return value
+    missedAt = Date.now()
+    return refresh(seen)
+  }
+}
+/** At most this many run token mints run at once; a request above it is answered 503. */
+const maxMints = 4
+class MintsBusy extends Schema.TaggedError<MintsBusy>()("MintsBusy", {}) {}
 /** A run token lives 15 minutes; its holder renews it 10 to 12 minutes in. */
 const renewIn = () => randomInt(10 * 60000, 12 * 60000)
 const denied = () => new Response(null, { status: 403 })
@@ -113,6 +155,8 @@ export const makeCapabilityGateway = (
         for (const runId of active.keys()) abortRun(runId)
       }),
     )
+    const jobKeys = cachedJobKeys(keys)
+    const mints = yield* Semaphore.make(maxMints)
     const issue = (deadline: number) =>
       ownedPromise((signal) =>
         mintCapability(
@@ -121,6 +165,14 @@ export const makeCapabilityGateway = (
           "run",
           Math.min(900, Math.floor((deadline - Date.now()) / 1000)),
           signal,
+        ),
+      ).pipe(
+        mints.withPermitsIfAvailable(1),
+        Effect.flatMap(
+          Option.match({
+            onNone: () => Effect.fail(new MintsBusy()),
+            onSome: Effect.succeed,
+          }),
         ),
       )
     const renewals = yield* Cache.makeWith(
@@ -167,7 +219,7 @@ export const makeCapabilityGateway = (
       const claims = proofClaims(token)
       if (!claims) return yield* Effect.fail(new CapabilityRefused())
       const job = yield* store.sessionContext(claims, Date.now())
-      const jwks = yield* ownedPromise(keys)
+      const jwks = yield* Effect.tryPromise(() => jobKeys(claims.kid))
       const policy = job.policy
       const ref = `refs/heads/workflowd/leases/${job.leaseId}`
       const verified = yield* Effect.try({
