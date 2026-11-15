@@ -30,8 +30,12 @@ export const eventRecordPaths = (eventsPath: string) => {
   }
 }
 
-/** Bytes of one record file from an offset; empty at its end or when it is absent. */
-export type RecordSource = (file: RecordFile, offset: number) => Promise<Uint8Array>
+/**
+ * Bytes of one record file from an offset: empty at its end or when it does
+ * not exist, null when it cannot be read now (the reader waits a poll and
+ * reads it again from the same offset).
+ */
+export type RecordSource = (file: RecordFile, offset: number) => Promise<Uint8Array | null>
 
 export type RecordIndex = { readonly first: number; readonly last: number }
 
@@ -57,11 +61,6 @@ export const decodeRecordIndex = (text: string): RecordIndex => {
   return { first: index.first, last: index.last }
 }
 
-const readIndex = async (source: RecordSource): Promise<RecordIndex | null> => {
-  const bytes = await source({ kind: "index" }, 0)
-  return bytes.length === 0 ? null : decodeRecordIndex(new TextDecoder().decode(bytes))
-}
-
 /**
  * Yields the complete lines of a record in the order the worker wrote them.
  * It reads the head, then each segment from the first one that still exists.
@@ -85,6 +84,8 @@ export const readEventRecord = <A>(options: {
     let offset = 0
     let buffered = ""
     let decoder = new TextDecoder()
+    /** A file of this pass could not be read; the pass is not the last one. */
+    let deferred = false
     const move = (next: LinesFile) => {
       current = next
       offset = 0
@@ -95,7 +96,8 @@ export const readEventRecord = <A>(options: {
     async function* readAvailable() {
       for (;;) {
         const bytes = await options.source(current, offset)
-        if (bytes.length === 0) return
+        if (bytes === null) deferred = true
+        if (bytes === null || bytes.length === 0) return
         offset += bytes.length
         buffered += decoder.decode(bytes, { stream: true })
         for (;;) {
@@ -114,13 +116,17 @@ export const readEventRecord = <A>(options: {
       for (;;) {
         const entered = offset
         yield* readAvailable()
-        const index = await readIndex(options.source)
-        if (index === null) return
+        if (deferred) return
+        const indexBytes = await options.source({ kind: "index" }, 0)
+        if (indexBytes === null) deferred = true
+        if (indexBytes === null || indexBytes.length === 0) return
+        const index = decodeRecordIndex(new TextDecoder().decode(indexBytes))
         // The index names a later file, so the worker sealed this one before
         // publishing it: read what was written before the index changed.
         const sealed = current.kind === "head" || current.n < index.last
         if (!sealed) return
         yield* readAvailable()
+        if (deferred) return
         // A file that never held a byte and that the index still names is not
         // progress (a forged range): wait a poll before the next. A segment the
         // worker removed is not such a file; its successors hold the newest lines.
@@ -135,15 +141,16 @@ export const readEventRecord = <A>(options: {
     }
     let stopped = false
     for (;;) {
+      deferred = false
       yield* drain()
-      if (stopped) {
+      if (stopped && !deferred) {
         if (options.flushPartialAtEnd === true && buffered !== "") yield options.parse(buffered)
         return
       }
       // Completion can publish its final bytes while shouldStop is awaiting
       // the manager. Drain once more after observing the terminal boundary.
-      stopped = await options.shouldStop()
-      if (!stopped) await Bun.sleep(options.pollIntervalMs)
+      if (!stopped) stopped = await options.shouldStop()
+      if (!stopped || deferred) await Bun.sleep(options.pollIntervalMs)
     }
   },
 })

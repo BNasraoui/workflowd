@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test"
-import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, open, rm, writeFile } from "node:fs/promises"
 import { existsSync } from "node:fs"
 import { createServer, type Socket } from "node:net"
 import { tmpdir } from "node:os"
@@ -8,7 +8,8 @@ import { Effect, Schema } from "effect"
 import { makeAgentRunCliDispatcher, type AgentRunCliStore } from "../../src/kernel/agent-run-cli"
 import { makeClaudeDispatchCli, parseClaudeDispatchEvent } from "../../src/kernel/claude-dispatch"
 import { makeCodexCli, parseCodexExecEvent } from "../../src/kernel/codex-session"
-import { eventRecordLimits } from "../../src/kernel/event-record-files"
+import { EVENT_RECORD_BYTES, eventRecordLimits } from "../../src/kernel/event-record-files"
+import { recordFiles } from "./event-record-harness"
 import { makeHostCli } from "../../src/agent-host/client"
 import { agentHostUnitName, HostRequest } from "../../src/agent-host/protocol"
 import type { CliPort, CliRunProcess } from "../../src/kernel/cli-process-contract"
@@ -976,42 +977,42 @@ test("a host re-attach that finds another launch does not adopt its result", asy
 }, 20_000)
 
 /**
- * workflowd-ripk: the event record keeps at most maxOutputBytes on disk. A
- * worker that writes more than that keeps reaching the observer, so a run is
- * never reported as stalled, or completed with an older message, because of
- * the size of its record.
+ * The event record keeps at most maxOutputBytes on disk. A worker that writes
+ * more than that keeps reaching the observer, so a run is never reported as
+ * stalled, or completed with an older message, because of the size of its
+ * record.
  */
 const RECORD_LIMIT = 64 * 1024
 
 /**
- * The observer's stall window in these tests. Each rotation creates a segment
- * and renames the index. On a disk busy with other builds one rename took 2.6 s,
- * so these runs keep their files in memory (tmpfs) where the host has it.
+ * The observer's stall window in these tests: three times a gap that a
+ * loaded host gives between two lines. The runs keep their files in memory
+ * (tmpfs) where the host has it, so each rotation's index rename is not a
+ * disk write.
  */
-const STALL_WINDOW_MS = 1_000
+const STALL_WINDOW_MS = 3_000
 const SCRATCH = existsSync("/dev/shm") ? "/dev/shm" : tmpdir()
 
-/** Three times the record limit in 2 KiB lines, one each 30 ms: about 2.9 s,
- * and about 1.9 s after a record that stops at the limit is full. */
-const FLOOD = `start()
+/** `times` the record limit `limit` in lines of `line` bytes, one each
+ * `everyMs`; then the worker flags "flooded". */
+const flood = (times: number, limit: number, line: number, everyMs: number) => `start()
 message("working")
-for (let line = 0; line < ${(3 * RECORD_LIMIT) / 2048}; line++) {
-  noise(2048)
-  await Bun.sleep(30)
+for (let line = 0; line < ${(times * limit) / line}; line++) {
+  noise(${line})
+  await Bun.sleep(${everyMs})
 }
 flag("flooded")`
 
+/** Six times the record limit in 2 KiB lines, one each 30 ms: about 5.8 s,
+ * and about 4.8 s, past the stall window, after a record that stops at the
+ * limit is full. */
+const FLOOD = flood(6, RECORD_LIMIT, 2048, 30)
+
 /** The bytes of every event record file of the run. */
-const recordBytes = async (root: string) => {
-  const directory = join(root, "custody", RUN_ID)
-  let total = 0
-  for (const name of await readdir(directory))
-    if (name.startsWith("events")) total += (await stat(join(directory, name))).size
-  return total
-}
+const recordBytes = async (root: string) => (await recordFiles(join(root, "custody", RUN_ID))).bytes
 
 for (const kind of ["claude", "codex"] as const)
-  test(`a ${kind} worker that writes three times the record limit completes with its final message`, async () => {
+  test(`a ${kind} worker that writes six times the record limit completes with its final message`, async () => {
     const h = await harness(kind, {
       maxOutputBytes: RECORD_LIMIT,
       scratch: SCRATCH,
@@ -1089,10 +1090,18 @@ process.exit(0)`,
   }, 20_000)
 
 /**
- * An agent host whose launches run the real worker in the host's file layout
- * (io/events, io/events.N, io/events.index.json) and whose exchange reads
- * those files, 64 KiB from an offset, as the host server does.
+ * An agent host whose launches run the real host worker (runHostWorker) as the
+ * host server starts it: the request in io/input, the worker in io with
+ * --host-input, so the record is io/events, io/events.N and
+ * io/events.index.json at the host's own limit. Its exchange reads those
+ * files, 64 KiB from an offset, as the host server does, without the owner
+ * and link checks of the server, which needs root.
  */
+/** Three times the host's record limit in 64 KiB lines, one each 15 ms: about
+ * 7.2 s, and about 4.8 s, past the stall window, after a record that stops at
+ * the limit is full. */
+const HOST_FLOOD = flood(3, EVENT_RECORD_BYTES, 64 * 1024, 15)
+
 const ioHost = async (kind: Kind, root: string) => {
   const socket = join(root, "host.sock")
   const io = join(root, "io")
@@ -1119,23 +1128,35 @@ const ioHost = async (kind: Kind, root: string) => {
       const reply = (value: unknown) => connection.end(JSON.stringify(value) + "\n")
       void (async () => {
         if (request.operation === "start") {
-          await writeFile(join(io, "prompt"), request.prompt)
-          const worker = new URL(`../../src/kernel/${kind}-worker.ts`, import.meta.url).pathname
-          // prettier-ignore
-          child = Bun.spawn([process.execPath, worker, "--binary", join(root, kind), "--directory", root,
-            "--prompt-file", join(io, "prompt"), "--result-file", join(io, "result"),
-            "--events-file", join(io, "events"), "--stderr-file", join(io, "stderr"),
-            "--max-output-bytes", String(RECORD_LIMIT)], { stdin: "ignore", stdout: "ignore", stderr: "ignore" })
+          await writeFile(join(io, "input"), JSON.stringify(request))
+          const worker = new URL("../../src/kernel/codex-worker.ts", import.meta.url).pathname
+          child = Bun.spawn(
+            [
+              process.execPath,
+              worker,
+              "--host-input",
+              join(io, "input"),
+              "--binary",
+              join(root, kind),
+            ],
+            { cwd: io, stdin: "ignore", stdout: "ignore", stderr: "ignore" },
+          )
           return reply({ admitted: true, process: owned(request.runId) })
         }
         if (request.operation === "inspect")
           return reply({ admitted: true, process: owned(request.runId) })
         if (request.operation === "exchange") {
-          const bytes = await readFile(join(io, request.file)).catch(() => Buffer.alloc(0))
-          return reply({
-            admitted: true,
-            bytes: bytes.subarray(request.offset, request.offset + 65536).toString("base64"),
-          })
+          const bytes = Buffer.alloc(65536)
+          const read = await open(join(io, request.file), "r")
+            .then(async (file) => {
+              try {
+                return (await file.read(bytes, 0, bytes.length, request.offset)).bytesRead
+              } finally {
+                await file.close()
+              }
+            })
+            .catch(() => 0)
+          return reply({ admitted: true, bytes: bytes.subarray(0, read).toString("base64") })
         }
         if (request.operation === "stop") {
           child?.kill("SIGKILL")
@@ -1160,7 +1181,7 @@ const ioHost = async (kind: Kind, root: string) => {
 }
 
 for (const kind of ["claude", "codex"] as const)
-  test(`a ${kind} worker behind the agent host that writes three times the record limit completes`, async () => {
+  test(`a ${kind} worker behind the agent host that writes three times the host's record limit completes`, async () => {
     const root = await mkdtemp(join(SCRATCH, "workflowd-ripk-host-"))
     const host = await ioHost(kind, root)
     try {
@@ -1169,7 +1190,7 @@ for (const kind of ["claude", "codex"] as const)
         fakeNative(
           kind,
           root,
-          `${FLOOD}
+          `${HOST_FLOOD}
 message("final answer")
 end(0)
 process.exit(0)`,
@@ -1188,20 +1209,28 @@ process.exit(0)`,
       expect(supervised.terminals).toEqual([{ kind: "complete", finalMessage: "final answer" }])
       expect(supervised.outputTokens).toEqual([7])
       expect(host.stops()).toBe(0)
-      let total = 0
-      const names = await readdir(host.io)
-      for (const name of names)
-        if (name.startsWith("events")) total += (await stat(join(host.io, name))).size
-      expect(names).toContain("events.index.json")
-      expect(total).toBeLessThanOrEqual(RECORD_LIMIT)
+      const record = await recordFiles(host.io)
+      expect(record.files.has("events.index.json")).toBe(true)
+      expect(record.bytes).toBeLessThanOrEqual(EVENT_RECORD_BYTES)
     } finally {
       await host.close()
       await rm(root, { recursive: true, force: true })
     }
-  }, 20_000)
+  }, 40_000)
 
 /** Twice the line limit of a record of RECORD_LIMIT bytes. */
 const OVERSIZED = 2 * eventRecordLimits(RECORD_LIMIT).line
+
+/** The bytes, without its newline, of the line the fake CLI prints for a
+ * message of OVERSIZED characters. */
+const oversizedLineBytes = (kind: Kind) => {
+  const text = "y".repeat(OVERSIZED)
+  return JSON.stringify(
+    kind === "claude"
+      ? { type: "assistant", message: { content: [{ type: "text", text }] } }
+      : { type: "item.completed", item: { type: "agent_message", text } },
+  ).length
+}
 
 for (const kind of ["claude", "codex"] as const)
   test(`a ${kind} run whose final message exceeds the line limit ends with the line limit reason`, async () => {
@@ -1223,7 +1252,7 @@ process.exit(0)`,
         kind: "operator_required",
         diagnostic: expect.stringMatching(
           new RegExp(
-            `^${kind}_output_line_limit: a ${kind} event of [0-9]+ bytes exceeded the line limit; the final message was not captured$`,
+            `^${kind}_output_line_limit: a ${kind} event of ${oversizedLineBytes(kind)} bytes exceeded the line limit; the final message was not captured$`,
           ),
         ),
       })

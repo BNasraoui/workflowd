@@ -9,6 +9,7 @@ import {
   runCodexWorker,
   runHostWorker,
 } from "../../src/kernel/codex-worker"
+import { MIN_EVENT_RECORD_BYTES } from "../../src/kernel/event-record-files"
 
 const fakeSystemd = (commands: ReadonlyArray<string>[]) => {
   let active = false
@@ -68,6 +69,23 @@ test("the worker command parser accepts exact pairs and rejects malformed argume
   expect(() => parseCodexWorkerArguments(["--binary", "codex"])).toThrow("missing --directory")
 })
 
+test("a record total too small for a head, a segment and a marker is refused by the worker and the daemon", () => {
+  const worker = (total: string) =>
+    parseCodexWorkerArguments([
+      ...["--binary", "codex", "--directory", "/work", "--prompt-file", "/state/prompt"],
+      ...["--result-file", "/state/result", "--events-file", "/state/events"],
+      ...["--stderr-file", "/state/stderr", "--max-output-bytes", total],
+    ])
+  const refusal = `--max-output-bytes must be an integer of at least ${MIN_EVENT_RECORD_BYTES}`
+  for (const total of [String(MIN_EVENT_RECORD_BYTES - 1), "0", "-1", "1e400", "64k", "1.5"])
+    expect(() => worker(total)).toThrow(refusal)
+  expect(worker(String(MIN_EVENT_RECORD_BYTES)).maxOutputBytes).toBe(MIN_EVENT_RECORD_BYTES)
+  const daemon = (maxOutputBytes: number) =>
+    makeCodexCli({ binary: "codex", custodyRoot: "/state", maxOutputBytes })
+  expect(() => daemon(MIN_EVENT_RECORD_BYTES - 1)).toThrow(refusal)
+  expect(daemon(MIN_EVENT_RECORD_BYTES).ownership).toBe("transient-exec")
+})
+
 test("the transient worker feeds the prompt on stdin and records its exit durably", async () => {
   const root = await mkdtemp(join(tmpdir(), "codex-worker-"))
   try {
@@ -87,15 +105,15 @@ test("the transient worker feeds the prompt on stdin and records its exit durabl
       resultFile: resultPath,
       eventsFile: eventsPath,
       stderrFile: stderrPath,
-      maxOutputBytes: 64,
+      maxOutputBytes: MIN_EVENT_RECORD_BYTES,
       model: null,
     })
 
     expect(exitCode).toBe(7)
     expect(await readFile(capturePath, "utf8")).toBe("prompt stays out of argv")
     expect(JSON.parse(await readFile(resultPath, "utf8"))).toEqual({ version: 1, exitCode: 7 })
-    expect((await stat(eventsPath)).size).toBeLessThanOrEqual(64)
-    expect((await stat(stderrPath)).size).toBeLessThanOrEqual(64)
+    expect((await stat(eventsPath)).size).toBeLessThanOrEqual(MIN_EVENT_RECORD_BYTES)
+    expect((await stat(stderrPath)).size).toBeLessThanOrEqual(MIN_EVENT_RECORD_BYTES)
   } finally {
     await rm(root, { recursive: true, force: true })
   }

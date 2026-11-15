@@ -14,7 +14,8 @@ import {
 
 const READ_CHUNK_BYTES = 64 * 1024
 
-/** The record in a local directory. A missing or unreadable file reads as empty. */
+/** The record in a local directory. A file that does not exist reads as empty;
+ * any other read error is a read to try again. */
 export const localRecordSource = (eventsPath: string): RecordSource => {
   const paths = eventRecordPaths(eventsPath)
   return async (file, offset) => {
@@ -27,9 +28,11 @@ export const localRecordSource = (eventsPath: string): RecordSource => {
       } finally {
         await handle.close()
       }
-    } catch {
+    } catch (error) {
       // The worker may not have created the file yet, or has rotated it away.
-      return new Uint8Array()
+      if (error instanceof Error && "code" in error && error.code === "ENOENT")
+        return new Uint8Array()
+      return null
     }
   }
 }
@@ -37,17 +40,12 @@ export const localRecordSource = (eventsPath: string): RecordSource => {
 export const encodeRecordIndex = (index: RecordIndex) =>
   `${JSON.stringify({ version: 1, first: index.first, last: index.last })}\n`
 
-/** The size limits of an event record. Each applies to every run. */
-export const EVENT_RECORD_LIMITS = {
-  /** The bytes of all record files of one run, unless the launch gives its own. */
-  totalBytes: 10 * 1024 * 1024,
-  /** The fixed first file: the start of the run, never removed. */
-  headBytes: 1024 * 1024,
-  /** One tail segment. The oldest segments are removed to keep the total. */
-  segmentBytes: 1024 * 1024,
-  /** One line. A longer line is replaced by a line_dropped marker. */
-  lineBytes: 1024 * 1024,
-} as const
+/** The bytes of all record files of one run, unless the launch gives its own. */
+export const EVENT_RECORD_BYTES = 10 * 1024 * 1024
+
+/** The line that replaces a line longer than the line limit. */
+export const lineDroppedMarker = (bytes: number) =>
+  `${JSON.stringify({ type: LINE_DROPPED_TYPE, bytes })}\n`
 
 /** Two index files of the longest encoding, the index and its replacement. */
 const INDEX_RESERVE_BYTES =
@@ -57,25 +55,33 @@ const INDEX_RESERVE_BYTES =
     last: Number.MAX_SAFE_INTEGER,
   }).length
 
-/** The limits for one record of `totalBytes`. A total under four times the
- * head keeps a quarter each for the head and a segment, so at least two
- * segments always fit beside the head. */
-export const eventRecordLimits = (totalBytes: number) => {
-  // The index and its replacement are on disk too.
-  const total = Number.isSafeInteger(totalBytes) ? Math.max(0, totalBytes - INDEX_RESERVE_BYTES) : 0
-  const quarter = Math.floor(total / 4)
-  const segment = Math.min(EVENT_RECORD_LIMITS.segmentBytes, quarter)
-  return {
-    total,
-    head: Math.min(EVENT_RECORD_LIMITS.headBytes, quarter),
-    segment,
-    line: Math.min(EVENT_RECORD_LIMITS.lineBytes, segment),
-  }
+/** The head, a segment and a line are each a tenth of the total. */
+const PARTS = 10
+
+/** The smallest total whose segment holds the longest line_dropped marker;
+ * the head and one segment then fit beside the two index files. */
+export const MIN_EVENT_RECORD_BYTES = PARTS * lineDroppedMarker(Number.MAX_SAFE_INTEGER).length
+
+/** Refuses a total under which the record cannot keep a head, one segment
+ * and a marker. */
+export const eventRecordBytes = (totalBytes: number) => {
+  if (!Number.isSafeInteger(totalBytes) || totalBytes < MIN_EVENT_RECORD_BYTES)
+    throw new Error(
+      `--max-output-bytes must be an integer of at least ${MIN_EVENT_RECORD_BYTES}, got ${totalBytes}`,
+    )
+  return totalBytes
 }
 
-/** The line that replaces a line longer than the line limit. */
-export const lineDroppedMarker = (bytes: number) =>
-  `${JSON.stringify({ type: LINE_DROPPED_TYPE, bytes })}\n`
+/**
+ * The limits of one record of `totalBytes`: the fixed head, one tail segment
+ * and one line are each a tenth of it (1 MiB of the default 10 MiB). The
+ * oldest segments are removed so that every file, the index and its
+ * replacement included, stays within the total.
+ */
+export const eventRecordLimits = (totalBytes: number) => {
+  const part = Math.floor(eventRecordBytes(totalBytes) / PARTS)
+  return { total: totalBytes - INDEX_RESERVE_BYTES, head: part, segment: part, line: part }
+}
 
 const NEWLINE = 10
 
@@ -148,7 +154,6 @@ export const openEventRecord = async (
   }
   /** Puts one whole line in the file where it fits, rotating if it must. */
   const place = async (line: Uint8Array) => {
-    if (line.length > limits.segment) return
     let changed = false
     if (!headSealed && headBytes + line.length <= limits.head) {
       batch.push(line)

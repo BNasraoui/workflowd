@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test"
-import { readdir, readFile, stat, mkdtemp, rm, unlink, writeFile } from "node:fs/promises"
+import { mkdir, readFile, stat, mkdtemp, rm, unlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { Schema } from "effect"
@@ -15,13 +15,15 @@ import {
 import {
   encodeRecordIndex,
   eventRecordLimits,
-  EVENT_RECORD_LIMITS,
+  EVENT_RECORD_BYTES,
+  MIN_EVENT_RECORD_BYTES,
   lineDroppedMarker,
   localRecordSource,
   openEventRecord,
   type EventRecordWriter,
 } from "../../src/kernel/event-record-files"
 import { parseClaudeDispatchEvent } from "../../src/kernel/claude-dispatch"
+import { recordFiles } from "./event-record-harness"
 
 const withRoot = async (body: (root: string) => Promise<void>) => {
   const root = await mkdtemp(join(tmpdir(), "event-record-"))
@@ -95,6 +97,46 @@ test("a missing head reads as an empty record", async () =>
     expect(await readAll(localRecordSource(join(root, "events.jsonl")))).toEqual([])
   }))
 
+/** A record file that cannot be read (a directory in its place) until its
+ * `readable`-th read, when the worker's file replaces it. */
+const unreadableUntil = (head: string, path: string, content: string, readable: number) => {
+  const local = localRecordSource(head)
+  const paths = eventRecordPaths(head)
+  let reads = 0
+  const source: RecordSource = async (file, offset) => {
+    if (paths.of(file) === path && ++reads === readable) {
+      await rm(path, { recursive: true })
+      await writeFile(path, content)
+    }
+    return local(file, offset)
+  }
+  return source
+}
+
+test("a sealed segment that cannot be read is read again on the next poll, and its lines are not skipped", async () =>
+  withRoot(async (root) => {
+    const head = join(root, "events.jsonl")
+    const paths = eventRecordPaths(head)
+    await writeFile(head, "h1\n")
+    await mkdir(paths.segment(1))
+    await writeFile(paths.segment(2), "s2\n")
+    await writeFile(paths.index, encodeRecordIndex({ first: 1, last: 2 }))
+    // It cannot be read on the first pass nor on the pass after the stop.
+    const source = unreadableUntil(head, paths.segment(1), "s1\n", 3)
+    expect(await readAll(source)).toEqual(["h1", "s1", "s2"])
+  }))
+
+test("an index that cannot be read is read again, not taken as a record without segments", async () =>
+  withRoot(async (root) => {
+    const head = join(root, "events.jsonl")
+    const paths = eventRecordPaths(head)
+    await writeFile(head, "h1\n")
+    await mkdir(paths.index)
+    await writeFile(paths.segment(1), "s1\n")
+    const source = unreadableUntil(head, paths.index, encodeRecordIndex({ first: 1, last: 1 }), 3)
+    expect(await readAll(source)).toEqual(["h1", "s1"])
+  }))
+
 test("the reader reads the head, then each kept segment in order", async () =>
   withRoot(async (root) => {
     const head = join(root, "events.jsonl")
@@ -132,7 +174,7 @@ test("a segment removed while it is read drops its partial line, never splits it
     const source: RecordSource = async (file, offset) => {
       if (file.kind === "segment" && file.n === 1) {
         reads += 1
-        if (reads === 1) return (await local(file, offset)).subarray(0, 10)
+        if (reads === 1) return (await local(file, offset))!.subarray(0, 10)
         await unlink(paths.segment(1)).catch(() => {})
         await writeFile(paths.index, encodeRecordIndex({ first: 2, last: 2 }))
       }
@@ -240,24 +282,19 @@ const writeChunked = async (writer: EventRecordWriter, text: string, size = 1000
     await writer.write(bytes.subarray(start, start + size))
 }
 
-/** The record files in a directory with their sizes. */
-const recordFiles = async (root: string) => {
-  const files = new Map<string, number>()
-  for (const name of await readdir(root))
-    if (name.startsWith("events")) files.set(name, (await stat(join(root, name))).size)
-  return files
-}
-
-test("the limits are 1 MiB each for a record of 10 MiB and a quarter for a small one", () => {
-  expect(eventRecordLimits(EVENT_RECORD_LIMITS.totalBytes)).toMatchObject({
+test("the head, a segment and a line are a tenth of the total each: 1 MiB of the default 10 MiB", () => {
+  expect(eventRecordLimits(EVENT_RECORD_BYTES)).toEqual({
+    // Two index files of the longest encoding, 63 bytes each, are within the total.
+    total: EVENT_RECORD_BYTES - 126,
     head: 1024 * 1024,
     segment: 1024 * 1024,
     line: 1024 * 1024,
   })
-  const small = eventRecordLimits(LIMIT)
-  expect(small.head).toBeLessThanOrEqual(LIMIT / 4)
-  expect(small.line).toBe(small.segment)
-  expect(eventRecordLimits(Number.NaN)).toMatchObject({ head: 0, segment: 0, line: 0 })
+  expect(eventRecordLimits(LIMIT)).toMatchObject({ head: 6553, segment: 6553, line: 6553 })
+  // The smallest total still holds the longest marker in a segment beside the head.
+  const smallest = eventRecordLimits(MIN_EVENT_RECORD_BYTES)
+  expect(smallest.segment).toBe(lineDroppedMarker(Number.MAX_SAFE_INTEGER).length)
+  expect(smallest.head + smallest.segment).toBeLessThanOrEqual(smallest.total)
 })
 
 test("a writer that gets three times its limit keeps the head and the newest lines within the limit", async () =>
@@ -268,8 +305,8 @@ test("a writer that gets three times its limit keeps the head and the newest lin
     await writeChunked(writer, Array.from({ length: count }, (_, seq) => numbered(seq)).join(""))
     expect(writer.rotated()).toBe(true)
     await writer.close()
-    const files = await recordFiles(root)
-    expect([...files.values()].reduce((sum, size) => sum + size, 0)).toBeLessThanOrEqual(LIMIT)
+    const { files, bytes } = await recordFiles(root)
+    expect(bytes).toBeLessThanOrEqual(LIMIT)
     const index = decodeRecordIndex(await readFile(eventRecordPaths(head).index, "utf8"))
     expect(index.first).toBeGreaterThan(1)
     // Exactly the segments the index names exist.
@@ -335,17 +372,19 @@ test("a new record removes the index and the segments of an earlier one", async 
     const writer = await openEventRecord(head, LIMIT)
     await writer.write(new TextEncoder().encode("new\n"))
     await writer.close()
-    expect([...(await recordFiles(root)).keys()].sort()).toEqual(["events", "events.notes"])
+    expect([...(await recordFiles(root)).files.keys()].sort()).toEqual(["events", "events.notes"])
     expect(await readAll(localRecordSource(head))).toEqual(["new"])
   }))
 
-test("a record without room for a line keeps nothing", async () =>
+test("a record total without room for a head, a segment and a marker is refused before any file is touched", async () =>
   withRoot(async (root) => {
     const head = join(root, "events.jsonl")
-    const writer = await openEventRecord(head, 0)
-    await writer.write(new TextEncoder().encode("a\nb\n"))
-    await writer.close()
-    expect([...(await recordFiles(root)).values()]).toEqual([0])
+    await writeFile(head, "earlier\n")
+    for (const total of [0, MIN_EVENT_RECORD_BYTES - 1, Number.NaN])
+      await expect(openEventRecord(head, total)).rejects.toThrow(
+        `--max-output-bytes must be an integer of at least ${MIN_EVENT_RECORD_BYTES}, got ${total}`,
+      )
+    expect(await readFile(head, "utf8")).toBe("earlier\n")
   }))
 
 /** Claude assistant lines numbered from 0, padded to `bytes` each. */
@@ -534,6 +573,91 @@ await writer.close()
     }),
   30_000,
 )
+
+/** The lines of the record at `head` as the controller reads them. */
+const readRecord = (head: string, flushPartialAtEnd = false) =>
+  readAll(localRecordSource(head), { flushPartialAtEnd })
+
+test("lines that end exactly at the head limit and the segment limit fill those files, and the next line opens a new one", async () =>
+  withRoot(async (root) => {
+    const head = join(root, "events.jsonl")
+    const { segment } = eventRecordLimits(LIMIT)
+    // Three lines that fill a file of `segment` bytes exactly, for the head and segment 1.
+    const third = Math.floor(segment / 3)
+    const sizes = [third, third, segment - 2 * third]
+    const lines = [...sizes, ...sizes, 2048].map((bytes, seq) => numbered(seq, bytes))
+    const writer = await openEventRecord(head, LIMIT)
+    await writeChunked(writer, lines.join(""))
+    await writer.close()
+    expect(Object.fromEntries((await recordFiles(root)).files)).toMatchObject({
+      "events.jsonl": segment,
+      "events.1.jsonl": segment,
+      "events.2.jsonl": 2048,
+    })
+    expect((await readRecord(head)).map(seqOf)).toEqual([0, 1, 2, 3, 4, 5, 6])
+  }))
+
+test("a CLI that writes one byte at a time is stored and read as whole lines", async () =>
+  withRoot(async (root) => {
+    const head = join(root, "events.jsonl")
+    const writer = await openEventRecord(head, LIMIT)
+    // Eight lines of 2 KiB cross from the head into a segment.
+    await writeChunked(writer, Array.from({ length: 8 }, (_, seq) => numbered(seq)).join(""), 1)
+    await writer.close()
+    expect((await recordFiles(root)).files.has("events.1.jsonl")).toBe(true)
+    expect((await readRecord(head)).map(seqOf)).toEqual([0, 1, 2, 3, 4, 5, 6, 7])
+  }))
+
+test("a line exactly at the line limit is kept, and a line one byte over is a marker of its size", async () =>
+  withRoot(async (root) => {
+    const head = join(root, "events.jsonl")
+    const { line } = eventRecordLimits(LIMIT)
+    const writer = await openEventRecord(head, LIMIT)
+    // The limit counts the newline; the marker counts the line without it.
+    await writeChunked(writer, numbered(0, line) + numbered(1, line + 1) + numbered(2))
+    await writer.close()
+    const read = await readRecord(head)
+    expect(read).toHaveLength(3)
+    expect(seqOf(read[0]!)).toBe(0)
+    expect(read[0]).toHaveLength(line - 1)
+    expect(recordEventParser(parseClaudeDispatchEvent)(read[1]!)).toEqual({
+      type: "record.line_dropped",
+      bytes: line,
+    })
+    expect(seqOf(read[2]!)).toBe(2)
+  }))
+
+test("a CLI whose output ends with no newline: its last line is stored, the host reader yields it and the controller reader does not, as before segments", async () =>
+  withRoot(async (root) => {
+    const head = join(root, "events.jsonl")
+    const writer = await openEventRecord(head, LIMIT)
+    const lines = Array.from({ length: 4 }, (_, seq) => numbered(seq)).join("")
+    await writeChunked(writer, `${lines}${numbered(4).slice(0, -1)}`)
+    await writer.close()
+    // The last line went to a segment, unterminated.
+    expect((await readFile(eventRecordPaths(head).segment(1), "utf8")).endsWith("}")).toBe(true)
+    expect((await readRecord(head, true)).map(seqOf)).toEqual([0, 1, 2, 3, 4])
+    expect((await readRecord(head)).map(seqOf)).toEqual([0, 1, 2, 3])
+  }))
+
+test("a reader that starts after many segments were removed reads the head, then the kept segments in order", async () =>
+  withRoot(async (root) => {
+    const head = join(root, "events.jsonl")
+    const writer = await openEventRecord(head, LIMIT)
+    const count = (20 * LIMIT) / 2048
+    await writeChunked(writer, Array.from({ length: count }, (_, seq) => numbered(seq)).join(""))
+    await writer.close()
+    const index = decodeRecordIndex(await readFile(eventRecordPaths(head).index, "utf8"))
+    expect(index.first).toBeGreaterThan(100)
+    const seqs = (await readRecord(head)).map(seqOf)
+    const headLines = Math.floor(eventRecordLimits(LIMIT).head / 2048)
+    expect(seqs.slice(0, headLines)).toEqual(Array.from({ length: headLines }, (_, seq) => seq))
+    // After the head, the kept tail ends with the last line, with no gap and no repeat.
+    const tail = seqs.slice(headLines)
+    expect(tail.at(-1)).toBe(count - 1)
+    expect(tail).toEqual(Array.from({ length: tail.length }, (_, i) => tail[0]! + i))
+    expect(tail[0]).toBeGreaterThan(headLines)
+  }))
 
 test("the line_dropped marker is a typed event and every other line is the CLI's", () => {
   const parse = recordEventParser(parseClaudeDispatchEvent)

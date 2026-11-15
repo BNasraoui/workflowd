@@ -6,7 +6,12 @@ import { CodexRetryTurn } from "./codex-retry"
 import { constants } from "node:fs"
 import { open, readFile, rename, stat, writeFile } from "node:fs/promises"
 import { nativeSandboxArguments } from "../sandbox/native"
-import { EVENT_RECORD_LIMITS, openEventRecord, type EventRecordWriter } from "./event-record-files"
+import {
+  EVENT_RECORD_BYTES,
+  eventRecordBytes,
+  openEventRecord,
+  type EventRecordWriter,
+} from "./event-record-files"
 import { codexProjectArguments } from "../execution/project-config"
 
 export type CliWorkerOptions = {
@@ -194,7 +199,7 @@ export const parseCodexWorkerArguments = (arguments_: ReadonlyArray<string>): Cl
     resultFile: required("--result-file"),
     eventsFile: required("--events-file"),
     stderrFile: required("--stderr-file"),
-    maxOutputBytes: Number.parseInt(required("--max-output-bytes"), 10),
+    maxOutputBytes: eventRecordBytes(Number(required("--max-output-bytes"))),
     model: values.get("--model") ?? null,
     ...(values.has("--effort") ? { effort: required("--effort") } : {}),
     ...(values.has("--provider") ? { provider: required("--provider") } : {}),
@@ -275,7 +280,7 @@ export async function runHostWorker(inputPath: string, binary: string, io = proc
     resultFile: join(io, "result"),
     eventsFile: join(io, "events"),
     stderrFile: join(io, "stderr"),
-    maxOutputBytes: EVENT_RECORD_LIMITS.totalBytes,
+    maxOutputBytes: EVENT_RECORD_BYTES,
     model: request.model,
     ...(request.effort === undefined ? {} : { effort: request.effort }),
     ...(request.provider === undefined ? {} : { provider: request.provider }),
