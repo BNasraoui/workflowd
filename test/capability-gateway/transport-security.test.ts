@@ -110,7 +110,8 @@ test("bound streaming preserves native bytes, renews with noscope, and denies cr
             )
           },
         )
-        const issued = yield* bindRunSession(Date.now())
+        // The run token is in its last five minutes, so it may be renewed.
+        const issued = yield* bindRunSession(Date.now(), { expiresAt: Date.now() + 300000 })
         const request = (
           path = "/capabilities/v1/providers/anthropic/v1/messages",
           token = issued.token,
@@ -180,24 +181,20 @@ test("bound streaming preserves native bytes, renews with noscope, and denies cr
           expect((yield* gateway.handle(denied)).status).toBe(403)
         expect(sent.length).toBe(1)
         expect(yield* Effect.promise(() => readFile(join(root, "mint-count"), "utf8"))).toBe("x")
-        const renew = yield* gateway.handle(request("/capabilities/v1/renew", issued.token, "{}"))
-        expect(renew.status).toBe(200)
-        const successor = yield* Effect.promise(() => renew.json()).pipe(
-          Effect.flatMap(Schema.decodeUnknownEffect(Schema.Struct({ token: Schema.String }))),
-        )
-        const retries = yield* Effect.all(
-          Array.from({ length: 12 }, () =>
-            gateway.handle(request("/capabilities/v1/renew", issued.token, "{}")),
-          ),
-          { concurrency: "unbounded" },
-        )
-        for (const retry of retries) {
-          expect(retry.status).toBe(200)
-          const repeated = yield* Effect.promise(() => retry.json()).pipe(
-            Effect.flatMap(Schema.decodeUnknownEffect(Schema.Struct({ token: Schema.String }))),
+        // A renewal asked again replaces the successor that has not renewed: the last one holds.
+        const renewals: Array<{ readonly token: string }> = []
+        for (let asked = 0; asked < 3; asked++) {
+          const renew = yield* gateway.handle(request("/capabilities/v1/renew", issued.token, "{}"))
+          expect(renew.status).toBe(200)
+          renewals.push(
+            yield* Effect.promise(() => renew.json()).pipe(
+              Effect.flatMap(Schema.decodeUnknownEffect(Schema.Struct({ token: Schema.String }))),
+            ),
           )
-          expect(repeated.token).toBe(successor.token)
         }
+        const successor = renewals[2]!
+        for (const replaced of renewals.slice(0, 2))
+          expect((yield* gateway.handle(request(undefined, replaced.token))).status).toBe(403)
         const next = yield* gateway.handle(request(undefined, successor.token))
         expect(next.status).toBe(200)
         yield* Effect.promise(() => next.text())

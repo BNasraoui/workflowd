@@ -1,4 +1,4 @@
-import { Cache, Context, Duration, Effect, Exit, Option, Redacted, Schema, Semaphore } from "effect"
+import { Context, Effect, Option, Redacted, Schema, Semaphore } from "effect"
 import { SqlClient } from "effect/unstable/sql"
 import { randomInt } from "node:crypto"
 import { mintCapability, type NoscopeConfiguration } from "./noscope"
@@ -22,11 +22,6 @@ export interface GatewayConfiguration {
   /** A stream silent this long is aborted; a stream that keeps sending runs to token expiry. */
   readonly streamIdleMs?: number
 }
-const RenewalKey = Schema.Struct({
-  runId: Schema.String,
-  channel: Schema.String,
-  predecessor: Schema.String,
-})
 const SessionProof = Schema.Struct({ token: Schema.String.check(Schema.isMaxLength(16384)) })
 const SessionAudience = /^workflowd:([a-f0-9]{64}):([a-f0-9]{64})$/
 /**
@@ -92,8 +87,10 @@ const cachedJobKeys = (keys: typeof githubJobKeys) => {
 /** At most this many run token mints run at once; a request above it is answered 503. */
 const maxMints = 4
 class MintsBusy extends Schema.TaggedError<MintsBusy>()("MintsBusy", {}) {}
-/** A run token lives 15 minutes; its holder renews it 10 to 12 minutes in. */
-const renewIn = () => randomInt(10 * 60000, 12 * 60000)
+/** A run token lives at most 15 minutes. */
+const tokenLifeMs = 900000
+/** Its holder renews it 180 to 300 seconds before it expires, or now when less is left. */
+const renewAt = (expiresAt: number) => Math.max(Date.now(), expiresAt - randomInt(180000, 300001))
 const denied = () => new Response(null, { status: 403 })
 const unavailable = () => new Response(null, { status: 503, headers: { "retry-after": "5" } })
 
@@ -124,22 +121,29 @@ export const makeCapabilityGateway = (
     const store = yield* makeCapabilityStore
     const sql = yield* SqlClient.SqlClient
     const authority = runLifetime(sql)
-    // Each live stream, by run, with the session of the token that opened it.
-    const active = new Map<string, Map<AbortController, number>>()
+    // Each live stream, by run, with the session and the digest of the token that opened it.
+    const active = new Map<
+      string,
+      Map<AbortController, { readonly session: number; readonly digest: string }>
+    >()
     let count = 0
     const abortRun = (runId: string) => {
       for (const controller of active.get(runId)?.keys() ?? []) controller.abort()
     }
     const streams = () =>
       [...active].flatMap(([runId, owned]) =>
-        [...new Set(owned.values())].map((session) => ({ runId, session })),
+        [...owned.values()].map((owner) => ({ runId, ...owner })),
       )
     const abortStale = (
-      stale: ReadonlyArray<{ readonly runId: string; readonly session: number }>,
+      stale: ReadonlyArray<{
+        readonly runId: string
+        readonly session: number
+        readonly digest: string
+      }>,
     ) => {
-      for (const { runId, session } of stale)
+      for (const { runId, session, digest } of stale)
         for (const [controller, owner] of active.get(runId) ?? [])
-          if (owner === session) controller.abort()
+          if (owner.session === session && owner.digest === digest) controller.abort()
     }
     // Bindings outlive this process: a restart revokes nothing. Another process (workflowd, or a
     // second gateway) revokes or opens a new session through the store, so live streams follow it.
@@ -147,6 +151,13 @@ export const makeCapabilityGateway = (
       Effect.tap((stale) => Effect.sync(() => abortStale(stale))),
       Effect.ignore,
       Effect.andThen(Effect.sleep("1 second")),
+      Effect.forever,
+      Effect.forkScoped,
+    )
+    // Rows of expired run tokens and of expired used proofs go, now and every minute.
+    yield* Effect.suspend(() => store.sweep(Date.now())).pipe(
+      Effect.ignore,
+      Effect.andThen(Effect.sleep("60 seconds")),
       Effect.forever,
       Effect.forkScoped,
     )
@@ -163,7 +174,7 @@ export const makeCapabilityGateway = (
           config.noscope,
           "run-capability",
           "run",
-          Math.min(900, Math.floor((deadline - Date.now()) / 1000)),
+          Math.min(tokenLifeMs / 1000, Math.floor((deadline - Date.now()) / 1000)),
           signal,
         ),
       ).pipe(
@@ -175,35 +186,28 @@ export const makeCapabilityGateway = (
           }),
         ),
       )
-    const renewals = yield* Cache.makeWith(
-      (key: string) =>
-        Effect.gen(function* () {
-          const input = yield* Schema.decodeUnknownEffect(Schema.fromJsonString(RenewalKey))(key)
-          const previous = yield* store.authorize(input, input.predecessor, Date.now())
-          const next = yield* issue(previous.deadline)
-          yield* authority.withPermit(
-            store.renew(
-              input,
-              input.predecessor,
-              capabilityDigest(next.token),
-              next.expiresAt,
-              Date.now(),
-            ),
-          )
-          return {
-            ...next,
-            renewAt: Math.min(next.expiresAt, Date.now() + renewIn()),
-            predecessorExpiresAt: previous.expiresAt,
-          }
-        }),
-      {
-        capacity: 1024,
-        timeToLive: (exit) =>
-          Exit.isSuccess(exit)
-            ? Duration.millis(Math.max(0, exit.value.predecessorExpiresAt - Date.now()))
-            : Duration.zero,
-      },
-    )
+    /**
+     * A renewal is checked before its mint and again when its successor is stored. Asked again
+     * for the same predecessor, it replaces the successor that has not renewed itself.
+     */
+    const renewal = Effect.fn("CapabilityGateway.renewal")(function* (
+      binding: { readonly runId: string; readonly channel: string },
+      predecessor: string,
+    ) {
+      const previous = yield* authority.withPermit(
+        store.renewable(
+          binding,
+          predecessor,
+          (deadline) => Math.min(Date.now() + tokenLifeMs, deadline),
+          Date.now(),
+        ),
+      )
+      const next = yield* issue(previous.deadline)
+      yield* authority.withPermit(
+        store.renew(binding, predecessor, capabilityDigest(next.token), next.expiresAt, Date.now()),
+      )
+      return { token: next.token, expiresAt: next.expiresAt, renewAt: renewAt(next.expiresAt) }
+    })
     const sessionChallenge = Effect.fn("CapabilityGateway.sessionChallenge")((lease: string) =>
       store.leaseChallenge(lease, Date.now()),
     )
@@ -261,9 +265,10 @@ export const makeCapabilityGateway = (
           capabilityDigest(issued.token),
           issued.expiresAt,
           Date.now(),
+          verified.expiresAt,
         ),
       )
-      const grant = { ...issued, renewAt: Math.min(issued.expiresAt, Date.now() + renewIn()) }
+      const grant = { ...issued, renewAt: renewAt(issued.expiresAt) }
       return {
         token: grant.token,
         expiresAt: grant.expiresAt,
@@ -304,16 +309,11 @@ export const makeCapabilityGateway = (
             ),
           ).pipe(Effect.result)
           if (body._tag === "Failure" || body.success.toString("utf8") !== "{}") return denied()
-          const renewed = yield* Cache.get(
-            renewals,
-            JSON.stringify({ ...binding, predecessor: digest }),
-          )
-          // Recheck even cached successors after cancellation; retries never reopen authority.
-          yield* store.authorize(binding, digest, Date.now())
-          return Response.json(
-            { token: renewed.token, expiresAt: renewed.expiresAt, renewAt: renewed.renewAt },
-            { headers: { "cache-control": "no-store" } },
-          )
+          // A refused renewal is final for this token; only a busy or failed mint or store is 503.
+          const renewed = yield* Effect.result(renewal(binding, digest))
+          if (renewed._tag === "Failure")
+            return renewed.failure instanceof CapabilityRefused ? denied() : unavailable()
+          return Response.json(renewed.success, { headers: { "cache-control": "no-store" } })
         }
         const prefix = `/capabilities/v1/providers/${config.providerId}`
         const isGit = config.gitRead === true && target.startsWith("/capabilities/v1/git/")
@@ -324,10 +324,12 @@ export const makeCapabilityGateway = (
           authority.withPermit(
             Effect.gen(function* () {
               yield* store.authorize(binding, digest, Date.now())
-              const owned = active.get(binding.runId) ?? new Map<AbortController, number>()
+              const owned =
+                active.get(binding.runId) ??
+                new Map<AbortController, { readonly session: number; readonly digest: string }>()
               if (count >= config.maxStreams || owned.size >= config.maxStreamsPerRun) return null
               const controller = new AbortController()
-              owned.set(controller, session)
+              owned.set(controller, { session, digest })
               active.set(binding.runId, owned)
               count++
               const unlisten = authority.listen(binding.runId, () => controller.abort())

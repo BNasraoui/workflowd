@@ -177,7 +177,10 @@ try {
     liveMints: async () => (await readdir(join(root, "live"))).length,
     slowMints: async (slow: boolean) =>
       slow ? writeFile(join(root, "slow"), "") : rm(join(root, "slow"), { force: true }),
-    tokenSeconds: (seconds: number) => writeFile(join(root, "ttl"), String(seconds)),
+    tokenSeconds: (seconds: number | null) =>
+      seconds === null
+        ? rm(join(root, "ttl"), { force: true })
+        : writeFile(join(root, "ttl"), String(seconds)),
     setStall: (value: boolean) => {
       stall = value
     },
@@ -251,13 +254,15 @@ export const gateways = [
 
 /**
  * Another run and lease of the fixture repository beside the seeded one. Its Actions run is
- * `actionsRunId`, attempt 1, or none yet when it is null.
+ * `actionsRunId`, attempt 1, or none yet when it is null. The lease was requested at
+ * `requestedAt`, so its deadline is 285 minutes after that.
  */
 export const seedLease = (
   runId: string,
   leaseId: string,
   actionsRunId: number | null,
   native = true,
+  requestedAt = Date.now(),
 ) =>
   Effect.gen(function* () {
     const runs = yield* AgentRunStore
@@ -297,7 +302,7 @@ export const seedLease = (
         tailscaleAudience: "fixture",
       },
       sourceSha: "d".repeat(40),
-      now: Date.now(),
+      now: requestedAt,
     })
     yield* leases.beginStart(runId)
     if (actionsRunId !== null) yield* leases.recordRun(runId, actionsRunId, 1)

@@ -71,24 +71,27 @@ test("renewal cannot resurrect expiry or survive durable revocation and restart"
       expect((yield* store.authorize(binding, "b".repeat(64), now + 2)).expiresAt).toBe(
         now + 3600000,
       )
+      // Asked again, the renewal replaces the successor that has not renewed itself.
+      yield* store.renew(binding, "a".repeat(64), "c".repeat(64), now + 7200000, now + 2)
+      expect((yield* Effect.result(store.authorize(binding, "b".repeat(64), now + 2)))._tag).toBe(
+        "Failure",
+      )
+      expect((yield* store.authorize(binding, "c".repeat(64), now + 2)).expiresAt).toBe(
+        now + 7200000,
+      )
       expect(
         (yield* Effect.result(
-          store.renew(binding, "a".repeat(64), "c".repeat(64), now + 7200000, now + 2),
-        ))._tag,
-      ).toBe("Failure")
-      expect(
-        (yield* Effect.result(
-          store.renew(binding, "a".repeat(64), "c".repeat(64), now + 7200000, now + 60000),
+          store.renew(binding, "a".repeat(64), "d".repeat(64), now + 7200000, now + 60000),
         ))._tag,
       ).toBe("Failure")
       yield* runs.cancel({ runId: "run", now: new Date(now + 3) })
-      expect((yield* Effect.result(store.authorize(binding, "b".repeat(64), now + 4)))._tag).toBe(
+      expect((yield* Effect.result(store.authorize(binding, "c".repeat(64), now + 4)))._tag).toBe(
         "Failure",
       )
       // A restart revokes nothing by itself; the durable cancellation still holds.
       const restarted = yield* makeCapabilityStore
       expect(
-        (yield* Effect.result(restarted.authorize(binding, "b".repeat(64), now + 4)))._tag,
+        (yield* Effect.result(restarted.authorize(binding, "c".repeat(64), now + 4)))._tag,
       ).toBe("Failure")
     }),
   )
@@ -125,7 +128,7 @@ test("accepted grant rejects each durable identity/context swap with adjacent ro
               ).toBe("Failure")
               expect(
                 (yield* Effect.result(
-                  store.renew(binding, "a".repeat(64), "b".repeat(64), now + 60000, now),
+                  store.renew(binding, "a".repeat(64), "b".repeat(64), now + 200000, now),
                 ))._tag,
               ).toBe("Failure")
               return yield* Effect.fail("fixture rollback")
@@ -137,23 +140,31 @@ test("accepted grant rejects each durable identity/context swap with adjacent ro
       expect(
         (yield* Effect.result(store.authorize(binding, "a".repeat(64), now + 60000)))._tag,
       ).toBe("Failure")
-      const races = yield* Effect.all(
+      // Two renewals of one predecessor: the later replaces the earlier, so one successor is valid.
+      yield* Effect.all(
         [
           store
-            .renew(binding, "a".repeat(64), "b".repeat(64), now + 60000, now + 1)
+            .renew(binding, "a".repeat(64), "b".repeat(64), now + 200000, now + 1)
             .pipe(Effect.result),
           store
-            .renew(binding, "a".repeat(64), "c".repeat(64), now + 60000, now + 1)
+            .renew(binding, "a".repeat(64), "c".repeat(64), now + 200000, now + 1)
             .pipe(Effect.result),
         ],
         { concurrency: "unbounded" },
       )
-      expect(races.filter((value) => value._tag === "Success")).toHaveLength(1)
+      const valid = []
+      for (const digest of ["b", "c"])
+        if (
+          (yield* Effect.result(store.authorize(binding, digest.repeat(64), now + 2)))._tag ===
+          "Success"
+        )
+          valid.push(digest)
+      expect(valid).toHaveLength(1)
       yield* Effect.all(
         [
           store.revoke("run"),
           store
-            .renew(binding, "b".repeat(64), "d".repeat(64), now + 60000, now + 2)
+            .renew(binding, valid[0]!.repeat(64), "d".repeat(64), now + 400000, now + 2)
             .pipe(Effect.result),
         ],
         { concurrency: "unbounded" },
@@ -175,7 +186,7 @@ test("the session migration keeps bindings, their tokens and revocation triggers
         digest: "a".repeat(64),
         expiresAt: now + 60000,
       })
-      yield* store.renew(binding, "a".repeat(64), "b".repeat(64), now + 60000, now + 1)
+      yield* store.renew(binding, "a".repeat(64), "b".repeat(64), now + 200000, now + 1)
       const count = () =>
         sql`SELECT (SELECT count(*) FROM capability_tokens) AS tokens,
           (SELECT count(*) FROM sqlite_master WHERE name='capability_tokens_run') AS indexes`
@@ -221,7 +232,7 @@ test("a new session ends every token of the earlier one, and a proof opens one s
       )
       expect(binding).toEqual({ runId: "run", channel: first.channel, session: 1 })
       const { session: _, ...run } = binding
-      yield* store.renew(run, "a".repeat(64), "b".repeat(64), now + 60000, now + 1)
+      yield* store.renew(run, "a".repeat(64), "b".repeat(64), now + 200000, now + 1)
       expect((yield* store.authorize(run, "b".repeat(64), now + 2)).session).toBe(1)
       // The used challenge, and the used proof on a new challenge, open nothing.
       expect(
@@ -257,24 +268,26 @@ test("a new session ends every token of the earlier one, and a proof opens one s
       }
       expect(
         (yield* Effect.result(
-          store.renew(run, "b".repeat(64), "d".repeat(64), now + 60000, now + 5),
+          store.renew(run, "b".repeat(64), "d".repeat(64), now + 400000, now + 5),
         ))._tag,
       ).toBe("Failure")
       expect((yield* store.bindingFor("c".repeat(64), now + 5)).session).toBe(2)
       expect(
         yield* store.staleAmong([
-          { runId: "run", session: 1 },
-          { runId: "run", session: 2 },
-          { runId: "gone", session: 1 },
+          { runId: "run", session: 1, digest: "c".repeat(64) },
+          { runId: "run", session: 2, digest: "c".repeat(64) },
+          { runId: "run", session: 2, digest: "e".repeat(64) },
+          { runId: "gone", session: 1, digest: "c".repeat(64) },
         ]),
       ).toEqual([
-        { runId: "run", session: 1 },
-        { runId: "gone", session: 1 },
+        { runId: "run", session: 1, digest: "c".repeat(64) },
+        { runId: "run", session: 2, digest: "e".repeat(64) },
+        { runId: "gone", session: 1, digest: "c".repeat(64) },
       ])
       yield* store.revoke("run")
-      expect(yield* store.staleAmong([{ runId: "run", session: 2 }])).toEqual([
-        { runId: "run", session: 2 },
-      ])
+      expect(
+        yield* store.staleAmong([{ runId: "run", session: 2, digest: "c".repeat(64) }]),
+      ).toEqual([{ runId: "run", session: 2, digest: "c".repeat(64) }])
       expect((yield* Effect.result(store.leaseChallenge("lease", now + 7)))._tag).toBe("Failure")
     }),
   )

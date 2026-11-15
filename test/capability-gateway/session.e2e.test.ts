@@ -8,7 +8,7 @@ import { Effect, Exit, Schema, Scope } from "effect"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
 import { SqlClient } from "effect/unstable/sql"
 import { AgentRunStore, AgentRunStoreLive } from "../../src/kernel/agent-run-store"
-import { makeCapabilityStore } from "../../src/capability-gateway/store"
+import { capabilityDigest, makeCapabilityStore } from "../../src/capability-gateway/store"
 import { makeCapabilityGateway } from "../../src/capability-gateway/service"
 import { makeSandboxStore } from "../../src/sandbox/store"
 import { serveCapabilityGateway } from "../../src/capability-gateway-server"
@@ -383,6 +383,15 @@ async function scenario(start: (f: Fixture) => Promise<{ port: number; stop(): P
     expect(await answer.text()).toBe(sse)
     expect((await call("x".repeat(43))).status).toBe(403)
 
+    // A token with more than 330 seconds left is not renewed; in its last minutes it is.
+    expect((await renew(grant.token)).status).toBe(403)
+    await f.store(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient
+        yield* sql`UPDATE capability_tokens SET expires_at=${Date.now() + 300000}
+          WHERE digest=${capabilityDigest(grant.token)}`
+      }),
+    )
     const renewed = await renew(grant.token)
     expect(renewed.status).toBe(200)
     const next = await Renewed(renewed)
