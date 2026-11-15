@@ -226,6 +226,23 @@ test("an index that names segments with no bytes costs one poll per segment", as
     expect(requested.size).toBeLessThanOrEqual(12)
   }))
 
+test("an index rewritten at each read with its first segment past the reader costs a bounded number of reads per poll", async () => {
+  const polls = 10
+  // Past this many index reads the source stops raising `first`, so a reader
+  // without the bound ends the test instead of looping forever.
+  const cap = 2000
+  let indexReads = 0
+  const source: RecordSource = async (file) => {
+    if (file.kind === "head") return new Uint8Array()
+    if (file.kind === "segment") return new Uint8Array()
+    const first = Math.min(++indexReads, cap)
+    return new TextEncoder().encode(encodeRecordIndex({ first, last: first + 5 }))
+  }
+  expect(await readAll(source, { stops: polls })).toEqual([])
+  // One jump past the removed segments and the index reads around it, per poll.
+  expect(indexReads).toBeLessThanOrEqual(4 * (polls + 1))
+})
+
 test("an index that fails to decode is evidence, not a lost observation", async () => {
   for (const text of [
     "{",

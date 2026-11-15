@@ -92,12 +92,15 @@ export const readEventRecord = <A>(options: {
       buffered = ""
       decoder = new TextDecoder()
     }
+    /** This drain read at least one byte. */
+    let progressed = false
     /** Yields the lines of the current file up to its present end. */
     async function* readAvailable() {
       for (;;) {
         const bytes = await options.source(current, offset)
         if (bytes === null) deferred = true
         if (bytes === null || bytes.length === 0) return
+        progressed = true
         offset += bytes.length
         buffered += decoder.decode(bytes, { stream: true })
         for (;;) {
@@ -113,6 +116,8 @@ export const readEventRecord = <A>(options: {
     }
     /** Drains every file that has bytes, moving past each sealed file. */
     async function* drain() {
+      progressed = false
+      let skipped = false
       for (;;) {
         const entered = offset
         yield* readAvailable()
@@ -130,13 +135,19 @@ export const readEventRecord = <A>(options: {
         // A file that never held a byte and that the index still names is not
         // progress (a forged range): wait a poll before the next. A segment the
         // worker removed is not such a file; its successors hold the newest lines.
-        const idle =
-          entered === 0 && offset === 0 && (current.kind === "head" || current.n >= index.first)
+        const removed = current.kind === "segment" && current.n < index.first
+        const idle = entered === 0 && offset === 0 && !removed
         move({
           kind: "segment",
           n: current.kind === "head" ? index.first : Math.max(current.n + 1, index.first),
         })
         if (idle) return
+        // One jump past removed segments per drain that read nothing: an index
+        // raised past the reader at each read waits a poll before the next.
+        if (removed && !progressed) {
+          if (skipped) return
+          skipped = true
+        }
       }
     }
     let stopped = false
