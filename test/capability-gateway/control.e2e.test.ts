@@ -3,6 +3,8 @@ import { createConnection } from "node:net"
 import { chmod, mkdir, stat, symlink, writeFile } from "node:fs/promises"
 import { dirname, join, resolve } from "node:path"
 import { Effect } from "effect"
+import { SqliteClient } from "@effect/sql-sqlite-bun"
+import { SqlClient } from "effect/unstable/sql"
 import { AgentRunStore } from "../../src/kernel/agent-run-store"
 import { Schema } from "effect"
 import { loadCapabilityGatewayConfig } from "../../src/config"
@@ -25,7 +27,7 @@ import {
 const src = (path: string) => JSON.stringify(resolve("src", path))
 const daemonProgram = (database: string, socket: string) => `
 import { createInterface } from "node:readline"
-import { Effect, Exit, Layer, Scope } from "effect"
+import { Cause, Effect, Exit, Layer, Scope } from "effect"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
 import { SqlClient } from "effect/unstable/sql"
 import { AgentRunStore, AgentRunStoreLive } from ${src("kernel/agent-run-store.ts")}
@@ -46,7 +48,11 @@ const started = await run(Effect.gen(function* () {
   yield* sql\`INSERT OR IGNORE INTO directory_local_identity(singleton,host_id) VALUES(1,'fixture-controller')\`
   return yield* makeDaemonCapability({ socket: ${JSON.stringify(socket)}, reconcileEveryMs: 200 }).pipe(Scope.provide(scope))
 }))
-if (Exit.isFailure(started)) { process.stdout.write("refused\\n"); process.exit(3) }
+if (Exit.isFailure(started)) {
+  const reason = String(Cause.squash(started.cause)?.message ?? "").replaceAll("\\n", " ")
+  process.stdout.write("refused " + reason + "\\n")
+  process.exit(3)
+}
 const capability = started.value
 process.stdout.write("ready\\n")
 const commands = {
@@ -75,6 +81,8 @@ const DaemonAnswer = Schema.fromJsonString(
 
 interface Daemon {
   readonly ready: boolean
+  /** Why the daemon refused to start, when it did. */
+  readonly refusal: string
   send(line: string): Promise<{ ok: boolean; value?: unknown; tag?: string }>
   stop(): Promise<void>
 }
@@ -104,6 +112,7 @@ async function startDaemon(database: string, socket: string): Promise<Daemon> {
   const first = await line().catch(() => "refused")
   return {
     ready: first === "ready",
+    refusal: first.startsWith("refused") ? first.slice("refused".length).trim() : "",
     send: async (command) => {
       void child.stdin.write(`${command}\n`)
       void child.stdin.flush()
@@ -390,11 +399,32 @@ test("neither process can name the other's database", async () => {
     expect(daemonSection({ socket: socketOf(f) })).toEqual({ socket: socketOf(f) })
     expect(() => daemonSection({ socket: socketOf(f), storePath: config.storePath })).toThrow()
     expect(config.storePath).not.toBe(daemonDatabase(f))
-    // A gateway given the daemon's file, and a daemon given the gateway's, each refuse to start.
-    await expect(startGateway(f, { ...config, storePath: daemonDatabase(f) })).rejects.toThrow()
+    // A gateway given the daemon's file, and a daemon given the gateway's, each refuse to start
+    // before they write to it: the file keeps its tables.
+    const tables = (path: string) =>
+      Effect.runPromise(
+        Effect.scoped(
+          Effect.gen(function* () {
+            const sql = yield* SqlClient.SqlClient
+            return yield* sql<{
+              readonly name: string
+            }>`SELECT name FROM sqlite_master ORDER BY name`
+          }),
+        ).pipe(Effect.provide(SqliteClient.layer({ filename: path, readonly: true }))),
+      )
+    const daemonTables = await tables(daemonDatabase(f))
+    expect(daemonTables.length).toBeGreaterThan(10)
+    await expect(startGateway(f, { ...config, storePath: daemonDatabase(f) })).rejects.toThrow(
+      "the gateway's store holds tables of another store",
+    )
+    expect(await tables(daemonDatabase(f))).toEqual(daemonTables)
     const gateway = await startGateway(f)
     try {
-      expect((await startDaemon(config.storePath, socketOf(f))).ready).toBe(false)
+      const gatewayTables = await tables(config.storePath)
+      const daemon = await startDaemon(config.storePath, socketOf(f))
+      expect(daemon.ready).toBe(false)
+      expect(daemon.refusal).toContain("is the capability gateway's store")
+      expect(await tables(config.storePath)).toEqual(gatewayTables)
     } finally {
       await gateway.stop()
     }
