@@ -1,0 +1,11 @@
+name: Gateway image
+
+on:
+  pull_request:
+
+permissions: {}
+
+jobs:
+  build:
+    permissions: {}
+    uses: ./.github/workflows/gateway-image.yml

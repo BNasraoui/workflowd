@@ -78,6 +78,46 @@ for (const [before, after] of [
   })
 }
 
+for (const [before, after] of [
+  ["permissions: {}", "permissions: { contents: read }"],
+  [`runs-on: ${prRunnerLabel}`, "runs-on: self-hosted"],
+  ["git -c credential.helper=", "git -c credential.helper=store"],
+  ["env -u GITHUB_TOKEN -u INPUT_GITHUB_ACCESS_TOKEN", "env"],
+  ["--no-update-lock-file", "--recreate-lock-file"],
+  ["timeout 600 bash test/gateway-image/e2e.sh", "true"],
+  ["run: bun test/gateway-image/drive.ts", "run: true"],
+  ['test "$FIRST" = "$SECOND"', "true"],
+  ["needs: [build, rebuild]", "needs: [build]"],
+  ["github.event_name == 'push' && github.ref == 'refs/heads/main'", "always()"],
+]) {
+  test(`CI guard rejects gateway image workflow drift: ${before}`, async () => {
+    const files = await workflows()
+    expect(() => assertUnprivilegedPrWorkflows(files)).not.toThrow()
+    const source = files["gateway-image.yml"]!
+    files["gateway-image.yml"] = source.replace(before!, after!)
+    expect(files["gateway-image.yml"]).not.toBe(source)
+    expect(() => assertUnprivilegedPrWorkflows(files)).toThrow(
+      "Image build differs from the reviewed unprivileged snapshot",
+    )
+  })
+}
+
+test("gateway image caller cannot inherit secrets, call the publisher or run another snapshot", async () => {
+  const files = await workflows()
+  const source = files["gateway-image-pr.yml"]!
+  files["gateway-image-pr.yml"] = source.replace("    uses:", "    secrets: inherit\n    uses:")
+  expect(() => assertUnprivilegedPrWorkflows(files)).toThrow()
+  files["gateway-image-pr.yml"] = source.replace("gateway-image.yml", "gateway-image-publish.yml")
+  expect(() => assertUnprivilegedPrWorkflows(files)).toThrow()
+  files["gateway-image-pr.yml"] = source
+  files["gateway-image.yml"] = files["agent-image.yml"]!
+  expect(() => assertUnprivilegedPrWorkflows(files)).toThrow(
+    "Image build differs from the reviewed unprivileged snapshot",
+  )
+  delete files["gateway-image.yml"]
+  expect(() => assertUnprivilegedPrWorkflows(files)).toThrow()
+})
+
 test("image caller cannot inherit secrets or substitute a reusable dependency", async () => {
   const files = await workflows()
   expect(() => assertUnprivilegedPrWorkflows(files)).not.toThrow()
