@@ -173,6 +173,8 @@ export async function serveRunnerRelay(config, directory = root) {
         call.once("error", reject)
         call.end("{}")
       })
+      // A stopped relay reads no answer, whatever its agent did with the request in flight.
+      if (closed) return
       retryable = status === 429 || status === 503
       if (status !== 200) throw new Error("renewal unavailable")
       const next = JSON.parse(raw)

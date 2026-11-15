@@ -131,7 +131,7 @@ test("after a clock jump past its expiry, the relay sends no renewal of the expi
   }
 }, 10000)
 
-test("after stop, the answer of a renewal in flight sends no further request", async () => {
+test("stop cuts a renewal in flight, and its answer after stop sends no further request even when the agent keeps the connection", async () => {
   const root = await mkdtemp(join(tmpdir(), "relay-stop-tls-"))
   try {
     const tls = await loopbackCertificate(root)
