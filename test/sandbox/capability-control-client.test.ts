@@ -27,7 +27,7 @@ test("the control client gives a complete answer that came before a reset of the
       const result = await Effect.runPromise(Effect.flip(controlClient(socket).revoke("run")))
       errors.push(`${result._tag}: ${result.reason}`)
     }
-    expect(errors).toEqual(Array(5).fill("CapabilityControlRefused: caller"))
+    expect(errors).toEqual(Array.from({ length: 5 }, () => "CapabilityControlRefused: caller"))
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()))
     await rm(root, { recursive: true, force: true })
