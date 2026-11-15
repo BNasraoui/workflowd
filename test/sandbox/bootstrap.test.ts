@@ -71,6 +71,9 @@ test("signature, immutable job context and fresh challenge are all required", ()
   expect(
     verifyJobProof(token({ iat: now / 1000 + 10, nbf: now / 1000 + 10 }), expected, jwks, now).jti,
   ).toBe("fixture-jti")
+  // One millisecond more ahead, by a clock one millisecond behind, it is refused.
+  for (const ahead of [{ iat: now / 1000 + 10 }, { nbf: now / 1000 + 10 }])
+    expect(() => verifyJobProof(token(ahead), expected, jwks, now - 1)).toThrow("job proof refused")
   expect(verifyJobProof(token({}, { x5t: "thumbprint" }), expected, jwks, now).jti).toBe(
     "fixture-jti",
   )
@@ -149,12 +152,12 @@ test("job key retrieval authenticates the signed job and refuses redirected or o
       "job proof refused",
     )
     response = () => Response.redirect(`http://127.0.0.1:${untrusted.port}/keys`)
-    await expect(githubJobKeys(signal)).rejects.toThrow()
+    await expect(githubJobKeys(signal)).rejects.toThrow("UnexpectedRedirect")
     expect(redirectedRequests).toBe(0)
     response = () => new Response("unavailable", { status: 503 })
     await expect(githubJobKeys(signal)).rejects.toThrow("job keys unavailable")
     response = () => new Response("not-json")
-    await expect(githubJobKeys(signal)).rejects.toThrow()
+    await expect(githubJobKeys(signal)).rejects.toThrow("JSON Parse error")
     response = () => new Response(JSON.stringify(jwks).padEnd(65536, " "))
     expect(verifyJobProof(token(), expected, await githubJobKeys(signal), now).jti).toBe(
       "fixture-jti",
@@ -233,5 +236,5 @@ test("private bootstrap selection is explicit and preserves its immutable owner 
         { ...policy, privateBootstrap: { repositoryOwnerId: 0, mode: "actions-native" } },
       ]),
     ),
-  ).toThrow()
+  ).toThrow('Expected a value greater than 0\n  at [0]["privateBootstrap"]["repositoryOwnerId"]')
 })

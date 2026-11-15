@@ -344,7 +344,9 @@ test("OIDC authority is removed before launch, consumed once, and refuses hostil
       origin === "https://fixture.actions.githubusercontent.com/id" ? "fixture-signed" : "refused",
     )
     if (origin !== "https://fixture.actions.githubusercontent.com/id") {
-      await expect(issue("workflowd:fixture", new AbortController().signal)).rejects.toThrow()
+      await expect(issue("workflowd:fixture", new AbortController().signal)).rejects.toThrow(
+        "job identity unavailable",
+      )
       expect(requests).toBe(0)
     }
   }

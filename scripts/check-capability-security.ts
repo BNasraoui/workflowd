@@ -10,7 +10,7 @@ async function main() {
   const args = process.argv.slice(2)
   const suite = args[1]
   const cases = suite === undefined ? undefined : suites[suite]
-  if (args.length !== 2 || args[0] !== "--suite" || cases === undefined)
+  if (args.length !== 2 || args[0] !== "--suite" || suite === undefined || cases === undefined)
     throw new Error("usage: check-capability-security.ts --suite <name>")
   const host = process.env.WORKFLOWD_FIXTURE_HOST_NETNS
   if (!host || !/^net:\[[0-9]+\]$/.test(host) || host === (await readlink("/proc/self/ns/net")))

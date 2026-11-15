@@ -2,12 +2,17 @@ import { expect, test } from "bun:test"
 import { gitHttpBackend } from "./git-backend"
 import { Effect } from "effect"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
-import { mkdtemp, mkdir, writeFile, rm, readFile } from "node:fs/promises"
+import { mkdtemp, writeFile, rm, readFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { AgentRunStoreLive } from "../../src/kernel/agent-run-store"
 import { makeCapabilityGateway } from "../../src/capability-gateway/service"
-import { bindRunSession, seedCapabilityRun } from "./fixture"
+import {
+  bindRunSession,
+  runCapabilityMint,
+  seedCapabilityRun,
+  writeNoscopeProvider,
+} from "./fixture"
 import { fixtureExecutable } from "../helpers/fixture-executable.mjs"
 import { loopbackCertificate, portOf } from "../helpers/loopback-tls"
 import { capabilityApi, capabilityHttpServer } from "../../src/capability-gateway/http"
@@ -42,12 +47,7 @@ async function git(cwd: string, ...args: string[]) {
 
 test("real Git clone/fetch, repository and write fences", async () => {
   const root = await mkdtemp(join(tmpdir(), "gateway-git-"))
-  await mkdir(join(root, "noscope/providers"), { recursive: true, mode: 0o700 })
-  await writeFile(
-    join(root, "noscope/providers/run-capability.toml"),
-    `contract_version = 1\n[commands]\nmint = "${process.execPath} ${resolve("src/capability-gateway/noscope-provider.ts")} run {ttl}"\n`,
-    { mode: 0o600 },
-  )
+  await writeNoscopeProvider(root, "run-capability", runCapabilityMint)
   await git(root, "init", "--initial-branch=main", "source")
   const source = join(root, "source")
   await writeFile(join(source, "public.txt"), "first\n")

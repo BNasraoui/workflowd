@@ -6,6 +6,7 @@ import {
   proof,
   seedLease,
   sse,
+  streamEnd,
   withGateway,
   type Fixture,
   type Gateway,
@@ -29,15 +30,6 @@ const opened = async (
   await f.tokenSeconds(null)
   return grant
 }
-
-const ended = (reader: { read(): Promise<unknown> }, within: number) =>
-  Promise.race([
-    reader.read().then(
-      () => "ended",
-      () => "ended",
-    ),
-    Bun.sleep(within).then(() => "live"),
-  ])
 
 for (const [mode, start] of gateways) {
   test(`[${mode}] a run token with more than 330 seconds left is not renewed, and the refusal is final`, async () => {
@@ -103,7 +95,7 @@ for (const [mode, start] of gateways) {
       expect(next.token).not.toBe(lost.token)
       expect(await (await relay.call(next.token)).text()).toBe(sse)
       expect((await relay.call(lost.token)).status).toBe(403)
-      expect(await ended(reader, 3000)).toBe("ended")
+      expect(await streamEnd(reader, 10000)).toBe("ended")
       // The predecessor stays valid until it expires; its replaced successor does not come back.
       expect(await (await relay.call(grant.token)).text()).toBe(sse)
       // Once the successor has renewed, its predecessor cannot renew again.

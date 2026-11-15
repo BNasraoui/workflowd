@@ -58,13 +58,16 @@ test("configured live composition settles prior leases, which revokes their gran
     await expect(
       loadConfig({ ...environment, WORKFLOWD_CAPABILITY_GATEWAY: undefined }),
     ).rejects.toThrow("Native Actions requires")
-    for (const bad of [
-      { ...gateway, unexpected: true },
-      { ...gateway, maxStreamsPerRun: 5 },
-    ])
+    for (const [bad, reason] of [
+      [{ ...gateway, unexpected: true }, 'Expected no excess property\n  at ["unexpected"]'],
+      [
+        { ...gateway, maxStreamsPerRun: 5 },
+        'Expected a value between 1 and 4\n  at ["maxStreamsPerRun"]',
+      ],
+    ] as const)
       await expect(
         loadConfig({ ...environment, WORKFLOWD_CAPABILITY_GATEWAY: JSON.stringify(bad) }),
-      ).rejects.toThrow()
+      ).rejects.toThrow(reason)
     const loaded = await loadConfig(environment, { home: root })
     expect(loaded.agentRuns?.capabilityGateway).toEqual(gateway)
     // The gateway's own process needs a listen address; workflowd accepts and ignores one.
@@ -85,16 +88,19 @@ test("configured live composition settles prior leases, which revokes their gran
     expect(() =>
       loadCapabilityGatewayConfig({ WORKFLOWD_CAPABILITY_GATEWAY: JSON.stringify(gateway) }, root),
     ).toThrow("requires a listen address")
-    for (const bad of [
-      { host: "gateway.example", port: 1 },
-      { host: "127.0.0.1", port: 65536 },
-    ])
+    for (const [bad, reason] of [
+      [{ host: "gateway.example", port: 1 }, `at ["listen"]["host"]`],
+      [
+        { host: "127.0.0.1", port: 65536 },
+        'Expected a value between 0 and 65535\n  at ["listen"]["port"]',
+      ],
+    ] as const)
       expect(() =>
         loadCapabilityGatewayConfig(
           { WORKFLOWD_CAPABILITY_GATEWAY: JSON.stringify({ ...gateway, listen: bad }) },
           root,
         ),
-      ).toThrow()
+      ).toThrow(reason)
     // Discovery is optional in the composition API; this boundary fixture does
     // not ask for a provider catalog, preflight, or an executor launch.
     const { executionCapabilities: _discovery, ...config } = loaded

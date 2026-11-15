@@ -151,14 +151,16 @@ test("controlled receipts exclude arbitrary raw, encoded, chunked and multiline 
     expect(() => validateReceipt(JSON.stringify(status))).not.toThrow()
     // Deliberately leaking and fragmented output must fail the same validator
     // used below on real capture output, even for unknown/encoded canaries.
-    expect(() => validateReceipt(JSON.stringify({ ...status, diagnostic: value }))).toThrow()
+    expect(() => validateReceipt(JSON.stringify({ ...status, diagnostic: value }))).toThrow(
+      'Expected no excess property\n  at ["diagnostic"]',
+    )
     expect(() =>
       validateReceipt([JSON.stringify(status), value.slice(0, 9), value.slice(9)].join("")),
-    ).toThrow()
+    ).toThrow("JSON Parse error")
   }
   expect(() =>
     serializePublicStatus({ stage: secret, outcome: "ok", reason: "none", count: 0 }),
-  ).toThrow()
+  ).toThrow("public status refused")
 })
 
 test("cancelled capture retains bounded private diagnostics and emits one fixed public receipt", async () => {
@@ -202,7 +204,7 @@ test("cancelled capture retains bounded private diagnostics and emits one fixed 
   }
 }, 3000)
 
-test("R2: exactly two trusted bootstrap fields are public, bounded and single-line", () => {
+test("exactly two trusted bootstrap fields are public, bounded and single-line", () => {
   expect(
     publicBootstrapConfiguration({
       tailscaleClientId: "fixture-client",
