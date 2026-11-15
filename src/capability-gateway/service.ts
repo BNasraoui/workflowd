@@ -22,6 +22,8 @@ type GatewayConfiguration = Omit<
 >
 /** The idle limit of a stream when the config names none. */
 const defaultStreamIdleMs = 120000
+/** The period of the sweep of stale streams when the config names none. */
+const defaultStaleSweepMs = 1000
 const SessionProof = Schema.Struct({
   token: Schema.String.check(Schema.isMaxLength(maxProofLength)),
 })
@@ -212,7 +214,7 @@ export const makeCapabilityGateway = (
     yield* Effect.suspend(() => store.staleAmong(streams())).pipe(
       Effect.tap((stale) => Effect.sync(() => abortStale(stale))),
       Effect.catch(logFailure("Capability stream check failed")),
-      Effect.andThen(Effect.sleep(config.staleSweepMs ?? 1000)),
+      Effect.andThen(Effect.sleep(config.staleSweepMs ?? defaultStaleSweepMs)),
       Effect.forever,
       Effect.forkScoped,
     )

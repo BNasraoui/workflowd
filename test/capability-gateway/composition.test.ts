@@ -157,7 +157,7 @@ test("configured live composition settles prior leases, which revokes their gran
   }
 })
 
-test("the gateway config bounds its streams: an idle limit of 1 ms to ten minutes, and at most maxStreams for a run", () => {
+test("the gateway config bounds its streams: an idle limit of 1 ms to ten minutes, a stale sweep every 100 ms to a minute, and at most maxStreams for a run", () => {
   const gateway = {
     noscope: { binary: "/fixture/noscope", configHome: "/fixture" },
     providerId: "anthropic",
@@ -180,6 +180,9 @@ test("the gateway config bounds its streams: an idle limit of 1 ms to ten minute
     [{ streamIdleMs: 1.5 }, 'Expected an integer\n  at ["streamIdleMs"]'],
     [{ streamIdleMs: "1000" }, 'Expected number\n  at ["streamIdleMs"]'],
     [{ maxStreams: 513 }, 'Expected a value between 1 and 512\n  at ["maxStreams"]'],
+    [{ staleSweepMs: 99 }, 'Expected a value between 100 and 60000\n  at ["staleSweepMs"]'],
+    [{ staleSweepMs: 60001 }, 'Expected a value between 100 and 60000\n  at ["staleSweepMs"]'],
+    [{ staleSweepMs: 250.5 }, 'Expected an integer\n  at ["staleSweepMs"]'],
     [
       { maxStreams: 1, maxStreamsPerRun: 2 },
       'Expected a value of at most maxStreams\n  at ["maxStreamsPerRun"]',
@@ -189,4 +192,7 @@ test("the gateway config bounds its streams: an idle limit of 1 ms to ten minute
   expect(load({ streamIdleMs: 1 }).streamIdleMs).toBe(1)
   expect(load({ streamIdleMs: 600000 }).streamIdleMs).toBe(600000)
   expect(load({}).streamIdleMs).toBeUndefined()
+  expect(load({ staleSweepMs: 100 }).staleSweepMs).toBe(100)
+  expect(load({ staleSweepMs: 60000 }).staleSweepMs).toBe(60000)
+  expect(load({}).staleSweepMs).toBeUndefined()
 })

@@ -240,7 +240,7 @@ test("the daemon reads a changed run only once the change commits, so the revoke
       )
       expect((await client(gateway.port).call(token)).status).toBe(403)
     },
-    { reconcileEveryMs: 3600000, staleSweepMs: 60000 },
+    { reconcileEveryMs: 3600000 },
   )
 })
 

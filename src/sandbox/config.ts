@@ -63,7 +63,10 @@ export const CapabilityGatewayConfig = Schema.Struct({
   streamIdleMs: Schema.optionalKey(
     Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 600000 })),
   ),
-  /** How often the gateway ends the streams of revoked or replaced sessions; 1000 by default. */
+  /**
+   * Milliseconds between two sweeps that end the streams of revoked or replaced sessions, 100 to
+   * 60000; 1000 when absent.
+   */
   staleSweepMs: Schema.optionalKey(
     Schema.Int.check(Schema.isBetween({ minimum: 100, maximum: 60000 })),
   ),
