@@ -1,11 +1,12 @@
 import { expect, test } from "bun:test"
-import { mkdtemp, rm, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises"
+import { existsSync } from "node:fs"
 import { createServer, type Socket } from "node:net"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { Effect, Schema } from "effect"
 import { makeAgentRunCliDispatcher, type AgentRunCliStore } from "../../src/kernel/agent-run-cli"
-import { makeClaudeDispatchCli } from "../../src/kernel/claude-dispatch"
+import { makeClaudeDispatchCli, parseClaudeDispatchEvent } from "../../src/kernel/claude-dispatch"
 import { makeCodexCli, parseCodexExecEvent } from "../../src/kernel/codex-session"
 import { makeHostCli } from "../../src/agent-host/client"
 import { agentHostUnitName, HostRequest } from "../../src/agent-host/protocol"
@@ -22,34 +23,48 @@ import type { AgentRunRecord } from "../../src/kernel/agent-run-store"
  */
 type Kind = "claude" | "codex"
 
-const fakeNative = (kind: Kind, root: string) => {
-  const file = (name: string) => JSON.stringify(join(root, name))
+/** The default script: start, one message, then work until the test releases it. */
+const WORK_UNTIL_RELEASED = `start()
+message("working")
+await until("release")
+const code = Number(await Bun.file(path("release")).text())
+message("final answer")
+end(code)
+process.exit(code)`
+
+/**
+ * A fake native CLI in the wire format of `kind`. Its script runs after the
+ * test writes `go`, with helpers for each event: start(), message(text),
+ * end(code), noise(bytes) for one line of about that size, flag(name) and
+ * until(name) for files under the test root.
+ */
+const fakeNative = (kind: Kind, root: string, script = WORK_UNTIL_RELEASED) => {
   const events =
     kind === "claude"
       ? {
           start: `say({ type: "system", subtype: "init", session_id: "native-session", model: "native-model" })`,
-          message: (text: string) =>
-            `say({ type: "assistant", message: { content: [{ type: "text", text: ${text} }] } })`,
+          message: `say({ type: "assistant", message: { content: [{ type: "text", text } ] } })`,
           end: `say({ type: "result", is_error: code !== 0, usage: { output_tokens: 7 }, result: "boom" })`,
         }
       : {
           start: `say({ type: "thread.started", thread_id: "native-session" })`,
-          message: (text: string) =>
-            `say({ type: "item.completed", item: { type: "agent_message", text: ${text} } })`,
+          message: `say({ type: "item.completed", item: { type: "agent_message", text } })`,
           end: `say({ type: "turn.completed", usage: { output_tokens: 7 } })`,
         }
   return `#!/usr/bin/env bun
-import { existsSync } from "node:fs"
+import { existsSync, writeFileSync } from "node:fs"
+import { join } from "node:path"
 await Bun.stdin.text()
 const say = (value) => console.log(JSON.stringify(value))
-while (!existsSync(${file("go")})) await Bun.sleep(5)
-${events.start}
-${events.message(`"working"`)}
-while (!existsSync(${file("release")})) await Bun.sleep(5)
-const code = Number(await Bun.file(${file("release")}).text())
-${events.message(`"final answer"`)}
-${events.end}
-process.exit(code)
+const path = (name) => join(${JSON.stringify(root)}, name)
+const until = async (name) => { while (!existsSync(path(name))) await Bun.sleep(5) }
+const flag = (name) => writeFileSync(path(name), "")
+const start = () => ${events.start}
+const message = (text) => ${events.message}
+const end = (code) => ${events.end}
+const noise = (bytes) => say({ type: "noise", pad: "x".repeat(Math.max(0, bytes - 30)) })
+await until("go")
+${script}
 `
 }
 
@@ -64,6 +79,7 @@ const simulatedManager = (workerPath: string) => {
   // A systemctl child killed by SIGTERM: no properties, status 143.
   let failure = { exitCode: 143, stdout: "", stderr: "" }
   let lastCommandAt = Date.now()
+  let stops = 0
   const alive = () => child !== undefined && child.exitCode === null && child.signalCode === null
   return {
     /** Fail the shows for which the plan holds, numbered from 1. */
@@ -79,6 +95,8 @@ const simulatedManager = (workerPath: string) => {
       failure = { ...result, stdout: "" }
     },
     shows: () => shows,
+    /** The stop and kill commands: the controller cancelled the worker. */
+    stops: () => stops,
     failedShows: () => failedShows,
     lastCommandAt: () => lastCommandAt,
     reuseUnit: () => {
@@ -118,6 +136,7 @@ const simulatedManager = (workerPath: string) => {
         }
       }
       if (command.includes("stop") || command.includes("kill")) {
+        stops += 1
         child?.kill("SIGKILL")
         await child?.exited
         return { exitCode: 0, stdout: "", stderr: "" }
@@ -177,10 +196,12 @@ const supervisor = (
     readonly retryMs?: number
     readonly healthyMs?: number
     readonly verifyTimeoutMs?: number
+    readonly progressWindowMs?: number
     readonly active?: ReadonlyArray<AgentRunRecord>
   } = {},
 ) => {
   const terminals: Terminal[] = []
+  const outputTokens: number[] = []
   let first = Promise.withResolvers<void>()
   const record = (terminal: Terminal) =>
     Effect.sync(() => {
@@ -192,7 +213,10 @@ const supervisor = (
     abandonLaunch: () => Effect.void,
     markSpawned: () => Effect.void,
     markVerified: () => Effect.void,
-    recordProgress: () => Effect.void,
+    recordProgress: (input) =>
+      Effect.sync(() => {
+        outputTokens.push(input.outputTokens)
+      }),
     fail: (input) => record({ kind: "failed", diagnostic: input.diagnostic }),
     cancel: () => Effect.void,
     listActiveByExecutor: () => Effect.succeed(options.active ?? []),
@@ -210,7 +234,7 @@ const supervisor = (
     ensureSession: () => Effect.succeed(`${kind}-session-native-session`),
     refuse: (reason, detail) => new AgentRunRefusalError({ reason, detail }),
     verifyTimeoutMs: options.verifyTimeoutMs ?? 10_000,
-    progressWindowMs: 60_000,
+    progressWindowMs: options.progressWindowMs ?? 60_000,
     observationRetryMs: options.retryMs ?? 5,
     ...(options.retryLimit === undefined ? {} : { observationRetryLimit: options.retryLimit }),
     ...(options.healthyMs === undefined ? {} : { observationHealthyMs: options.healthyMs }),
@@ -218,6 +242,7 @@ const supervisor = (
   return {
     runtime,
     terminals,
+    outputTokens,
     firstTerminal: () => first.promise,
     reset: () => {
       first = Promise.withResolvers<void>()
@@ -243,12 +268,16 @@ const harness = async (
     readonly healthyMs?: number
     readonly verifyTimeoutMs?: number
     readonly observationTimeoutMs?: number
+    readonly progressWindowMs?: number
+    readonly maxOutputBytes?: number
+    /** The fake CLI's script; see fakeNative. */
+    readonly script?: string
     readonly wrap?: (cli: Transient) => Transient
   } = {},
 ) => {
   const root = await mkdtemp(join(tmpdir(), "workflowd-8wo4-"))
   const binary = join(root, kind)
-  await writeFile(binary, fakeNative(kind, root), { mode: 0o700 })
+  await writeFile(binary, fakeNative(kind, root, options.script), { mode: 0o700 })
   if (options.gated !== true) await writeFile(join(root, "go"), "")
   const workerPath = new URL(`../../src/kernel/${kind}-worker.ts`, import.meta.url).pathname
   const manager = simulatedManager(workerPath)
@@ -261,6 +290,7 @@ const harness = async (
       ...(options.observationTimeoutMs === undefined
         ? {}
         : { observationTimeoutMs: options.observationTimeoutMs }),
+      ...(options.maxOutputBytes === undefined ? {} : { maxOutputBytes: options.maxOutputBytes }),
     }),
   )
   const cli = options.wrap?.(native) ?? native
@@ -269,6 +299,9 @@ const harness = async (
     ...(options.retryMs === undefined ? {} : { retryMs: options.retryMs }),
     ...(options.healthyMs === undefined ? {} : { healthyMs: options.healthyMs }),
     ...(options.verifyTimeoutMs === undefined ? {} : { verifyTimeoutMs: options.verifyTimeoutMs }),
+    ...(options.progressWindowMs === undefined
+      ? {}
+      : { progressWindowMs: options.progressWindowMs }),
   })
   /** The first terminal write, then no manager traffic: the supervisor has settled. */
   const settle = async () => {
@@ -938,3 +971,216 @@ test("a host re-attach that finds another launch does not adopt its result", asy
     await h.cleanup()
   }
 }, 20_000)
+
+/**
+ * workflowd-ripk: the event record keeps at most maxOutputBytes on disk. A
+ * worker that writes more than that keeps reaching the observer, so a run is
+ * never reported as stalled, or completed with an older message, because of
+ * the size of its record.
+ */
+const RECORD_LIMIT = 64 * 1024
+
+/** Three times the record limit in 2 KiB lines, one each 20 ms. */
+const FLOOD = `start()
+message("working")
+for (let line = 0; line < ${(3 * RECORD_LIMIT) / 2048}; line++) {
+  noise(2048)
+  await Bun.sleep(20)
+}
+flag("flooded")`
+
+/** The bytes of every event record file of the run. */
+const recordBytes = async (root: string) => {
+  const directory = join(root, "custody", RUN_ID)
+  let total = 0
+  for (const name of await readdir(directory))
+    if (name.startsWith("events")) total += (await stat(join(directory, name))).size
+  return total
+}
+
+for (const kind of ["claude", "codex"] as const)
+  test(`a ${kind} worker that writes three times the record limit completes with its final message`, async () => {
+    const h = await harness(kind, {
+      maxOutputBytes: RECORD_LIMIT,
+      progressWindowMs: 300,
+      script: `${FLOOD}
+message("final answer")
+end(0)
+process.exit(0)`,
+    })
+    try {
+      await h.dispatch()
+      expect(await h.settle()).toEqual([{ kind: "complete", finalMessage: "final answer" }])
+      expect(h.outputTokens).toEqual([7])
+      expect(h.manager.stops()).toBe(0)
+      expect(await recordBytes(h.root)).toBeLessThanOrEqual(RECORD_LIMIT)
+    } finally {
+      await h.cleanup()
+    }
+  }, 20_000)
+
+for (const kind of ["claude", "codex"] as const)
+  test(`a ${kind} worker that stops writing is still reported as stalled`, async () => {
+    const h = await harness(kind, {
+      maxOutputBytes: RECORD_LIMIT,
+      progressWindowMs: 300,
+      script: `start()
+message("working")
+await until("release")`,
+    })
+    try {
+      await h.dispatch()
+      const terminals = await h.settle()
+      expect(terminals).toHaveLength(1)
+      expect(terminals[0]).toMatchObject({
+        kind: "operator_required",
+        diagnostic: expect.stringMatching(new RegExp(`^${kind}_stalled: `)),
+      })
+      expect(h.manager.stops()).toBeGreaterThan(0)
+    } finally {
+      await h.cleanup()
+    }
+  }, 20_000)
+
+for (const kind of ["claude", "codex"] as const)
+  test(`a restarted controller recovers a live ${kind} worker whose record already rotated`, async () => {
+    const h = await harness(kind, {
+      maxOutputBytes: RECORD_LIMIT,
+      script: `${FLOOD}
+await until("release")
+message("final answer")
+end(0)
+process.exit(0)`,
+    })
+    try {
+      await h.dispatch()
+      await waitFor(() => existsSync(join(h.root, "flooded")), "the worker to pass the limit")
+      await Effect.runPromise(h.runtime.shutdown)
+      expect(h.terminals).toEqual([])
+      expect(h.manager.alive()).toBe(true)
+      // The next start replays the record from its start while the worker is live.
+      const next = supervisor(kind, h.root, h.cli, { active: [run(kind, h.root, "verified")] })
+      expect(await Effect.runPromise(next.runtime.recover)).toBe(1)
+      await h.release(0)
+      await next.firstTerminal()
+      await waitFor(() => Date.now() - h.manager.lastCommandAt() > 250, "the supervisor to settle")
+      expect(next.terminals).toEqual([{ kind: "complete", finalMessage: "final answer" }])
+      expect(next.outputTokens).toEqual([7])
+      expect(h.manager.stops()).toBe(0)
+      expect(await recordBytes(h.root)).toBeLessThanOrEqual(RECORD_LIMIT)
+    } finally {
+      await h.cleanup()
+    }
+  }, 20_000)
+
+/**
+ * An agent host whose launches run the real worker in the host's file layout
+ * (io/events, io/events.N, io/events.index.json) and whose exchange reads
+ * those files, 64 KiB from an offset, as the host server does.
+ */
+const ioHost = async (kind: Kind, root: string) => {
+  const socket = join(root, "host.sock")
+  const io = join(root, "io")
+  await mkdir(io)
+  const launchId = "33333333-3333-4333-8333-333333333333"
+  let child: ReturnType<typeof Bun.spawn> | undefined
+  const owned = (runId: string) => ({
+    runId,
+    launchId,
+    unit: agentHostUnitName(runId),
+    invocationId: "invocation-3",
+    uid: 12345,
+    pid: child?.pid ?? 0,
+    started: new Date().toISOString(),
+    active: child !== undefined && child.exitCode === null && child.signalCode === null,
+    exitCode: child?.exitCode ?? null,
+  })
+  const server = createServer((connection) => {
+    let data = ""
+    connection.on("data", (chunk) => {
+      data += chunk.toString()
+      if (!data.includes("\n")) return
+      const request = Schema.decodeUnknownSync(HostRequest)(JSON.parse(data))
+      const reply = (value: unknown) => connection.end(JSON.stringify(value) + "\n")
+      void (async () => {
+        if (request.operation === "start") {
+          await writeFile(join(io, "prompt"), request.prompt)
+          const worker = new URL(`../../src/kernel/${kind}-worker.ts`, import.meta.url).pathname
+          // prettier-ignore
+          child = Bun.spawn([process.execPath, worker, "--binary", join(root, kind), "--directory", root,
+            "--prompt-file", join(io, "prompt"), "--result-file", join(io, "result"),
+            "--events-file", join(io, "events"), "--stderr-file", join(io, "stderr"),
+            "--max-output-bytes", String(RECORD_LIMIT)], { stdin: "ignore", stdout: "ignore", stderr: "ignore" })
+          return reply({ admitted: true, process: owned(request.runId) })
+        }
+        if (request.operation === "inspect")
+          return reply({ admitted: true, process: owned(request.runId) })
+        if (request.operation === "exchange") {
+          const bytes = await readFile(join(io, request.file)).catch(() => Buffer.alloc(0))
+          return reply({
+            admitted: true,
+            bytes: bytes.subarray(request.offset, request.offset + 65536).toString("base64"),
+          })
+        }
+        if (request.operation === "stop") {
+          child?.kill("SIGKILL")
+          await child?.exited
+          return reply({ admitted: true, process: null })
+        }
+        return reply({ admitted: false, reason: "unsupported" })
+      })()
+    })
+  })
+  await new Promise<void>((resolve) => server.listen(socket, resolve))
+  return {
+    socket,
+    io,
+    stops: () => (child?.signalCode === "SIGKILL" ? 1 : 0),
+    close: async () => {
+      child?.kill("SIGKILL")
+      await child?.exited
+      await new Promise<void>((resolve) => server.close(() => resolve()))
+    },
+  }
+}
+
+for (const kind of ["claude", "codex"] as const)
+  test(`a ${kind} worker behind the agent host that writes three times the record limit completes`, async () => {
+    const root = await mkdtemp(join(tmpdir(), "workflowd-ripk-host-"))
+    const host = await ioHost(kind, root)
+    try {
+      await writeFile(
+        join(root, kind),
+        fakeNative(
+          kind,
+          root,
+          `${FLOOD}
+message("final answer")
+end(0)
+process.exit(0)`,
+        ),
+        { mode: 0o700 },
+      )
+      await writeFile(join(root, "go"), "")
+      const cli = makeHostCli(
+        host.socket,
+        kind,
+        kind === "claude" ? parseClaudeDispatchEvent : parseCodexExecEvent,
+      )
+      const supervised = supervisor(kind, root, cli, { progressWindowMs: 500 })
+      await supervised.dispatch()
+      await supervised.firstTerminal()
+      expect(supervised.terminals).toEqual([{ kind: "complete", finalMessage: "final answer" }])
+      expect(supervised.outputTokens).toEqual([7])
+      expect(host.stops()).toBe(0)
+      let total = 0
+      const names = await readdir(host.io)
+      for (const name of names)
+        if (name.startsWith("events")) total += (await stat(join(host.io, name))).size
+      expect(names).toContain("events.index.json")
+      expect(total).toBeLessThanOrEqual(RECORD_LIMIT)
+    } finally {
+      await host.close()
+      await rm(root, { recursive: true, force: true })
+    }
+  }, 20_000)

@@ -11,7 +11,7 @@ import { runWorkspaceCommand } from "../workspace/command"
 import { WorkspaceError } from "../workspace/errors"
 import type { CodexCliPort, CodexExit, CodexPreflightError } from "./codex-cli-port"
 import { cleanupFinishedCustody } from "./codex-output"
-import { localRecordSource, readEventRecord } from "./event-record"
+import { EVENT_RECORD_LIMITS, localRecordSource, readEventRecord } from "./event-record"
 import { readSandboxBinding } from "../sandbox/binding"
 export type {
   CodexCliPort,
@@ -257,7 +257,7 @@ export const makeDurableCliProcess = (
   const pollIntervalMs = options.pollIntervalMs ?? 100
   const unitPrefix = options.unitPrefix ?? "workflowd-agent-"
   if (!/^[a-zA-Z0-9_-]{1,100}$/.test(unitPrefix)) throw new Error("invalid unit prefix")
-  const maxOutputBytes = options.maxOutputBytes ?? 10 * 1024 * 1024
+  const maxOutputBytes = options.maxOutputBytes ?? EVENT_RECORD_LIMITS.totalBytes
   const observationTimeoutMs = options.observationTimeoutMs ?? 24 * 60 * 60_000
   const cancellationGraceMs = options.cancellationGraceMs ?? 5_000
   const commandTimeoutMs = options.commandTimeoutMs ?? 5_000
