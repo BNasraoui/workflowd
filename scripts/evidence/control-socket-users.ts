@@ -1,5 +1,5 @@
 import { strict as assert } from "node:assert"
-import { chmod, chown, mkdir } from "node:fs/promises"
+import { chown, mkdir } from "node:fs/promises"
 import { join } from "node:path"
 import {
   fixture,
@@ -33,11 +33,12 @@ const as = (uid: number, gid: number) => [
 const f = await fixture()
 const gateways: Array<{ stop(): Promise<void> }> = []
 try {
-  await chmod(f.root, 0o755)
+  await Bun.$`chmod 755 ${f.root}`
   const owned = async (path: string, uid: number, mode: number) => {
     await mkdir(path)
     await chown(path, uid, groupGid)
-    await chmod(path, mode)
+    // coreutils' chmod: it sets the sticky bit on each Bun this runs on.
+    await Bun.$`chmod ${mode.toString(8)} ${path}`
   }
   const home = join(f.root, "gateway-home")
   await owned(home, gatewayUid, 0o700)
@@ -53,25 +54,37 @@ try {
       }),
     })
 
-  // A reconcile on the control socket from `uid` and `gid`: the answer, or the connect error.
+  // A reconcile on the control socket from `uid` and `gid`, by Python from `/`: the answer, or
+  // the name of the connect error.
   const call = async (socket: string, uid: number, gid: number) => {
     const caller = Bun.spawn(
       [
         ...as(uid, gid),
-        process.execPath,
-        "-e",
-        `const net = require("node:net")
-const body = Buffer.from(JSON.stringify({ verb: "reconcile", body: { live: [] } }))
-const header = Buffer.alloc(4)
-header.writeUInt32BE(body.length)
-const connection = net.createConnection(${JSON.stringify(socket)})
-let answer = Buffer.alloc(0)
-connection.on("connect", () => connection.write(Buffer.concat([header, body])))
-connection.on("data", (chunk) => { answer = Buffer.concat([answer, chunk]) })
-connection.on("error", (error) => { process.stdout.write("error " + error.code); process.exit(0) })
-connection.on("close", () => process.stdout.write(answer.length >= 4 ? answer.subarray(4).toString() : "closed"))`,
+        "python3",
+        "-I",
+        "-c",
+        `import errno, json, socket, struct, sys
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+try:
+    s.connect(sys.argv[1])
+except OSError as error:
+    sys.stdout.write("error " + errno.errorcode[error.errno])
+    sys.exit(0)
+body = json.dumps({"verb": "reconcile", "body": {"live": []}}).encode()
+s.sendall(struct.pack(">I", len(body)) + body)
+answer = b""
+while True:
+    try:
+        chunk = s.recv(65536)
+    except ConnectionResetError:
+        break
+    if not chunk:
+        break
+    answer += chunk
+sys.stdout.write(answer[4:].decode() if len(answer) >= 4 else "closed")`,
+        socket,
       ],
-      { env: { PATH: process.env.PATH, HOME: "/tmp" }, stdout: "pipe", stderr: "inherit" },
+      { cwd: "/", env: { PATH: process.env.PATH }, stdout: "pipe", stderr: "inherit" },
     )
     const [output, code] = await Promise.all([new Response(caller.stdout).text(), caller.exited])
     assert.equal(code, 0, `the caller as uid ${uid} failed`)

@@ -55,9 +55,11 @@ async function fixtureForImageUser(f: Fixture) {
   await chmod(join(f.root, "live"), 0o770)
   for (const entry of await readdir(f.root, { withFileTypes: true }))
     if (entry.isFile()) await chmod(join(f.root, entry.name), 0o660)
+  // coreutils' chmod sets the sticky bit, and a change of owner keeps it.
+  await Bun.$`chmod 1770 ${f.root}`
   await asRoot(
     f,
-    `const fs = require("node:fs"); fs.chownSync(${JSON.stringify(f.root)}, ${imageUser}, ${runnerGroup()}); fs.chmodSync(${JSON.stringify(f.root)}, 0o1770)`,
+    `require("node:fs").chownSync(${JSON.stringify(f.root)}, ${imageUser}, ${runnerGroup()})`,
   )
 }
 

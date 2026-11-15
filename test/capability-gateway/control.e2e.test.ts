@@ -576,7 +576,8 @@ test("the gateway refuses a control directory whose parent another user could re
     ] as const) {
       const parent = join(f.root, `parent-${mode.toString(8)}`)
       await mkdir(parent)
-      await chmod(parent, mode)
+      // coreutils' chmod: it sets the sticky bit on each Bun this suite runs on.
+      await Bun.$`chmod ${mode.toString(8)} ${parent}`
       if (starts) await (await startGateway(f, under(parent))).stop()
       else
         await expect(startGateway(f, under(parent))).rejects.toThrow(
