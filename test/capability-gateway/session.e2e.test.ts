@@ -198,8 +198,8 @@ async function scenario(start: (f: Fixture) => Promise<Gateway>) {
       }),
     )
     await f.reconcile()
-    expect((await challenge("lease-b")).status).toBe(403)
-    expect((await challenge("lease-c")).status).toBe(403)
+    expect((await challenge("lease-b")).status).toBe(503)
+    expect((await challenge("lease-c")).status).toBe(503)
 
     // workflowd's revoke on the control socket aborts a live stream at once.
     f.setStall(true)

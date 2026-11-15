@@ -11,6 +11,7 @@ let
       ../tsconfig.json
       # The files of deploy/ that src imports.
       ../deploy/opencode/sandbox.json
+      ../deploy/sandbox/capability-limits.mjs
       ../deploy/sandbox/publication.mjs
       ../deploy/sandbox/casefold.json
       ../deploy/sandbox/publication-unicode.json

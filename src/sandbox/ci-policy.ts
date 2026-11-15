@@ -19,7 +19,7 @@ const setupNode = "actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020"
 // that requires equal digests and the recorded noscope output hash.
 const imageWorkflowSha256 = new Map([
   ["agent-image.yml", "5cbed263784fda5a91137a9c935d7f1ba4ccb809b31d479b329a76aa9a79a857"],
-  ["gateway-image.yml", "2ab0da3c25926ce159404ccfe0df6ea86d48177719b1293cd1b9c648951dbec2"],
+  ["gateway-image.yml", "b5f6d7ce48d94f53ddf94ff2932d6df93118db25d622e0d794af11f16024dc57"],
 ])
 const head = "${{ github.event.pull_request.head.sha || github.sha }}"
 const base = "${{ github.event.pull_request.base.sha || github.event.before }}"

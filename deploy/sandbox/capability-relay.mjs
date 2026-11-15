@@ -6,6 +6,7 @@ import { chmod } from "node:fs/promises"
 import { pathToFileURL } from "node:url"
 import { gatewayOrigin } from "./bootstrap-helper.mjs"
 import { renewalRequests } from "./renewal.mjs"
+import { maxHeaderBytes, maxStreamsPerRun } from "./capability-limits.mjs"
 
 const root = "/run/workflowd-sandbox"
 
@@ -49,9 +50,9 @@ export async function serveRunnerRelay(config, directory = root) {
   let closed = false
   const sockets = new Set()
   const http = httpServer(
-    { maxHeaderSize: 8192, requestTimeout: 120000, headersTimeout: 10000 },
+    { maxHeaderSize: maxHeaderBytes, requestTimeout: 120000, headersTimeout: 10000 },
     (request, response) => {
-      if (closed || streams >= 4 || Date.now() >= credential.expiresAt) {
+      if (closed || streams >= maxStreamsPerRun || Date.now() >= credential.expiresAt) {
         response.writeHead(503, { "retry-after": "5" })
         response.end()
         return
@@ -100,7 +101,7 @@ export async function serveRunnerRelay(config, directory = root) {
           method: request.method,
           headers: { ...headers, authorization: `Bearer ${credential.token}` },
           agent,
-          maxHeaderSize: 8192,
+          maxHeaderSize: maxHeaderBytes,
         },
         (reply) => {
           const output = Object.fromEntries(
@@ -139,7 +140,7 @@ export async function serveRunnerRelay(config, directory = root) {
     let retryable = true
     // After a clock jump the predecessor may have expired: it is never sent.
     if (Date.now() >= credential.expiresAt) {
-      stop()
+      end("expiry")
       return
     }
     try {
@@ -185,7 +186,7 @@ export async function serveRunnerRelay(config, directory = root) {
       credential = next
       failures = 0
       clearTimeout(expiry)
-      expiry = setTimeout(stop, next.expiresAt - Date.now())
+      expiry = setTimeout(() => end("expiry"), next.expiresAt - Date.now())
       renewal = setTimeout(renew, next.renewAt - Date.now())
     } catch {
       if (closed) return
@@ -203,10 +204,11 @@ export async function serveRunnerRelay(config, directory = root) {
     }
   }
   renewal = setTimeout(renew, Math.max(0, credential.renewAt - Date.now()))
-  const deadline = setTimeout(() => stop(), Math.max(0, config.deadline - Date.now()))
-  let expiry = setTimeout(() => stop(), Math.max(0, config.expiresAt - Date.now()))
+  const deadline = setTimeout(() => end("deadline"), Math.max(0, config.deadline - Date.now()))
+  let expiry = setTimeout(() => end("expiry"), Math.max(0, config.expiresAt - Date.now()))
   /** Ends the session and leaves its fixed reason for the job's hold step. */
   function end(reason) {
+    if (closed) return
     try {
       writeFileSync(`${directory}/relay-ended`, `${reason}\n`, { mode: 0o600 })
     } catch {

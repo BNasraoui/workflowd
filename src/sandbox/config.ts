@@ -2,6 +2,7 @@ import { Schema } from "effect"
 import { safePublication } from "../../deploy/sandbox/publication.mjs"
 import skills from "../../deploy/sandbox/skills/catalog.json"
 import { publicBootstrapFields } from "../../deploy/sandbox/public-status.mjs"
+import { maxStreamsPerRun } from "../../deploy/sandbox/capability-limits.mjs"
 
 const PublicationCoAuthor = Schema.String.check(
   Schema.makeFilter(
@@ -35,7 +36,6 @@ const Id = Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 4294967294 }
 /** The gateway process's own section. It names the gateway's store, never workflowd's. */
 export const CapabilityGatewayConfig = Schema.Struct({
   gitRead: Schema.optionalKey(Schema.Boolean),
-  nodeBinary: AbsolutePath,
   noscope: Schema.Struct({
     binary: AbsolutePath,
     configHome: AbsolutePath,
@@ -54,7 +54,7 @@ export const CapabilityGatewayConfig = Schema.Struct({
   providerId: Schema.NonEmptyString,
   credentialRole: Schema.String.check(Schema.isPattern(/^[A-Za-z0-9_.-]{1,128}$/)),
   maxStreams: Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 512 })),
-  maxStreamsPerRun: Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 4 })),
+  maxStreamsPerRun: Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: maxStreamsPerRun })),
   /** How often the gateway ends the streams of revoked or replaced sessions; 1000 by default. */
   staleSweepMs: Schema.optionalKey(
     Schema.Int.check(Schema.isBetween({ minimum: 100, maximum: 60000 })),

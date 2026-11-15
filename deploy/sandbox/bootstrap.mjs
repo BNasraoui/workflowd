@@ -16,22 +16,10 @@ export async function prepare({
   /** The pause between proofs; the helper's own when not named. */
   backoff,
 } = {}) {
-  const image = environment.SANDBOX_AGENT_IMAGE
-  const workflowSha = environment.GITHUB_SHA
   const ref = environment.GITHUB_REF ?? ""
-  if (
-    !/^ghcr\.io\/bnasraoui\/workflowd-agent-base@sha256:[a-f0-9]{64}$/.test(image ?? "") ||
-    !/^[a-f0-9]{40}$/.test(workflowSha ?? "") ||
-    !ref.startsWith("refs/heads/workflowd/leases/")
-  )
-    throw new Error()
+  if (!/^[a-f0-9]{40}$/.test(environment.GITHUB_SHA ?? "") || !ref.startsWith("refs/heads/workflowd/leases/"))
+    throw new Error("lease ref refused")
   const leaseId = ref.slice("refs/heads/workflowd/leases/".length)
-  await writeFile(`${directory}/agent-image`, image, { mode: 0o600 })
-  await writeFile(
-    `${directory}/identity.json`,
-    JSON.stringify({ repository: environment.GITHUB_REPOSITORY, leaseId }),
-    { mode: 0o600 },
-  )
   const gateway = environment.SANDBOX_GATEWAY_URL ?? ""
   const issue = takeJobIdentity(environment, identity)
   let grant
@@ -76,16 +64,8 @@ export async function prepare({
   await writeFile(`${directory}/execution-mode`, "actions-native", { mode: 0o600 })
 }
 
-/** The runner's log line for a failed bootstrap: it names the cause only when its text is fixed. */
-export const failure = (error) =>
-  `private bootstrap unavailable${error?.reported ? `: ${error.message}` : ""}\n`
-
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  try {
-    if (process.argv[2] !== "prepare") throw new Error()
-    await prepare()
-  } catch (error) {
-    process.stderr.write(failure(error))
-    process.exitCode = 1
-  }
+  // The public wrapper of this step shows only that it failed, so no cause is written.
+  if (process.argv[2] === "prepare") await prepare().catch(() => (process.exitCode = 1))
+  else process.exitCode = 1
 }

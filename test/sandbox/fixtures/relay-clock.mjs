@@ -50,6 +50,8 @@ test("renewal never sends an expired predecessor after a clock jump", async (t) 
     assert.equal(attempts, 1)
     t.mock.timers.tick(7200000)
     assert.equal(attempts, 1)
+    // The relay names the expiry of its token as the reason it ended the session.
+    assert.equal(await readFile(join(root, "relay-ended"), "utf8"), "expiry\n")
   } finally {
     relay.close()
     server.closeAllConnections()

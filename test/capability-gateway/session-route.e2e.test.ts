@@ -1,5 +1,7 @@
 import { expect, test } from "bun:test"
 import { randomBytes } from "node:crypto"
+import { Effect } from "effect"
+import { AgentRunStore } from "../../src/kernel/agent-run-store"
 import {
   client,
   gateways,
@@ -81,6 +83,32 @@ test("a lease that does not exist and a lease whose Actions run is not recorded 
     )
     await f.reconcile()
     expect((await runner.challenge("lease-u")).status).toBe(200)
+  })
+}, 60000)
+
+test("a lease that is unknown, of an ended run, or of a revoked binding gets the same not-ready answer, and a malformed lease id is refused", async () => {
+  await withGateway(gateways[0][1], async (f, gateway) => {
+    const runner = client(gateway.port)
+    await f.store(seedLease("run-ended", "lease-ended", 83))
+    await f.store(
+      Effect.gen(function* () {
+        yield* (yield* AgentRunStore).cancel({ runId: "run-ended", now: new Date() })
+      }),
+    )
+    await runner.audience()
+    await f.gatewaySql((sql) => sql`UPDATE capability_bindings SET revoked=1 WHERE run_id='run'`)
+    const answers = await Promise.all(
+      ["lease-none", "lease-ended", "lease"].map(async (lease) => {
+        const answer = await runner.challenge(lease)
+        return { status: answer.status, body: await answer.text() }
+      }),
+    )
+    expect(answers).toEqual([
+      { status: 503, body: "" },
+      { status: 503, body: "" },
+      { status: 503, body: "" },
+    ])
+    expect((await runner.challenge("lease%2F..")).status).toBe(403)
   })
 }, 60000)
 

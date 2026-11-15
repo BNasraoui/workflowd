@@ -268,7 +268,6 @@ test("an actions-native harness start is refused before any lease or GitHub effe
           Effect.provide(FetchHttpClient.layer),
         )
         const dispatch = yield* makeSandboxDispatch({
-          publicationContract: { reference: "fixture-only:worktree", receipt: "fixed-v1" },
           policies: [native],
           github,
           leases: yield* makeSandboxLeaseService(github, root),

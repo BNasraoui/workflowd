@@ -1,14 +1,18 @@
 import { createHash, randomBytes } from "node:crypto"
+import { maxJtiLength } from "../../deploy/sandbox/capability-limits.mjs"
 import { Effect, Schema } from "effect"
 import { SqlClient } from "effect/unstable/sql"
-import { renewalReplacements } from "../../deploy/sandbox/renewal.mjs"
+import { renewalReplacements, renewalWindowMs } from "../../deploy/sandbox/renewal.mjs"
 import { CapabilityGrant, SessionPolicy } from "../capability-control/protocol"
 
 export class CapabilityRefused extends Schema.TaggedError<CapabilityRefused>()(
   "CapabilityRefused",
   {},
 ) {}
-/** The lease cannot be challenged yet: it is unknown, or its Actions run is not recorded. */
+/**
+ * The lease cannot be challenged: it is unknown, its Actions run is not recorded, its run has
+ * ended, or its binding is revoked. All of them get the same answer.
+ */
 class CapabilityNotReady extends Schema.TaggedError<CapabilityNotReady>()(
   "CapabilityNotReady",
   {},
@@ -35,8 +39,6 @@ const Binding = Schema.Struct({ runId: Schema.String, channel: Digest })
 const SessionBinding = Schema.Struct({ ...Binding.fields, session: Schema.Int })
 /** A run opens at most this many sessions; only a verified proof opens one. */
 const maxSessions = 8
-/** A run token is renewed only in its last 330 seconds: the relay's 180 to 300, and 30 of slack. */
-const renewalWindowMs = 330000
 /** A renewal asked again replaces the successor of one token at most this many times. */
 const maxReplacements = renewalReplacements
 /** A successor must outlive its predecessor by this much, so renewals near the deadline end. */
@@ -266,8 +268,9 @@ export const makeCapabilityStore = Effect.gen(function* () {
   /**
    * A runner's challenge for its lease. While an unused challenge is alive, every request gets
    * that same nonce and expiry back, so asking again costs the run nothing; otherwise a new nonce
-   * replaces it. A lease that workflowd has not granted gets the same answer whether or not it
-   * exists: the runner may ask before workflowd records its Actions run and sends the grant.
+   * replaces it. A lease that workflowd has not granted, whose grant is revoked or whose binding
+   * is revoked gets the same answer whether or not it exists: the runner may ask before workflowd
+   * records its Actions run and sends the grant.
    */
   const leaseChallenge = Effect.fn("CapabilityStore.leaseChallenge")(function* (
     leaseId: string,
@@ -282,13 +285,16 @@ export const makeCapabilityStore = Effect.gen(function* () {
         const runId = rows[0]?.run_id
         if (rows.length !== 1 || runId === undefined)
           return yield* Effect.fail(new CapabilityNotReady())
-        const value = yield* current(runId, now)
+        // An ended run and a revoked binding answer as an unknown lease does: not ready.
+        const value = yield* current(runId, now).pipe(
+          Effect.mapError(() => new CapabilityNotReady()),
+        )
         const bound = yield* sql`SELECT * FROM capability_bindings WHERE run_id=${runId}`
         const nonce = randomBytes(32).toString("hex")
         const expiresAt = Math.min(now + 60000, value.deadline)
         if (bound.length > 0) {
           const row = yield* Schema.decodeUnknownEffect(Row)(bound[0])
-          if (row.revoked !== 0) return yield* Effect.fail(new CapabilityRefused())
+          if (row.revoked !== 0) return yield* Effect.fail(new CapabilityNotReady())
           if (row.nonce !== null && row.challenge_expires > now)
             return { channel: row.channel, nonce: row.nonce, expiresAt: row.challenge_expires }
           yield* sql`UPDATE capability_bindings
@@ -315,7 +321,7 @@ export const makeCapabilityStore = Effect.gen(function* () {
     expiresAt: number,
     now: number,
     /** When the proof itself expires; until then its jti stays recorded. */
-    proofExpiresAt = now + 610000,
+    proofExpiresAt: number,
   ) {
     yield* Schema.decodeUnknownEffect(Challenge)(challenge)
     yield* Schema.decodeUnknownEffect(Digest)(digest)
@@ -331,7 +337,7 @@ export const makeCapabilityStore = Effect.gen(function* () {
           row.session >= maxSessions ||
           row.authority.recipientId !== challenge.recipientId ||
           !jti ||
-          jti.length > 256 ||
+          jti.length > maxJtiLength ||
           !Number.isSafeInteger(expiresAt) ||
           expiresAt <= now ||
           expiresAt > row.authority.deadline

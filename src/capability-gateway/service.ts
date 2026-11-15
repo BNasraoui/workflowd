@@ -1,4 +1,4 @@
-import { Context, Effect, Option, Redacted, Schema, Semaphore } from "effect"
+import { Context, Effect, Option, Schema, Semaphore } from "effect"
 import { SqlClient } from "effect/unstable/sql"
 import { randomInt } from "node:crypto"
 import { mintCapability, type NoscopeConfiguration } from "./noscope"
@@ -10,7 +10,13 @@ import { runLifetime } from "../store/run-lifetime"
 import { ownedPromise } from "./owned"
 import { gitReadRequest, type GitUpstream } from "./git"
 import type { ControlTarget } from "./control"
-import type { makeTokenBroker } from "../worker-identity/broker"
+import { renewLeadMaxMs, renewLeadMinMs } from "../../deploy/sandbox/renewal.mjs"
+import { capabilityOrigin, RequestRefused } from "./headers"
+import {
+  maxJtiLength,
+  maxProofLength,
+  maxStreamsPerRun,
+} from "../../deploy/sandbox/capability-limits.mjs"
 
 export interface GatewayConfiguration {
   readonly gitRead?: boolean
@@ -26,7 +32,9 @@ export interface GatewayConfiguration {
   /** How often the gateway ends the streams of revoked or replaced sessions and tokens. */
   readonly staleSweepMs?: number
 }
-const SessionProof = Schema.Struct({ token: Schema.String.check(Schema.isMaxLength(16384)) })
+const SessionProof = Schema.Struct({
+  token: Schema.String.check(Schema.isMaxLength(maxProofLength)),
+})
 const SessionAudience = /^workflowd:([a-f0-9]{64}):([a-f0-9]{64})$/
 /**
  * Reads the audience and jti of an unverified proof only to select its challenge and to refuse a
@@ -47,7 +55,7 @@ const proofClaims = (token: string) => {
     return match?.[1] &&
       match[2] &&
       typeof jti === "string" &&
-      jti.length <= 256 &&
+      jti.length <= maxJtiLength &&
       typeof kid === "string"
       ? { audience: match[0], channel: match[1], nonce: match[2], jti, kid }
       : null
@@ -93,8 +101,18 @@ const maxMints = 4
 class MintsBusy extends Schema.TaggedError<MintsBusy>()("MintsBusy", {}) {}
 /** A run token lives at most 15 minutes. */
 const tokenLifeMs = 900000
-/** Its holder renews it 180 to 300 seconds before it expires, or now when less is left. */
-const renewAt = (expiresAt: number) => Math.max(Date.now(), expiresAt - randomInt(180000, 300001))
+/** Its holder renews it within the renewal lead before it expires, or now when less is left. */
+const renewAt = (expiresAt: number) =>
+  Math.max(Date.now(), expiresAt - randomInt(renewLeadMinMs, renewLeadMaxMs + 1))
+/** The kind of a failure for the log: its tag or its class name, never its text or values. */
+const failureKind = (error: unknown) =>
+  typeof error === "object" && error !== null && "_tag" in error && typeof error._tag === "string"
+    ? error._tag
+    : error instanceof Error
+      ? error.name
+      : typeof error
+const logFailure = (message: string) => (error: unknown) =>
+  Effect.logWarning(message, { kind: failureKind(error) })
 const denied = () => new Response(null, { status: 403 })
 const unavailable = () => new Response(null, { status: 503, headers: { "retry-after": "5" } })
 
@@ -102,10 +120,7 @@ const unavailable = () => new Response(null, { status: 503, headers: { "retry-af
 export const makeCapabilityGateway = (
   config: GatewayConfiguration,
   upstream: ClaudeUpstream = fetch,
-  git?: {
-    readonly broker?: Effect.Success<ReturnType<typeof makeTokenBroker>>
-    readonly upstream?: GitUpstream
-  },
+  gitUpstream: GitUpstream = fetch,
   keys: typeof githubJobKeys = githubJobKeys,
 ) =>
   Effect.gen(function* () {
@@ -116,7 +131,7 @@ export const makeCapabilityGateway = (
       config.maxStreams > 512 ||
       !Number.isSafeInteger(config.maxStreamsPerRun) ||
       config.maxStreamsPerRun < 1 ||
-      config.maxStreamsPerRun > config.maxStreams ||
+      config.maxStreamsPerRun > Math.min(config.maxStreams, maxStreamsPerRun) ||
       !Number.isSafeInteger(streamIdleMs) ||
       streamIdleMs < 1 ||
       streamIdleMs > 600000
@@ -154,14 +169,14 @@ export const makeCapabilityGateway = (
     // unless configured.
     yield* Effect.suspend(() => store.staleAmong(streams())).pipe(
       Effect.tap((stale) => Effect.sync(() => abortStale(stale))),
-      Effect.ignore,
+      Effect.catch(logFailure("Capability stream check failed")),
       Effect.andThen(Effect.sleep(config.staleSweepMs ?? 1000)),
       Effect.forever,
       Effect.forkScoped,
     )
     // Rows of expired run tokens and of expired used proofs go, now and every minute.
     yield* Effect.suspend(() => store.sweep(Date.now())).pipe(
-      Effect.ignore,
+      Effect.catch(logFailure("Capability sweep failed")),
       Effect.andThen(Effect.sleep("60 seconds")),
       Effect.forever,
       Effect.forkScoped,
@@ -287,10 +302,236 @@ export const makeCapabilityGateway = (
         store.revoke(runId).pipe(Effect.ensuring(Effect.sync(() => abortRun(runId)))),
       ),
     )
+    type Binding = { readonly runId: string; readonly channel: string }
+    type Grant = Effect.Success<ReturnType<typeof store.authorize>>
+    /** The renew route: an empty JSON body, and the successor of the presented token. */
+    const renewRoute = Effect.fn("CapabilityGateway.renewRoute")(function* (
+      request: Request,
+      binding: Binding,
+      digest: string,
+    ) {
+      if (request.method !== "POST" || Number(request.headers.get("content-length") ?? 0) > 2)
+        return denied()
+      const body = yield* ownedPromise((signal) =>
+        readRequestBody(
+          request,
+          AbortSignal.any([signal, request.signal, AbortSignal.timeout(10000)]),
+          2,
+        ),
+      ).pipe(Effect.result)
+      if (body._tag === "Failure" || body.success.toString("utf8") !== "{}") return denied()
+      // A refused renewal is final for this token; only a busy or failed mint or store is 503.
+      const renewed = yield* Effect.result(renewal(binding, digest))
+      if (renewed._tag === "Failure")
+        return renewed.failure instanceof CapabilityRefused ? denied() : unavailable()
+      return Response.json(renewed.success, { headers: { "cache-control": "no-store" } })
+    })
+    /**
+     * Admits one stream of a run, under the run-lifetime fence: null when the gateway or the run
+     * holds its most streams. The stream ends at the token's expiry or the run's deadline, after
+     * `streamIdleMs` without a chunk, at the provider credential's expiry, or when the run changes.
+     */
+    const admit = (binding: Binding, session: number, digest: string, grant: Grant) =>
+      authority.withPermit(
+        Effect.gen(function* () {
+          yield* store.authorize(binding, digest, Date.now())
+          const owned =
+            active.get(binding.runId) ??
+            new Map<AbortController, { readonly session: number; readonly digest: string }>()
+          if (count >= config.maxStreams || owned.size >= config.maxStreamsPerRun) return null
+          const controller = new AbortController()
+          owned.set(controller, { session, digest })
+          active.set(binding.runId, owned)
+          count++
+          const unlisten = authority.listen(binding.runId, () => controller.abort())
+          const timer = setTimeout(
+            () => controller.abort(),
+            Math.max(0, Math.min(grant.expiresAt - Date.now(), grant.deadline - Date.now())),
+          )
+          let idleTimer = setTimeout(() => controller.abort(), streamIdleMs)
+          let providerTimer: ReturnType<typeof setTimeout> | undefined
+          let released = false
+          const release = () => {
+            if (released) return
+            released = true
+            unlisten()
+            clearTimeout(timer)
+            clearTimeout(idleTimer)
+            clearTimeout(providerTimer)
+            active.get(binding.runId)?.delete(controller)
+            if (active.get(binding.runId)?.size === 0) active.delete(binding.runId)
+            count--
+            controller.abort()
+          }
+          return {
+            controller,
+            release,
+            transferred: false,
+            touch: () => {
+              if (released) return
+              clearTimeout(idleTimer)
+              idleTimer = setTimeout(() => controller.abort(), streamIdleMs)
+            },
+            providerExpiry: (expiry: number) => {
+              providerTimer = setTimeout(() => controller.abort(), Math.max(0, expiry - Date.now()))
+            },
+          }
+        }),
+      )
+    type Ownership = NonNullable<Effect.Success<ReturnType<typeof admit>>>
+    /**
+     * The upstream body as the client's body: at most 32 MiB, each chunk restarts the idle timer,
+     * and an abort or a failed read ends it with an error and releases the stream.
+     */
+    const boundedBody = (
+      selected: { readonly response: Response; readonly headers: Headers },
+      signal: AbortSignal,
+      ownership: Ownership,
+    ) => {
+      const { release } = ownership
+      if (!selected.response.body) {
+        release()
+        return new Response(null, {
+          status: selected.response.status,
+          headers: selected.headers,
+        })
+      }
+      const reader = selected.response.body.getReader()
+      let bytes = 0
+      const abort = () => {
+        void reader.cancel().then(release, release)
+      }
+      signal.addEventListener("abort", abort, { once: true })
+      const body = new ReadableStream<Uint8Array>(
+        {
+          async pull(destination) {
+            try {
+              signal.throwIfAborted()
+              const item = await reader.read()
+              signal.throwIfAborted()
+              if (item.done) {
+                destination.close()
+                signal.removeEventListener("abort", abort)
+                release()
+                return
+              }
+              const chunk: unknown = item.value
+              if (!(chunk instanceof Uint8Array)) throw new Error("response refused")
+              ownership.touch()
+              bytes += chunk.length
+              if (bytes > 32 * 1048576) throw new Error("response capacity")
+              destination.enqueue(chunk)
+            } catch {
+              destination.error(new Error("capability stream interrupted"))
+              signal.removeEventListener("abort", abort)
+              try {
+                await reader.cancel()
+              } finally {
+                release()
+              }
+            }
+          },
+          async cancel() {
+            signal.removeEventListener("abort", abort)
+            try {
+              await reader.cancel()
+            } finally {
+              release()
+            }
+          },
+        },
+        { highWaterMark: 1 },
+      )
+      return new Response(body, {
+        status: selected.response.status,
+        headers: selected.headers,
+      })
+    }
+    /**
+     * Sends an admitted request upstream through its route: the Git read of the saved repository,
+     * or the Claude call with a provider credential. Each upstream launch is checked again under
+     * the run-lifetime fence. A refused request is "refused"; any other failure is "unavailable".
+     */
+    const forward = (
+      request: Request,
+      route:
+        | { readonly git: true; readonly target: string }
+        | { readonly git: false; readonly path: string },
+      grant: Grant,
+      binding: Binding,
+      digest: string,
+      ownership: Ownership,
+    ) =>
+      ownedPromise(async (interruption) => {
+        const signal = AbortSignal.any([ownership.controller.signal, request.signal, interruption])
+        const send = async (start: () => Promise<Response>) => {
+          // Admission and launch share the run-lifetime fence; network waiting does not.
+          const started = await Effect.runPromise(
+            authority.withPermit(
+              Effect.gen(function* () {
+                yield* store.authorize(binding, digest, Date.now())
+                return yield* Effect.try(() => {
+                  signal.throwIfAborted()
+                  return { response: start() }
+                })
+              }),
+            ),
+            { signal },
+          )
+          return await started.response
+        }
+        const selected = route.git
+          ? await gitReadRequest(request, route.target, grant, signal, (url, input) =>
+              send(() => gitUpstream(url, input)),
+            )
+          : await claudeRequest(
+              request,
+              route.path,
+              grant.modelId,
+              async () => {
+                const snapshot = await mintCapability(
+                  config.noscope,
+                  "provider-access",
+                  config.credentialRole,
+                  3600,
+                  signal,
+                ).catch(async (error: unknown) => {
+                  const provider = custodyProvider(config.credentialRole)
+                  const fault =
+                    config.login && provider
+                      ? await loginFault(config.login.directory, provider)
+                      : undefined
+                  if (fault) console.error(fault)
+                  throw error
+                })
+                ownership.providerExpiry(snapshot.expiresAt)
+                return snapshot.token
+              },
+              signal,
+              (url, input) => send(() => upstream(url, input)),
+            )
+        if (signal.aborted) {
+          await selected.response.body?.cancel()
+          signal.throwIfAborted()
+        }
+        return boundedBody(selected, signal, ownership)
+      }).pipe(
+        Effect.catch((error) =>
+          error instanceof RequestRefused
+            ? Effect.fail("refused" as const)
+            : logFailure("Capability route failed")(error).pipe(
+                Effect.andThen(Effect.fail("unavailable" as const)),
+              ),
+        ),
+      )
+    /**
+     * A run's call. Its run token selects and authorizes its binding before any body is read; then
+     * the renew route, or one admitted stream of the Git or Claude route.
+     */
     const handle = Effect.fn("CapabilityGateway.handle")(
       function* (request: Request) {
         const auth = /^Bearer ([A-Za-z0-9_-]{43})$/.exec(request.headers.get("authorization") ?? "")
-        if (!auth?.[1] || !request.url.startsWith("http://capability.invalid/")) return denied()
+        if (!auth?.[1] || !request.url.startsWith(`${capabilityOrigin}/`)) return denied()
         const digest = capabilityDigest(auth[1])
         // The run token alone selects its binding; no route reads a body before this check.
         const found = yield* Effect.result(store.bindingFor(digest, Date.now()))
@@ -302,222 +543,28 @@ export const makeCapabilityGateway = (
         if (checked._tag === "Failure") return denied()
         const grant = checked.success
         if (grant.providerId !== config.providerId) return denied()
-        const target = request.url.slice("http://capability.invalid".length)
-        if (target === "/capabilities/v1/renew") {
-          if (request.method !== "POST" || Number(request.headers.get("content-length") ?? 0) > 2)
-            return denied()
-          const body = yield* ownedPromise((signal) =>
-            readRequestBody(
-              request,
-              AbortSignal.any([signal, request.signal, AbortSignal.timeout(10000)]),
-              2,
-            ),
-          ).pipe(Effect.result)
-          if (body._tag === "Failure" || body.success.toString("utf8") !== "{}") return denied()
-          // A refused renewal is final for this token; only a busy or failed mint or store is 503.
-          const renewed = yield* Effect.result(renewal(binding, digest))
-          if (renewed._tag === "Failure")
-            return renewed.failure instanceof CapabilityRefused ? denied() : unavailable()
-          return Response.json(renewed.success, { headers: { "cache-control": "no-store" } })
-        }
+        const target = request.url.slice(capabilityOrigin.length)
+        if (target === "/capabilities/v1/renew") return yield* renewRoute(request, binding, digest)
         const prefix = `/capabilities/v1/providers/${config.providerId}`
         const isGit = config.gitRead === true && target.startsWith("/capabilities/v1/git/")
         if (!isGit && !target.startsWith(`${prefix}/`)) return denied()
+        const route = isGit
+          ? { git: true as const, target }
+          : { git: false as const, path: target.slice(prefix.length) }
         return yield* Effect.acquireUseRelease(
-          authority.withPermit(
-            Effect.gen(function* () {
-              yield* store.authorize(binding, digest, Date.now())
-              const owned =
-                active.get(binding.runId) ??
-                new Map<AbortController, { readonly session: number; readonly digest: string }>()
-              if (count >= config.maxStreams || owned.size >= config.maxStreamsPerRun) return null
-              const controller = new AbortController()
-              owned.set(controller, { session, digest })
-              active.set(binding.runId, owned)
-              count++
-              const unlisten = authority.listen(binding.runId, () => controller.abort())
-              const timer = setTimeout(
-                () => controller.abort(),
-                Math.max(0, Math.min(grant.expiresAt - Date.now(), grant.deadline - Date.now())),
-              )
-              let idleTimer = setTimeout(() => controller.abort(), streamIdleMs)
-              let providerTimer: ReturnType<typeof setTimeout> | undefined
-              let released = false
-              const release = () => {
-                if (released) return
-                released = true
-                unlisten()
-                clearTimeout(timer)
-                clearTimeout(idleTimer)
-                clearTimeout(providerTimer)
-                active.get(binding.runId)?.delete(controller)
-                if (active.get(binding.runId)?.size === 0) active.delete(binding.runId)
-                count--
-                controller.abort()
-              }
-              return {
-                controller,
-                release,
-                transferred: false,
-                touch: () => {
-                  if (released) return
-                  clearTimeout(idleTimer)
-                  idleTimer = setTimeout(() => controller.abort(), streamIdleMs)
-                },
-                providerExpiry: (expiry: number) => {
-                  providerTimer = setTimeout(
-                    () => controller.abort(),
-                    Math.max(0, expiry - Date.now()),
-                  )
-                },
-              }
-            }),
-          ),
+          admit(binding, session, digest, grant),
           (ownership) =>
             Effect.gen(function* () {
               if (!ownership)
                 return new Response(null, { status: 429, headers: { "retry-after": "1" } })
-              const { controller, release } = ownership
               const result = yield* Effect.result(
-                ownedPromise(async (interruption) => {
-                  const signal = AbortSignal.any([controller.signal, request.signal, interruption])
-                  const send = async (start: () => Promise<Response>) => {
-                    // Admission and launch share the run-lifetime fence; network waiting does not.
-                    const started = await Effect.runPromise(
-                      authority.withPermit(
-                        Effect.gen(function* () {
-                          yield* store.authorize(binding, digest, Date.now())
-                          return yield* Effect.try(() => {
-                            signal.throwIfAborted()
-                            return { response: start() }
-                          })
-                        }),
-                      ),
-                      { signal },
-                    )
-                    return await started.response
-                  }
-                  const selected = isGit
-                    ? await gitReadRequest(
-                        request,
-                        target,
-                        grant,
-                        async () => {
-                          if (!git?.broker) return undefined
-                          const snapshot = await Effect.runPromise(
-                            git.broker({
-                              repository: grant.repositoryName,
-                              installationId: grant.installationId,
-                              permissions: { contents: "read" },
-                            }),
-                            { signal },
-                          )
-                          ownership.providerExpiry(snapshot.expiresAt)
-                          return Redacted.value(snapshot.token)
-                        },
-                        signal,
-                        (url, input) => send(() => (git?.upstream ?? fetch)(url, input)),
-                      )
-                    : await claudeRequest(
-                        request,
-                        target.slice(prefix.length),
-                        grant.modelId,
-                        async () => {
-                          const snapshot = await mintCapability(
-                            config.noscope,
-                            "provider-access",
-                            config.credentialRole,
-                            3600,
-                            signal,
-                          ).catch(async (error: unknown) => {
-                            const provider = custodyProvider(config.credentialRole)
-                            const fault =
-                              config.login && provider
-                                ? await loginFault(config.login.directory, provider)
-                                : undefined
-                            if (fault) console.error(fault)
-                            throw error
-                          })
-                          ownership.providerExpiry(snapshot.expiresAt)
-                          return snapshot.token
-                        },
-                        signal,
-                        (url, input) => send(() => upstream(url, input)),
-                      )
-                  if (signal.aborted) {
-                    await selected.response.body?.cancel()
-                    signal.throwIfAborted()
-                  }
-                  if (!selected.response.body) {
-                    release()
-                    return new Response(null, {
-                      status: selected.response.status,
-                      headers: selected.headers,
-                    })
-                  }
-                  const reader = selected.response.body.getReader()
-                  let bytes = 0
-                  const abort = () => {
-                    void reader.cancel().then(release, release)
-                  }
-                  signal.addEventListener("abort", abort, { once: true })
-                  const body = new ReadableStream<Uint8Array>(
-                    {
-                      async pull(destination) {
-                        try {
-                          signal.throwIfAborted()
-                          const item = await reader.read()
-                          signal.throwIfAborted()
-                          if (item.done) {
-                            destination.close()
-                            signal.removeEventListener("abort", abort)
-                            release()
-                            return
-                          }
-                          const chunk: unknown = item.value
-                          if (!(chunk instanceof Uint8Array)) throw new Error("response refused")
-                          ownership.touch()
-                          bytes += chunk.length
-                          if (bytes > 32 * 1048576) throw new Error("response capacity")
-                          destination.enqueue(chunk)
-                        } catch {
-                          destination.error(new Error("capability stream interrupted"))
-                          signal.removeEventListener("abort", abort)
-                          try {
-                            await reader.cancel()
-                          } finally {
-                            release()
-                          }
-                        }
-                      },
-                      async cancel() {
-                        signal.removeEventListener("abort", abort)
-                        try {
-                          await reader.cancel()
-                        } finally {
-                          release()
-                        }
-                      },
-                    },
-                    { highWaterMark: 1 },
-                  )
-                  return new Response(body, {
-                    status: selected.response.status,
-                    headers: selected.headers,
-                  })
-                }).pipe(
-                  Effect.mapError((error) =>
-                    error instanceof Error && error.message === "request refused"
-                      ? ("refused" as const)
-                      : ("unavailable" as const),
-                  ),
-                ),
+                forward(request, route, grant, binding, digest, ownership),
               )
               if (result._tag === "Success") {
                 ownership.transferred = true
                 return result.success
               }
-              release()
+              ownership.release()
               return result.failure === "refused" ? denied() : unavailable()
             }),
           (ownership) =>
@@ -526,7 +573,9 @@ export const makeCapabilityGateway = (
             }),
         )
       },
-      Effect.catch(() => Effect.succeed(unavailable())),
+      Effect.catch((error) =>
+        logFailure("Capability request failed")(error).pipe(Effect.as(unavailable())),
+      ),
     )
     /** workflowd's calls on the control socket. Each revoked run's open streams end at once. */
     const control: ControlTarget = {

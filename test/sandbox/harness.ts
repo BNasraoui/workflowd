@@ -968,13 +968,6 @@ export function sandboxPublicationFixture(
   leaseId = "lease-1",
   fault = "none",
   branch = "no/name/rules '$()\n雪",
-  captured?: {
-    readonly actionsRunId: number
-    readonly leaseId: () => string
-    readonly metadata: () => Promise<
-      typeof import("../../src/sandbox/publish-store").ResultMetadata.Type
-    >
-  },
 ) {
   let reviews: unknown[] = []
   let posts = 0
@@ -984,9 +977,6 @@ export function sandboxPublicationFixture(
   const title = "Agent title"
   const commitMessage = "Agent message\n\nDetails"
   fixture.publication(async (request) => {
-    const metadata = await captured?.metadata()
-    const selectedBranch = metadata?.branch ?? branch
-    const actionsRunId = captured?.actionsRunId ?? 41
     const path = new URL(request.url).pathname
     if (path.endsWith("/deployment_protection_rule")) {
       posts++
@@ -1028,12 +1018,8 @@ export function sandboxPublicationFixture(
       const receipt = {
         binding,
         repository: policy.repository,
-        ...(captured
-          ? { v: 1, failed: false }
-          : {
-              branch: selectedBranch,
-              marker: `<!-- workflowd-publication:${Buffer.from(JSON.stringify(binding)).toString("base64")} -->`,
-            }),
+        branch,
+        marker: `<!-- workflowd-publication:${Buffer.from(JSON.stringify(binding)).toString("base64")} -->`,
         stage,
         closingIssuesVerified: ![
           "unchecked PR",
@@ -1041,12 +1027,16 @@ export function sandboxPublicationFixture(
           "closing references",
           "closing query malformed",
         ].includes(fault),
-        ...(["closing references", "closing query malformed", "branch collision"].includes(fault)
-          ? { cause: "Protected publication failed" }
+        ...(fault === "closing references"
+          ? { cause: "PR contains closing issue references; PR closed" }
+          : {}),
+        ...(fault === "closing query malformed"
+          ? { cause: "closing issue references could not be verified; PR closed" }
           : {}),
         pr: stage === "published" ? 17 : null,
         revoked: fault !== "unrevoked",
         commitSha: "2".repeat(40),
+        ...(fault === "branch collision" ? { cause: "branch already exists (HTTP 200)" } : {}),
       }
       return new Response(
         "2026-10-08T00:00:00.0000000Z workflowd.publish.receipt " +
@@ -1054,11 +1044,11 @@ export function sandboxPublicationFixture(
           "\n",
       )
     }
-    if (decodeURIComponent(path.split("/git/ref/heads/")[1] ?? "") === selectedBranch)
+    if (decodeURIComponent(path.split("/git/ref/heads/")[1] ?? "") === branch)
       return posts === 0
         ? new Response(null, { status: 404 })
         : Response.json({
-            ref: `refs/heads/${selectedBranch}`,
+            ref: `refs/heads/${branch}`,
             object: { sha: "2".repeat(40) },
           })
     if (path.includes("/git/commits/"))
@@ -1071,14 +1061,14 @@ export function sandboxPublicationFixture(
             ? "changed"
             : fault === "missing co-author"
               ? commitMessage
-              : `${metadata?.commitMessage ?? commitMessage}\n\nCo-authored-by: ${policy.publish!.coAuthor}`,
+              : `${commitMessage}\n\nCo-authored-by: ${policy.publish!.coAuthor}`,
         verification: { verified: true },
       })
     if (path.endsWith("/pulls") || path.endsWith("/pulls/17")) {
       const pull = {
         number: 17,
         html_url: `https://github.com/${policy.repository}/pull/17`,
-        title: fault === "wrong title" ? "changed" : (metadata?.title ?? title),
+        title: fault === "wrong title" ? "changed" : title,
         draft: true,
         state: "open",
         maintainer_can_modify: false,
@@ -1088,7 +1078,7 @@ export function sandboxPublicationFixture(
           type: "Bot",
         },
         head: {
-          ref: selectedBranch,
+          ref: branch,
           sha: "2".repeat(40),
           repo: { id: policy.repositoryId, full_name: policy.repository },
         },
@@ -1099,7 +1089,7 @@ export function sandboxPublicationFixture(
         body:
           fault === "wrong body"
             ? "Changed description"
-            : `<!-- workflowd-publication:${Buffer.from(JSON.stringify(binding)).toString("base64")} -->\n\n${metadata?.body ?? "## Result\n\nReadable agent description."}`,
+            : `<!-- workflowd-publication:${Buffer.from(JSON.stringify(binding)).toString("base64")} -->\n\n## Result\n\nReadable agent description.`,
       }
       return Response.json(path.endsWith("/pulls") ? [{ number: pull.number }] : pull)
     }
@@ -1133,7 +1123,7 @@ export function sandboxPublicationFixture(
           {
             id: 101,
             name: "sandbox / runner",
-            run_id: actionsRunId,
+            run_id: 41,
             run_attempt: 1,
             head_sha: policy.workflowSha,
             status: "completed",
@@ -1142,7 +1132,7 @@ export function sandboxPublicationFixture(
           {
             id: 102,
             name: "agent-publish",
-            run_id: actionsRunId,
+            run_id: 41,
             run_attempt: 1,
             head_sha: policy.workflowSha,
             status: posts ? (waiting ? "in_progress" : "completed") : "waiting",
@@ -1156,16 +1146,16 @@ export function sandboxPublicationFixture(
         artifacts: [
           {
             id: posts && fault === "artifact replaced" ? 53 : 52,
-            name: `sandbox-result-${actionsRunId}-1`,
+            name: "sandbox-result-41-1",
             digest: "sha256:" + "f".repeat(64),
             size_in_bytes: 100,
             expired: false,
             workflow_run: {
-              id: fault === "foreign artifact" ? 42 : actionsRunId,
+              id: fault === "foreign artifact" ? 42 : 41,
               repository_id: policy.repositoryId,
               head_repository_id: policy.repositoryId,
               head_sha: policy.workflowSha,
-              head_branch: `workflowd/leases/${captured?.leaseId() ?? leaseId}`,
+              head_branch: `workflowd/leases/${leaseId}`,
             },
           },
         ],

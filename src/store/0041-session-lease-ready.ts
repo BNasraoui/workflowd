@@ -19,7 +19,9 @@ export const sessionLeaseReady = Effect.gen(function* () {
   }>`SELECT type,sql FROM sqlite_master WHERE tbl_name='sandbox_leases' AND sql IS NOT NULL`
   const table = definitions.find((row) => row.type === "table")?.sql
   if (table?.includes(sshReady) !== true)
-    return yield* Effect.die(new Error("sandbox_leases readiness check not found"))
+    return yield* Effect.fail(
+      new Error(`sandbox_leases holds no readiness check of the expected text: ${sshReady}`),
+    )
   yield* sql`CREATE TEMP TABLE ready_copy_sandbox_leases AS SELECT * FROM sandbox_leases`
   yield* sql`DROP TABLE sandbox_leases`
   yield* sql.unsafe(table.replace(sshReady, sessionReady))

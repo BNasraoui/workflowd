@@ -558,7 +558,7 @@ export const makeSandboxStore = Effect.gen(function* () {
       cause === undefined
         ? "Sandbox inventory incomplete; retry required"
         : sandboxDiagnostic("lease.inventory", cause).message
-    yield* sql`UPDATE sandbox_cleanup_runs SET last_error=${diagnostic}
+    yield* sql`UPDATE sandbox_cleanup_runs SET last_error=${diagnostic},updated_at=${Date.now()}
       WHERE repository_id=${policy.repositoryId} AND state != 'released'`
     yield* sql`UPDATE sandbox_leases SET release_error=${diagnostic}
       WHERE json_extract(policy,'$.repositoryId')=${policy.repositoryId} AND state != 'released'

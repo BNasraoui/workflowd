@@ -11,17 +11,12 @@ import { publicationBody, SandboxPolicy } from "./config"
 import { makeSandboxStore, SandboxError } from "./store"
 import {
   makePublishStore,
+  PublicationReceipt,
   publishedCommitSchema,
   type PublishIntent,
   ResultMetadata,
 } from "./publish-store"
 import { readSandboxSubmission } from "./submission"
-import {
-  approvedPublisher,
-  decodePublicationReceipt,
-  requireNativePublisherActivation,
-  type PublisherContract,
-} from "./publisher-contract"
 
 export const SandboxTerminal = Schema.Struct({
   state: Schema.Literals(["completed", "cancelled", "failed", "operator_required"]),
@@ -95,7 +90,6 @@ export function approvalComment(intent: PublishIntent): string {
 export const makeSandboxPublisher = (
   github: Effect.Success<ReturnType<typeof makeSandboxGithub>>,
   remote: Effect.Success<ReturnType<typeof makeSandboxLeaseService>>,
-  contract: PublisherContract = approvedPublisher,
 ) =>
   Effect.gen(function* () {
     const store = yield* makePublishStore
@@ -261,15 +255,31 @@ export const makeSandboxPublisher = (
         const raw = yield* Effect.try((): unknown =>
           JSON.parse(Buffer.from(records.at(-1)!, "base64").toString()),
         )
-        const currentReceipt = yield* decodePublicationReceipt(
-          raw,
-          {
-            binding: approvalComment(intent),
-            repository: policy.repository,
-            branch,
-          },
-          contract.receipt,
+        const proof = yield* Schema.decodeUnknownEffect(
+          Schema.Struct({
+            ...PublicationReceipt.fields,
+            binding: Schema.Json,
+            repository: Schema.String,
+            branch: Schema.String,
+            marker: Schema.String,
+          }),
+        )(raw)
+        if (
+          JSON.stringify(proof.binding) !== approvalComment(intent) ||
+          proof.repository !== policy.repository ||
+          proof.branch !== intent.metadata.branch ||
+          proof.marker !== marker
         )
+          return yield* Effect.fail(fail())
+        const { stage, pr, revoked, commitSha, cause } = proof
+        const currentReceipt = {
+          stage,
+          pr,
+          revoked,
+          commitSha,
+          closingIssuesVerified: proof.closingIssuesVerified === true,
+          ...(cause === undefined ? {} : { cause }),
+        }
         receipt = currentReceipt
         yield* store.saveReceipt(intent.run_id, currentReceipt)
       }
@@ -361,7 +371,12 @@ export const makeSandboxPublisher = (
     const poll = Effect.fn("SandboxPublisher.poll")(function* (runId: string, directory?: string) {
       const saved = yield* store.read(runId)
       const lease = yield* leases.read(runId)
-      if (lease) yield* requireNativePublisherActivation(lease.policy, contract)
+      if (lease?.policy.privateBootstrap?.mode === "actions-native")
+        return yield* Effect.fail(
+          new SandboxError({
+            message: "Actions-native leases do not publish through the publisher",
+          }),
+        )
       if (
         saved === null ||
         lease === null ||

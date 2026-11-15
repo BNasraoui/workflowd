@@ -15,11 +15,10 @@ import { requiredEnvironment } from "../helpers/config"
 import { AgentRunStoreLive } from "../../src/kernel/agent-run-store"
 import { fixtureExecutable } from "../helpers/fixture-executable.mjs"
 
-test("configured live composition settles prior leases, which revokes their grants on the control socket, and refuses P2 native launch before external effects", async () => {
+test("configured live composition settles prior leases, which revokes their grants on the control socket, and refuses an actions-native launch before external effects", async () => {
   const root = await mkdtemp(join(tmpdir(), "gateway-composition-"))
   const socket = join(root, "control", "gateway.sock")
   const gateway = {
-    nodeBinary: fixtureExecutable("node"),
     noscope: { binary: fixtureExecutable("noscope"), configHome: root },
     providerId: "anthropic",
     credentialRole: "fixture",
@@ -122,7 +121,7 @@ test("configured live composition settles prior leases, which revokes their gran
           if (Option.isNone(selected)) throw new Error("configured dispatch unavailable")
           const dispatch = selected.value
           // The start settled the prior lease; the gateway revoked its run.
-          for (let waited = 0; (yield* Effect.promise(challenge)) !== 403; waited++) {
+          for (let waited = 0; (yield* Effect.promise(challenge)) !== 503; waited++) {
             if (waited > 100) throw new Error("the settled lease kept its grant")
             yield* Effect.sleep("20 millis")
           }

@@ -58,10 +58,7 @@ const leaseService = (
       api,
       f.root,
       () => Promise.reject(new Error("no controller command for a private lease")),
-      {
-        native: { gateway },
-        publicationContract: { reference: "fixture-only:worktree", receipt: "fixed-v1" },
-      },
+      { native: { gateway } },
     )
   })
 

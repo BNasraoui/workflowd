@@ -123,6 +123,7 @@ export const bindRunSession = (
       options.digest ?? capabilityDigest(token),
       expiresAt,
       now,
+      now + 610000,
     )
     if (yield* store.sessionBound("run", 78, 1))
       yield* (yield* makeSandboxStore).bindSession("run", 78, 1)

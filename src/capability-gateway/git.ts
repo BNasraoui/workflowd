@@ -1,4 +1,5 @@
-import { readRequestBody, safeProviderResponse } from "./claude"
+import { readRequestBody } from "./claude"
+import { checkHeaders, RequestRefused } from "./headers"
 
 export interface GitRequest {
   readonly method: "GET" | "POST"
@@ -10,46 +11,39 @@ export interface GitRequest {
 export type GitUpstream = (url: string, input: GitRequest) => Promise<Response>
 
 function validateGitHeaders(request: Request, upload: boolean, advertisement: boolean) {
-  let bytes = 0
-  for (const [name, value] of request.headers) {
-    bytes += name.length + value.length
-    if (
-      bytes > 8192 ||
-      value.length > 2048 ||
-      /[\r\n\0]/.test(value) ||
-      ![
-        "authorization",
-        "host",
-        "content-type",
-        "content-length",
-        "accept",
-        "accept-encoding",
-        "accept-language",
-        "pragma",
-        "user-agent",
-        "git-protocol",
-      ].includes(name)
-    )
-      throw new Error("request refused")
-  }
+  checkHeaders(request, (name) =>
+    [
+      "authorization",
+      "host",
+      "content-type",
+      "content-length",
+      "accept",
+      "accept-encoding",
+      "accept-language",
+      "pragma",
+      "user-agent",
+      "git-protocol",
+    ].includes(name),
+  )
   const protocol = request.headers.get("git-protocol")
   if (
-    (request.headers.get("host") ?? "capability.invalid") !== "capability.invalid" ||
     (protocol !== null && !/^version=[012]$/.test(protocol)) ||
     (upload && request.headers.get("content-type") !== "application/x-git-upload-pack-request") ||
     (advertisement &&
       (request.body !== null || Number(request.headers.get("content-length") ?? 0) !== 0))
   )
-    throw new Error("request refused")
+    throw new RequestRefused()
   return protocol
 }
 
-/** The saved repository selects the destination; the caller can select only upload-pack. */
+/**
+ * The saved repository selects the destination; the caller can select only upload-pack. The read
+ * carries no credential, so it serves a public repository only.
+ */
 export async function gitReadRequest(
   request: Request,
   path: string,
   repository: { readonly repositoryId: number; readonly repositoryName: string },
-  credential: () => Promise<string | undefined>,
   signal: AbortSignal,
   send: GitUpstream,
 ) {
@@ -61,15 +55,12 @@ export async function gitReadRequest(
     (!advertisement && !upload) ||
     !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository.repositoryName)
   )
-    throw new Error("request refused")
+    throw new RequestRefused()
   const protocol = validateGitHeaders(request, upload, advertisement)
   const body = upload ? await readRequestBody(request, signal, 1048576) : undefined
-  const access = await credential()
   const headers = new Headers({ "accept-encoding": "identity" })
   if (protocol) headers.set("git-protocol", protocol)
   if (upload) headers.set("content-type", "application/x-git-upload-pack-request")
-  const basic = access ? Buffer.from(`x-access-token:${access}`).toString("base64") : undefined
-  if (basic) headers.set("authorization", `Basic ${basic}`)
   signal.throwIfAborted()
   const response = await send(
     `https://github.com/${repository.repositoryName}.git${path.slice(prefix.length)}`,
@@ -91,8 +82,7 @@ export async function gitReadRequest(
     throw new Error("upstream unavailable")
   }
   return {
-    response:
-      access && basic ? (await safeProviderResponse(response, [access, basic])).response : response,
+    response,
     headers: new Headers({ "content-type": contentType, "cache-control": "no-store" }),
   }
 }

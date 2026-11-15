@@ -39,6 +39,7 @@ test("a session proof is single-use and tokens bind existing run, recipient and 
             "b".repeat(64),
             now + 3600000,
             now,
+            now + 610000,
           ),
         ))._tag,
       ).toBe("Failure")
@@ -194,6 +195,7 @@ test("a new session ends every token of the earlier one, and a proof opens one s
         "a".repeat(64),
         now + 60000,
         now,
+        now + 610000,
       )
       expect(binding).toEqual({ runId: "run", channel: first.channel, session: 1 })
       const { session: _, ...run } = binding
@@ -208,6 +210,7 @@ test("a new session ends every token of the earlier one, and a proof opens one s
             "c".repeat(64),
             now + 60000,
             now + 3,
+            now + 610000,
           ),
         ))._tag,
       ).toBe("Failure")
@@ -216,12 +219,18 @@ test("a new session ends every token of the earlier one, and a proof opens one s
       const challenge = { runId: "run", channel: second.channel, nonce: second.nonce, recipientId }
       expect(
         (yield* Effect.result(
-          store.bindSession(challenge, "jti-1", "c".repeat(64), now + 60000, now + 4),
+          store.bindSession(challenge, "jti-1", "c".repeat(64), now + 60000, now + 4, now + 610000),
         ))._tag,
       ).toBe("Failure")
       expect(
-        (yield* store.bindSession(challenge, "jti-2", "c".repeat(64), now + 60000, now + 4))
-          .session,
+        (yield* store.bindSession(
+          challenge,
+          "jti-2",
+          "c".repeat(64),
+          now + 60000,
+          now + 4,
+          now + 610000,
+        )).session,
       ).toBe(2)
       for (const digest of ["a", "b"]) {
         expect((yield* Effect.result(store.authorize(run, digest.repeat(64), now + 5)))._tag).toBe(

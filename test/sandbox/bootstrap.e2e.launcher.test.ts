@@ -174,7 +174,6 @@ for (const race of [
       },
     })
     const config = {
-      nodeBinary: node,
       noscope: { binary: fixtureExecutable("noscope"), configHome: root },
       providerId: "anthropic",
       credentialRole: "fixture",
@@ -276,7 +275,6 @@ for (const race of [
             () => Promise.reject(new Error("no controller command for a private lease")),
             {
               native: { gateway: local },
-              publicationContract: { reference: "fixture-only:worktree", receipt: "fixed-v1" },
             },
           )
           // The gateway as its own process, behind TLS; then the real bootstrap and relay.

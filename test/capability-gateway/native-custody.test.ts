@@ -53,7 +53,6 @@ async function withLogin(
   const env = {
     PATH: process.env.PATH ?? "/usr/bin:/bin",
     WORKFLOWD_CAPABILITY_GATEWAY: JSON.stringify({
-      nodeBinary: "/usr/bin/node",
       noscope: { binary: "/usr/bin/noscope", configHome: root },
       storePath: join(root, "gateway.db"),
       controlSocket: join(root, "control/gateway.sock"),

@@ -178,7 +178,6 @@ try {
   const database = join(root, "workflowd.db")
   const controlSocket = join(root, "control", "gateway.sock")
   const config = {
-    nodeBinary: fixtureExecutable("node"),
     noscope: { binary: fixtureExecutable("noscope"), configHome: root },
     providerId: "anthropic",
     credentialRole: "fixture",
