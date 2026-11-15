@@ -214,13 +214,11 @@ type BundleHeader = {
 
 /** The v2 bundle header: `-<sha> <comment>` prerequisites, `<sha> <ref>` refs, a blank line. */
 const parseBundleHeader = (bundle: Uint8Array): BundleHeader | SealedResultRefused => {
-  const end = bundle.subarray(0, 64 * 1024).indexOf(0x0a)
-  const signature = "# v2 git bundle"
-  if (end < 0 || new TextDecoder().decode(bundle.subarray(0, end)) !== signature)
-    return refused("bundle_format")
+  const signature = new TextEncoder().encode("# v2 git bundle\n")
+  if (!signature.every((byte, index) => bundle[index] === byte)) return refused("bundle_format")
   const prerequisites: string[] = []
   const refs: { sha: string; name: string }[] = []
-  let offset = end + 1
+  let offset = signature.byteLength
   for (;;) {
     const next = bundle.indexOf(0x0a, offset)
     if (next < 0 || next - offset > 4096) return refused("bundle_format")
@@ -303,7 +301,8 @@ const scanPack = (pack: Uint8Array): SealedResultRefused | undefined => {
     return refused("bundle_format")
   const version = view.getUint32(4)
   const count = view.getUint32(8)
-  if (version !== 2 && version !== 3) return refused("bundle_format")
+  // git bundle writes version 2; no other version is read.
+  if (version !== 2) return refused("bundle_format")
   if (count > sealedResultLimits.objects)
     return refused("object_count", `${count} objects; the bound is ${sealedResultLimits.objects}`)
   let offset = 12

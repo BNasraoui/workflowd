@@ -1,8 +1,10 @@
 import { expect, test } from "bun:test"
 import { Cause, Effect, Exit, Redacted, Schema } from "effect"
 import { chmod, mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises"
+import { createHash } from "node:crypto"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
+import { constants as zlibConstants, deflateRawSync, deflateSync } from "node:zlib"
 import {
   checkSealedResult,
   decodeSealedResult,
@@ -542,8 +544,12 @@ test(
   }),
 )
 
+/** The git calls a recording git made; none when no git ran. */
+const recordedCalls = async (f: Fixture, recorder: Awaited<ReturnType<typeof recordingGit>>) =>
+  (await Bun.file(join(f.root, "git-calls.jsonl")).exists()) ? recorder.calls() : []
+
 test(
-  "a bundle that expands past the bounds is refused inside the time and disk limits, before git unpacks it",
+  "a bundle whose objects declare more than the bound is refused before git unpacks it",
   withFixture(async (f) => {
     const recorder = await recordingGit(f)
     // 80 MiB of zeros compress to well under the 16 MiB bundle bound.
@@ -557,13 +563,205 @@ test(
     const started = Date.now()
     const exit = await publish(result, options(f, { gitBinary: recorder.path }))
     expect(refusedCheck(exit)).toBe("object_bytes")
-    expect(Date.now() - started).toBeLessThan(sealedResultLimits.timeLimitMs)
-    // No git child ever read the bundle: the bound held during the unpack.
-    const calls = await Bun.file(join(f.root, "git-calls.jsonl"))
-      .exists()
-      .then((exists) => (exists ? recorder.calls() : []))
-    expect(calls.some((call) => call.argv.includes("index-pack"))).toBe(false)
+    // The walk refuses at the declared size of the object, before any inflation.
+    expect(Date.now() - started).toBeLessThan(2_000)
+    expect(
+      (await recordedCalls(f, recorder)).some((call) => call.argv.includes("index-pack")),
+    ).toBe(false)
     expect(await remoteRef(f)).toBe("")
+  }),
+  60_000,
+)
+
+// Packs built byte by byte, as a misbehaving runner could send them.
+const MiB = 1024 * 1024
+const concat = (...parts: ReadonlyArray<Uint8Array | string>) =>
+  Buffer.concat(parts.map((part) => (typeof part === "string" ? Buffer.from(part) : part)))
+const uint32 = (value: number) => {
+  const bytes = Buffer.alloc(4)
+  bytes.writeUInt32BE(value)
+  return bytes
+}
+/** The type and size of a pack object: 4 bits of size in the first byte, then 7 per byte. */
+const objectHeader = (type: number, size: number) => {
+  const bytes = [(type << 4) | (size & 0x0f)]
+  for (let rest = Math.floor(size / 16); rest > 0; rest = Math.floor(rest / 128)) {
+    bytes[bytes.length - 1]! |= 0x80
+    bytes.push(rest & 0x7f)
+  }
+  return Uint8Array.from(bytes)
+}
+/** A size of a delta: 7 bits per byte, low bits first. */
+const deltaSize = (size: number) => {
+  const bytes: number[] = []
+  for (let rest = size; ; rest = Math.floor(rest / 128)) {
+    bytes.push((rest & 0x7f) | (rest >= 128 ? 0x80 : 0))
+    if (rest < 128) return Uint8Array.from(bytes)
+  }
+}
+const blobId = (content: Uint8Array) =>
+  createHash("sha1")
+    .update(concat(`blob ${content.byteLength}\0`, content))
+    .digest()
+const blobEntry = (content: Uint8Array) =>
+  concat(objectHeader(3, content.byteLength), deflateSync(content))
+const refDeltaEntry = (base: Uint8Array, delta: Uint8Array) =>
+  concat(objectHeader(7, delta.byteLength), base, deflateSync(delta))
+const pack = (
+  entries: ReadonlyArray<Uint8Array>,
+  header: { version?: number; count?: number } = {},
+) => {
+  const body = concat(
+    "PACK",
+    uint32(header.version ?? 2),
+    uint32(header.count ?? entries.length),
+    ...entries,
+  )
+  return concat(body, createHash("sha1").update(body).digest())
+}
+const packBundle = (f: Fixture, packBytes: Uint8Array) =>
+  concat(
+    `# v2 git bundle\n-${f.sourceSha} base\n${"f".repeat(40)} refs/workflowd/result\n\n`,
+    packBytes,
+  )
+/** A zlib stream of `mebibytes` MiB of zeros, from one flushed block repeated. */
+const zerosStream = (mebibytes: number) => {
+  const block = deflateRawSync(new Uint8Array(MiB), { finishFlush: zlibConstants.Z_FULL_FLUSH })
+  const adler = uint32((((mebibytes * MiB) % 65521) * 65536 + 1) >>> 0)
+  return concat(
+    Uint8Array.from([0x78, 0x01]),
+    ...Array.from({ length: mebibytes }, () => block),
+    Uint8Array.from([0x03, 0x00]),
+    adler,
+  )
+}
+test(
+  "a small pack with one delta whose result is above the bound is refused before git unpacks it",
+  withFixture(async (f) => {
+    const recorder = await recordingGit(f)
+    const base = new Uint8Array(64 * 1024)
+    // Each 0x80 copies 64 KiB of the base: 1120 of them make a 70 MiB blob.
+    const copies = 1120
+    const delta = concat(
+      deltaSize(base.byteLength),
+      deltaSize(copies * base.byteLength),
+      new Uint8Array(copies).fill(0x80),
+    )
+    const bundle = packBundle(f, pack([blobEntry(base), refDeltaEntry(blobId(base), delta)]))
+    expect(bundle.byteLength).toBeLessThan(4096)
+    const exit = await publish(
+      await decode(manifest(f.sourceSha), bundle),
+      options(f, { gitBinary: recorder.path }),
+    )
+    expect(refusedCheck(exit)).toBe("object_bytes")
+    expect(
+      (await recordedCalls(f, recorder)).some((call) => call.argv.includes("index-pack")),
+    ).toBe(false)
+  }),
+)
+
+test(
+  "a pack whose header gives a size below what its stream inflates to is refused, inflating no more than the size",
+  withFixture(async (f) => {
+    // The header says 10 bytes; the stream holds 256 MiB of zeros.
+    const bundle = packBundle(f, pack([concat(objectHeader(3, 10), zerosStream(256))]))
+    const result = await decode(manifest(f.sourceSha), bundle)
+    const peak = process.resourceUsage().maxRSS
+    const exit = await publish(result, options(f))
+    expect(refusedCheck(exit)).toBe("bundle_format")
+    // The peak memory of the process (KiB) grew by far less than the stream holds.
+    expect(process.resourceUsage().maxRSS - peak).toBeLessThan(128 * 1024)
+  }),
+  30_000,
+)
+
+const blob = blobEntry(new TextEncoder().encode("content\n"))
+for (const [name, check, packBytes] of [
+  [
+    "a zlib stream that is cut",
+    "bundle_format",
+    () => pack([blob.subarray(0, blob.byteLength - 3)]),
+  ],
+  ["bytes after the trailer of the pack", "bundle_format", () => concat(pack([blob]), "x")],
+  [
+    "a count of objects above the objects present",
+    "bundle_format",
+    () => pack([blob], { count: 2 }),
+  ],
+  [
+    "a count of objects below the objects present",
+    "bundle_format",
+    () => pack([blob, blob], { count: 1 }),
+  ],
+  ["a pack of version 3", "bundle_format", () => pack([blob], { version: 3 })],
+  ["a pack too short for its header and trailer", "bundle_format", () => pack([]).subarray(0, 31)],
+  ["a pack that is not a pack", "bundle_format", () => concat("KCAP", pack([blob]).subarray(4))],
+  [
+    `a header count of ${sealedResultLimits.objects + 1} objects`,
+    "object_count",
+    () => pack([], { count: sealedResultLimits.objects + 1 }),
+  ],
+  [
+    `a header count of ${sealedResultLimits.objects} objects and none present`,
+    "bundle_format",
+    () => pack([], { count: sealedResultLimits.objects }),
+  ],
+] as const)
+  test(
+    `the walk of the pack refuses ${name}: result_refused: ${check}`,
+    withFixture(async (f) => {
+      const exit = await publish(
+        await decode(manifest(f.sourceSha), packBundle(f, packBytes())),
+        options(f),
+      )
+      expect(refusedCheck(exit)).toBe(check)
+    }),
+  )
+
+/** A bundle of the result with its header lines changed. */
+const withHeader = (bundle: Uint8Array, change: (lines: string[]) => string[]) => {
+  const end = Buffer.from(bundle).indexOf("\n\n") + 1
+  const lines = new TextDecoder().decode(bundle.subarray(0, end)).split("\n").slice(0, -1)
+  return concat(change(lines).join("\n"), "\n", bundle.subarray(end))
+}
+
+test(
+  "a header line of 4096 bytes is read, and one of 4097 bytes is refused",
+  withFixture(async (f) => {
+    const bundle = await handBundle(f, (git, dir) => commitFile(git, dir, "a.txt"))
+    const prerequisite = (length: number) =>
+      withHeader(bundle, ([signature, , ...rest]) => [
+        signature!,
+        `-${f.sourceSha} ${"x".repeat(length - 42)}`,
+        ...rest,
+      ])
+    const long = await publish(await decode(manifest(f.sourceSha), prerequisite(4097)), options(f))
+    expect(refusedCheck(long)).toBe("bundle_format")
+    const exit = await publish(await decode(manifest(f.sourceSha), prerequisite(4096)), options(f))
+    if (Exit.isFailure(exit)) throw Cause.squash(exit.cause)
+  }),
+)
+
+test(
+  "a header of 16 lines is read, and one of 17 lines is refused",
+  withFixture(async (f) => {
+    const bundle = await handBundle(f, (git, dir) => commitFile(git, dir, "a.txt"))
+    const lines = (count: number) =>
+      withHeader(bundle, ([signature, ...rest]) => [
+        signature!,
+        ...Array.from(
+          { length: count - rest.length },
+          (_, index) => `-${index.toString(16).padStart(40, "0")}`,
+        ),
+        ...rest,
+      ])
+    // Sixteen lines are read; their extra prerequisites are refused by the base rule.
+    expect(
+      refusedCheck(await publish(await decode(manifest(f.sourceSha), lines(16)), options(f))),
+    ).toBe("base")
+    expect(
+      refusedCheck(await publish(await decode(manifest(f.sourceSha), lines(17)), options(f))),
+    ).toBe("bundle_format")
   }),
 )
 
