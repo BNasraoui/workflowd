@@ -9,8 +9,7 @@ import tempfile
 
 def main():
     os.umask(0o077)
-    Path("/tmp/opencode").mkdir(mode=0o700, exist_ok=True)
-    evidence = Path(tempfile.mkdtemp(prefix="isolated-fixture-check-", dir="/tmp/opencode"))
+    evidence = Path(tempfile.mkdtemp(prefix="isolated-fixture-check-"))
     source = Path(__file__).with_name("isolated-fixture.py")
     failed = []
     for case in ["absent", "existing", "symlink"]:
@@ -44,6 +43,7 @@ def main():
             passed &= mountpoint.is_symlink() and (target / "user-file").read_text() == "preserve"
         if not passed:
             failed.append(case)
+    shutil.rmtree(evidence, ignore_errors=True)
     print(f"isolated fixture checks: 3 cases ran, {len(failed)} failed")
     for case in failed:
         print(f"failed: {case}")
