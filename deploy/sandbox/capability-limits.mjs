@@ -16,3 +16,9 @@ export const maxJtiLength = 256
 /** The bytes of all request header names and values, and of one header value. */
 export const maxHeaderBytes = 8192
 export const maxHeaderValueBytes = 2048
+/**
+ * The longest time in milliseconds that a model stream may go without a chunk. The gateway's
+ * config decodes `streamIdleMs` up to this value, and its listener destroys a socket idle for
+ * this long, so a larger idle limit could never take effect.
+ */
+export const maxStreamIdleMs = 120000

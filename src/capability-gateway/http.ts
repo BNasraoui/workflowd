@@ -5,7 +5,7 @@ import type { Socket } from "node:net"
 import { Cause, Effect, Exit } from "effect"
 import { readRequestBody } from "./claude"
 import { capabilityOrigin } from "./headers"
-import { maxHeaderBytes } from "../../deploy/sandbox/capability-limits.mjs"
+import { maxHeaderBytes, maxStreamIdleMs } from "../../deploy/sandbox/capability-limits.mjs"
 import { CapabilityRefused } from "./store"
 import type { CapabilityGateway } from "./service"
 
@@ -111,7 +111,9 @@ export function capabilityHttpServer(handle: (request: Request) => Promise<Respo
   })
   server.requestTimeout = 120000
   server.headersTimeout = 15000
-  server.setTimeout(120000, (socket) => socket.destroy())
+  // A socket idle this long is destroyed, also under a silent model stream: the stream's idle
+  // limit in the config is bounded by the same number.
+  server.setTimeout(maxStreamIdleMs, (socket) => socket.destroy())
   server.on("connection", (socket) => {
     sockets.add(socket)
     socket.once("close", () => sockets.delete(socket))

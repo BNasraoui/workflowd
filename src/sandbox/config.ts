@@ -2,7 +2,11 @@ import { Schema } from "effect"
 import { safePublication } from "../../deploy/sandbox/publication.mjs"
 import skills from "../../deploy/sandbox/skills/catalog.json"
 import { publicBootstrapFields } from "../../deploy/sandbox/public-status.mjs"
-import { maxStreamsPerRun, providerIdPattern } from "../../deploy/sandbox/capability-limits.mjs"
+import {
+  maxStreamIdleMs,
+  maxStreamsPerRun,
+  providerIdPattern,
+} from "../../deploy/sandbox/capability-limits.mjs"
 
 const PublicationCoAuthor = Schema.String.check(
   Schema.makeFilter(
@@ -42,11 +46,11 @@ export const CapabilityGatewayConfig = Schema.Struct({
   maxStreams: Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 512 })),
   maxStreamsPerRun: Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: maxStreamsPerRun })),
   /**
-   * Milliseconds a stream may go without a chunk before the gateway aborts it, at most ten
-   * minutes; 120000 when absent. A stream that keeps sending runs to its token's expiry.
+   * Milliseconds a stream may go without a chunk before the gateway aborts it, at most
+   * `maxStreamIdleMs` (two minutes, the listener's socket timeout); 120000 when absent. A stream that keeps sending runs to its token's expiry.
    */
   streamIdleMs: Schema.optionalKey(
-    Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 600000 })),
+    Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: maxStreamIdleMs })),
   ),
   /**
    * Where the gateway's own process listens; workflowd ignores it. The listener is clear text,
