@@ -174,7 +174,6 @@ for (const race of [
       },
     })
     const config = {
-      nodeBinary: node,
       noscope: { binary: fixtureExecutable("noscope"), configHome: root },
       providerId: "anthropic",
       credentialRole: "fixture",

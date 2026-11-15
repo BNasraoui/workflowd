@@ -173,7 +173,6 @@ try {
   })
   const database = join(root, "workflowd.db")
   const config = {
-    nodeBinary: fixtureExecutable("node"),
     noscope: { binary: fixtureExecutable("noscope"), configHome: root },
     providerId: "anthropic",
     credentialRole: "fixture",
