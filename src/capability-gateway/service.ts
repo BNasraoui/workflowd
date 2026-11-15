@@ -29,6 +29,8 @@ export interface GatewayConfiguration {
   readonly credentialRole: string
   readonly maxStreams: number
   readonly maxStreamsPerRun: number
+  /** A stream silent this long is aborted; a stream that keeps sending runs to token expiry. */
+  readonly streamIdleMs?: number
 }
 const RenewalKey = Schema.Struct({
   runId: Schema.String,
@@ -48,13 +50,17 @@ export const makeCapabilityGateway = (
   },
 ) =>
   Effect.gen(function* () {
+    const streamIdleMs = config.streamIdleMs ?? 120000
     if (
       !Number.isSafeInteger(config.maxStreams) ||
       config.maxStreams < 1 ||
       config.maxStreams > 512 ||
       !Number.isSafeInteger(config.maxStreamsPerRun) ||
       config.maxStreamsPerRun < 1 ||
-      config.maxStreamsPerRun > config.maxStreams
+      config.maxStreamsPerRun > config.maxStreams ||
+      !Number.isSafeInteger(streamIdleMs) ||
+      streamIdleMs < 1 ||
+      streamIdleMs > 600000
     )
       return yield* Effect.fail(new Error("gateway limits refused"))
     const store = yield* makeCapabilityStore
@@ -202,11 +208,9 @@ export const makeCapabilityGateway = (
               const unlisten = authority.listen(binding.runId, () => controller.abort())
               const timer = setTimeout(
                 () => controller.abort(),
-                Math.max(
-                  0,
-                  Math.min(120000, grant.expiresAt - Date.now(), grant.deadline - Date.now()),
-                ),
+                Math.max(0, Math.min(grant.expiresAt - Date.now(), grant.deadline - Date.now())),
               )
+              let idleTimer = setTimeout(() => controller.abort(), streamIdleMs)
               let providerTimer: ReturnType<typeof setTimeout> | undefined
               let released = false
               const release = () => {
@@ -214,6 +218,7 @@ export const makeCapabilityGateway = (
                 released = true
                 unlisten()
                 clearTimeout(timer)
+                clearTimeout(idleTimer)
                 clearTimeout(providerTimer)
                 active.get(binding.runId)?.delete(controller)
                 if (active.get(binding.runId)?.size === 0) active.delete(binding.runId)
@@ -225,6 +230,11 @@ export const makeCapabilityGateway = (
                 controller,
                 release,
                 transferred: false,
+                touch: () => {
+                  if (released) return
+                  clearTimeout(idleTimer)
+                  idleTimer = setTimeout(() => controller.abort(), streamIdleMs)
+                },
                 providerExpiry: (expiry: number) => {
                   providerTimer = setTimeout(
                     () => controller.abort(),
@@ -447,6 +457,7 @@ export const makeCapabilityGateway = (
                           }
                           const chunk: unknown = item.value
                           if (!(chunk instanceof Uint8Array)) throw new Error("response refused")
+                          ownership.touch()
                           bytes += chunk.length
                           if (bytes > 32 * 1048576) throw new Error("response capacity")
                           await observe?.(chunk)

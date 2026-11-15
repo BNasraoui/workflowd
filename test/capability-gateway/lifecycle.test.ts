@@ -259,3 +259,32 @@ for (const [ending, phase] of [
     }
   }, 15000)
 }
+
+test("the stream idle limit is a positive integer of at most ten minutes", async () => {
+  const base = {
+    noscope: { binary: fixtureExecutable("noscope"), configHome: "/nonexistent" },
+    providerId: "anthropic",
+    credentialRole: "fixture",
+    maxStreams: 1,
+    maxStreamsPerRun: 1,
+  }
+  const outcome = (streamIdleMs?: number) =>
+    Effect.runPromise(
+      Effect.gen(function* () {
+        yield* seedCapabilityRun(Date.now())
+        return yield* makeCapabilityGateway(
+          streamIdleMs === undefined ? base : { ...base, streamIdleMs },
+        )
+      }).pipe(
+        Effect.as("built"),
+        Effect.catch((error) => Effect.succeed(error.message)),
+        Effect.provide(AgentRunStoreLive),
+        Effect.provide(SqliteClient.layer({ filename: ":memory:" })),
+        Effect.scoped,
+      ),
+    )
+  for (const refused of [0, -1, 1.5, 600001, Number.NaN])
+    expect(await outcome(refused)).toBe("gateway limits refused")
+  expect(await outcome(600000)).toBe("built")
+  expect(await outcome()).toBe("built")
+})
