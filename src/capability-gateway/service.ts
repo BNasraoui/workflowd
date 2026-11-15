@@ -1,7 +1,7 @@
 import { Context, Effect, Option, Schema, Semaphore } from "effect"
 import { SqlClient } from "effect/unstable/sql"
 import { randomInt } from "node:crypto"
-import { mintCapability, type NoscopeConfiguration } from "./noscope"
+import { mintCapability } from "./noscope"
 import { claudeRequest, readRequestBody, type ClaudeUpstream } from "./claude"
 import { CapabilityRefused, capabilityDigest, makeCapabilityStore } from "./store"
 import { githubJobKeys, verifyJobProof } from "../sandbox/bootstrap"
@@ -10,22 +10,11 @@ import { ownedPromise } from "./owned"
 import { gitReadRequest, type GitUpstream } from "./git"
 import { renewLeadMaxMs, renewLeadMinMs } from "../../deploy/sandbox/renewal.mjs"
 import { capabilityOrigin, RequestRefused } from "./headers"
-import {
-  maxJtiLength,
-  maxProofLength,
-  maxStreamsPerRun,
-} from "../../deploy/sandbox/capability-limits.mjs"
+import { maxJtiLength, maxProofLength } from "../../deploy/sandbox/capability-limits.mjs"
+import type { CapabilityGatewayConfig } from "../sandbox/config"
 
-export interface GatewayConfiguration {
-  readonly gitRead?: boolean
-  readonly noscope: NoscopeConfiguration
-  readonly providerId: string
-  readonly credentialRole: string
-  readonly maxStreams: number
-  readonly maxStreamsPerRun: number
-  /** A stream silent this long is aborted; a stream that keeps sending runs to token expiry. */
-  readonly streamIdleMs?: number
-}
+/** The idle limit of a stream when the config names none. */
+const defaultStreamIdleMs = 120000
 const SessionProof = Schema.Struct({
   token: Schema.String.check(Schema.isMaxLength(maxProofLength)),
 })
@@ -127,25 +116,13 @@ export type CapabilityRevoke = Effect.Success<typeof makeCapabilityRevoke>
 
 /** Owns run authority and stream lifetime. No administrative HTTP listener shares this interface. */
 export const makeCapabilityGateway = (
-  config: GatewayConfiguration,
+  config: CapabilityGatewayConfig,
   upstream: ClaudeUpstream = fetch,
   gitUpstream: GitUpstream = fetch,
   keys: typeof githubJobKeys = githubJobKeys,
 ) =>
   Effect.gen(function* () {
-    const streamIdleMs = config.streamIdleMs ?? 120000
-    if (
-      !Number.isSafeInteger(config.maxStreams) ||
-      config.maxStreams < 1 ||
-      config.maxStreams > 512 ||
-      !Number.isSafeInteger(config.maxStreamsPerRun) ||
-      config.maxStreamsPerRun < 1 ||
-      config.maxStreamsPerRun > Math.min(config.maxStreams, maxStreamsPerRun) ||
-      !Number.isSafeInteger(streamIdleMs) ||
-      streamIdleMs < 1 ||
-      streamIdleMs > 600000
-    )
-      return yield* Effect.fail(new Error("gateway limits refused"))
+    const streamIdleMs = config.streamIdleMs ?? defaultStreamIdleMs
     const store = yield* makeCapabilityStore
     const sql = yield* SqlClient.SqlClient
     const authority = runLifetime(sql)

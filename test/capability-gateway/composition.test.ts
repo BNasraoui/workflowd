@@ -150,3 +150,35 @@ test("configured live composition settles prior leases, which revokes their gran
     await rm(root, { recursive: true, force: true })
   }
 })
+
+test("the gateway config bounds its streams: an idle limit of 1 ms to ten minutes, and at most maxStreams for a run", () => {
+  const gateway = {
+    noscope: { binary: "/fixture/noscope", configHome: "/fixture" },
+    providerId: "anthropic",
+    credentialRole: "fixture",
+    maxStreams: 2,
+    maxStreamsPerRun: 2,
+    listen: { host: "127.0.0.1", port: 0 },
+  }
+  const load = (keys: Record<string, unknown>) =>
+    loadCapabilityGatewayConfig(
+      { WORKFLOWD_CAPABILITY_GATEWAY: JSON.stringify({ ...gateway, ...keys }) },
+      "/fixture",
+    ).gateway
+  for (const [keys, reason] of [
+    [{ streamIdleMs: 0 }, 'Expected a value between 1 and 600000\n  at ["streamIdleMs"]'],
+    [{ streamIdleMs: -1 }, 'Expected a value between 1 and 600000\n  at ["streamIdleMs"]'],
+    [{ streamIdleMs: 600001 }, 'Expected a value between 1 and 600000\n  at ["streamIdleMs"]'],
+    [{ streamIdleMs: 1.5 }, 'Expected an integer\n  at ["streamIdleMs"]'],
+    [{ streamIdleMs: "1000" }, 'Expected number\n  at ["streamIdleMs"]'],
+    [{ maxStreams: 513 }, 'Expected a value between 1 and 512\n  at ["maxStreams"]'],
+    [
+      { maxStreams: 1, maxStreamsPerRun: 2 },
+      'Expected a value of at most maxStreams\n  at ["maxStreamsPerRun"]',
+    ],
+  ] as const)
+    expect(() => load(keys)).toThrow(reason)
+  expect(load({ streamIdleMs: 1 }).streamIdleMs).toBe(1)
+  expect(load({ streamIdleMs: 600000 }).streamIdleMs).toBe(600000)
+  expect(load({}).streamIdleMs).toBeUndefined()
+})

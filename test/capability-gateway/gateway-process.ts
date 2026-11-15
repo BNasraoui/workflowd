@@ -94,6 +94,15 @@ export const sse =
   }) +
   event("message_stop", {})
 
+/** Keys of the gateway config that a test sets for its gateway. */
+interface GatewayKeys {
+  readonly maxStreamsPerRun?: number
+  readonly streamIdleMs?: number
+}
+
+/** The fixed event stream, one event and then silence, or `chunks` events `gapMs` apart. */
+type UpstreamAnswer = "events" | "stall" | { readonly chunks: number; readonly gapMs: number }
+
 /** A request that reached the model upstream: its path and query, headers and body text. */
 export interface UpstreamRequest {
   readonly path: string
@@ -106,9 +115,9 @@ export interface UpstreamRequest {
  * upstream, each in this process. The run token provider records each start in `mints`, the
  * most it saw running at once in `peaks`, waits while `slow` exists, and gives a token that
  * lives `ttl` seconds when that file names fewer than asked. The model upstream records each
- * request it receives.
+ * request it receives. `keys` add to or replace keys of the gateway config.
  */
-export async function fixture() {
+export async function fixture(keys: GatewayKeys = {}) {
   const root = await mkdtemp(join(tmpdir(), "wfd-gateway-process-"))
   await mkdir(join(root, "live"))
   await writeFile(
@@ -136,7 +145,8 @@ try {
     "{ttl}",
   ])
   await writeNoscopeProvider(root, "provider-access", [process.execPath, join(root, "access.mjs")])
-  let stall = false
+  let answer: UpstreamAnswer = "events"
+  let cancelled = 0
   const received: UpstreamRequest[] = []
   const upstream = Bun.serve({
     hostname: "127.0.0.1",
@@ -148,14 +158,34 @@ try {
         headers: Object.fromEntries(request.headers),
         body: await request.text(),
       })
+      if (answer === "events")
+        return new Response(sse, { headers: { "content-type": "text/event-stream" } })
+      const ends = answer !== "stall"
+      const { chunks, gapMs } = answer === "stall" ? { chunks: 1, gapMs: 0 } : answer
+      let timer: ReturnType<typeof setTimeout> | undefined
       return new Response(
-        stall
-          ? new ReadableStream({
-              start(controller) {
-                controller.enqueue(new TextEncoder().encode("event: message_start\ndata: {}\n\n"))
-              },
-            })
-          : sse,
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            let sent = 0
+            const tick = () => {
+              if (sent === chunks) {
+                if (ends) controller.close()
+                return
+              }
+              const event = ends
+                ? `event: ping\ndata: ${sent}\n\n`
+                : "event: message_start\ndata: {}\n\n"
+              sent++
+              controller.enqueue(new TextEncoder().encode(event))
+              timer = setTimeout(tick, gapMs)
+            }
+            tick()
+          },
+          cancel() {
+            clearTimeout(timer)
+            cancelled++
+          },
+        }),
         { headers: { "content-type": "text/event-stream" } },
       )
     },
@@ -177,6 +207,7 @@ try {
     maxStreams: 8,
     maxStreamsPerRun: 2,
     listen: { host: "127.0.0.1", port: 0 },
+    ...keys,
   }
   const env = {
     PATH: process.env.PATH,
@@ -219,9 +250,16 @@ try {
         : writeFile(join(root, "ttl"), String(seconds)),
     /** Each request that reached the model upstream, in order. */
     upstreamRequests: (): ReadonlyArray<UpstreamRequest> => received,
+    /** The upstream answers with one event and then nothing, until set back. */
     setStall: (value: boolean) => {
-      stall = value
+      answer = value ? "stall" : "events"
     },
+    /** The upstream answers with `chunks` events `gapMs` apart, then ends. */
+    setTrickle: (chunks: number, gapMs: number) => {
+      answer = { chunks, gapMs }
+    },
+    /** How many upstream answers the gateway cancelled before their end. */
+    upstreamCancels: () => cancelled,
     sql: <A>(query: (sql: SqlClient.SqlClient) => Effect.Effect<A, unknown>) =>
       store(
         Effect.gen(function* () {
@@ -424,12 +462,13 @@ export const client = (port: number) => {
   return { url, challenge, audience, session, grant, provider, call, renew }
 }
 
-/** Starts a gateway with `start`, runs `body` against it, and always stops both. */
+/** Starts a gateway with `start` and the config `keys`, runs `body` against it, and always stops both. */
 export async function withGateway(
   start: (f: Fixture) => Promise<Gateway>,
   body: (f: Fixture, gateway: Gateway) => Promise<void>,
+  keys: GatewayKeys = {},
 ) {
-  const f = await fixture()
+  const f = await fixture(keys)
   let gateway: Gateway | undefined
   try {
     gateway = await start(f)

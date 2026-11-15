@@ -1,4 +1,20 @@
-# Capability gateway: Git reads, session leases and fixture suites
+# Capability gateway: configuration, Git reads, session leases and fixture suites
+
+## Configuration
+
+`WORKFLOWD_CAPABILITY_GATEWAY` holds one JSON object. workflowd and the gateway process
+decode it with the same schema, and a key it does not name is refused.
+
+| Key | Value |
+| --- | --- |
+| `noscope.binary`, `noscope.configHome` | Absolute paths of the noscope binary and of its configuration. |
+| `providerId` | The provider id of the model route `/capabilities/v1/providers/<id>/`. |
+| `credentialRole` | The noscope role that mints run tokens and provider credentials. |
+| `maxStreams` | The most streams open at once in the gateway: 1 to 512. |
+| `maxStreamsPerRun` | The most streams open at once for one run: 1 to 4, and at most `maxStreams`. |
+| `streamIdleMs` | Optional. Milliseconds a stream may go without a chunk before the gateway aborts it: 1 to 600000, 120000 when absent. A stream that keeps sending runs to its token's expiry. |
+| `gitRead` | Optional. Whether runs may read their saved repository; false when absent. |
+| `listen.host`, `listen.port` | Where the gateway process listens: port 0 to 65535, where 0 asks for a free port. workflowd accepts the key and does not read it; the gateway process requires it. |
 
 ## Git reads
 
