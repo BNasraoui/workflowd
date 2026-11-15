@@ -158,11 +158,40 @@ function claudeHeaders(request: Request) {
   return headers
 }
 
+/**
+ * A JSON number text as its exact decimal value: digits without leading or trailing zeros and a
+ * power of ten, or undefined when the text is not a finite JSON number.
+ */
+function decimalValue(text: string) {
+  const parts = /^(-?)(\d+)(?:\.(\d+))?(?:[eE]([+-]?\d+))?$/.exec(text)
+  if (!parts) return undefined
+  const fraction = parts[3] ?? ""
+  const digits = `${parts[2]}${fraction}`.replace(/^0+/, "")
+  const significant = digits.replace(/0+$/, "")
+  if (significant === "") return "0"
+  const exponent = Number(parts[4] ?? "0") - fraction.length + (digits.length - significant.length)
+  return `${parts[1]}${significant}e${exponent}`
+}
+
+/**
+ * Keeps a parsed number only when `JSON.stringify` gives back a text of the same value as the
+ * one the client sent (`1.0` is sent as `1`); a number that the parse would change is refused.
+ */
+function sameNumber(this: unknown, _key: string, value: unknown, context?: { source?: string }) {
+  if (
+    typeof value === "number" &&
+    (context?.source === undefined ||
+      decimalValue(context.source) !== decimalValue(JSON.stringify(value)))
+  )
+    throw new Error("request refused")
+  return value
+}
+
 /** The one parse of a request body: the value the checks see and the provider gets. */
 function parsedBody(body: Buffer) {
   let data: unknown
   try {
-    data = JSON.parse(body.toString("utf8"))
+    data = JSON.parse(body.toString("utf8"), sameNumber)
   } catch {
     throw new Error("request refused")
   }

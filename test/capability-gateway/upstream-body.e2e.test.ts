@@ -53,6 +53,30 @@ for (const [mode, start] of gateways) {
     })
   }, 60000)
 
+  test(`[${mode}] a number that its JSON text would change is refused; one that keeps its value is sent`, async () => {
+    await withGateway(start, async (f, gateway) => {
+      const token = await runToken(gateway.port)
+      for (const number of ["9007199254740993", "1e400", "1e-400", "0.10000000000000000000001"])
+        expect(
+          (
+            await client(gateway.port).provider(
+              token,
+              `{"model":"fixture-model","stream":true,"messages":[],"max_tokens":${number}}`,
+            )
+          ).status,
+        ).toBe(403)
+      expect(sent(f)).toEqual([])
+      const answer = await client(gateway.port).provider(
+        token,
+        '{"model":"fixture-model","stream":true,"messages":[],"temperature":1.0,"top_k":1e3,"top_p":-0.5E0,"max_tokens":9007199254740992}',
+      )
+      expect(answer.status).toBe(200)
+      expect(sent(f).map((request) => request.body)).toEqual([
+        '{"model":"fixture-model","stream":true,"messages":[],"temperature":1,"top_k":1000,"top_p":-0.5,"max_tokens":9007199254740992}',
+      ])
+    })
+  }, 60000)
+
   test(`[${mode}] a body that the gateway refuses reaches no provider`, async () => {
     await withGateway(start, async (f, gateway) => {
       const token = await runToken(gateway.port)
