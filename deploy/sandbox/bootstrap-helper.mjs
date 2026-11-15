@@ -53,14 +53,11 @@ const passing = new Set([
   "UND_ERR_HEADERS_TIMEOUT",
 ])
 
-/** A failure that may be shown in the runner's log: its text names only the cause. */
-const reported = (message) => Object.assign(new Error(message), { reported: true })
-
 /** The code of a certificate that the runner does not trust: no wait can clear it. */
 function untrustedCertificate(error) {
   const code = error?.cause?.code ?? error?.code
   return typeof code === "string" && /CERT|SELF_SIGNED|UNABLE_TO_(?:GET|VERIFY)|ALTNAME/.test(code)
-    ? reported(`gateway certificate not trusted (${code})`)
+    ? new Error(`gateway certificate not trusted (${code})`)
     : undefined
 }
 
@@ -105,11 +102,11 @@ export async function openSession({
     } catch (error) {
       signal?.throwIfAborted()
       if (passes(error)) return undefined
-      throw untrustedCertificate(error) ?? reported("gateway unavailable")
+      throw untrustedCertificate(error) ?? new Error("gateway unavailable")
     }
     if (response.status === 503) return undefined
-    if (response.status === 403) throw reported("lease refused")
-    if (response.status !== 200) throw reported("gateway unavailable")
+    if (response.status === 403) throw new Error("lease refused")
+    if (response.status !== 200) throw new Error("gateway unavailable")
     return await boundedJson(response, 4096)
   }
   for (let attempt = 0; attempt < attempts; ) {
@@ -155,7 +152,7 @@ export async function openSession({
     }
     if (attempt < attempts) await sleep(backoff(attempt), signal)
   }
-  throw reported("gateway session unavailable")
+  throw new Error("gateway session unavailable")
 }
 
 /**

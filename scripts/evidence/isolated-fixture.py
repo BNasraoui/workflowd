@@ -1,6 +1,5 @@
 #!/usr/bin/python3
 """Bounded Linux fixture custody. Never exposes a host bus, engine or real HOME."""
-import json
 import os
 from pathlib import Path
 import shutil
@@ -74,11 +73,7 @@ def main():
         "-p", "CPUQuota=200%", "-p", "TasksMax=512",
         "-p", "RuntimeMaxSec=180s", "/usr/bin/env", "-i", "PATH=/usr/bin:/bin", *command,
     ]
-    (evidence / "invocation.json").write_text(json.dumps({"unit": unit, "command": outer}, indent=2))
-    result = subprocess.run(outer, check=False, timeout=200)
-    (evidence / "exit.json").write_text(json.dumps({"exit": result.returncode}))
-    print(f"isolated unit={unit} evidence={evidence} exit={result.returncode}", flush=True)
-    return result.returncode
+    return subprocess.run(outer, check=False, timeout=200).returncode
 
 
 if __name__ == "__main__":

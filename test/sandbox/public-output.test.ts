@@ -1,10 +1,12 @@
 import { expect, test } from "bun:test"
 import { Schema } from "effect"
-import { serializePublicStatus } from "../../src/sandbox/public-output"
-import { publicBootstrapConfiguration } from "../../deploy/sandbox/public-status.mjs"
+import {
+  publicBootstrapConfiguration,
+  serializePublicStatus,
+} from "../../deploy/sandbox/public-status.mjs"
 import { join, resolve } from "node:path"
 import { tmpdir } from "node:os"
-import { mkdtemp, readdir, rm, readFile, stat } from "node:fs/promises"
+import { mkdtemp, readdir, rm } from "node:fs/promises"
 
 const publicReceipt = Schema.Struct({
   version: Schema.Literal(1),
@@ -61,7 +63,7 @@ process.exitCode = 23;`,
   }
 }, 30000)
 
-test("Node direct CLI retains the prescribed public receipt and owner-only private capture", async () => {
+test("Node direct CLI prints the public receipt and writes no file", async () => {
   const root = await mkdtemp(join(tmpdir(), "wfd-node-public-"))
   try {
     const child = Bun.spawn(
@@ -89,13 +91,8 @@ test("Node direct CLI retains the prescribed public receipt and owner-only priva
       reason: "none",
       count: 0,
     })
-    const directories = await readdir(root)
-    expect(directories).toHaveLength(1)
-    const directory = `${root}/${directories[0]}`
-    expect((await stat(directory)).mode & 0o777).toBe(0o700)
-    expect((await stat(`${directory}/capture.log`)).mode & 0o777).toBe(0o600)
-    expect(await readFile(`${directory}/capture.log`, "utf8")).toBe("private-node-canary\n")
-    expect(await readFile(`${directory}/receipt.json`, "utf8")).toBe(stdout.trim())
+    expect(stdout).not.toContain("canary")
+    expect(await readdir(root)).toEqual([])
   } finally {
     await rm(root, { recursive: true, force: true })
   }
@@ -187,8 +184,7 @@ test("cancelled capture retains bounded private diagnostics and emits one fixed 
       reason: "unavailable",
     })
     expect(stdout).not.toContain("canary")
-    const diagnostic = (await readdir(root)).find((entry) => entry.startsWith("workflowd-private-"))
-    expect(await readFile(`${root}/${diagnostic}/receipt.json`, "utf8")).toBe(stdout.trim())
+    expect((await readdir(root)).filter((entry) => entry !== "started")).toEqual([])
   } finally {
     clearTimeout(timeout)
     child.kill("SIGKILL")
@@ -276,20 +272,7 @@ test("setup, error and cleanup captures cannot create Actions command files or p
         expect(stdout).not.toContain("fixture-canary")
         expect(stdout).not.toContain(Buffer.from("fixture-canary").toString("base64"))
       }
-    const diagnostics = await readdir(root)
-    expect(diagnostics).toHaveLength(4)
-    for (const directory of diagnostics) {
-      expect(directory).toStartWith("workflowd-private-")
-      expect((await stat(`${root}/${directory}`)).mode & 0o777).toBe(0o700)
-      expect((await stat(`${root}/${directory}/capture.log`)).mode & 0o777).toBe(0o600)
-      expect(await readFile(`${root}/${directory}/capture.log`, "utf8")).toContain("fixture-canary")
-      expect(await readFile(`${root}/${directory}/capture.log`, "utf8")).not.toContain(
-        "synthetic-job-credential",
-      )
-      expect(await readFile(`${root}/${directory}/capture.log`, "utf8")).not.toContain(
-        Buffer.from("synthetic-job-credential").toString("base64"),
-      )
-    }
+    expect(await readdir(root)).toEqual([])
   } finally {
     await rm(root, { recursive: true, force: true })
   }

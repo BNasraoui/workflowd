@@ -1,7 +1,4 @@
 import { spawn } from "node:child_process"
-import { mkdtempSync, writeFileSync } from "node:fs"
-import { tmpdir } from "node:os"
-import { join } from "node:path"
 import { publicBootstrapConfiguration, serializePublicStatus } from "./public-status.mjs"
 
 if (import.meta.main) {
@@ -27,8 +24,6 @@ if (import.meta.main) {
       "BASHOPTS",
     ])
       delete environment[key]
-    const directory = mkdtempSync(join(tmpdir(), "workflowd-private-"))
-    const captured = []
     const child = spawn(process.argv[4], process.argv.slice(5), {
       env: environment,
       stdio: ["ignore", "pipe", "pipe"],
@@ -53,7 +48,6 @@ if (import.meta.main) {
         stop("capacity")
         return
       }
-      captured.push(bytes)
       if (!audit) return
       pending += bytes.toString("utf8")
       if (pending.length > 8192) {
@@ -89,37 +83,13 @@ if (import.meta.main) {
       clearTimeout(timer)
       // The hold exits 3 when the relay ended the session on its last failed renewal.
       if (stage === "audit" && code === 3 && reason === "none") reason = "renewal"
-      // Join before filtering, so chunk boundaries cannot expose known job
-      // credentials. Upstream credentials are never present on this runner.
-      let diagnostic = Buffer.concat(captured).toString("utf8")
-      for (const [key, value] of Object.entries(process.env)) {
-        if (!/(?:TOKEN|SECRET|PASSWORD|KEY)$/.test(key) || !value) continue
-        for (const form of new Set([
-          value,
-          Buffer.from(value).toString("base64"),
-          Buffer.from(value).toString("base64url"),
-          Buffer.from(value).toString("hex"),
-          encodeURIComponent(value),
-        ]))
-          diagnostic = diagnostic.replaceAll(form, "[credential excluded]")
-      }
-      try {
-        writeFileSync(join(directory, "capture.log"), diagnostic, { mode: 0o600, flag: "wx" })
-      } catch {
-        reason = "unavailable"
-      }
-      let receipt = serializePublicStatus({
+      // The child's own output is counted and dropped: only this status line is public.
+      const receipt = serializePublicStatus({
         stage,
         outcome: cancelled ? "cancelled" : code === 0 && reason === "none" ? "ok" : "failed",
         reason:
           code === 0 && reason === "none" ? "none" : reason === "none" ? "unavailable" : reason,
       })
-      try {
-        writeFileSync(join(directory, "receipt.json"), receipt, { mode: 0o600 })
-      } catch {
-        reason = "unavailable"
-        receipt = serializePublicStatus({ stage, outcome: "failed", reason })
-      }
       process.stdout.write(receipt + "\n")
       process.exitCode = code === 0 && reason === "none" ? 0 : 1
     })
