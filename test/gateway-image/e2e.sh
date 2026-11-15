@@ -7,7 +7,7 @@ if [[ ${WORKFLOWD_TEST_RESOURCE_SHELL:-} != 1 ]]; then
 fi
 
 # The image before it runs. test/gateway-image/drive.ts then runs it against the session fixtures.
-image=${1:-workflowd-gateway:local}
+image=workflowd-gateway:local
 root=$(mktemp -d)
 name="workflowd-gateway-image-$$"
 cleanup() {
@@ -28,17 +28,28 @@ docker rm -v "$name" >/dev/null
 mkdir "$root/fs"
 tar -xf "$root/image.tar" -C "$root/fs" --no-same-owner --no-same-permissions
 chmod -R u+rwX "$root/fs"
-if find "$root/fs" -regextype posix-extended -iregex \
+# A scan that cannot read the whole image fails the test as a match does: find exits above 0 on
+# an error, and grep exits 0 on a match, 1 on none and above 1 on an error.
+status=0
+find "$root/fs" -regextype posix-extended -iregex \
   '.*/(\.credentials\.json|\.git-credentials|\.netrc|\.npmrc|auth\.json|id_(rsa|ecdsa|ed25519)|[^/]*\.(key|p12|pfx)|\.ssh|\.claude|\.config/(gh|noscope)|providers/[^/]*\.toml)' \
-  -print | grep .; then
-  echo "credential-like path in the image" >&2
-  exit 1
+  -print > "$root/paths" || status=$?
+paths=no
+if ((status != 0)); then
+  paths=error
+elif [[ -s $root/paths ]]; then
+  cat "$root/paths" >&2
+  paths=match
 fi
 # Public npm packages carry PEM parsers, test keys and example tokens. Their files are those of
 # bun.lock's integrity hashes, fixed again by the output hash of nix/workflowd-modules.nix.
-if grep -rlE 'BEGIN ([A-Z]+ )?PRIVATE KEY|sk-ant-[A-Za-z0-9_-]{20}|gh[opsu]_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{20}' \
-  --exclude-dir='*-workflowd-node-modules' "$root/fs"; then
-  echo "key or token material in the image" >&2
+status=0
+grep -rlE 'BEGIN ([A-Z]+ )?PRIVATE KEY|sk-ant-[A-Za-z0-9_-]{20}|gh[opsu]_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{20}' \
+  --exclude-dir='*-workflowd-node-modules' "$root/fs" >&2 || status=$?
+contents=no
+if ((status == 0)); then contents=match; elif ((status > 1)); then contents=error; fi
+if [[ $paths != no || $contents != no ]]; then
+  echo "credential-like path: $paths; key or token material: $contents" >&2
   exit 1
 fi
 [[ $(ls -A "$root"/fs/nix/store/*-workflowd-node-modules) == node_modules ]]
