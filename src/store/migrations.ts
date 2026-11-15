@@ -16,6 +16,7 @@ import { sessionLeaseReady } from "./0041-session-lease-ready"
 import { capabilityRenewal } from "./0042-capability-renewal"
 import { capabilityReplacements } from "./0043-capability-replacements"
 import { capabilityStoreSplit } from "./0044-capability-store-split"
+import { gatewayMigrationsTable } from "../capability-control/protocol"
 import { MAX_AGENT_LAUNCH_INTENT_BYTES, MAX_AGENT_OUTPUT_BYTES } from "../agent-payload"
 
 const initialSchema = Effect.gen(function* () {
@@ -1514,9 +1515,22 @@ export const runStoreMigrationsThrough0043 = Migrator.make({})({
   loader: Migrator.fromRecord(migrationsThrough0043),
 })
 
-export const runStoreMigrations = Migrator.make({})({
-  loader: Migrator.fromRecord({
-    ...migrationsThrough0043,
-    "0044_capability_store_split": capabilityStoreSplit,
-  }),
+/**
+ * workflowd's migrations. A database that holds the capability gateway's migrations table is the
+ * gateway's store: it is refused before the migrations table is made or a migration runs.
+ */
+export const runStoreMigrations = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient
+  const gateway = yield* sql`SELECT 1 FROM sqlite_master WHERE name=${gatewayMigrationsTable}`
+  if (gateway.length > 0)
+    return yield* new Migrator.MigrationError({
+      kind: "BadState",
+      message: "the database is the capability gateway's store; workflowd refuses it",
+    })
+  return yield* Migrator.make({})({
+    loader: Migrator.fromRecord({
+      ...migrationsThrough0043,
+      "0044_capability_store_split": capabilityStoreSplit,
+    }),
+  })
 })

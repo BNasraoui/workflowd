@@ -6,7 +6,6 @@ import {
   ControlAnswer,
   controlFrame,
   controlProtocol,
-  gatewayMigrationsTable,
   maxControlFrame,
   type ControlVerb,
   type ControlVerbSchemas,
@@ -146,8 +145,6 @@ export const liveGrants = Effect.fn("DaemonCapability.liveGrants")(function* (
  *   followed once the change commits: a run that is no longer live is revoked, at once.
  * - `reconcile` sends every live run, so the gateway revokes the others; it runs at start and
  *   every `reconcileEveryMs`, which also covers a revoke that the gateway missed while it was down.
- *
- * It refuses to start on a store that holds the gateway's tables.
  */
 export const makeDaemonCapability = (options: {
   readonly socket: string
@@ -155,9 +152,6 @@ export const makeDaemonCapability = (options: {
 }) =>
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient
-    const foreign = yield* sql`SELECT 1 FROM sqlite_master WHERE name=${gatewayMigrationsTable}`
-    if (foreign.length > 0)
-      return yield* Effect.fail(new Error("workflowd's store holds the gateway's store"))
     const lifetime = runLifetime(sql)
     const control = controlClient(options.socket)
     const calls = yield* Semaphore.make(1)
