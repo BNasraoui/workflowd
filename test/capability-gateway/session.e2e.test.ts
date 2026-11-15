@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test"
 import { connect } from "node:net"
-import { Effect, Exit, Schema } from "effect"
+import { Cause, Effect, Exit, Schema } from "effect"
 import { SqlClient } from "effect/unstable/sql"
 import { AgentRunStore } from "../../src/kernel/agent-run-store"
 import { capabilityDigest, makeCapabilityStore } from "../../src/capability-gateway/store"
@@ -221,5 +221,8 @@ test("the gateway process refuses to start without its configuration", async () 
   const exit = await Effect.runPromiseExit(
     Effect.scoped(serveCapabilityGateway({ WORKFLOWD_DATABASE_PATH: ":memory:" })),
   )
-  expect(Exit.isFailure(exit)).toBe(true)
+  const failure = Exit.isFailure(exit) ? Cause.squash(exit.cause) : undefined
+  expect(failure instanceof Error && String(failure.cause)).toBe(
+    "Error: WORKFLOWD_CAPABILITY_GATEWAY is required",
+  )
 })
