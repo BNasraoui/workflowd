@@ -1,9 +1,10 @@
 import { expect, test } from "bun:test"
-import { mkdtemp, rm } from "node:fs/promises"
+import { lstat, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { requestRunSocket } from "../../src/worker-identity/socket-client"
 import { RunPeers, serveRunSocket } from "../../src/worker-identity/peer"
+import { holdDatagramSocketInChild, leaveStaleSocket } from "../helpers/socket-holders"
 
 test("socket authenticates two concurrent process trees and denies outsiders", async () => {
   const directory = await mkdtemp(join(tmpdir(), "workflowd-peers-"))
@@ -79,6 +80,77 @@ test("socket UID policy denies a foreign UID even with filesystem access", async
     expect(routed).toBe(false)
   } finally {
     await server.close()
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
+const refusesAndKeeps = async (
+  prepare: (directory: string, socket: string) => Promise<void>,
+  message: string,
+  kept: (socket: string) => Promise<boolean>,
+) => {
+  const directory = await mkdtemp(join(tmpdir(), "workflowd-peer-claim-"))
+  const socket = join(directory, "broker.sock")
+  try {
+    await prepare(directory, socket)
+    await expect(serveRunSocket(socket, async () => undefined)).rejects.toThrow(
+      `${socket} ${message}`,
+    )
+    expect(await kept(socket)).toBe(true)
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+}
+
+test("socket start refuses a directory at its path and keeps it", async () => {
+  await refusesAndKeeps(
+    (_, socket) => mkdir(socket),
+    "exists and is not a socket",
+    async (socket) => (await lstat(socket)).isDirectory(),
+  )
+})
+
+test("socket start refuses a symbolic link to a stale socket and keeps both", async () => {
+  await refusesAndKeeps(
+    async (directory, socket) => {
+      await leaveStaleSocket(join(directory, "target.sock"))
+      await symlink(join(directory, "target.sock"), socket)
+    },
+    "exists and is not a socket",
+    async (socket) =>
+      (await lstat(socket)).isSymbolicLink() &&
+      (await lstat(join(socket, "../target.sock"))).isSocket(),
+  )
+})
+
+test("socket start keeps a datagram socket whose live owner holds the lock of the path", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "workflowd-peer-claim-"))
+  const socket = join(directory, "broker.sock")
+  const owner = await holdDatagramSocketInChild(socket)
+  try {
+    const inode = (await lstat(socket)).ino
+    await expect(serveRunSocket(socket, async () => undefined)).rejects.toThrow(
+      `${socket} is locked by a live process; refusing to bind it`,
+    )
+    expect((await lstat(socket)).ino).toBe(inode)
+  } finally {
+    owner.kill("SIGKILL")
+    await owner.exited
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
+test("socket start refuses a lock file that others can read and keeps the stale socket", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "workflowd-peer-claim-"))
+  const socket = join(directory, "broker.sock")
+  try {
+    await leaveStaleSocket(socket)
+    await writeFile(`${socket}.lock`, "", { mode: 0o644 })
+    await expect(serveRunSocket(socket, async () => undefined)).rejects.toThrow(
+      `${socket}.lock is not a private lock file`,
+    )
+    expect((await lstat(socket)).isSocket()).toBe(true)
+  } finally {
     await rm(directory, { recursive: true, force: true })
   }
 })
