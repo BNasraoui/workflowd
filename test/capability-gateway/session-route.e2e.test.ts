@@ -2,6 +2,7 @@ import { expect, test } from "bun:test"
 import { randomBytes } from "node:crypto"
 import { Effect } from "effect"
 import { AgentRunStore } from "../../src/kernel/agent-run-store"
+import { makeSandboxStore } from "../../src/sandbox/store"
 import {
   client,
   gateways,
@@ -77,9 +78,10 @@ test("a lease that does not exist and a lease whose Actions run is not recorded 
     expect(answers[1]).toEqual(answers[0])
     expect(answers[2]).toEqual(answers[0])
     // Once the daemon records the run, the same lease gets its challenge.
-    await f.sql(
-      (sql) =>
-        sql`UPDATE sandbox_leases SET actions_run_id=84,actions_attempt=1 WHERE lease_id='lease-u'`,
+    await f.store(
+      Effect.gen(function* () {
+        yield* (yield* makeSandboxStore).recordRun("run-u", 84, 1)
+      }),
     )
     expect((await runner.challenge("lease-u")).status).toBe(200)
   })
@@ -127,11 +129,21 @@ for (const [mode, start] of gateways)
       const next = await runner.audience()
       expect(next.audience).not.toBe(live.audience)
       expect((await runner.session(proof(next.audience, "jti-used"))).status).toBe(200)
-      const fetched = f.keyFetches()
-      expect(fetched).toBeGreaterThan(0)
-      const again = await runner.audience()
-      expect((await runner.session(proof(again.audience, "jti-used"))).status).toBe(403)
-      expect(await f.mints()).toBe(1)
-      expect(f.keyFetches()).toBe(fetched)
+      expect(f.keyFetches()).toBeGreaterThan(0)
+      // A second gateway on the same store starts with no job keys, so a key check would fetch.
+      const restarted = await start(f)
+      try {
+        const fetched = f.keyFetches()
+        const fresh = client(restarted.port)
+        const again = await fresh.audience()
+        expect((await fresh.session(proof(again.audience, "jti-used"))).status).toBe(403)
+        expect(f.keyFetches()).toBe(fetched)
+        expect(await f.mints()).toBe(1)
+        const unused = await fresh.audience()
+        expect((await fresh.session(proof(unused.audience, "jti-unused"))).status).toBe(200)
+        expect(f.keyFetches()).toBe(fetched + 1)
+      } finally {
+        await restarted.stop()
+      }
     })
   }, 60000)

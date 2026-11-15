@@ -1,9 +1,10 @@
 import { expect, test } from "bun:test"
-import { Effect } from "effect"
+import { Effect, Result } from "effect"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
 import { SqlClient } from "effect/unstable/sql"
 import { AgentRunStoreLive, AgentRunStore } from "../../src/kernel/agent-run-store"
-import { makeCapabilityStore } from "../../src/capability-gateway/store"
+import { CapabilityRefused, makeCapabilityStore } from "../../src/capability-gateway/store"
+import { renewalWindowMs } from "../../deploy/sandbox/renewal.mjs"
 import { bindRunSession, seedCapabilityRun } from "./fixture"
 import { capabilitySession } from "../../src/store/0040-capability-session"
 
@@ -295,6 +296,27 @@ test("a new session ends every token of the earlier one, and a proof opens one s
         yield* store.staleAmong([{ runId: "run", session: 2, digest: "c".repeat(64) }]),
       ).toEqual([{ runId: "run", session: 2, digest: "c".repeat(64) }])
       expect((yield* Effect.result(store.leaseChallenge("lease", now + 7)))._tag).toBe("Failure")
+    }),
+  )
+})
+
+test("a run token is renewed with exactly the renewal window left, and refused one millisecond earlier", async () => {
+  await run(
+    Effect.gen(function* () {
+      const { store } = yield* seed
+      const { binding, expiresAt } = yield* bindRunSession(now, { digest: "a".repeat(64) })
+      const opens = expiresAt - renewalWindowMs
+      const early = yield* Effect.result(
+        store.renew(binding, "a".repeat(64), "b".repeat(64), expiresAt + 600000, opens - 1),
+      )
+      expect(early).toEqual(Result.fail(new CapabilityRefused()))
+      expect((yield* Effect.result(store.authorize(binding, "b".repeat(64), opens - 1)))._tag).toBe(
+        "Failure",
+      )
+      yield* store.renew(binding, "a".repeat(64), "b".repeat(64), expiresAt + 600000, opens)
+      expect((yield* store.authorize(binding, "b".repeat(64), opens)).expiresAt).toBe(
+        expiresAt + 600000,
+      )
     }),
   )
 })
