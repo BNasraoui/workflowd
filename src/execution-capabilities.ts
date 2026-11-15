@@ -15,7 +15,6 @@ export type ExecutionModel = {
   readonly variants?: ExecutionThinking["variants"]
   readonly reasoning?: { readonly supported: boolean }
   readonly efforts?: ExecutionThinking["efforts"]
-  readonly thinkingStatus?: "configured"
   readonly defaultEffort?: string
   readonly defaultBudgets?: ExecutionThinking["defaultBudgets"]
   readonly defaultModel?: boolean
@@ -28,8 +27,6 @@ export type ExecutionModel = {
 
 export type DiscoverySource = {
   readonly executor: string
-  readonly host?: string
-  readonly evidence?: "configured"
   readonly kind?: string
   readonly protocol?: string
   readonly checkCredentials?: () => Promise<void>
@@ -172,22 +169,20 @@ export function makeExecutionCapabilities(options: {
           ? []
           : observation.models.map((model) => ({
               identity: {
-                host: source.host ?? options.host,
+                host: options.host,
                 executor: source.executor,
                 provider: model.provider,
                 model: model.model,
               },
               selectionModel: model.selectionModel ?? model.model,
-              ...(source.evidence === undefined ? {} : { evidence: source.evidence }),
               ...(model.name === undefined ? {} : { name: model.name }),
               thinking: {
                 status:
-                  model.thinkingStatus ??
-                  (model.variants !== undefined || model.efforts !== undefined
+                  model.variants !== undefined || model.efforts !== undefined
                     ? ("advertised" as const)
                     : model.reasoning?.supported === false
                       ? ("unsupported" as const)
-                      : ("unknown" as const)),
+                      : ("unknown" as const),
                 ...(model.variants === undefined ? {} : { variants: model.variants }),
                 ...(model.reasoning === undefined ? {} : { reasoning: model.reasoning }),
                 ...(model.efforts === undefined ? {} : { efforts: model.efforts }),

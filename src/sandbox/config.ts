@@ -28,24 +28,10 @@ export function publicationBody(marker: string, body: string): string {
 const positiveId = Schema.Int.check(Schema.isGreaterThan(0))
 export const PrivateBootstrapPolicy = Schema.Struct({
   repositoryOwnerId: positiveId,
-  mode: Schema.Literals(["remote-tools", "actions-native"]),
+  mode: Schema.Literal("actions-native"),
 })
 export const CapabilityGatewayConfig = Schema.Struct({
   gitRead: Schema.optionalKey(Schema.Boolean),
-  native: Schema.optionalKey(
-    Schema.Struct({
-      protocol: Schema.Literals(["codex-chatgpt", "openai-chat"]),
-      models: Schema.Array(
-        Schema.Struct({
-          id: Schema.String.check(Schema.isPattern(/^[A-Za-z0-9_.-]{1,128}$/)),
-          efforts: Schema.Array(Schema.Literals(["low", "medium", "high", "xhigh"])).check(
-            Schema.isMinLength(1),
-            Schema.isMaxLength(4),
-          ),
-        }),
-      ).check(Schema.isMinLength(1), Schema.isMaxLength(32)),
-    }),
-  ),
   nodeBinary: Schema.String.check(Schema.isPattern(/^\/[A-Za-z0-9/_.-]+$/)),
   noscope: Schema.Struct({
     binary: Schema.String.check(Schema.isPattern(/^\/[A-Za-z0-9/_.-]+$/)),

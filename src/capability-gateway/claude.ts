@@ -126,16 +126,14 @@ const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
 /**
  * Native request headers allowed through: bounded, unprivileged, anthropic-beta values of the
- * recorded list only, and the client's session id (the exact native session when one is named).
+ * recorded list only, and the client's session id when it is a UUID.
  */
-function claudeHeaders(request: Request, nativeSession?: string) {
+function claudeHeaders(request: Request) {
   let headerBytes = 0
   const headers = new Headers()
-  const session = (value: string) =>
-    nativeSession === undefined ? uuid.test(value) : value === nativeSession
   for (const [key, value] of request.headers) {
     headerBytes += key.length + value.length
-    const sent = forwarded.has(key) || (key === "x-claude-code-session-id" && session(value))
+    const sent = forwarded.has(key) || (key === "x-claude-code-session-id" && uuid.test(value))
     if (
       headerBytes > 8192 ||
       value.length > 2048 ||
@@ -173,14 +171,6 @@ function parsedBody(body: Buffer) {
   return data
 }
 
-const effortObserved = (data: object, nativeEffort?: string) =>
-  nativeEffort !== undefined &&
-  "output_config" in data &&
-  typeof data.output_config === "object" &&
-  data.output_config !== null &&
-  "effort" in data.output_config &&
-  data.output_config.effort === nativeEffort
-
 /** Only this adapter chooses the upstream. Native auth is replaced, never exported or downgraded. */
 export async function claudeRequest(
   request: Request,
@@ -189,8 +179,6 @@ export async function claudeRequest(
   credential: () => Promise<string>,
   signal: AbortSignal,
   send: ClaudeUpstream,
-  nativeSession?: string,
-  nativeEffort?: string,
 ) {
   if (
     request.method !== "POST" ||
@@ -202,14 +190,12 @@ export async function claudeRequest(
     ].includes(path)
   )
     throw new Error("request refused")
-  const headers = claudeHeaders(request, nativeSession)
+  const headers = claudeHeaders(request)
   const data = parsedBody(await readRequestBody(request, signal, 1048576))
   if (!("model" in data) || data.model !== model) throw new Error("request refused")
-  const selectionObserved = effortObserved(data, nativeEffort)
   const access = await credential()
   signal.throwIfAborted()
   headers.set("authorization", `Bearer ${access}`)
-  if (nativeSession !== undefined) headers.set("x-claude-code-session-id", nativeSession)
   headers.set("accept-encoding", "identity")
   const response = await send(`https://api.anthropic.com${path}`, {
     method: "POST",
@@ -219,7 +205,7 @@ export async function claudeRequest(
     redirect: "error",
     signal,
   })
-  return { ...(await safeProviderResponse(response, [access])), selectionObserved }
+  return await safeProviderResponse(response, [access])
 }
 
 /** Same bounded credential-reflection exclusion for every native protocol. */

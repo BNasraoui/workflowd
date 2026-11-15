@@ -9,8 +9,6 @@ export const capabilityGateway = Effect.gen(function* () {
     challenge TEXT NOT NULL UNIQUE CHECK(length(challenge)=64),
     challenge_expires INTEGER NOT NULL,
     authority TEXT NOT NULL CHECK(json_valid(authority)),
-    transport_digest TEXT NOT NULL CHECK(length(transport_digest)=64),
-    jti_digest TEXT UNIQUE CHECK(jti_digest IS NULL OR length(jti_digest)=64),
     revoked INTEGER NOT NULL DEFAULT 0 CHECK(revoked IN (0,1))
   ) STRICT`
   yield* sql`CREATE TABLE capability_tokens (

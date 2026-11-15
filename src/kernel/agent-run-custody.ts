@@ -60,51 +60,46 @@ export const makeAgentRunCustody = (dependencies: {
     readonly createdAt: Date
     readonly kind?: "opencode" | "claude" | "codex"
     readonly host?: string
-    readonly actionsHost?: string
   }) =>
     Effect.gen(function* () {
       const kind = input.kind ?? "opencode"
-      const host = input.actionsHost ?? input.host ?? options.identity.owningHostId
+      const claudeHost = input.host ?? options.identity.owningHostId
       const providerConfig = {
         claude: {
           sessionId: claudeSessionCustodyId(input.nativeSessionId),
           providerId: CLAUDE_PROVIDER_ID,
-          serverId: host,
+          serverId: claudeHost,
           endpointAlias: CLAUDE_ENDPOINT_ALIAS,
-          endpointIdentity: claudeEndpointIdentity(host),
+          endpointIdentity: claudeEndpointIdentity(claudeHost),
         },
         codex: {
           sessionId: codexSessionCustodyId(input.nativeSessionId),
           providerId: CODEX_PROVIDER_ID,
-          serverId: input.actionsHost ?? input.host ?? options.identity.serverId,
+          serverId: options.identity.serverId,
           endpointAlias: CODEX_ENDPOINT_ALIAS,
-          endpointIdentity: codexEndpointIdentity(host),
+          endpointIdentity: codexEndpointIdentity(options.identity.owningHostId),
         },
         opencode: {
           sessionId: `opencode-session-${input.nativeSessionId}`,
           providerId: options.identity.providerId,
-          serverId: input.actionsHost ?? options.identity.serverId,
+          serverId: options.identity.serverId,
           endpointAlias: options.identity.endpointAlias,
-          endpointIdentity:
-            input.actionsHost === undefined
-              ? options.identity.endpointIdentity
-              : `opencode-cli://${input.actionsHost}`,
+          endpointIdentity: options.identity.endpointIdentity,
         },
       }[kind]
       const { sessionId } = providerConfig
       const saved = yield* sessions.readSession(sessionId)
       if (
-        (kind === "claude" || input.host !== undefined || input.actionsHost !== undefined) &&
+        kind === "claude" &&
         saved !== null &&
         (saved.provider_kind !== kind ||
-          saved.native_session_id !== input.nativeSessionId ||
           saved.server_id !== providerConfig.serverId ||
           saved.endpoint_identity !== providerConfig.endpointIdentity ||
           saved.resource_id !== input.resourceId)
       ) {
         return yield* refuse(
           "missing_parent_session",
-          "Native session conflicts with saved custody",
+          "Claude session conflicts with saved custody",
         )
       }
       if (saved === null) {

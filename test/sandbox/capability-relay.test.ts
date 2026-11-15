@@ -35,28 +35,18 @@ async function loopbackCertificate(root: string) {
   return { key, cert }
 }
 
-for (const scenario of [
-  "headers",
-  "renewal",
-  "result",
-  "responses",
-  "chat/completions",
-  "git-refs",
-  "git-upload",
-] as const) {
+for (const scenario of ["headers", "renewal", "git-refs", "git-upload"] as const) {
   test(`R6/R7: relay survives ${scenario} failure and serves the next valid request`, async () => {
     const root = await mkdtemp(join(tmpdir(), "relay-regression-"))
     const now = Date.now()
     const first = "a".repeat(43)
     const next = "b".repeat(43)
-    const nativePath =
-      scenario === "responses" || scenario === "chat/completions"
-        ? `/capabilities/v1/providers/selected/${scenario}`
-        : scenario === "git-refs"
-          ? "/capabilities/v1/git/12.git/info/refs?service=git-upload-pack"
-          : scenario === "git-upload"
-            ? "/capabilities/v1/git/12.git/git-upload-pack"
-            : undefined
+    const gitPath =
+      scenario === "git-refs"
+        ? "/capabilities/v1/git/12.git/info/refs?service=git-upload-pack"
+        : scenario === "git-upload"
+          ? "/capabilities/v1/git/12.git/git-upload-pack"
+          : undefined
     const expiry = now + 15000
     const tls = await loopbackCertificate(root)
     let attempts = 0
@@ -81,12 +71,7 @@ for (const scenario of [
           `Bearer ${scenario === "renewal" ? next : first}`,
         )
         expect(request.method).toBe(scenario === "git-refs" ? "GET" : "POST")
-        expect(target).toBe(
-          nativePath ??
-            (scenario === "result"
-              ? "/capabilities/v1/result"
-              : "/capabilities/v1/providers/anthropic/v1/messages"),
-        )
+        expect(target).toBe(gitPath ?? "/capabilities/v1/providers/anthropic/v1/messages")
         requests++
         return new Response("fixture-stream")
       },
@@ -118,16 +103,12 @@ for (const scenario of [
         "ready\n",
       )
       const request = (headers: Record<string, string> = {}) =>
-        fetch(
-          "http://capability.invalid" +
-            (nativePath ?? (scenario === "result" ? "/capabilities/v1/result" : "/v1/messages")),
-          {
-            unix: join(root, "gateway.sock"),
-            method: scenario === "git-refs" ? "GET" : "POST",
-            headers: { authorization: "Bearer workflowd-local", ...headers },
-            body: scenario === "git-refs" ? undefined : "{}",
-          },
-        )
+        fetch("http://capability.invalid" + (gitPath ?? "/v1/messages"), {
+          unix: join(root, "gateway.sock"),
+          method: scenario === "git-refs" ? "GET" : "POST",
+          headers: { authorization: "Bearer workflowd-local", ...headers },
+          body: scenario === "git-refs" ? undefined : "{}",
+        })
       if (scenario === "headers") {
         const response = await request({ "keep-alive": "timeout=5" }).catch(() => null)
         expect(response?.status).toBe(403)

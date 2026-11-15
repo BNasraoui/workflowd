@@ -1,7 +1,8 @@
 import { expect, test } from "bun:test"
 import { claudeRequest, type ClaudeRequest } from "../../src/capability-gateway/claude"
 
-const native = JSON.stringify({ model: "claude-opus-4-6", output_config: { effort: "high" } })
+const native = JSON.stringify({ model: "claude-opus-4-6" })
+const session = "6f1c2a3b-4d5e-4f60-8a7b-9c0d1e2f3a4b"
 const headers = {
   host: "capability.invalid",
   authorization: "Bearer gateway-sentinel",
@@ -9,7 +10,7 @@ const headers = {
   "anthropic-version": "2023-06-01",
   "anthropic-beta": "claude-code-20250219, oauth-2025-04-20",
   "user-agent": "claude-cli/2.1.301",
-  "x-claude-code-session-id": "native-session",
+  "x-claude-code-session-id": session,
 }
 
 let credentialReads = 0
@@ -37,15 +38,12 @@ const call = async (extra: Record<string, string | undefined> = {}, body = nativ
       sent.push({ url, input })
       return new Response("{}", { headers: { "content-type": "application/json" } })
     },
-    "native-session",
-    "high",
   )
   return { result, sent }
 }
 
 test("Claude requests forward only bounded native headers and replace authorization", async () => {
-  const { result, sent } = await call()
-  expect(result.selectionObserved).toBe(true)
+  const { sent } = await call()
   expect(sent).toHaveLength(1)
   expect(sent[0]!.url).toBe("https://api.anthropic.com/v1/messages?beta=true")
   expect(Object.fromEntries(sent[0]!.input.headers)).toEqual({
@@ -55,10 +53,7 @@ test("Claude requests forward only bounded native headers and replace authorizat
     authorization: "Bearer provider-access",
     "content-type": "application/json",
     "user-agent": "claude-cli/2.1.301",
-    "x-claude-code-session-id": "native-session",
-  })
-  expect((await call({}, JSON.stringify({ model: "claude-opus-4-6" }))).result).toMatchObject({
-    selectionObserved: false,
+    "x-claude-code-session-id": session,
   })
 })
 

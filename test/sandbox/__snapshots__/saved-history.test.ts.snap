@@ -123,7 +123,6 @@ exports[`current saved policy round-trips every field; schema changes require a 
         "properties": {
           "mode": {
             "enum": [
-              "remote-tools",
               "actions-native",
             ],
             "type": "string",

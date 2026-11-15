@@ -36,7 +36,7 @@ export type SandboxDispatchPort = {
   readonly prepareNative?: (run: AgentRunRecord) => Effect.Effect<
     {
       readonly cli: CliPort
-      readonly sandboxBindingFile?: string
+      readonly sandboxBindingFile: string
     },
     SandboxError
   >

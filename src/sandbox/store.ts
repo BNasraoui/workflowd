@@ -471,7 +471,7 @@ export const makeSandboxStore = Effect.gen(function* () {
       WHERE run_id=${runId} AND state='starting' AND actions_run_id=${actionsRunId} AND actions_attempt=${attempt}
       AND json_extract(policy,'$.privateBootstrap.mode')='actions-native'
       AND EXISTS(SELECT 1 FROM capability_bindings b WHERE b.run_id=${runId} AND b.session>0
-        AND b.revoked=0 AND b.transport_digest IS NULL) RETURNING run_id`
+        AND b.revoked=0) RETURNING run_id`
     return rows.length === 1
   })
   const adopt = Effect.fn("SandboxStore.adopt")(function* (
