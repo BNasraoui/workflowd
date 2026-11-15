@@ -29,7 +29,7 @@ export const deliverResident = Effect.fn("Resident.deliver")(
       readonly prompt: string
       readonly state: string
     },
-    mode: "queue" | "start" = "queue",
+    mode: "queue" | "start" | "auto" = "queue",
   ) {
     if (message.state === "sending") {
       let cursor: string | null = null
@@ -50,6 +50,30 @@ export const deliverResident = Effect.fn("Resident.deliver")(
       )
         ? ("delivered" as const)
         : ("uncertain" as const)
+    }
+    if (mode === "auto") {
+      const loaded = yield* Effect.tryPromise(() =>
+        request("thread/read", { threadId: message.thread_id, includeTurns: false }),
+      ).pipe(
+        Effect.flatMap(
+          Schema.decodeUnknownEffect(
+            Schema.Struct({
+              thread: Schema.Struct({
+                id: Schema.String,
+                status: Schema.Struct({ type: Schema.String }),
+                canAcceptDirectInput: Schema.NullOr(Schema.Boolean),
+              }),
+            }),
+          ),
+        ),
+      )
+      if (
+        loaded.thread.id !== message.thread_id ||
+        loaded.thread.canAcceptDirectInput !== true ||
+        !["active", "idle"].includes(loaded.thread.status.type)
+      )
+        return "uncertain" as const
+      mode = loaded.thread.status.type === "idle" ? "start" : "queue"
     }
     yield* Effect.tryPromise(() =>
       request(mode === "start" ? "turn/start" : "thread/queue/add", {

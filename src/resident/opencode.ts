@@ -1,7 +1,7 @@
 import { residentWorkerInstructions } from "./instructions"
 import { workerEnvironment } from "./environment"
 import { createHash, timingSafeEqual } from "node:crypto"
-import { Context, Effect, Layer, Schedule, Schema, Semaphore } from "effect"
+import { Context, Effect, Layer, Option, Schedule, Schema, Semaphore } from "effect"
 import { SqlClient } from "effect/unstable/sql"
 import type { OpenCodeAdapter, OpenCodeAdapterError } from "../opencode/adapter"
 import type { OpenCodeCompletionSourceOptions } from "../kernel/opencode-completion-source"
@@ -12,6 +12,8 @@ import { serveRunSocket, type RunSocketPolicy } from "../worker-identity/peer"
 import { makeResidentStore } from "./store"
 import { EventSelector, makeSubscriptions } from "./subscriptions"
 import { deliverOpenCode } from "./opencode-delivery"
+import { AgentMessaging } from "../messaging/service"
+import { AgentMessage } from "../messaging/contract"
 
 export type OpenCodeMailboxProvider = Pick<OpenCodeAdapter, "sessionExists" | "promptSession"> & {
   readonly setSessionEnvironment: (input: {
@@ -35,6 +37,7 @@ export const makeOpenCodeMailbox = (options: Options, provider: OpenCodeMailboxP
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient
     const runs = yield* AgentRunStore
+    const messaging = yield* Effect.serviceOption(AgentMessaging)
     const ci = yield* CiService
     const inbox = yield* makeResidentStore
     const subscriptions = yield* makeSubscriptions
@@ -81,8 +84,11 @@ export const makeOpenCodeMailbox = (options: Options, provider: OpenCodeMailboxP
           now: new Date(),
         })
     })
+    let inboxCursor: string | undefined
     const flush = Effect.gen(function* () {
-      for (const message of yield* inbox.pending("opencode")) {
+      const page = yield* inbox.pending("opencode", inboxCursor)
+      inboxCursor = page.at(-1)?.id
+      for (const message of page) {
         const row = yield* inbox.read(message.thread_id)
         if (row === null) continue
         const run = yield* runs.read(row.run_id)
@@ -97,7 +103,7 @@ export const makeOpenCodeMailbox = (options: Options, provider: OpenCodeMailboxP
           yield* uncertain(message.id, row.thread_id, row.run_id)
           continue
         }
-        yield* inbox.sending(message.id)
+        if (!(yield* inbox.sending(message.id)) && message.state === "prepared") continue
         const outcome = yield* deliverOpenCode(provider, message, run)
         if (outcome === "delivered") yield* inbox.delivered(message.id)
         else {
@@ -117,12 +123,22 @@ export const makeOpenCodeMailbox = (options: Options, provider: OpenCodeMailboxP
     )(subscriptions.reconcile().pipe(Effect.andThen(flush)))
     const route = Effect.fn("OpenCodeMailbox.route")(
       function* (request: Request) {
-        if (new URL(request.url).pathname !== "/subscriptions")
+        const path = new URL(request.url).pathname
+        if (path !== "/subscriptions" && path !== "/messages")
           return new Response(null, { status: 404 })
         if (request.method !== "POST") return new Response(null, { status: 405 })
         const input = yield* Effect.tryPromise(() => request.json()).pipe(
           Effect.flatMap((value) =>
-            Schema.decodeUnknownEffect(Subscribe)(value, { onExcessProperty: "error" }),
+            Schema.decodeUnknownEffect(
+              Schema.Union([
+                Subscribe,
+                Schema.Struct({
+                  runId: Subscribe.fields.runId,
+                  capability: Subscribe.fields.capability,
+                  message: AgentMessage,
+                }),
+              ]),
+            )(value, { onExcessProperty: "error" }),
           ),
         )
         const run = yield* runs.read(input.runId)
@@ -137,6 +153,16 @@ export const makeOpenCodeMailbox = (options: Options, provider: OpenCodeMailboxP
           !(yield* custody(run.runId))
         )
           return new Response(null, { status: 403 })
+        if ("message" in input) {
+          if (path !== "/messages" || Option.isNone(messaging))
+            return new Response(null, { status: 503 })
+          const receipt = yield* messaging.value.send(
+            { message: input.message },
+            { runId: run.runId },
+          )
+          return Response.json(receipt, { status: 202 })
+        }
+        if (path !== "/subscriptions") return new Response(null, { status: 400 })
         const selector = input.selector
         if (selector.kind === "ci") {
           const repository = options.repositories.find(

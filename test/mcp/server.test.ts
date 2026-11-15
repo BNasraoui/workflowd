@@ -71,14 +71,20 @@ test("the streamable HTTP endpoint lists every tool with the fire-and-ack contra
 
   expect(listed.tools.map((tool) => tool.name).sort()).toEqual([
     "agent_directory",
+    "cancel_event_subscription",
     "dispatch_agent",
     "enqueue_probe",
+    "event_subscription_status",
     "host_health",
     "job_status",
     "list_agent_runs",
     "list_execution_capabilities",
     "list_recent_jobs",
+    "message_status",
+    "publish_agent_event",
     "read_agent_mailbox",
+    "send_message",
+    "subscribe_to_event",
     "wait_for_agent",
   ])
   for (const name of ["enqueue_probe", "wait_for_agent"]) {

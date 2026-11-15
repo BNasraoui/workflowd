@@ -34,6 +34,7 @@ import type { WorkflowStorePort } from "./store/contracts"
 import { handleGitHubWebhook } from "./webhook-handler"
 import type { WorkSignalPort } from "./work-signal"
 import { routeDirectory, type DirectoryHttpBinding } from "./directory/http"
+import { routeMessaging, type MessagingHttpBinding } from "./messaging/http"
 export { handleGitHubWebhook } from "./webhook-handler"
 
 type QrspiIngress = {
@@ -74,6 +75,7 @@ export type WebhookHandlerOptions = {
   readonly agentRuns?: AgentRunIngressBinding
   readonly dogfood?: DogfoodBinding
   readonly directory?: DirectoryHttpBinding
+  readonly messaging?: MessagingHttpBinding
   readonly executionCapabilities?: {
     readonly token: string
     readonly list: () => Effect.Effect<ExecutionCapabilities, Error>
@@ -97,6 +99,7 @@ export function routeRequest(
   options: WebhookHandlerOptions,
 ): Effect.Effect<Response, never, WorkflowStorePort | WorkSignalPort> {
   return (
+    routeMessaging(request, options.messaging, options.maxBodyBytes) ??
     routeDirectory(request, options.directory, options.maxBodyBytes) ??
     routeApplicationRequest(request, options)
   )
