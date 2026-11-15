@@ -5,8 +5,10 @@ import { join } from "node:path"
 import {
   client,
   fixture,
+  gatewaySource,
   proof,
   sse,
+  startGatewayProcess,
   type Fixture,
   type Gateway,
 } from "../capability-gateway/gateway-process"
@@ -82,13 +84,11 @@ async function imageGateway(f: Fixture, entrypoint: boolean): Promise<Gateway> {
     noscope: { binary: "/bin/noscope", configHome: f.root },
     daemon: { uid: process.getuid!(), gid: Number(group) },
   }
-  const inject = `import { runCapabilityGatewayServer } from "/app/src/capability-gateway-server.ts"
-import { Effect } from "effect"
-Effect.runFork(runCapabilityGatewayServer(process.env, {
-  keys: async (signal) => (await fetch(${JSON.stringify(f.keysUrl)}, { signal })).json(),
-  upstream: (url, init) => fetch(url.replace("https://api.anthropic.com", ${JSON.stringify(f.upstreamUrl)}), init),
-}))`
-  const child = Bun.spawn(
+  const removed = async () => {
+    await Bun.spawn(["docker", "rm", "--force", name], { stdout: "ignore", stderr: "ignore" })
+      .exited
+  }
+  const container = await startGatewayProcess(
     [
       "docker",
       "run",
@@ -110,30 +110,26 @@ Effect.runFork(runCapabilityGatewayServer(process.env, {
       `${f.root}:${f.root}`,
       "--env",
       "WORKFLOWD_CAPABILITY_GATEWAY",
-      ...(entrypoint ? [image] : ["--entrypoint", "/bin/bun", image, "-e", inject]),
+      ...(entrypoint
+        ? [image]
+        : [
+            "--entrypoint",
+            "/bin/bun",
+            image,
+            "-e",
+            gatewaySource(f, "/app/src/capability-gateway-server.ts"),
+          ]),
     ],
-    {
-      env: {
-        PATH: process.env.PATH,
-        WORKFLOWD_CAPABILITY_GATEWAY: JSON.stringify(config),
-      },
-      stdout: "pipe",
-      stderr: "inherit",
-    },
-  )
+    { PATH: process.env.PATH, WORKFLOWD_CAPABILITY_GATEWAY: JSON.stringify(config) },
+  ).catch(async (error: unknown) => {
+    await removed()
+    throw error
+  })
+  // The container goes first; then the docker client that ran it ends.
   const stop = async () => {
-    await Bun.spawn(["docker", "rm", "--force", name], { stdout: "ignore", stderr: "ignore" })
-      .exited
-    await child.exited
+    await removed()
+    await container.stop()
   }
-  const reader = child.stdout.getReader()
-  let text = ""
-  while (!text.includes("\n")) {
-    const part = await reader.read()
-    if (part.done) throw new Error(`gateway container ${name} exited before listening`)
-    text += Buffer.from(part.value).toString()
-  }
-  reader.releaseLock()
   try {
     const ids = await gatewayIds(name)
     assert.deepEqual(ids.uid, [imageUser, imageUser, imageUser, imageUser])
@@ -150,7 +146,7 @@ Effect.runFork(runCapabilityGatewayServer(process.env, {
     await stop()
     throw error
   })
-  return { port: Number(/^listening (\d+)$/m.exec(text)?.[1]), stop }
+  return { port: container.port, stop }
 }
 
 const f = await fixture()

@@ -275,15 +275,16 @@ export interface Gateway {
 }
 
 /**
- * The `bun -e` source of a gateway process: the real entry `src/capability-gateway-server.ts`,
- * which reads its configuration from the environment, with the job keys of the fixture key
- * server at `keysUrl` and the model upstream at `upstreamUrl` in place of api.anthropic.com.
+ * The `bun -e` source of a gateway process: the real entry `src/capability-gateway-server.ts`
+ * (or `entry`, its path in an image), which reads its configuration from the environment, with
+ * the job keys of the fixture key server at `keysUrl` and the model upstream at `upstreamUrl` in
+ * place of api.anthropic.com.
  */
-export const gatewaySource = (servers: {
-  readonly keysUrl: string
-  readonly upstreamUrl: string
-}) =>
-  `import { runCapabilityGatewayServer } from ${JSON.stringify(resolve("src/capability-gateway-server.ts"))}
+export const gatewaySource = (
+  servers: { readonly keysUrl: string; readonly upstreamUrl: string },
+  entry = resolve("src/capability-gateway-server.ts"),
+) =>
+  `import { runCapabilityGatewayServer } from ${JSON.stringify(entry)}
 import { Effect } from "effect"
 Effect.runFork(runCapabilityGatewayServer(process.env, {
   keys: async (signal) => (await fetch(${JSON.stringify(servers.keysUrl)}, { signal })).json(),
