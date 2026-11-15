@@ -283,9 +283,9 @@ test("a challenge is waited for after a 503, a refused connection, a reset, a ti
     expect(proofs).toBe(1)
     waits.length = 0
     // A name that never resolves is waited for only inside the same total limit.
-    await expect(open(() => fetch("http://unresolved.invalid/"))).rejects.toThrow(
-      "gateway session unavailable",
-    )
+    const unresolved = () =>
+      Promise.reject(Object.assign(new TypeError("fetch failed"), { cause: { code: "ENOTFOUND" } }))
+    await expect(open(unresolved)).rejects.toThrow("gateway session unavailable")
     expect(waits.reduce((sum, wait) => sum + wait, 0)).toBe(180000)
     expect(proofs).toBe(1)
     waits.length = 0
@@ -300,7 +300,7 @@ test("a challenge is waited for after a 503, a refused connection, a reset, a ti
   } finally {
     reset.close()
   }
-})
+}, 30000)
 
 test("OIDC authority is removed before launch, consumed once, and refuses hostile origins", async () => {
   for (const origin of [
