@@ -13,6 +13,23 @@ const turns = async (cycles) => {
     await new Promise((resolve) => globalThis.setImmediate(resolve))
 }
 
+// The real timers, kept before a test mocks `setTimeout`: the bound below runs on the wall clock.
+const realSetTimeout = globalThis.setTimeout
+const realClearTimeout = globalThis.clearTimeout
+
+/** Whether `socket` emits `close` within `ms` milliseconds of real time. */
+const closesWithin = async (socket, ms) => {
+  let timer
+  const late = new Promise((resolve) => {
+    timer = realSetTimeout(() => resolve(false), ms)
+  })
+  try {
+    return await Promise.race([once(socket, "close").then(() => true), late])
+  } finally {
+    realClearTimeout(timer)
+  }
+}
+
 /**
  * A relay whose renewal is in flight at a gateway that has not answered it yet. `body` gets the
  * relay, the gateway's pending response and request, and the count of renewal requests.
@@ -62,13 +79,9 @@ async function renewalInFlight(t, body) {
 
 test("stop cuts the connection of a renewal in flight", async (t) => {
   await renewalInFlight(t, async ({ relay, request }) => {
-    let cut = false
-    request.socket.once("close", () => {
-      cut = true
-    })
+    const closed = closesWithin(request.socket, 3000)
     relay.close()
-    for (let cycle = 0; cycle < 200 && !cut; cycle++) await turns(1)
-    assert.equal(cut, true)
+    assert.equal(await closed, true)
   })
 })
 
