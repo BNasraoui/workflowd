@@ -104,16 +104,17 @@ for (const [before, after] of [
 
 test("gateway image caller cannot inherit secrets, call the publisher or run another snapshot", async () => {
   const files = await workflows()
-  const source = files["gateway-image-pr.yml"]!
-  files["gateway-image-pr.yml"] = source.replace("    uses:", "    secrets: inherit\n    uses:")
+  const source = files["ci.yml"]!
+  const caller = "    uses: ./.github/workflows/gateway-image.yml"
+  files["ci.yml"] = source.replace(caller, `    secrets: inherit\n${caller}`)
   expect(() => assertUnprivilegedPrWorkflows(files)).toThrow(
     "Inherited secrets are forbidden in every workflow",
   )
-  files["gateway-image-pr.yml"] = source.replace("gateway-image.yml", "gateway-image-publish.yml")
+  files["ci.yml"] = source.replace(caller, caller.replace("gateway-image", "gateway-image-publish"))
   expect(() => assertUnprivilegedPrWorkflows(files)).toThrow(
     "PR job may not attach secrets, environments, containers or reusable workflows",
   )
-  files["gateway-image-pr.yml"] = source
+  files["ci.yml"] = source
   files["gateway-image.yml"] = files["agent-image.yml"]!
   expect(() => assertUnprivilegedPrWorkflows(files)).toThrow(
     "Image build differs from the reviewed unprivileged snapshot",

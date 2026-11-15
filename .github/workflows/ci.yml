@@ -563,6 +563,10 @@ jobs:
           AISLOP_SKIP_TOOL_DOWNLOAD: "1"
         run: npx --yes aislop@0.13.1 scan --json
 
+  gateway-image:
+    permissions: {}
+    uses: ./.github/workflows/gateway-image.yml
+
   required-checks:
     name: Required checks
     if: always()
@@ -573,6 +577,7 @@ jobs:
       - tests
       - credential-host
       - capability-security
+      - gateway-image
     runs-on: ubuntu-24.04
     timeout-minutes: 1
     permissions: {}
@@ -585,14 +590,19 @@ jobs:
           TESTS_RESULT: ${{ needs.tests.result }}
           CREDENTIAL_HOST_RESULT: ${{ needs.credential-host.result }}
           CAPABILITY_RESULT: ${{ needs.capability-security.result }}
+          # Success with "false" when a pull request changes no input of the image and nothing builds.
+          GATEWAY_IMAGE_RESULT: ${{ needs.gateway-image.result }}
+          GATEWAY_IMAGE_CHANGED: ${{ needs.gateway-image.outputs.changed }}
         run: |
           if [[ "$QUALITY_RESULT" != "success" || \
                 "$REPOSITORY_RESULT" != "success" || \
                 "$DEPLOYMENT_RESULT" != "success" || \
                 "$TESTS_RESULT" != "success" || \
                 "$CREDENTIAL_HOST_RESULT" != "success" || \
-                "$CAPABILITY_RESULT" != "success" ]]; then
-            printf 'Quality: %s\nRepository integrity: %s\nDeployment: %s\nTests: %s\nCredential host: %s\nCapability security: %s\n' \
-              "$QUALITY_RESULT" "$REPOSITORY_RESULT" "$DEPLOYMENT_RESULT" "$TESTS_RESULT" "$CREDENTIAL_HOST_RESULT" "$CAPABILITY_RESULT"
+                "$CAPABILITY_RESULT" != "success" || \
+                "$GATEWAY_IMAGE_RESULT" != "success" || \
+                ! "$GATEWAY_IMAGE_CHANGED" =~ ^(true|false)$ ]]; then
+            printf 'Quality: %s\nRepository integrity: %s\nDeployment: %s\nTests: %s\nCredential host: %s\nCapability security: %s\nGateway image: %s (inputs changed: %s)\n' \
+              "$QUALITY_RESULT" "$REPOSITORY_RESULT" "$DEPLOYMENT_RESULT" "$TESTS_RESULT" "$CREDENTIAL_HOST_RESULT" "$CAPABILITY_RESULT" "$GATEWAY_IMAGE_RESULT" "$GATEWAY_IMAGE_CHANGED"
             exit 1
           fi

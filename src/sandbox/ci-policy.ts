@@ -14,11 +14,12 @@ const setupNode = "actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020"
 // tokenless pinned Bun setup, locked build/determinism/E2E, and artifact upload
 // restricted to main pushes.
 // Any dependency, permission, input or script edit requires a fresh review.
-// gateway-image.yml: the same checkout, Nix, Bun and main-only upload, plus a second build of
-// the commit and a job that requires equal digests and the recorded noscope output hash.
+// gateway-image.yml: the same checkout, Nix, Bun and main-only upload, plus a job that finds
+// whether a pull request changes an input of the image, a second build of the commit and a job
+// that requires equal digests and the recorded noscope output hash.
 const imageWorkflowSha256 = new Map([
   ["agent-image.yml", "5cbed263784fda5a91137a9c935d7f1ba4ccb809b31d479b329a76aa9a79a857"],
-  ["gateway-image.yml", "523c23e8f814f80c2d93be552847dcb668deac0aaa2115a5d1656dc11fb0c6bf"],
+  ["gateway-image.yml", "2a797f348d5413ad7de0fd49a39be3c583f1becc171303f2af9e64b3bb218401"],
 ])
 const head = "${{ github.event.pull_request.head.sha || github.sha }}"
 const base = "${{ github.event.pull_request.base.sha || github.event.before }}"

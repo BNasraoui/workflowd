@@ -2,12 +2,61 @@ name: Gateway image reusable build
 
 on:
   workflow_call:
+    outputs:
+      changed:
+        description: Whether the image builds, as for a push or a pull request that changes an input
+        value: ${{ jobs.inputs.outputs.changed }}
 
 permissions: {}
 
 jobs:
+  inputs:
+    name: Gateway image inputs
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {}
+    outputs:
+      changed: ${{ steps.inputs.outputs.changed }}
+    steps:
+      - name: Anonymous checkout
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          set -euo pipefail
+          [[ "$HEAD_SHA" =~ ^[a-f0-9]{40}$ ]]
+          [[ "$BASE_SHA" =~ ^[a-f0-9]{40}$ ]]
+          export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0
+          git init .
+          git remote add origin https://github.com/BNasraoui/workflowd.git
+          git -c credential.helper= -c http.extraHeader= fetch --no-tags origin "$HEAD_SHA" "$BASE_SHA"
+          git checkout --detach "$HEAD_SHA"
+      - name: Find whether the change touches an input of the image
+        id: inputs
+        env:
+          EVENT: ${{ github.event_name }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          set -euo pipefail
+          changed=true
+          if [[ $EVENT == pull_request ]]; then
+            # The files of nix/gateway-image.nix and what builds, checks and runs them.
+            inputs='^(flake\.(nix|lock)|nix/|src/|package\.json|bun\.lock|tsconfig\.json|deploy/opencode/sandbox\.json|deploy/sandbox/(publication\.mjs|casefold\.json|publication-unicode\.json|public-status\.mjs|skills/catalog\.json)|\.github/workflows/gateway-image\.yml|test/gateway-image/|test/capability-gateway/|test/resources/)'
+            base=$(git merge-base "$BASE_SHA" "$HEAD_SHA")
+            git diff --name-only "$base" "$HEAD_SHA" > "$RUNNER_TEMP/changed-files"
+            status=0
+            grep -E "$inputs" "$RUNNER_TEMP/changed-files" || status=$?
+            if ((status > 1)); then exit "$status"; fi
+            if ((status == 1)); then changed=false; fi
+          fi
+          echo "changed=$changed" >> "$GITHUB_OUTPUT"
+          printf 'Image inputs changed: %s\n' "$changed" | tee -a "$GITHUB_STEP_SUMMARY"
+
   build:
     name: Gateway image build and E2E
+    needs: inputs
+    if: needs.inputs.outputs.changed == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     permissions: {}
@@ -99,6 +148,8 @@ jobs:
 
   rebuild:
     name: Gateway image second build
+    needs: inputs
+    if: needs.inputs.outputs.changed == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     permissions: {}
