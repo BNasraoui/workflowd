@@ -120,9 +120,11 @@ A command probe pauses after successful `systemd-run` for the launch crash case.
 The parent kills only its own host process, then starts a new host against the
 same scratch database. SQLite triggers count actual terminal state changes;
 parsed-event logs count partial-line consumption. The manager-unavailable case
-uses an invalid bus address in the scratch host only. Output is limited to 4096
-bytes per file and retention to one second for this runner; production defaults
-remain 10 MiB and seven days. The runner uses the CLI default model route, whose
+uses an invalid bus address in the scratch host only. For this runner the event
+record is limited to 4096 bytes across all its files (head, segments and index),
+with a line limit of 409 bytes; stderr is limited to 4096 bytes; retention is one
+second. Production defaults remain a 10 MiB event record with a 1 MiB line limit,
+10 MiB of stderr, and seven days. The runner uses the CLI default model route, whose
 stored model identifier is `<cli-default>`.
 
 Normal completion, failures, SIGINT and SIGTERM enter cleanup. Cleanup targets

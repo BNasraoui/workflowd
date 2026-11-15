@@ -2,15 +2,16 @@ import { expect, test } from "bun:test"
 import { appendFile, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { incrementalLines } from "../../src/kernel/codex-output"
+import { readEventRecord } from "../../src/kernel/event-record"
+import { localRecordSource } from "../../src/kernel/event-record-files"
 
 test("drains bytes appended during the terminal check exactly once", async () => {
   const root = await mkdtemp(join(tmpdir(), "codex-final-drain-"))
   try {
     const path = join(root, "events.jsonl")
     await writeFile(path, "first\n")
-    const events = incrementalLines({
-      path,
+    const events = readEventRecord({
+      source: localRecordSource(path),
       pollIntervalMs: 1,
       parse: (line) => line,
       shouldStop: async () => {
