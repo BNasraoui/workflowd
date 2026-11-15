@@ -15,6 +15,7 @@ let
       ../deploy/sandbox/casefold.json
       ../deploy/sandbox/publication-unicode.json
       ../deploy/sandbox/public-status.mjs
+      ../deploy/sandbox/renewal.mjs
       ../deploy/sandbox/skills/catalog.json
     ];
   };
