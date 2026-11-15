@@ -406,6 +406,7 @@ export async function access(
     }
     if (!next.scopes.includes("user:inference") || next.expiresAt <= Date.now())
       throw await required("interrupted")
+    await persist(directory, path, JSON.stringify(providers[provider].write(document, next)))
     await remove(directory, statePathOf)
     return { token: next.accessToken, expiresAt: next.expiresAt }
   })
