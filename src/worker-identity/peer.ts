@@ -57,7 +57,11 @@ export function loadRunSocketPolicy(
   return { controllerUid, agentUid, groupGid }
 }
 
-/** Why the socket at the path must stay, or undefined when the kernel refuses a connect. */
+// Bun 1.3 reports a refused connect to a Unix socket path as ENOENT; Bun 1.4 as ECONNREFUSED.
+// Either way no process listens; a path removed since lstat() is also safe to bind.
+const NO_LISTENER = new Set(["ECONNREFUSED", "ENOENT"])
+
+/** Why the socket at the path must stay, or undefined when no process listens on it. */
 function liveSocketReason(path: string) {
   return new Promise<string | undefined>((resolve) => {
     const probe = createConnection(path)
@@ -67,7 +71,7 @@ function liveSocketReason(path: string) {
     })
     probe.once("error", (error: Error & { code?: string }) => {
       probe.destroy()
-      resolve(error.code === "ECONNREFUSED" ? undefined : `could not be probed (${error.code})`)
+      resolve(NO_LISTENER.has(error.code!) ? undefined : `could not be probed (${error.code})`)
     })
   })
 }
