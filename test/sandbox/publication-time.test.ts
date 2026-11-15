@@ -55,13 +55,25 @@ except ValueError:
   ],
 } as const
 
-/** The answer of `check` for `text`, or "late" when it has none within `bound` milliseconds. */
+/**
+ * The answer of `check` for `text`; "late" when it has none within `bound` milliseconds, and the
+ * exit code and error output when it ends on its own with a failure.
+ */
 async function judged(check: ReadonlyArray<string>, text: string, bound: number) {
   const child = Bun.spawn([...check], { stdin: new Blob([text]), stdout: "pipe", stderr: "pipe" })
-  const late = setTimeout(() => child.kill("SIGKILL"), bound)
+  let killed = false
+  const late = setTimeout(() => {
+    killed = true
+    child.kill("SIGKILL")
+  }, bound)
   try {
-    const [status, out] = await Promise.all([child.exited, new Response(child.stdout).text()])
-    return status === 0 ? out.trim() : "late"
+    const [status, out, error] = await Promise.all([
+      child.exited,
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+    ])
+    if (killed) return "late"
+    return status === 0 ? out.trim() : `exit ${status}: ${error}`
   } finally {
     clearTimeout(late)
   }
