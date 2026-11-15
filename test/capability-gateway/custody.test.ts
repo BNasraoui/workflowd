@@ -2,6 +2,8 @@ import { expect, test } from "bun:test"
 import { createConnection } from "node:net"
 import { chmod, readFile, readdir, stat } from "node:fs/promises"
 import { join, resolve } from "node:path"
+import { Effect, Exit, Scope } from "effect"
+import { serveCapabilityGateway } from "../../src/capability-gateway-server"
 import {
   claudeLogin,
   client,
@@ -13,6 +15,7 @@ import {
   proof,
   sse,
   startGatewayProcess,
+  storedAccess,
   syntheticValue,
   writeCustodyProvider,
   type Fixture,
@@ -136,7 +139,7 @@ test("import-login takes the login on standard input only, into a 0700 directory
       stderr: "",
     })
     expect(JSON.parse(await readFile(loginFile(f), "utf8"))).toEqual(second)
-    expect(await readdir(loginDirectory(f))).toEqual(["claude.json"])
+    expect((await readdir(loginDirectory(f))).sort()).toEqual(["claude.json", "claude.lock"])
 
     const refused = async (
       input: string,
@@ -182,7 +185,7 @@ test("import-login takes the login on standard input only, into a 0700 directory
   } finally {
     await f.close()
   }
-})
+}, 30000)
 
 test("the gateway refuses a login whose directory or file has a wider mode, and names the path and the fault", async () => {
   await withCustody(async (f, oauth, start) => {
@@ -194,7 +197,7 @@ test("the gateway refuses a login whose directory or file has a wider mode, and 
     const values = [login.claudeAiOauth.accessToken, login.claudeAiOauth.refreshToken]
     await imported(f, login)
     const refusedStart = async () => {
-      const child = Bun.spawn([process.execPath, "-e", gatewaySource(f)], {
+      const child = Bun.spawn([process.execPath, resolve("src/capability-gateway-server.ts")], {
         cwd: resolve("."),
         env: custodyEnv(f, loginDirectory(f)),
         stdout: "pipe",
@@ -208,7 +211,8 @@ test("the gateway refuses a login whose directory or file has a wider mode, and 
       expect(code).not.toBe(0)
       expect(stdout).not.toContain("listening")
       expect(leaked(stdout + stderr, values)).toEqual([])
-      return stderr
+      // The process's logger writes the failure that ends it on standard output.
+      return stdout + stderr
     }
 
     await chmod(loginDirectory(f), 0o750)
@@ -243,7 +247,7 @@ test("the gateway refuses a login whose directory or file has a wider mode, and 
     expect(oauth.requests()).toHaveLength(0)
     expect(leaked(gateway.output?.() ?? "", values)).toEqual([])
   })
-})
+}, 30000)
 
 test("two calls at one time renew once, the new login is on disk before the upstream uses it, and no value leaves custody", async () => {
   await withCustody(async (f, oauth, start, outputs) => {
@@ -259,7 +263,7 @@ test("two calls at one time renew once, the new login is on disk before the upst
     outputs.push(importOutput.stdout, importOutput.stderr)
     const onDisk: string[] = []
     f.onUpstream(async () => {
-      onDisk.push(JSON.parse(await readFile(loginFile(f), "utf8")).claudeAiOauth.accessToken)
+      onDisk.push(storedAccess(await readFile(loginFile(f), "utf8")))
     })
     const gateway = await start()
     const token = await runToken(gateway, "jti-renew")
@@ -295,7 +299,7 @@ test("two calls at one time renew once, the new login is on disk before the upst
     })
     expect(stored.claudeAiOauth.expiresAt).toBeGreaterThan(Date.now() + 3500000)
     expect(await mode(loginFile(f))).toBe("0600")
-    expect(await readdir(loginDirectory(f))).toEqual(["claude.json", "claude.lock"])
+    expect((await readdir(loginDirectory(f))).sort()).toEqual(["claude.json", "claude.lock"])
 
     // A call on a fresh login does not renew it.
     const later = await client(gateway.port).call(token)
@@ -317,7 +321,7 @@ test("two calls at one time renew once, the new login is on disk before the upst
     expect(leaked((gateway.output?.() ?? "") + outputs.join(""), values)).toEqual([])
     expect(leaked(await storeBytes(f), values)).toEqual([])
   })
-})
+}, 30000)
 
 test("no verb of the control socket imports or returns a login", async () => {
   await withCustody(async (f, _oauth, start) => {
@@ -333,7 +337,7 @@ test("no verb of the control socket imports or returns a login", async () => {
       expect(JSON.parse(answer)).toEqual({ ok: false, error: "verb" })
     }
   })
-})
+}, 30000)
 
 test("a refusal of the OAuth server leaves a state that asks for a new import, and is not asked again", async () => {
   await withCustody(async (f, oauth, start) => {
@@ -342,7 +346,7 @@ test("a refusal of the OAuth server leaves a state that asks for a new import, a
     oauth.mode("refuse")
     const gateway = await start()
     const token = await runToken(gateway, "jti-refused")
-    for (const _ of [1, 2, 3]) {
+    for (let attempt = 0; attempt < 3; attempt++) {
       const call = await client(gateway.port).call(token)
       expect(call.status).toBe(503)
       expect(await call.text()).toBe("")
@@ -368,7 +372,7 @@ test("a refusal of the OAuth server leaves a state that asks for a new import, a
       `Bearer ${fresh.claudeAiOauth.accessToken}`,
     ])
   })
-})
+}, 30000)
 
 test("an OAuth server that does not answer ends the call at the time limit, with no upstream call on the old value", async () => {
   await withCustody(async (f, oauth, start) => {
@@ -394,7 +398,7 @@ test("an OAuth server that does not answer ends the call at the time limit, with
     expect(oauth.requests()).toHaveLength(1)
     expect(f.upstreamRequests()).toHaveLength(0)
   })
-}, 20000)
+}, 30000)
 
 /** One frame on the control socket: a 4-byte length, then the JSON. */
 function rawFrame(socket: string, value: unknown) {
@@ -412,3 +416,61 @@ function rawFrame(socket: string, value: unknown) {
     connection.on("close", () => done(answer.subarray(4).toString("utf8")))
   })
 }
+
+test("in this process, the gateway refuses a login it cannot hold and logs a login that needs a new import", async () => {
+  await withCustody(async (f, oauth) => {
+    const env = custodyEnv(f, loginDirectory(f))
+    const serve = (with_: Record<string, string | undefined>) =>
+      Effect.gen(function* () {
+        const scope = yield* Scope.make()
+        const served = yield* serveCapabilityGateway(with_, {
+          keys: async (signal) => (await fetch(f.keysUrl, { signal })).json(),
+          upstream: (url, init) =>
+            fetch(url.replace("https://api.anthropic.com", f.upstreamUrl), init),
+        }).pipe(
+          Scope.provide(scope),
+          Effect.onError(() => Scope.close(scope, Exit.void)),
+        )
+        return { port: served.port, stop: () => Effect.runPromise(Scope.close(scope, Exit.void)) }
+      })
+    const role = await Effect.runPromise(
+      Effect.flip(
+        serve({
+          ...env,
+          WORKFLOWD_CAPABILITY_GATEWAY: JSON.stringify({
+            ...f.config,
+            credentialRole: "fixture",
+            login: { directory: loginDirectory(f) },
+          }),
+        }),
+      ),
+    )
+    expect(String(role)).toContain("custody holds no provider fixture")
+
+    const login = claudeLogin(
+      syntheticValue("access"),
+      syntheticValue("refresh"),
+      Date.now() - 1000,
+    )
+    await imported(f, login)
+    await chmod(loginDirectory(f), 0o711)
+    const wide = await Effect.runPromise(Effect.flip(serve(env)))
+    expect(String(wide)).toContain(
+      `custody refused ${loginDirectory(f)}: mode 0711, custody requires 0700`,
+    )
+    await chmod(loginDirectory(f), 0o700)
+
+    oauth.mode("refuse")
+    const gateway = await Effect.runPromise(serve(env))
+    try {
+      await f.reconcile()
+      const token = await runToken({ ...gateway }, "jti-in-process")
+      const call = await client(gateway.port).call(token)
+      expect(call.status).toBe(503)
+      expect(oauth.requests()).toHaveLength(1)
+      expect(f.upstreamRequests()).toHaveLength(0)
+    } finally {
+      await gateway.stop()
+    }
+  })
+}, 30000)

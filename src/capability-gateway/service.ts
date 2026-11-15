@@ -2,6 +2,7 @@ import { Context, Effect, Option, Redacted, Schema, Semaphore } from "effect"
 import { SqlClient } from "effect/unstable/sql"
 import { randomInt } from "node:crypto"
 import { mintCapability, type NoscopeConfiguration } from "./noscope"
+import { custodyProvider, loginFault } from "./custody"
 import { claudeRequest, readRequestBody, type ClaudeUpstream } from "./claude"
 import { CapabilityRefused, capabilityDigest, makeCapabilityStore } from "./store"
 import { githubJobKeys, verifyJobProof } from "../sandbox/bootstrap"
@@ -16,6 +17,8 @@ export interface GatewayConfiguration {
   readonly noscope: NoscopeConfiguration
   readonly providerId: string
   readonly credentialRole: string
+  /** The directory of the login that custody holds for `credentialRole`. */
+  readonly login?: { readonly directory: string }
   readonly maxStreams: number
   readonly maxStreamsPerRun: number
   /** A stream silent this long is aborted; a stream that keeps sending runs to token expiry. */
@@ -423,7 +426,15 @@ export const makeCapabilityGateway = (
                             config.credentialRole,
                             3600,
                             signal,
-                          )
+                          ).catch(async (error: unknown) => {
+                            const provider = custodyProvider(config.credentialRole)
+                            const fault =
+                              config.login && provider
+                                ? await loginFault(config.login.directory, provider)
+                                : undefined
+                            if (fault) console.error(fault)
+                            throw error
+                          })
                           ownership.providerExpiry(snapshot.expiresAt)
                           return snapshot.token
                         },

@@ -531,11 +531,12 @@ export interface OAuthRequest {
 /**
  * A fixture OAuth server on loopback, a real HTTP server in this process. In `renew` it answers a
  * refresh with `next` (an access value that lives an hour, and a new refresh value). In `refuse`
- * it answers 400 `invalid_grant`. In `silent` it never answers. In `cut` it sends the status and
+ * it answers 400 `invalid_grant`, in `busy` 503, and in `garbled` a body that does not parse.
+ * In `silent` it never answers. In `cut` it sends the status and
  * part of the body, calls `onCut`, and never sends the rest.
  */
 export function oauthFixture() {
-  let mode: "renew" | "refuse" | "silent" | "cut" = "renew"
+  let mode: "renew" | "refuse" | "silent" | "cut" | "busy" | "garbled" = "renew"
   let next = { access: syntheticValue("access"), refresh: syntheticValue("refresh") }
   let onCut: (() => void) | undefined
   const requests: OAuthRequest[] = []
@@ -547,6 +548,8 @@ export function oauthFixture() {
       requests.push({ body: await request.text(), at: performance.now() })
       if (mode === "refuse") return Response.json({ error: "invalid_grant" }, { status: 400 })
       if (mode === "silent") return new Promise<Response>(() => {})
+      if (mode === "busy") return new Response(null, { status: 503 })
+      if (mode === "garbled") return new Response("{not json")
       const body = JSON.stringify({
         token_type: "Bearer",
         access_token: next.access,
@@ -630,3 +633,11 @@ export async function importLogin(
   ])
   return { code, stdout, stderr }
 }
+
+/** The access value of a stored Claude login, from the text of its file. */
+export const storedAccess = (text: string) =>
+  Schema.decodeUnknownSync(
+    Schema.fromJsonString(
+      Schema.Struct({ claudeAiOauth: Schema.Struct({ accessToken: Schema.String }) }),
+    ),
+  )(text).claudeAiOauth.accessToken

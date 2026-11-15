@@ -46,6 +46,11 @@ export const CapabilityGatewayConfig = Schema.Struct({
   controlSocket: AbsolutePath,
   /** The only caller the control socket answers, and the group that may reach the socket. */
   daemon: Schema.Struct({ uid: Id, gid: Id }),
+  /**
+   * The directory of the provider login that custody holds for `credentialRole`; the gateway's
+   * uid owns it, mode 0700. The noscope provider `provider-access` names the same directory.
+   */
+  login: Schema.optionalKey(Schema.Struct({ directory: AbsolutePath })),
   providerId: Schema.NonEmptyString,
   credentialRole: Schema.String.check(Schema.isPattern(/^[A-Za-z0-9_.-]{1,128}$/)),
   maxStreams: Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 512 })),
