@@ -28,7 +28,7 @@ export function publicationBody(marker: string, body: string): string {
 const positiveId = Schema.Int.check(Schema.isGreaterThan(0))
 export const PrivateBootstrapPolicy = Schema.Struct({
   repositoryOwnerId: positiveId,
-  mode: Schema.Literals(["remote-tools", "actions-native"]),
+  mode: Schema.Literal("actions-native"),
 })
 export const CapabilityGatewayConfig = Schema.Struct({
   gitRead: Schema.optionalKey(Schema.Boolean),
