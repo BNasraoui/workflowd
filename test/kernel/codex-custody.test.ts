@@ -9,7 +9,8 @@ import {
   runCodexWorker,
   runHostWorker,
 } from "../../src/kernel/codex-worker"
-import { MIN_EVENT_RECORD_BYTES } from "../../src/kernel/event-record-files"
+import { lineDroppedMarker, MIN_EVENT_RECORD_BYTES } from "../../src/kernel/event-record-files"
+import { recordFiles } from "./event-record-harness"
 
 const fakeSystemd = (commands: ReadonlyArray<string>[]) => {
   let active = false
@@ -96,7 +97,20 @@ test("the transient worker feeds the prompt on stdin and records its exit durabl
     const stderrPath = join(root, "stderr.log")
     const binary = join(root, "codex")
     await writeFile(promptPath, "prompt stays out of argv")
-    await writeFile(binary, `#!/bin/sh\ncat > "${capturePath}"\nexit 7\n`, { mode: 0o755 })
+    // Past the limit on both streams: twenty short lines (about 960 bytes),
+    // then one line over the line limit, and 1000 bytes of stderr.
+    await writeFile(
+      binary,
+      `#!/bin/sh
+cat > "${capturePath}"
+i=0
+while [ $i -lt 20 ]; do echo '{"type":"noise","pad":"xxxxxxxxxxxxxxxxxxxxxx"}'; i=$((i+1)); done
+head -c 1000 /dev/zero | tr '\\0' x; echo
+head -c 1000 /dev/zero | tr '\\0' e >&2
+exit 7
+`,
+      { mode: 0o755 },
+    )
 
     const exitCode = await runCodexWorker({
       binary,
@@ -112,8 +126,18 @@ test("the transient worker feeds the prompt on stdin and records its exit durabl
     expect(exitCode).toBe(7)
     expect(await readFile(capturePath, "utf8")).toBe("prompt stays out of argv")
     expect(JSON.parse(await readFile(resultPath, "utf8"))).toEqual({ version: 1, exitCode: 7 })
-    expect((await stat(eventsPath)).size).toBeLessThanOrEqual(MIN_EVENT_RECORD_BYTES)
-    expect((await stat(stderrPath)).size).toBeLessThanOrEqual(MIN_EVENT_RECORD_BYTES)
+    const record = await recordFiles(root)
+    expect(record.files.size).toBeGreaterThan(2)
+    expect(record.bytes).toBeLessThanOrEqual(MIN_EVENT_RECORD_BYTES)
+    const newest = Math.max(
+      ...[...record.files.keys()].map((name) =>
+        Number(/^events\.(\d+)\.jsonl$/.exec(name)?.[1] ?? 0),
+      ),
+    )
+    expect(await readFile(join(root, `events.${newest}.jsonl`), "utf8")).toBe(
+      lineDroppedMarker(1000),
+    )
+    expect((await stat(stderrPath)).size).toBe(MIN_EVENT_RECORD_BYTES)
   } finally {
     await rm(root, { recursive: true, force: true })
   }
