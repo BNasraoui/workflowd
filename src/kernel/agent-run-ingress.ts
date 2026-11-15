@@ -285,7 +285,7 @@ const make = (options: AgentRunIngressOptions) =>
       refuse("executor_unavailable", sandboxDiagnostic("ingress.custody", cause).message)
     const visibility = Option.getOrUndefined(yield* Effect.serviceOption(RepositoryVisibility))
     // A runner run needs a public repository; a read that fails never counts as public.
-    // Until the runner executor exists, a public repository is refused too.
+    // No runner executor is provided, so a public repository is refused too.
     const refuseRunner = (alias: string) =>
       Effect.gen(function* () {
         const policy = options.sandboxRepositories?.find((candidate) => candidate.alias === alias)

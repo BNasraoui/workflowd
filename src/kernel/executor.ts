@@ -3,9 +3,8 @@ import type { CliEvent } from "./cli-process-contract"
 import type { SealedResult } from "./sealed-result"
 
 /**
- * Where a repository's runs execute. `host` is the daemon's own host, as today;
- * `runner` is a GitHub Actions job whose sealed result the daemon checks and
- * publishes. (workflowd-0m5r adds `host-box`.)
+ * Where a repository's runs execute. `host` is the daemon's own host; `runner` is
+ * a GitHub Actions job whose sealed result the daemon checks and publishes.
  */
 export type Placement = "host" | "runner"
 

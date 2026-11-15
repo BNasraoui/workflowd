@@ -617,6 +617,55 @@ test(
 )
 
 test(
+  "a push with an expected head fast-forwards a target whose head is equal, and refuses one that moved",
+  withFixture(async (f) => {
+    const sealed = await sealWithResultPy(f, async (workspace) => {
+      await writeFile(join(workspace, "result.txt"), "content\n")
+    })
+    const result = await decode(sealed.json, sealed.bundle)
+    const existing = { ref: "refs/heads/agent-run/existing", expectedHead: f.sourceSha }
+    await command(["git", "update-ref", existing.ref, f.sourceSha], f.remote)
+    const exit = await publish(result, options(f), undefined, existing)
+    if (Exit.isFailure(exit)) throw Cause.squash(exit.cause)
+    expect(exit.value.ref).toBe(existing.ref)
+    expect(await remoteRef(f, existing.ref)).toBe(exit.value.sha)
+    // The head moves between the check and the push: the push is refused, never forced.
+    const moving = { ref: "refs/heads/agent-run/moving", expectedHead: f.sourceSha }
+    await command(["git", "update-ref", moving.ref, f.sourceSha], f.remote)
+    const moved = await run(
+      ["git", "commit-tree", "-m", "moved", `${f.sourceSha}^{tree}`],
+      f.remote,
+    )
+    const refusedPush = await publish(
+      result,
+      options(f),
+      () => command(["git", "update-ref", moving.ref, moved], f.remote).then(() => undefined),
+      moving,
+    )
+    expect(refusedCheck(refusedPush)).toBe("target_moved")
+    expect(await remoteRef(f, moving.ref)).toBe(moved)
+  }),
+)
+
+test(
+  "a bundle whose ref names no commit of its pack is refused",
+  withFixture(async (f) => {
+    const bundle = await handBundle(f, (git, dir) => commitFile(git, dir, "a.txt"))
+    const blob = await run(["git", "hash-object", "--stdin"], f.root, "content\n")
+    for (const sha of [blob, "f".repeat(40)]) {
+      const named = withHeader(bundle, (lines) =>
+        lines.map((line) =>
+          line.replace(/^[0-9a-f]{40} refs\/workflowd\/result$/, `${sha} refs/workflowd/result`),
+        ),
+      )
+      const exit = await publish(await decode(manifest(f.sourceSha), named), options(f))
+      expect(refusedCheck(exit)).toBe("ref")
+      expect(refusal(exit).detail).toBe("the ref of the bundle names no commit of its pack")
+    }
+  }),
+)
+
+test(
   "a target ref that exists before the check is refused, and a wrong expected head is refused",
   withFixture(async (f) => {
     const sealed = await sealWithResultPy(f, async (workspace) => {

@@ -79,7 +79,9 @@ export type SealedResultOptions = {
    * earlier process left.
    */
   readonly scratchRoot: string
+  /** Only tests set it (a recording or a slow git); the daemon runs /usr/bin/git. */
   readonly gitBinary?: string
+  /** Only tests set it; the daemon uses `sealedResultLimits.timeLimitMs`. */
   readonly timeLimitMs?: number
 }
 
@@ -773,18 +775,8 @@ const checkHistory = (context: GitContext, base: string, resultSha: string) =>
       parent = commit!
     }
     if (parent !== resultSha) return yield* refused("linear_history")
-    const objects = (yield* gitOk(context, ["rev-list", "--objects", range])).trim().split("\n")
-    if (objects.length > sealedResultLimits.objects) return yield* refused("object_count")
-    const sizes = yield* gitOk(
-      context,
-      ["cat-file", "--batch-check=%(objectsize)"],
-      new TextEncoder().encode(objects.map((line) => `${line.slice(0, 40)}\n`).join("")),
-    )
-    const total = sizes
-      .trim()
-      .split("\n")
-      .reduce((sum, line) => sum + Number(line), 0)
-    if (total > sealedResultLimits.objectBytes) return yield* refused("object_bytes")
+    // The objects of the range are objects of the pack, whose count and sizes the walk
+    // bounded: the bases --fix-thin adds are objects of the base.
     return commits
   })
 
