@@ -256,8 +256,13 @@ test("a challenge is waited for after a 503, a refused connection, a reset, a ti
     const faults: Array<() => Promise<Response>> = [
       () => fetch(refusedUrl),
       () => fetch(resetUrl),
-      // The gateway's name before the runner has joined the tailnet.
-      () => fetch("http://unresolved.invalid/"),
+      // The gateway's name before the runner has joined the tailnet, as Node's fetch and Bun's
+      // fetch report it.
+      () =>
+        Promise.reject(
+          Object.assign(new TypeError("fetch failed"), { cause: { code: "ENOTFOUND" } }),
+        ),
+      () => Promise.reject(Object.assign(new TypeError("fetch failed"), { code: "ENOTFOUND" })),
       () =>
         Promise.reject(
           Object.assign(new TypeError("fetch failed"), { cause: { code: "EAI_AGAIN" } }),
@@ -279,7 +284,7 @@ test("a challenge is waited for after a 503, a refused connection, a reset, a ti
         },
       })
     expect(await open((url, init) => faults.shift()?.() ?? gateway.send(url, init))).toEqual(grant)
-    expect(waits).toHaveLength(6)
+    expect(waits).toHaveLength(7)
     expect(proofs).toBe(1)
     waits.length = 0
     // A name that never resolves is waited for only inside the same total limit.
