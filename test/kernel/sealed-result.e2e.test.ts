@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test"
-import { Cause, Effect, Exit, Fiber, Layer, Redacted, Schema } from "effect"
+import { Cause, Effect, Exit, Fiber, Layer, Logger, Redacted, Schema } from "effect"
 import {
   chmod,
   lstat,
@@ -702,6 +702,86 @@ test(
         `token ${token}`,
         `token ${token}`,
       ])
+    } finally {
+      await stub.close()
+    }
+  }),
+)
+
+const stubPolicy = { repository: "fixture/repo", repositoryId: 12, installationId: 34 }
+
+test(
+  "a revocation that fails is logged with no token, and the check and the push keep their result",
+  withFixture(async (f) => {
+    const stub = await githubApiStub(
+      (path, method) =>
+        method === "DELETE" && path === "/installation/token"
+          ? new Response(null, { status: 500 })
+          : undefined,
+      token,
+    )
+    try {
+      const sealed = await sealWithResultPy(f, async (workspace) => {
+        await writeFile(join(workspace, "result.txt"), "content\n")
+      })
+      const result = await decode(sealed.json, sealed.bundle)
+      const logs: string[] = []
+      const logged = Logger.layer([Logger.make((entry) => logs.push(Bun.inspect(entry)))])
+      const opts = options(f, { token: stub.github.pushToken(stubPolicy) })
+      const step = (checkedTarget: typeof target) =>
+        Effect.runPromiseExit(
+          Effect.provide(
+            Effect.scoped(
+              Effect.gen(function* () {
+                return yield* pushSealedResult(
+                  yield* checkSealedResult(result, checkedTarget, opts),
+                )
+              }),
+            ),
+            Layer.mergeAll(gitLayer(opts.git), logged),
+          ),
+        )
+      const pushed = await step(target)
+      if (Exit.isFailure(pushed)) throw Cause.squash(pushed.cause)
+      expect(pushed.value).toEqual({ ref: target.ref, sha: await remoteRef(f) })
+      // A refusal stays the refusal.
+      expect(refusedCheck(await step(target))).toBe("target_exists")
+      expect(stub.revoked()).toHaveLength(2)
+      expect(logs.filter((line) => line.includes("Installation token not revoked"))).toHaveLength(2)
+      const encoded = Buffer.from(`x-access-token:${token}`).toString("base64")
+      for (const line of logs) {
+        expect(line).not.toContain(token)
+        expect(line).not.toContain(encoded)
+      }
+    } finally {
+      await stub.close()
+    }
+  }),
+)
+
+test(
+  "an interrupt while the token is in use revokes the token",
+  withFixture(async (f) => {
+    const stub = await githubApiStub(undefined, token)
+    try {
+      const sealed = await sealWithResultPy(f, async (workspace) => {
+        await writeFile(join(workspace, "result.txt"), "content\n")
+      })
+      const result = await decode(sealed.json, sealed.bundle)
+      const started = join(f.root, "started")
+      const endless = join(f.root, "endless-git")
+      await writeFile(endless, `#!/bin/sh\ntouch ${started}\nexec sleep 300\n`)
+      await chmod(endless, 0o755)
+      const opts = options(f, { binary: endless, token: stub.github.pushToken(stubPolicy) })
+      const fiber = Effect.runFork(
+        Effect.provide(Effect.scoped(checkSealedResult(result, target, opts)), gitLayer(opts.git)),
+      )
+      // The first git child runs once the token is made.
+      while (!(await Bun.file(started).exists())) await Bun.sleep(10)
+      expect(stub.minted()).toHaveLength(1)
+      expect(stub.revoked()).toHaveLength(0)
+      await Effect.runPromise(Fiber.interrupt(fiber))
+      expect(stub.revoked().map((request) => request.authorization)).toEqual([`token ${token}`])
     } finally {
       await stub.close()
     }

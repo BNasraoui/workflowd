@@ -15,11 +15,13 @@ export type GithubApiRequest = {
 
 /**
  * A GitHub API stub on the loopback address, with a GitHub App of a generated key.
- * It mints installation tokens and revokes them; `route` answers every other
- * request, else 404. It records each request. Nothing reaches GitHub.
+ * It mints installation tokens and revokes them, unless `route` answers the request
+ * first; `route` answers every other request, else 404. It records each request.
+ * Nothing reaches GitHub.
  */
 export async function githubApiStub(
-  route: (path: string) => Response | Promise<Response> | undefined = () => undefined,
+  route: (path: string, method: string) => Response | Promise<Response> | undefined = () =>
+    undefined,
   token = "fixture-token",
 ) {
   const root = await mkdtemp(join(tmpdir(), "github-api-stub-"))
@@ -44,11 +46,13 @@ export async function githubApiStub(
         authorization: request.headers.get("authorization"),
         body: text === "" ? undefined : JSON.parse(text),
       })
+      const routed = route(path, request.method)
+      if (routed !== undefined) return routed
       if (request.method === "POST" && /^\/app\/installations\/\d+\/access_tokens$/.test(path))
         return Response.json({ token }, { status: 201 })
       if (request.method === "DELETE" && path === "/installation/token")
         return new Response(null, { status: 204 })
-      return route(path) ?? new Response(null, { status: 404 })
+      return new Response(null, { status: 404 })
     },
   })
   const github = await Effect.runPromise(
