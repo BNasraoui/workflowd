@@ -1057,6 +1057,59 @@ test(
   30_000,
 )
 
+/**
+ * A pack of the deepest delta chain the walk lets through: a blob, then a delta on
+ * the blob before it for each object up to the object bound but a tree and a
+ * commit, with the inflated sizes inside the bound of object bytes.
+ */
+function deepChainBundle(f: Fixture) {
+  const links = sealedResultLimits.objects - 2
+  const size = 6_000
+  expect(links * size).toBeLessThan(sealedResultLimits.objectBytes - 64 * 1024)
+  const content = (index: number) => {
+    const bytes = new Uint8Array(size).fill(0x61)
+    bytes.set(Buffer.from(index.toString(16).padStart(8, "0")))
+    return bytes
+  }
+  // Insert the 8 bytes of the index, then copy the rest of the base from offset 8.
+  const delta = (index: number) =>
+    concat(
+      deltaSize(size),
+      deltaSize(size),
+      Uint8Array.from([8]),
+      content(index).subarray(0, 8),
+      Uint8Array.from([0x80 | 0x01 | 0x10 | 0x20, 8, (size - 8) & 0xff, (size - 8) >> 8]),
+    )
+  const entries = [blobEntry(content(0))]
+  for (let index = 1; index < links; index++)
+    entries.push(refDeltaEntry(blobId(content(index - 1)), delta(index)))
+  const tree = concat("100644 deep.txt\0", blobId(content(links - 1)))
+  const commit = Buffer.from(
+    `tree ${objectId("tree", tree).toString("hex")}\nparent ${f.sourceSha}\nauthor ${agentLine}\ncommitter ${agentLine}\n\nAdd the end of a deep delta chain\n`,
+  )
+  entries.push(objectEntry("tree", tree), objectEntry("commit", commit))
+  expect(entries).toHaveLength(sealedResultLimits.objects)
+  return concat(
+    `# v2 git bundle\n-${f.sourceSha} base\n${objectId("commit", commit).toString("hex")} refs/workflowd/result\n\n`,
+    pack(entries),
+  )
+}
+
+test(
+  "a delta chain as deep as the object bound permits is checked inside the time and memory bounds",
+  withFixture(async (f) => {
+    const bundle = deepChainBundle(f)
+    expect(bundle.byteLength).toBeLessThan(sealedResultLimits.bundleBytes)
+    const started = Date.now()
+    const { check, peak } = await checkInOwnProcess(f, bundle)
+    const elapsed = Date.now() - started
+    expect(check).toBeNull()
+    expect(peak).toBeLessThan(checkPeakBytes)
+    expect(elapsed).toBeLessThan(sealedResultLimits.timeLimitMs)
+  }),
+  sealedResultLimits.timeLimitMs + 30_000,
+)
+
 const blob = blobEntry(new TextEncoder().encode("content\n"))
 for (const [name, check, packBytes] of [
   [
