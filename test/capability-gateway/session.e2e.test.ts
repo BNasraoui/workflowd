@@ -1,265 +1,23 @@
 import { expect, test } from "bun:test"
-import { generateKeyPairSync, sign } from "node:crypto"
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
-import { tmpdir } from "node:os"
-import { join, resolve } from "node:path"
 import { connect } from "node:net"
-import { Effect, Exit, Schema, Scope } from "effect"
-import { SqliteClient } from "@effect/sql-sqlite-bun"
+import { Effect, Exit, Schema } from "effect"
 import { SqlClient } from "effect/unstable/sql"
-import { AgentRunStore, AgentRunStoreLive } from "../../src/kernel/agent-run-store"
+import { AgentRunStore } from "../../src/kernel/agent-run-store"
 import { capabilityDigest, makeCapabilityStore } from "../../src/capability-gateway/store"
 import { makeCapabilityGateway } from "../../src/capability-gateway/service"
 import { makeSandboxStore } from "../../src/sandbox/store"
 import { serveCapabilityGateway } from "../../src/capability-gateway-server"
-import { fixtureExecutable } from "../helpers/fixture-executable.mjs"
-import { seedCapabilityRun } from "./fixture"
-
-const { privateKey, publicKey } = generateKeyPairSync("rsa", { modulusLength: 2048 })
-const jwks = {
-  keys: [{ ...publicKey.export({ format: "jwk" }), kid: "fixture", alg: "RS256", use: "sig" }],
-}
-const ref = "refs/heads/workflowd/leases/lease"
-/** A GitHub Actions OIDC proof for the seeded lease (Actions run 78, attempt 1). */
-const proof = (audience: string, jti: string, change: Record<string, string> = {}) => {
-  const now = Math.floor(Date.now() / 1000)
-  const input = [
-    { alg: "RS256", typ: "JWT", kid: "fixture" },
-    {
-      iss: "https://token.actions.githubusercontent.com",
-      aud: audience,
-      sub: `repo:fixture@1/repo@12:ref:${ref}`,
-      jti,
-      iat: now - 5,
-      nbf: now - 5,
-      exp: now + 300,
-      repository: "fixture/repo",
-      repository_id: "12",
-      repository_owner_id: "1",
-      repository_owner: "fixture",
-      actor_id: "56",
-      ref,
-      sha: "a".repeat(40),
-      workflow_ref: `fixture/repo/.github/workflows/agent-sandbox-caller.yml@${ref}`,
-      workflow_sha: "a".repeat(40),
-      job_workflow_ref: `fixture/repo/.github/workflows/agent-sandbox.yml@${ref}`,
-      job_workflow_sha: "a".repeat(40),
-      run_id: "78",
-      run_attempt: "1",
-      event_name: "push",
-      runner_environment: "github-hosted",
-      ...change,
-    },
-  ]
-    .map((value) => Buffer.from(JSON.stringify(value)).toString("base64url"))
-    .join(".")
-  return `${input}.${sign("RSA-SHA256", Buffer.from(input), privateKey).toString("base64url")}`
-}
-
-const json =
-  <A>(schema: Schema.Codec<A>) =>
-  async (response: Response): Promise<A> =>
-    Schema.decodeUnknownSync(schema)(await response.json())
-const Challenge = json(Schema.Struct({ channel: Schema.String, nonce: Schema.String }))
-const Grant = json(
-  Schema.Struct({
-    token: Schema.String,
-    expiresAt: Schema.Number,
-    renewAt: Schema.Number,
-    deadline: Schema.Number,
-  }),
-)
-const Renewed = json(Schema.Struct({ token: Schema.String, renewAt: Schema.Number }))
-const sse = "event: message_start\ndata: {}\n\nevent: message_stop\ndata: {}\n\n"
-
-async function fixture() {
-  const root = await mkdtemp(join(tmpdir(), "wfd-gateway-session-"))
-  await mkdir(join(root, "noscope/providers"), { recursive: true, mode: 0o700 })
-  await mkdir(join(root, "run"))
-  // The run token provider waits while `slow` exists, so a session request can be cut mid-mint.
-  await writeFile(
-    join(root, "run.mjs"),
-    `import {existsSync} from 'node:fs';import {randomBytes,randomUUID} from 'node:crypto';
-while (existsSync(${JSON.stringify(join(root, "slow"))})) await new Promise((r)=>setTimeout(r,50));
-process.stdout.write(JSON.stringify({token:randomBytes(32).toString('base64url'),token_id:randomUUID(),expires_at:new Date(Date.now()+Number(process.argv[2])*1000).toISOString()}))`,
-  )
-  await writeFile(
-    join(root, "access.mjs"),
-    `process.stdout.write(JSON.stringify({token:"fixture-access",token_id:"fixture",expires_at:new Date(Date.now()+120000).toISOString()}))`,
-  )
-  for (const [name, script, argument] of [
-    ["run-capability", "run.mjs", " {ttl}"],
-    ["provider-access", "access.mjs", ""],
-  ] as const)
-    await writeFile(
-      join(root, `noscope/providers/${name}.toml`),
-      `contract_version = 1\n[commands]\nmint = "${process.execPath} ${join(root, script)}${argument}"\n`,
-      { mode: 0o600 },
-    )
-  let stall = false
-  const upstream = Bun.serve({
-    hostname: "127.0.0.1",
-    port: 0,
-    fetch: () =>
-      new Response(
-        stall
-          ? new ReadableStream({
-              start(controller) {
-                controller.enqueue(new TextEncoder().encode("event: message_start\ndata: {}\n\n"))
-              },
-            })
-          : sse,
-        { headers: { "content-type": "text/event-stream" } },
-      ),
-  })
-  const database = join(root, "workflowd.db")
-  const config = {
-    nodeBinary: fixtureExecutable("node"),
-    noscope: { binary: fixtureExecutable("noscope"), configHome: root },
-    providerId: "anthropic",
-    credentialRole: "fixture",
-    maxStreams: 8,
-    maxStreamsPerRun: 2,
-    listen: { host: "127.0.0.1", port: 0 },
-  }
-  const env = {
-    PATH: process.env.PATH,
-    HOME: root,
-    WORKFLOWD_DATABASE_PATH: database,
-    WORKFLOWD_CAPABILITY_GATEWAY: JSON.stringify(config),
-  }
-  const store = <A, E>(
-    effect: Effect.Effect<
-      A,
-      E,
-      SqlClient.SqlClient | typeof AgentRunStore.Identifier | Scope.Scope
-    >,
-  ) =>
-    Effect.runPromise(
-      Effect.scoped(effect).pipe(
-        Effect.provide(AgentRunStoreLive),
-        Effect.provide(SqliteClient.layer({ filename: database })),
-      ),
-    )
-  await store(
-    Effect.gen(function* () {
-      const { sql } = yield* seedCapabilityRun(Date.now(), true)
-      yield* sql`UPDATE kernel_agent_runs SET directory=${join(root, "run")} WHERE run_id='run'`
-    }),
-  )
-  const upstreamFn = (url: string, init: RequestInit) =>
-    fetch(url.replace("https://api.anthropic.com", `http://127.0.0.1:${upstream.port}`), init)
-  return {
-    root,
-    env,
-    config,
-    store,
-    upstreamFn,
-    setStall: (value: boolean) => {
-      stall = value
-    },
-    close: async () => {
-      await upstream.stop(true)
-      await rm(root, { recursive: true, force: true })
-    },
-    upstreamPort: upstream.port,
-  }
-}
-type Fixture = Awaited<ReturnType<typeof fixture>>
-
-/** The gateway as its own process: its real entry, with the fixture's keys and upstream. */
-async function processGateway(f: Fixture) {
-  const child = Bun.spawn(
-    [
-      process.execPath,
-      "-e",
-      `import { runCapabilityGatewayServer } from ${JSON.stringify(resolve("src/capability-gateway-server.ts"))}
-import { Effect } from "effect"
-const jwks = ${JSON.stringify(jwks)}
-Effect.runFork(runCapabilityGatewayServer(process.env, {
-  keys: async () => jwks,
-  upstream: (url, init) => fetch(url.replace("https://api.anthropic.com", "http://127.0.0.1:${f.upstreamPort}"), init),
-}))`,
-    ],
-    { cwd: resolve("."), env: f.env, stdout: "pipe", stderr: "inherit" },
-  )
-  const reader = child.stdout.getReader()
-  let text = ""
-  while (!text.includes("\n")) {
-    const part = await reader.read()
-    if (part.done) throw new Error("gateway process exited before listening")
-    text += Buffer.from(part.value).toString()
-  }
-  reader.releaseLock()
-  const port = Number(/^listening (\d+)$/m.exec(text)?.[1])
-  return {
-    port,
-    stop: async () => {
-      child.kill("SIGKILL")
-      await child.exited
-    },
-  }
-}
-
-/** The same server in this process, so its routes count toward the plain run's coverage. */
-async function inProcessGateway(f: Fixture) {
-  const scope = Effect.runSync(Scope.make())
-  const served = await Effect.runPromise(
-    serveCapabilityGateway(f.env, { keys: async () => jwks, upstream: f.upstreamFn }).pipe(
-      Scope.provide(scope),
-    ),
-  )
-  return {
-    port: served.port,
-    stop: () => Effect.runPromise(Scope.close(scope, Exit.void)),
-  }
-}
-
-/** Another run and lease beside the fixture's, for Actions run `actionsRunId`, attempt 1. */
-const seedLease = (runId: string, leaseId: string, actionsRunId: number, native: boolean) =>
-  Effect.gen(function* () {
-    const runs = yield* AgentRunStore
-    yield* runs.create({
-      runId,
-      route: "fixture",
-      providerId: "anthropic",
-      modelId: "fixture-model",
-      executorKind: "claude",
-      agent: "sandbox",
-      repository: "fixture",
-      directory: "/fixture",
-      prompt: "fixture",
-      promptSha256: "c".repeat(64),
-      parentSessionId: null,
-      resumePrompt: null,
-      maxAttempts: 1,
-      createdAt: new Date(),
-    })
-    yield* runs.claimSpawn({ runId, now: new Date() })
-    const leases = yield* makeSandboxStore
-    yield* leases.request({
-      runId,
-      leaseId,
-      policy: {
-        ...(native
-          ? { privateBootstrap: { mode: "actions-native" as const, repositoryOwnerId: 1 } }
-          : {}),
-        alias: "fixture",
-        repository: "fixture/repo",
-        repositoryId: 12,
-        installationId: 1,
-        workflowSha: "a".repeat(40),
-        appActorId: 56,
-        agentImage: `ghcr.io/bnasraoui/workflowd-agent-base@sha256:${"b".repeat(64)}`,
-        tailscaleClientId: "fixture",
-        tailscaleAudience: "fixture",
-      },
-      sourceSha: "d".repeat(40),
-      now: Date.now(),
-    })
-    yield* leases.beginStart(runId)
-    yield* leases.recordRun(runId, actionsRunId, 1)
-  })
+import {
+  client,
+  fixture,
+  inProcessGateway,
+  processGateway,
+  proof,
+  seedLease,
+  sse,
+  type Fixture,
+  type Gateway,
+} from "./gateway-process"
 
 const ended = (reader: { read(): Promise<unknown> }, within: number) =>
   Promise.race([
@@ -270,51 +28,39 @@ const ended = (reader: { read(): Promise<unknown> }, within: number) =>
     Bun.sleep(within).then(() => "live"),
   ])
 
-async function scenario(start: (f: Fixture) => Promise<{ port: number; stop(): Promise<void> }>) {
+async function scenario(start: (f: Fixture) => Promise<Gateway>) {
   const f = await fixture()
   await f.store(
     Effect.gen(function* () {
-      yield* seedLease("run-b", "lease-b", 79, true)
-      yield* seedLease("run-c", "lease-c", 80, true)
+      yield* seedLease("run-b", "lease-b", 79)
+      yield* seedLease("run-c", "lease-c", 80)
       yield* seedLease("run-d", "lease-d", 81, false)
     }),
   )
   let gateway = await start(f)
-  let other: { port: number; stop(): Promise<void> } | undefined
+  let other: Gateway | undefined
   try {
-    const url = (path: string, port = gateway.port) => `http://127.0.0.1:${port}${path}`
-    const challenge = (lease: string, port?: number) =>
-      fetch(url(`/capabilities/v1/challenge?lease=${lease}`, port))
+    const at = (port = gateway.port) => client(port)
+    const url = (path: string) => at().url(path)
+    const challenge = (lease: string) => at().challenge(lease)
     const audienceOf = async (lease: string, port?: number) => {
-      const issued = await challenge(lease, port)
+      const issued = await at(port).challenge(lease)
       expect(issued.status).toBe(200)
       expect(issued.headers.get("cache-control")).toBe("no-store")
-      const value = await Challenge(issued)
+      const value = Schema.decodeUnknownSync(
+        Schema.Struct({ channel: Schema.String, nonce: Schema.String }),
+      )(await issued.json())
       return `workflowd:${value.channel}:${value.nonce}`
     }
-    const session = (token: string, port?: number) =>
-      fetch(url("/capabilities/v1/session", port), {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ token }),
-      })
-    const call = (token: string) =>
-      fetch(url("/capabilities/v1/providers/anthropic/v1/messages"), {
-        method: "POST",
-        headers: {
-          authorization: `Bearer ${token}`,
-          "content-type": "application/json",
-          "anthropic-version": "2023-06-01",
-          "anthropic-beta": "oauth-2025-04-20",
-        },
-        body: JSON.stringify({ model: "fixture-model", stream: true, messages: [] }),
-      })
-    const renew = (token: string) =>
-      fetch(url("/capabilities/v1/renew"), {
-        method: "POST",
-        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
-        body: "{}",
-      })
+    const session = (token: string, port?: number) => at(port).session(token)
+    const call = (token: string) => at().call(token)
+    const renew = (token: string) => at().renew(token)
+    const Grant = async (response: Response) => {
+      const grant = await at().grant(response)
+      expect(grant.deadline).toBeNumber()
+      return { ...grant, deadline: grant.deadline ?? 0 }
+    }
+    const Renewed = (response: Response) => at().grant(response)
     const sessionOfRun = () =>
       f.store(
         Effect.gen(function* () {
@@ -332,7 +78,7 @@ async function scenario(start: (f: Fixture) => Promise<{ port: number; stop(): P
     const first = await audienceOf("lease")
 
     // (c) Another Actions run's proof, and malformed proofs, are refused and consume nothing.
-    expect((await session(proof(first, "jti-1", { run_id: "79" }))).status).toBe(403)
+    expect((await session(proof(first, "jti-1", { claims: { run_id: "79" } }))).status).toBe(403)
     expect((await session("not-a-jwt")).status).toBe(403)
     expect(
       (
@@ -348,7 +94,7 @@ async function scenario(start: (f: Fixture) => Promise<{ port: number; stop(): P
 
     // (a) A client sends a complete session request and leaves before the answer. The gateway
     // finishes the session without it; the runner proves itself again and gets the next one.
-    await writeFile(join(f.root, "slow"), "")
+    await f.slowMints(true)
     const body = JSON.stringify({ token: proof(first, "jti-1") })
     const socket = connect(gateway.port, "127.0.0.1")
     let answered = ""
@@ -359,7 +105,7 @@ async function scenario(start: (f: Fixture) => Promise<{ port: number; stop(): P
     await Bun.sleep(300)
     socket.destroy()
     expect(answered).toBe("")
-    await rm(join(f.root, "slow"))
+    await f.slowMints(false)
     for (let tries = 0; (await sessionOfRun()) !== 1 && tries < 100; tries++) await Bun.sleep(50)
     expect(await sessionOfRun()).toBe(1)
 
