@@ -21,5 +21,5 @@ pkgs.stdenvNoCC.mkDerivation {
   dontFixup = true;
   outputHashMode = "recursive";
   outputHashAlgo = "sha256";
-  outputHash = pkgs.lib.fakeHash;
+  outputHash = "sha256-aVsGv8hAMKYso0/zbVpWkz/Rb90IV/xqsw5ytJgX0VE=";
 }
