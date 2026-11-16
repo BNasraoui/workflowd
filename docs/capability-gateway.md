@@ -95,3 +95,17 @@ test, or passes its time or output limit.
 Test files named `*.launcher.test.ts` run only in these suites, or, for the pinned Claude
 Code test, in its own step; `bunfig.toml` keeps them out of the plain test run and its
 coverage gate.
+
+## Login custody
+
+With a `login` section, the gateway holds its provider's login in `login.directory` and renews
+it on demand. A renewal sends the stored refresh value to the OAuth server; the server replaces
+that value in its answer, so an answer that is lost (a kill of the gateway during the request,
+or a failed write of the answer) can leave a stored value that the server no longer takes, and
+the login then needs a new import.
+
+On SIGTERM, the gateway waits for a renewal in flight, up to 6 seconds (custody's limit of 5
+seconds on the request, then the write of the answer), before it stops the custody process.
+The stop timeout of the gateway's container or unit, from SIGTERM to SIGKILL, must be at least
+15 seconds: `docker stop --time 15` or `--stop-timeout 15`, or `TimeoutStopSec=15` in a systemd
+unit, which covers that wait and the stop of the listener and the store.
