@@ -5,6 +5,7 @@ import { Context, Data, Effect, Layer, Redacted, Schema, Semaphore, type Scope }
 import type { AgentGitConfig } from "../agent-git/config"
 import { PublicationBody, PublicationMessage, PublicationTitle } from "../sandbox/config"
 import { tryFileLock } from "../file-lock"
+import { githubHost } from "../sandbox/github"
 
 /**
  * The daemon's check of a sealed result from a run placed off the host, and its
@@ -1011,7 +1012,20 @@ export type SealedResultGitSettings = {
   readonly waitLimitMs: number
   /** The protocols a remote may use. */
   readonly protocols: ReadonlyArray<SealedResultProtocol>
+  /**
+   * Whether a check may speak to the remote. A remote it refuses is a fault `remote`
+   * before the check waits for a slot, so no token is made and no git child starts.
+   */
+  readonly remoteAllowed: (remote: string) => boolean
 }
+
+/**
+ * The remote rule of the daemon's runner: an https URL of the GitHub host with no user
+ * part and no port, in printable ASCII. The `/` right after the host leaves no place
+ * for a user part, a port or another host.
+ */
+export const githubRemote = (remote: string) =>
+  remote.startsWith(`https://${githubHost}/`) && /^[\x21-\x7e]+$/.test(remote)
 
 export type SealedResultGitPort = {
   /**
@@ -1096,6 +1110,11 @@ export const makeSealedResultGit = (
           return yield* new SealedResultFault({
             operation: "target",
             message: "Invalid expected head",
+          })
+        if (!settings.remoteAllowed(options.remote))
+          return yield* new SealedResultFault({
+            operation: "remote",
+            message: "Remote is not one that the runner may speak to",
           })
         if (result.sourceSha !== options.sourceSha) return yield* refused("source")
         const base = target.expectedHead ?? options.sourceSha
@@ -1196,7 +1215,10 @@ export const makeSealedResultGit = (
     return { check }
   })
 
-/** The daemon's git runner: /usr/bin/git, the time limits of the plan, https remotes only. */
+/**
+ * The daemon's git runner: /usr/bin/git, the time limits of the plan, and https remotes
+ * of the GitHub host only.
+ */
 export const SealedResultGitLive = (scratchRoot: string) =>
   Layer.effect(
     SealedResultGit,
@@ -1206,6 +1228,7 @@ export const SealedResultGitLive = (scratchRoot: string) =>
       timeLimitMs: sealedResultLimits.timeLimitMs,
       waitLimitMs: sealedResultLimits.waitLimitMs,
       protocols: ["https"],
+      remoteAllowed: githubRemote,
     }),
   )
 

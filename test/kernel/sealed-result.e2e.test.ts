@@ -28,6 +28,7 @@ import { join, resolve } from "node:path"
 import { constants as zlibConstants, deflateRawSync, deflateSync } from "node:zlib"
 import {
   checkSealedResult,
+  githubRemote,
   decodeSealedResult,
   makeSealedResultGit,
   printable,
@@ -135,13 +136,14 @@ type CheckOptions = SealedResultOptions<unknown> & { readonly git: SealedResultG
 
 /**
  * The daemon's settings, but a remote on disk: the test runner permits the `file`
- * protocol, which the daemon's runner does not.
+ * protocol and any remote, which the daemon's runner does not.
  */
 const options = (
   f: Fixture,
   extra: Partial<SealedResultOptions<unknown>> & Partial<SealedResultGitSettings> = {},
 ): CheckOptions => {
-  const { scratchRoot, binary, timeLimitMs, waitLimitMs, protocols, ...check } = extra
+  const { scratchRoot, binary, timeLimitMs, waitLimitMs, protocols, remoteAllowed, ...check } =
+    extra
   return {
     remote: f.remote,
     sourceSha: f.sourceSha,
@@ -154,6 +156,7 @@ const options = (
       timeLimitMs: timeLimitMs ?? sealedResultLimits.timeLimitMs,
       waitLimitMs: waitLimitMs ?? sealedResultLimits.waitLimitMs,
       protocols: protocols ?? ["file"],
+      remoteAllowed: remoteAllowed ?? (() => true),
     },
   }
 }
@@ -691,7 +694,7 @@ const exit = await Effect.runPromiseExit(Effect.scoped(Effect.gen(function* () {
   const result = yield* decodeSealedResult(new TextEncoder().encode(input.json), Buffer.from(input.bundle, "base64"))
   const options = { ...input.options, token: Effect.succeed(Redacted.make(input.token)) }
   return yield* pushSealedResult(yield* checkSealedResult(result, input.target, options))
-})).pipe(Effect.provide(Layer.effect(SealedResultGit, makeSealedResultGit(input.settings)))))
+})).pipe(Effect.provide(Layer.effect(SealedResultGit, makeSealedResultGit({ ...input.settings, remoteAllowed: () => true })))))
 console.log(Exit.isSuccess(exit) ? "pushed" : String(exit.cause))`,
       ],
       {
@@ -1084,7 +1087,7 @@ const exit = await Effect.runPromiseExit(Effect.scoped(Effect.gen(function* () {
   delete input.bundle
   const options = { ...input.options, token: Effect.succeed(Redacted.make("fixture")) }
   return yield* checkSealedResult(result, input.target, options)
-})).pipe(Effect.provide(Layer.effect(SealedResultGit, makeSealedResultGit(input.settings)))))
+})).pipe(Effect.provide(Layer.effect(SealedResultGit, makeSealedResultGit({ ...input.settings, remoteAllowed: () => true })))))
 const error = Exit.isFailure(exit) ? Cause.squash(exit.cause) : undefined
 // VmHWM is the peak of this process since it started; maxRSS would also hold its parent's.
 const status = await Bun.file("/proc/self/status").text()
@@ -1743,25 +1746,64 @@ test(
   }),
 )
 
+/** Remotes that the daemon's runner refuses: each is not https://github.com/<path>. */
+const refusedRemotes = (f: Fixture) => [
+  f.remote,
+  `file://${f.remote}`,
+  "http://github.com/owner/name.git",
+  "https://x-access-token@github.com/owner/name.git",
+  "https://user:password@github.com/owner/name.git",
+  "https://@github.com/owner/name.git",
+  "https://github.com:443/owner/name.git",
+  "https://github.com:8443/owner/name.git",
+  "https://api.github.com/owner/name.git",
+  "https://github.com.example.org/owner/name.git",
+  "https://example.org/github.com/owner/name.git",
+  "https://github.com",
+  "ssh://git@github.com/owner/name.git",
+  "git@github.com:owner/name.git",
+  " https://github.com/owner/name.git",
+  "https://github.com/owner/name.git\n",
+  "https://github.com/owner/na me.git",
+  "https://github.com/owner/name.git\u202e",
+]
+
 test(
-  "the daemon's runner permits https remotes only: a remote on disk is a fault before any object is fetched",
+  "the daemon's runner refuses a remote that is not an https URL of the GitHub host with no user part and no port, before it makes a token or starts a git child",
   withFixture(async (f) => {
-    const sealed = await sealWithResultPy(f, async (workspace) => {
-      await writeFile(join(workspace, "result.txt"), "content\n")
+    const result = await sealedResult(f)
+    const recorder = await recordingGit(f)
+    let minted = 0
+    const opts = options(f, {
+      binary: recorder.path,
+      protocols: ["https"],
+      remoteAllowed: githubRemote,
+      token: Effect.sync(() => {
+        minted += 1
+        return Redacted.make(token)
+      }),
     })
-    const result = await decode(sealed.json, sealed.bundle)
-    for (const remote of [f.remote, `file://${f.remote}`]) {
+    for (const remote of refusedRemotes(f)) {
+      const error = failure(await publish(result, { ...opts, remote }))
+      expect({ remote, error }).toMatchObject({
+        remote,
+        error: { _tag: "SealedResultFault", operation: "remote" },
+      })
+    }
+    expect(minted).toBe(0)
+    expect(await Bun.file(join(f.root, "git-calls.jsonl")).exists()).toBe(false)
+    expect(githubRemote("https://github.com/owner/name.git")).toBe(true)
+    // The daemon's layer has this rule.
+    for (const remote of [f.remote, "https://x-access-token@github.com/owner/name.git"]) {
       const exit = await Effect.runPromiseExit(
         Effect.provide(
           Effect.scoped(checkSealedResult(result, target, { ...options(f), remote })),
           SealedResultGitLive(f.scratchRoot),
         ),
       )
-      const error = failure(exit)
-      expect(error).toBeInstanceOf(SealedResultFault)
-      expect(error).toMatchObject({ operation: "ls-remote" })
-      expect(String(error)).toContain("transport 'file' not allowed")
+      expect(failure(exit)).toMatchObject({ _tag: "SealedResultFault", operation: "remote" })
     }
+    expect(await readdir(f.scratchRoot)).toEqual([])
     expect(await remoteRef(f)).toBe("")
   }),
 )

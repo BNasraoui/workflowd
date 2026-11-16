@@ -129,6 +129,9 @@ const VisibleRepository = Schema.Struct({
   visibility: Schema.optionalKey(Schema.String),
 })
 
+/** The host of the repositories of the GitHub App, which serves their git remotes. */
+export const githubHost = "github.com"
+
 export const makeSandboxGithub = (
   github: { appId: number; privateKeyPath: string },
   OctokitClass: typeof Octokit = Octokit,
