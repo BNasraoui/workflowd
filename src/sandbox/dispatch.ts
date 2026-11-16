@@ -359,33 +359,22 @@ export const makeSandboxDispatch = (options: {
         Effect.tapError((cause) => retainSandboxFailure(run.directory, "dispatch.settle", cause)),
       )
     /**
-     * The stop of a runner run. A run whose events this daemon reads ends `cancelled` from them; the
-     * gateway revokes it at once. A run that no executor holds (a start of the daemon came between)
-     * is settled here: its lease is released and it ends `cancelled`.
+     * The stop of a runner run: its events end `cancelled`, and the gateway revokes it at once. A
+     * revoke that fails is logged; the run's release revokes it again. A run that no executor holds
+     * is settling already (a coordinator's start settles every runner run that it finds live).
      */
     const stopRunner = (run: AgentRunRecord) =>
-      Effect.gen(function* () {
-        const held =
-          runnerExecutor === undefined
-            ? false
-            : yield* runnerExecutor.stopRun(run.runId).pipe(
-                Effect.tapError((error) =>
-                  Effect.logWarning(
-                    "Runner run revoke at its stop failed; its release revokes it",
-                    {
-                      runId: run.runId,
-                      reason: error.reason,
-                    },
-                  ),
-                ),
-                Effect.orElseSucceed(() => true),
-              )
-        if (held) return
-        if ((yield* store.read(run.runId)) !== null) yield* leases.release(run.runId)
-        yield* runs
-          .cancel({ runId: run.runId, now: new Date(), diagnostic: "cancelled" })
-          .pipe(Effect.catchTag("AgentRunStoreConflictError", () => Effect.void))
-      }).pipe((effect) => sandboxStage("dispatch.stopRunner", effect))
+      runnerExecutor === undefined
+        ? Effect.void
+        : runnerExecutor.stopRun(run.runId).pipe(
+            Effect.asVoid,
+            Effect.catch((error) =>
+              Effect.logWarning("Runner run revoke at its stop failed; its release revokes it", {
+                runId: run.runId,
+                reason: error.reason,
+              }),
+            ),
+          )
     const cancel = (run: AgentRunRecord) =>
       Effect.suspend(() => {
         if (runnerPolicy(run.repository) !== undefined) return stopRunner(run)
@@ -901,10 +890,18 @@ export const makeSandboxDispatch = (options: {
         (effect) => sandboxStage("dispatch.observe", effect),
         Effect.tapError((cause) => retainSandboxFailure(run.directory, "dispatch.observe", cause)),
       )
-    // A new coordinator never resumes an abandoned execution or injects resident tools.
+    // A new coordinator never resumes an abandoned execution or injects resident tools. A runner
+    // run's events are read by no executor of this coordinator: its lease is released, which
+    // revokes it and cancels its Actions run, and it ends once.
     for (const lease of yield* store.active()) {
       const run = yield* runs.read(lease.run_id)
-      if (run !== null)
+      if (run !== null && runnerPolicy(run.repository) !== undefined)
+        yield* finishRunner(run, {
+          state: "operator_required",
+          finalMessage: null,
+          diagnostic: "Sandbox coordinator restarted",
+        }).pipe(Effect.ignore)
+      else if (run !== null)
         yield* settle(run, {
           state: "operator_required",
           sessionId: run.nativeSessionId,

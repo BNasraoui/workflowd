@@ -499,3 +499,100 @@ test("a runner that is lost when GitHub reports its Actions run cancelled, at on
   expect(end.messages.length).toBe(1)
   expect(end.cancels).toEqual([])
 }, 30000)
+
+/**
+ * A daemon on the scripted gateway `control` and the store below `root`, with its own files in a
+ * new directory below `root`: `use` gets its runtime; the daemon ends after it.
+ */
+async function withScriptedDaemon<A>(
+  root: string,
+  github: Awaited<ReturnType<typeof githubStub>>,
+  bare: string,
+  control: RunnerControl,
+  use: (runtime: ReturnType<typeof daemonRuntime>) => Promise<A>,
+) {
+  const runtime = daemonRuntime(
+    { root: await mkdtemp(join(root, "daemon-")), database: join(root, "workflowd.db") },
+    github,
+    bare,
+    runnerPolicy(image),
+    Effect.succeed(control),
+  )
+  try {
+    return await use(runtime)
+  } finally {
+    await runtime.dispose()
+  }
+}
+
+const cancelRun = (runtime: ReturnType<typeof daemonRuntime>) =>
+  runtime.runPromise(
+    Effect.flatMap(AgentRunIngress, (ingress) => Effect.result(ingress.cancel(runId, new Date()))),
+  )
+const registerRun = (runtime: ReturnType<typeof daemonRuntime>) =>
+  runtime.runPromise(
+    Effect.flatMap(AgentRunIngress, (ingress) =>
+      Effect.result(ingress.register(submission, new Date())),
+    ),
+  )
+
+test("a stop before the run's job holds its session ends the start, and the run ends cancelled with one message", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-ending-"))
+  const remote = await gitRemote(join(root, "git"))
+  const github = await githubStub(remote.sourceSha, () => undefined)
+  const gateway = scripted(() => Promise.resolve())
+  try {
+    await withScriptedDaemon(
+      root,
+      github,
+      remote.bare,
+      // The job never opens its session.
+      { ...gateway.control, sessionBound: () => Effect.succeed(false) },
+      async (runtime) => {
+        const registering = registerRun(runtime)
+        await until("lease ref", () => (github.leaseRefs().length > 0 ? true : undefined))
+        expect((await cancelRun(runtime))._tag).toBe("Success")
+        expect((await registering)._tag).toBe("Failure")
+        const end = await ended(runtime, runId)
+        expect(end.run.state).toBe("cancelled")
+        expect(end.messages.map((entry) => entry.message)).toEqual([
+          expect.objectContaining({ status: "cancelled", end_reason: "cancelled" }),
+        ])
+        expect(gateway.revokes[0]).toBe(runId)
+      },
+    )
+  } finally {
+    await github.close()
+    await remote.close()
+    await rm(root, { recursive: true, force: true })
+  }
+}, 30000)
+
+test("a runner run that is live at a start of the daemon ends once at that start, its lease released; a stop after that is refused", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-ending-"))
+  const remote = await gitRemote(join(root, "git"))
+  const github = await githubStub(remote.sourceSha, () => undefined)
+  const gateway = scripted(() => Promise.resolve())
+  try {
+    await withScriptedDaemon(root, github, remote.bare, gateway.control, async (runtime) => {
+      expect((await registerRun(runtime))._tag).toBe("Success")
+    })
+    // The daemon starts again on the same store: no executor of it reads the live run.
+    await withScriptedDaemon(root, github, remote.bare, gateway.control, async (runtime) => {
+      const end = await ended(runtime, runId)
+      expect({ state: end.run.state, diagnostic: end.run.diagnostic }).toEqual({
+        state: "operator_required",
+        diagnostic: "Sandbox coordinator restarted",
+      })
+      expect(end.messages.length).toBe(1)
+      expect(gateway.revokes).toContain(runId)
+      expect(github.cancels()).toEqual([actionsRunId])
+      expect((await cancelRun(runtime))._tag).toBe("Failure")
+      expect((await runtime.runPromise(mailbox(runId))).length).toBe(1)
+    })
+  } finally {
+    await github.close()
+    await remote.close()
+    await rm(root, { recursive: true, force: true })
+  }
+}, 30000)
