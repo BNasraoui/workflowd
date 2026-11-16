@@ -1193,6 +1193,79 @@ test(
   sealedResultLimits.timeLimitMs + 30_000,
 )
 
+/**
+ * A pack of 100 commits whose root trees are links of one chain of tree deltas, as long
+ * as the object bound permits: each `diff-tree` of the check resolves its two root trees
+ * from the start of the chain. Each tree has the same 64 names, each on one of two
+ * blobs by a bit of the index of the tree, so the trees differ and the changed paths
+ * stay under their bound; the inflated sizes stay inside the bound of object bytes.
+ */
+function treeChainBundle(f: Fixture) {
+  const commits = sealedResultLimits.commits
+  const links = sealedResultLimits.objects - commits - 2
+  const blobs = [new TextEncoder().encode("a\n"), new TextEncoder().encode("b\n")]
+  const names = Array.from({ length: 64 }, (_, index) =>
+    `tree-chain-${index.toString().padStart(2, "0")}-`.padEnd(75, "x"),
+  )
+  const entry = (name: string, bit: number) => concat(`100644 ${name}\0`, blobId(blobs[bit]!))
+  const entries = (index: number) => names.map((name, bit) => entry(name, (index >> bit) & 1))
+  const size = concat(...entries(0)).byteLength
+  expect(links * size).toBeLessThan(sealedResultLimits.objectBytes - 64 * 1024)
+  // Copy each entry that is the same as in the tree before, and insert each other.
+  const delta = (index: number) => {
+    const before = entries(index - 1)
+    const ops: Uint8Array[] = [deltaSize(size), deltaSize(size)]
+    let offset = 0
+    entries(index).forEach((bytes, at) => {
+      if (Buffer.compare(bytes, before[at]!) === 0)
+        ops.push(
+          Uint8Array.from([
+            0x80 | 0x01 | 0x02 | 0x10,
+            offset & 0xff,
+            offset >> 8,
+            bytes.byteLength,
+          ]),
+        )
+      else ops.push(Uint8Array.from([bytes.byteLength]), bytes)
+      offset += bytes.byteLength
+    })
+    return concat(...ops)
+  }
+  const tree = (index: number) => concat(...entries(index))
+  const objects: Uint8Array[] = [...blobs.map(blobEntry), objectEntry("tree", tree(0))]
+  for (let index = 1; index < links; index++)
+    objects.push(refDeltaEntry(objectId("tree", tree(index - 1)), delta(index)))
+  let parent = f.sourceSha
+  for (let commit = 1; commit <= commits; commit++) {
+    const root = Math.floor((commit * links) / commits) - 1
+    const content = Buffer.from(
+      `tree ${objectId("tree", tree(root)).toString("hex")}\nparent ${parent}\nauthor ${agentLine}\ncommitter ${agentLine}\n\nChange the blobs of tree ${root}\n`,
+    )
+    objects.push(objectEntry("commit", content))
+    parent = objectId("commit", content).toString("hex")
+  }
+  expect(objects).toHaveLength(sealedResultLimits.objects)
+  return concat(
+    `# v2 git bundle\n-${f.sourceSha} base\n${parent} refs/workflowd/result\n\n`,
+    pack(objects),
+  )
+}
+
+test(
+  "100 commits whose root trees are links of one chain of tree deltas as long as the object bound permits are checked inside the time and memory bounds",
+  withFixture(async (f) => {
+    const bundle = treeChainBundle(f)
+    expect(bundle.byteLength).toBeLessThan(sealedResultLimits.bundleBytes)
+    const started = Date.now()
+    const { check, peak } = await checkInOwnProcess(f, bundle)
+    const elapsed = Date.now() - started
+    expect(check).toBeNull()
+    expect(peak).toBeLessThan(checkPeakBytes)
+    expect(elapsed).toBeLessThan(sealedResultLimits.timeLimitMs)
+  }),
+  sealedResultLimits.timeLimitMs + 30_000,
+)
+
 const blob = blobEntry(new TextEncoder().encode("content\n"))
 for (const [name, check, packBytes] of [
   [
