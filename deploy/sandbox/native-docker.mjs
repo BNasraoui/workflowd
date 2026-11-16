@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process"
-import { chmod, open } from "node:fs/promises"
+import { chmod } from "node:fs/promises"
 import { join } from "node:path"
-import { command, environment } from "./command.mjs"
+import { command, environment, readArchive } from "./command.mjs"
 
 /** The port of the box's entry, on the box's own loopback; claude-interactive.py serves it. */
 export const boxPort = 31741
@@ -100,33 +100,11 @@ export function makeBox({ directory, image, name }) {
       await docker("box wait", ["wait", name])
     },
     /**
-     * Writes the stopped box's workspace to `file` as a tar archive of at most 96 MiB; the seal
-     * reads it, and nothing of it is extracted by Docker or tar on the host.
+     * One read of the stopped box's workspace as a tar archive, of any size, within ten minutes;
+     * nothing of it is extracted by Docker or tar on the host. The seal reads it twice.
      */
-    async exportWorkspace(file) {
-      const output = await open(file, "wx", 0o600)
-      try {
-        const child = spawn("/usr/bin/docker", ["cp", `${name}:/workdir/.`, "-"], {
-          env: environment,
-          stdio: ["ignore", "pipe", "ignore"],
-        })
-        const closed = new Promise((resolve) => child.once("close", resolve))
-        const timer = setTimeout(() => child.kill("SIGKILL"), 120000)
-        try {
-          let size = 0
-          for await (const chunk of child.stdout) {
-            size += chunk.length
-            if (size > 96 * 1048576) throw new Error("box export: capacity")
-            await output.write(chunk)
-          }
-          if ((await closed) !== 0) throw new Error("box export: failed")
-        } finally {
-          clearTimeout(timer)
-          child.kill("SIGKILL")
-        }
-      } finally {
-        await output.close()
-      }
+    workspace() {
+      return readArchive("box export", "/usr/bin/docker", ["cp", `${name}:/workdir/.`, "-"])
     },
     /** Removes the box and its volumes. */
     async remove() {

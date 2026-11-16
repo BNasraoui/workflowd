@@ -296,6 +296,12 @@ def seal(source):
     print(json.dumps({**manifest, 'manifestSha256': sha(encoded)}, separators=(',', ':')))
 
 
+# The bounds of one result's change, as the daemon's check and the agent's prompt state them
+# (result-rules.mjs resultBounds; a test of the daemon compares the two).
+RESULT_BOUNDS = {'blobBytes': 1024**2, 'changedBytes': 8 * 1024**2, 'changedPaths': 100,
+                 'commits': 100, 'objects': 10000, 'objectBytes': 64 * 1024**2}
+
+
 # Characters that change what a reviewer of a pushed path sees: each invisible code
 # point (the bidi controls, the joiners, the variation selectors and the tags among
 # them) and the line and paragraph separators (as the daemon's check).
@@ -447,14 +453,14 @@ def native_export(source):
             mode = b'100755' if item.mode & 0o111 else b'100644'
             data = archive.extractfile(item)
             same = entry is not None and entry[0] == mode and entry[2] == item.size
-            if item.size > 1024**2:
+            if item.size > RESULT_BOUNDS['blobBytes']:
                 digest = hashlib.sha1(b'blob %d\0' % item.size)
                 while same and (chunk := data.read(1024**2)): digest.update(chunk)
                 if not (same and digest.hexdigest() == entry[1]):
                     raise PathRefused('Changed file over the bound of a blob', name)
                 present.add(name)
                 continue
-            content = data.read(1024**2 + 1)
+            content = data.read(RESULT_BOUNDS['blobBytes'] + 1)
             if same and blob_id(content) == entry[1]:
                 present.add(name)
                 continue
@@ -548,17 +554,17 @@ def native_seal(source):
 
 def inspect_changes(repo, source, result, sensitive=()):
     commits = git(repo, 'rev-list', '--reverse', source + '..' + result).decode().splitlines()
-    if not (1 <= len(commits) <= 100):
+    if not (1 <= len(commits) <= RESULT_BOUNDS['commits']):
         raise ValueError('Commit count exceeded bound')
     objects = git(repo, 'rev-list', '--objects', source + '..' + result).splitlines()
-    if len(objects) > 10000:
+    if len(objects) > RESULT_BOUNDS['objects']:
         raise ValueError('Object count exceeded bound')
     total = 0
     ids = b''.join(obj.split(b' ')[0] + b'\n' for obj in objects)
     for line in git(repo, 'cat-file', '--batch-check=%(objectname) %(objecttype) %(objectsize)', input=ids).splitlines():
         oid, kind, size = line.decode('ascii').split()
         total += int(size)
-        if total > 64 * 1024 * 1024:
+        if total > RESULT_BOUNDS['objectBytes']:
             raise ValueError('Object bytes exceeded bound')
         # The content of each new file and commit. A tree holds the names of the paths beside a
         # changed one, which the run did not change; each changed path is checked below.
@@ -586,7 +592,7 @@ def inspect_changes(repo, source, result, sensitive=()):
             content_check(path, sensitive)
             safe_path(path)
             changed.add(path)
-            if len(changed) > 100:
+            if len(changed) > RESULT_BOUNDS['changedPaths']:
                 raise ValueError('Changed path count exceeded bound')
             if not (old in ('000000', '100644', '100755') and new in ('000000', '100644', '100755')):
                 raise ValueError('Unsupported file mode')
@@ -594,10 +600,10 @@ def inspect_changes(repo, source, result, sensitive=()):
                 raise ValueError('Forbidden file mode change')
             if new != '000000':
                 size = int(git(repo, 'cat-file', '-s', blob))
-                if size > 1024 * 1024:
+                if size > RESULT_BOUNDS['blobBytes']:
                     raise ValueError('Blob exceeded bound')
                 content += size
-                if content > 8 * 1024 * 1024:
+                if content > RESULT_BOUNDS['changedBytes']:
                     raise ValueError('Content exceeded bound')
         # Detect case/normalization collisions against the complete tree, including base paths.
         names = git(repo, 'ls-tree', '-r', '-z', '--name-only', commit).split(b'\0')[:-1]

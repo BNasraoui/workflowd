@@ -57,3 +57,25 @@ export function command(step, binary, args, { input = "", stdin, timeoutMs = 120
     })
   })
 }
+
+/**
+ * One read of an archive that `binary` with `args` writes to its standard output: `stream`, and
+ * `done`, which fails when it exits other than 0, its read is stopped or it outlives `timeoutMs`.
+ */
+export function readArchive(step, binary, args, { timeoutMs = 600000 } = {}) {
+  const child = spawn(binary, args, { env: environment, stdio: ["ignore", "pipe", "pipe"] })
+  let errors = ""
+  child.stderr.on("data", (bytes) => {
+    errors = (errors + bytes.toString("utf8")).slice(-2000)
+  })
+  const timer = setTimeout(() => child.kill("SIGKILL"), timeoutMs)
+  const done = new Promise((resolve, reject) => {
+    child.once("error", (error) => reject(new Error(`${step}: ${error.message}`)))
+    child.once("close", (code, signal) => {
+      clearTimeout(timer)
+      if (code === 0) resolve()
+      else reject(new Error(`${step}: exit ${code ?? signal}: ${errors.trim()}`))
+    })
+  })
+  return { stream: child.stdout, done }
+}

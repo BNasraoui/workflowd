@@ -1,9 +1,21 @@
 import { expect, test } from "bun:test"
 import { spawnSync } from "node:child_process"
-import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises"
+import {
+  chmod,
+  link,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  symlink,
+  truncate,
+  writeFile,
+} from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
+import { claudeCommand } from "../../deploy/sandbox/native-runner.mjs"
 import { sealRun } from "../../deploy/sandbox/native-seal.mjs"
+import { resultBounds, resultRules } from "../../deploy/sandbox/result-rules.mjs"
 import { directoryArchive } from "../helpers/workspace-archive.mjs"
 
 /**
@@ -164,3 +176,104 @@ test("the seal of a one-line change in that tree holds that change alone", async
     await rm(source.root, { recursive: true, force: true })
   }
 }, 120_000)
+
+/** A source tree whose .gitignore ignores dependencies, build output and logs. */
+async function ignoringSource() {
+  const root = await mkdtemp(join(tmpdir(), "native-seal-ignoring-"))
+  const work = join(root, "work")
+  await mkdir(work)
+  await writeFile(join(work, "README.md"), "fixture\n")
+  await writeFile(join(work, ".gitignore"), "node_modules/\n/build/\n*.log\n")
+  run(["git", "init", "--quiet", "-b", "main"], work)
+  run(["git", "add", "-A"], work)
+  run(["git", "commit", "--quiet", "-m", "source"], work)
+  return { root, work, sourceSha: run(["git", "rev-parse", "HEAD"], work) }
+}
+
+test("the seal leaves out ignored output of any size and count, and holds the change alone", async () => {
+  const source = await ignoringSource()
+  const box = await boxRun(source.work, source.sourceSha, async (workspace) => {
+    await writeFile(join(workspace, "README.md"), "fixture\nchanged\n")
+    // Dependencies of more entries than the bound of an export, a build output over the bound of
+    // a whole archive, and a log over the bound of one file.
+    await mkdir(join(workspace, "node_modules", "package"), { recursive: true })
+    for (let index = 0; index <= 10_000; index++)
+      await writeFile(join(workspace, "node_modules", "package", `f${index}.js`), "")
+    await mkdir(join(workspace, "build"))
+    await writeFile(join(workspace, "build", "output.bin"), "")
+    await truncate(join(workspace, "build", "output.bin"), 100 * 1024 * 1024)
+    await writeFile(join(workspace, "build.log"), Buffer.alloc(1_100_000, 46))
+  })
+  try {
+    const sealed = await seal(box, source.sourceSha)
+    expect(sealed.bundle).not.toBeNull()
+    expect(changedPaths(box, source.sourceSha)).toBe("M\tREADME.md")
+  } finally {
+    await rm(box.directory, { recursive: true, force: true })
+    await rm(source.root, { recursive: true, force: true })
+  }
+}, 300_000)
+
+const refusedEntries = [
+  [
+    "a new symbolic link",
+    (workspace: string) => symlink("README.md", join(workspace, "docs-link.md")),
+    'Symbolic link in the change: "docs-link.md"',
+  ],
+  [
+    "a changed tracked symbolic link",
+    async (workspace: string) => {
+      await rm(join(workspace, "link.md"))
+      await symlink("fixture.txt", join(workspace, "link.md"))
+    },
+    'Symbolic link in the change: "link.md"',
+  ],
+  [
+    "a FIFO",
+    async (workspace: string) => {
+      run(["mkfifo", join(workspace, "pipe")], workspace)
+    },
+    'Special file in the change: "pipe"',
+  ],
+  [
+    "a hard link",
+    (workspace: string) => link(join(workspace, "README.md"), join(workspace, "hard.md")),
+    /Special file in the change: "(README|hard)\.md"/,
+  ],
+] as const
+
+for (const [name, change, refusal] of refusedEntries)
+  test(`the seal refuses ${name} by its path`, async () => {
+    const source = await guardedSource()
+    const box = await boxRun(source.work, source.sourceSha, change)
+    try {
+      await expect(seal(box, source.sourceSha)).rejects.toThrow(refusal)
+      expect(await readFile(join(box.directory, "result", "result.json")).catch(() => null)).toBe(
+        null,
+      )
+    } finally {
+      await rm(box.directory, { recursive: true, force: true })
+      await rm(source.root, { recursive: true, force: true })
+    }
+  }, 120_000)
+
+test("Claude Code in the box gets the rules of the result, whose bounds are the seal's", () => {
+  const command = claudeCommand("claude-sonnet-4-5")
+  expect(command.slice(command.indexOf("--append-system-prompt"))).toEqual([
+    "--append-system-prompt",
+    resultRules,
+  ])
+  for (const text of ["1 MiB", "8 MiB", "100 changed paths", "symbolic link", "Ignored files"])
+    expect(resultRules).toContain(text)
+  const seal = spawnSync(
+    "python3",
+    [
+      "-I",
+      "-c",
+      "import importlib.util, json, sys\nspec = importlib.util.spec_from_file_location('result', sys.argv[1])\nm = importlib.util.module_from_spec(spec)\nspec.loader.exec_module(m)\nprint(json.dumps(m.RESULT_BOUNDS))",
+      resolve("deploy/sandbox/result.py"),
+    ],
+    { encoding: "utf8" },
+  )
+  expect(JSON.parse(seal.stdout)).toEqual(resultBounds)
+})

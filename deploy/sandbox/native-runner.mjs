@@ -2,7 +2,7 @@
 // Its standard output is the box's ready line, then Claude Code's stream-json lines and nothing
 // else: the run client posts each of them as an event. It leaves the run's sealed result in <run directory>/result.
 import { randomBytes } from "node:crypto"
-import { appendFileSync, createReadStream } from "node:fs"
+import { appendFileSync } from "node:fs"
 import { mkdir } from "node:fs/promises"
 import { dirname, join } from "node:path"
 import { createInterface } from "node:readline"
@@ -11,6 +11,7 @@ import { boxReadyLine } from "./box-ready.mjs"
 import { command } from "./command.mjs"
 import { boxNetwork, boxPort, boxSentinel, docker, makeBox } from "./native-docker.mjs"
 import { sealRun } from "./native-seal.mjs"
+import { resultRules } from "./result-rules.mjs"
 
 const tooling = dirname(fileURLToPath(import.meta.url))
 /** What the run's stop (SIGTERM from the run client) does: the box, once made, is removed. */
@@ -37,20 +38,28 @@ async function readLaunch() {
 }
 
 /**
+ * The command of Claude Code in the box: print mode with a stream of JSON lines, the launch's
+ * model, no background task, no MCP server, and the rules of the run's result (`resultRules`)
+ * added to its system prompt, so the agent knows what the seal takes.
+ */
+export const claudeCommand = (model) => [
+  "/bin/claude", "-p", "--output-format", "stream-json", "--verbose",
+  "--model", model,
+  // Print-mode turns must finish their commands before the run is sealed.
+  "--settings", '{"env":{"CLAUDE_CODE_DISABLE_BACKGROUND_TASKS":"1"}}',
+  "--setting-sources", "user", "--dangerously-skip-permissions",
+  "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
+  "--append-system-prompt", resultRules,
+]
+
+/**
  * Runs Claude Code in print mode in the box, with the prompt on its standard input, and writes
  * each line of its stream to standard output. Resolves to the text of its last result line; fails
  * when it exits other than 0 or the run's deadline comes first.
  */
 function runClaude(box, launch, log) {
   const child = box.spawn(
-    [
-      "/bin/claude", "-p", "--output-format", "stream-json", "--verbose",
-      "--model", launch.model,
-      // Print-mode turns must finish their commands before the run is sealed.
-      "--settings", '{"env":{"CLAUDE_CODE_DISABLE_BACKGROUND_TASKS":"1"}}',
-      "--setting-sources", "user", "--dangerously-skip-permissions",
-      "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
-    ],
+    claudeCommand(launch.model),
     {
       CLAUDE_CODE_OAUTH_TOKEN: boxSentinel,
       ANTHROPIC_BASE_URL: `http://127.0.0.1:${boxPort}`,
@@ -163,7 +172,6 @@ async function runBox(directory, launch) {
     process.stdout.write(`${boxReadyLine}\n`)
     const result = await step("claude", () => runClaude(box, launch, log))
     await step("stop", () => box.stop())
-    await step("export", () => box.exportWorkspace(join(native, "capture.tar")))
     await step("seal", () =>
       sealRun({
         directory,
@@ -171,7 +179,7 @@ async function runBox(directory, launch) {
         sourceSha: launch.sourceSha,
         identity: launch.identity,
         reply: result,
-        workspace: () => ({ stream: createReadStream(join(native, "capture.tar")), done: Promise.resolve() }),
+        workspace: () => box.workspace(),
       }),
     )
   } finally {
