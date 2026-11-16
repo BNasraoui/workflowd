@@ -139,6 +139,8 @@ interface GatewayKeys {
   readonly maxStreamsPerRun?: number
   readonly streamIdleMs?: number
   readonly staleSweepMs?: number
+  /** The Git read route of a run's own repository, which a runner run clones through. */
+  readonly gitRead?: boolean
 }
 
 /**

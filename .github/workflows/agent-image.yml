@@ -9,7 +9,7 @@ jobs:
   build:
     name: Agent image build and container-use E2E
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 60
     permissions: {}
     steps:
       - name: Anonymous checkout
@@ -61,6 +61,40 @@ jobs:
             printf 'Uncompressed image: %s bytes\n' "$(cat image-size.txt)"
             printf 'Compressed archive: %s bytes\n' "$(stat -c %s agent-image.tar.gz)"
           } | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Install test dependencies without scripts
+        run: bun install --frozen-lockfile --ignore-scripts
+      - name: Pin the runner run's Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 24.11.1
+          token: ""
+      - name: Find the gateway's noscope for the runner run fixtures
+        run: echo "WORKFLOWD_FIXTURE_NOSCOPE=$(nix build .#gateway-noscope --no-update-lock-file --no-link --print-out-paths)/bin/noscope" >> "$GITHUB_ENV"
+      # A runner pulls its image by its ghcr.io digest. A registry on loopback, with a certificate
+      # that only this job's Docker trusts, serves the image under that name.
+      - name: Serve the image by its registry digest on loopback
+        run: |
+          set -euo pipefail
+          certs="$RUNNER_TEMP/registry"
+          mkdir -p "$certs"
+          openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=ghcr.io \
+            -addext subjectAltName=DNS:ghcr.io -keyout "$certs/key.pem" -out "$certs/cert.pem" 2>/dev/null
+          sudo install -D -m 644 "$certs/cert.pem" /etc/docker/certs.d/ghcr.io/ca.crt
+          echo "127.0.0.1 ghcr.io" | sudo tee -a /etc/hosts >/dev/null
+          docker run -d --name registry -p 127.0.0.1:443:443 -v "$certs:/certs:ro" \
+            -e REGISTRY_HTTP_ADDR=0.0.0.0:443 -e REGISTRY_HTTP_TLS_CERTIFICATE=/certs/cert.pem \
+            -e REGISTRY_HTTP_TLS_KEY=/certs/key.pem \
+            registry@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373 >/dev/null
+          docker tag workflowd-agent-base:local ghcr.io/bnasraoui/workflowd-agent-base:runner-test
+          for attempt in 1 2 3 4 5; do
+            docker push --quiet ghcr.io/bnasraoui/workflowd-agent-base:runner-test >/dev/null && break
+            sleep 2
+          done
+          digest=$(docker image inspect --format '{{index .RepoDigests 0}}' ghcr.io/bnasraoui/workflowd-agent-base:runner-test)
+          echo "WORKFLOWD_RUNNER_IMAGE=$digest" >> "$GITHUB_ENV"
+      - name: Run a runner run on the real runner scripts in the image's box
+        timeout-minutes: 20
+        run: bun test --path-ignore-patterns= test/runner/runner-box.launcher.test.ts
       - name: Save tested image for publication
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

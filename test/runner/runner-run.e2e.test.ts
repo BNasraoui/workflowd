@@ -17,7 +17,17 @@ import { runnerKey } from "../capability-gateway/gateway-process"
 import { controlClient, liveGrants } from "../../src/sandbox/capability-control"
 import { defaultRunBudget } from "../../src/sandbox/config"
 import { makeRunnerExecutor } from "../../src/kernel/runner-executor"
-import { writeHarness } from "./fixture"
+import { AgentRunIngress } from "../../src/kernel/agent-run-ingress"
+import { AgentRunStore } from "../../src/kernel/agent-run-store"
+import {
+  mailbox,
+  run,
+  runnerModel,
+  step,
+  withRunnerDaemon,
+  writeHarness,
+  writeSealingHarness,
+} from "./fixture"
 
 const image = `ghcr.io/bnasraoui/workflowd-agent-base@sha256:${"b".repeat(64)}`
 
@@ -290,3 +300,76 @@ test("a run client refuses a launch whose image is not its job's own, and runs n
     await rm(root, { recursive: true, force: true })
   }
 }, 60000)
+
+test("a runner dispatch goes from the ingress through the lease, the job's session, the run client and the gateway to agent-run/<id> and the caller's mailbox", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "runner-job-"))
+  try {
+    await withRunnerDaemon(
+      {
+        directory,
+        image,
+        harness: async (bare) => [
+          fixtureExecutable("node"),
+          await writeSealingHarness(await mkdtemp(join(directory, "harness-")), bare),
+        ],
+      },
+      async ({ runtime, remote, jobEnded }) => {
+        const receipt = await step("dispatch", () =>
+          runtime.runPromise(
+            Effect.flatMap(AgentRunIngress, (ingress) =>
+              ingress.register(
+                { route: "claude", repository: "runner", prompt: "Write the proof file." },
+                new Date(),
+              ),
+            ),
+          ),
+        )
+        await step("job", jobEnded)
+        const runs = await runtime.runPromise(AgentRunStore)
+        const ended = await step("run end", async () => {
+          for (let tries = 0; tries < 600; tries++) {
+            const current = await runtime.runPromise(runs.read(receipt.runId))
+            if (current !== null && !["spawning", "spawned", "verified"].includes(current.state))
+              return current
+            await Bun.sleep(100)
+          }
+          throw new Error("the run did not end")
+        })
+        expect({ state: ended.state, diagnostic: ended.diagnostic }).toEqual({
+          state: "completed",
+          diagnostic: null,
+        })
+        const branch = `refs/heads/agent-run/${receipt.runId.replace(/^agent-run-/, "").slice(0, 16)}`
+        const pushed = await step("branch", async () => {
+          const sha = remote.ref(branch)
+          if (sha === null) throw new Error(`${branch} is not in the remote`)
+          return sha
+        })
+        expect(run("branch", ["git", "-C", remote.bare, "rev-parse", `${pushed}^`])).toBe(
+          remote.sourceSha,
+        )
+        expect(
+          run("branch", ["git", "-C", remote.bare, "show", `${pushed}:runner-proof.txt`]),
+        ).toBe("written by the runner run")
+        const messages = await runtime.runPromise(mailbox(receipt.runId))
+        expect(messages.map((entry) => entry.id)).toEqual([`agent-run-end-${receipt.runId}`])
+        expect(messages[0]?.message).toEqual({
+          run_id: receipt.runId,
+          session_id: expect.any(String),
+          native_session_id: "fixture-session",
+          route: "claude",
+          model: runnerModel,
+          executor: "claude",
+          status: "completed",
+          end_reason: "completed",
+          ended_at: expect.any(String),
+          final_message: "Runner run done.",
+          final_message_ref: null,
+          placement: "runner",
+        })
+      },
+    )
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+}, 120000)
