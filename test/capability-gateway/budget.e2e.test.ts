@@ -238,7 +238,7 @@ test("[process] a change of the config's budget changes no run that workflowd ha
     expect(refused.status).toBe(403)
     expect(await refused.json()).toEqual(spentBody)
     const stored = await f.sql(
-      (sql) => sql`SELECT calls,output_tokens,max_tokens FROM capability_run_budgets`,
+      (sql) => sql`SELECT calls,output_tokens,max_tokens FROM sandbox_run_budgets`,
     )
     expect(stored).toEqual([{ calls: 1, output_tokens: 1000, max_tokens: 400 }])
   })

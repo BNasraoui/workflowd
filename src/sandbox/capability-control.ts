@@ -157,11 +157,11 @@ const fixedBudget = Effect.fn("DaemonCapability.fixedBudget")(function* (
   budget: RunBudget,
 ) {
   const sql = yield* SqlClient.SqlClient
-  yield* sql`INSERT INTO capability_run_budgets(run_id,calls,output_tokens,max_tokens)
+  yield* sql`INSERT INTO sandbox_run_budgets(run_id,calls,output_tokens,max_tokens)
     VALUES(${runId},${budget.calls},${budget.outputTokens},${budget.maxTokens})
     ON CONFLICT(run_id) DO NOTHING`
   const rows = yield* sql`SELECT calls,output_tokens AS outputTokens,max_tokens AS maxTokens
-    FROM capability_run_budgets WHERE run_id=${runId}`
+    FROM sandbox_run_budgets WHERE run_id=${runId}`
   return yield* Schema.decodeUnknownEffect(RunBudget)(rows[0])
 })
 
