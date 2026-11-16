@@ -2,7 +2,7 @@ import { mkdir } from "node:fs/promises"
 import { homedir } from "node:os"
 import { dirname, join } from "node:path"
 import { BunRuntime } from "@effect/platform-bun"
-import { SqliteClient } from "@effect/sql-sqlite-bun"
+import { workflowdDatabase } from "./store/database"
 import { Effect, Layer } from "effect"
 import { KernelEventStoreLive } from "./kernel/event-store"
 import { KernelJobStoreLive } from "./kernel/job-store"
@@ -38,7 +38,7 @@ const program = (argv: ReadonlyArray<string>, env: Record<string, string | undef
       try: () => mkdir(dirname(filename), { recursive: true }),
       catch: (cause) => new Error(`Could not create state directory: ${String(cause)}`),
     })
-    const database = SqliteClient.layer({ filename })
+    const database = workflowdDatabase(filename)
     const bootstrap = WorkflowStoreLive.pipe(Layer.provideMerge(database))
     const kernel = Layer.merge(KernelEventStoreLive, KernelJobStoreLive).pipe(
       Layer.provideMerge(bootstrap),

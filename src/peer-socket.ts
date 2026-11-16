@@ -93,17 +93,25 @@ export interface SocketRole {
  * from the parent up to `/` is owned by root (uid 0) or this uid, and either lets neither its
  * group nor others write to it (mode & 0o022 is 0) or has the sticky bit (mode & 0o1000). The
  * sticky bit lets only an entry's owner, the directory's owner and root rename or remove the
- * entry, and each entry on the path is owned by root or this uid. `/` may also show the kernel's
- * overflow uid: a user namespace shows it for an owner that it does not map, as the host's root,
- * and `/` itself cannot be renamed or replaced.
+ * entry, and each entry on the path is owned by root or this uid.
+ *
+ * `/` may also show the kernel's overflow uid, but only when uid 0 of the parent user namespace
+ * has no mapping in this process's user namespace (`/proc/self/uid_map`). Such a namespace shows
+ * the overflow uid for every owner that it does not map, so in it the gateway cannot tell which
+ * user outside owns `/`: it accepts `/` whoever owns it there. `/` itself cannot be renamed or
+ * replaced.
  */
 async function checkAncestors(directory: string, uid: number, role: SocketRole) {
   const parent = dirname(directory)
   if ((await realpath(parent)) !== parent)
     throw new Error(`${role.socket} directory must be named by its real path`)
-  const overflow = Number(
-    (await readFile("/proc/sys/kernel/overflowuid", "utf8").catch(() => "")).trim() || -1,
-  )
+  // Each line of the map is the first uid inside, the first uid outside and the count.
+  const rootUnmapped = !(await readFile("/proc/self/uid_map", "utf8"))
+    .split("\n")
+    .some((line) => line.trim().split(/\s+/)[1] === "0")
+  const overflow = rootUnmapped
+    ? Number((await readFile("/proc/sys/kernel/overflowuid", "utf8")).trim())
+    : -1
   for (let above = parent; ; above = dirname(above)) {
     const info = await lstat(above)
     const owners = above === "/" ? [0, uid, overflow] : [0, uid]

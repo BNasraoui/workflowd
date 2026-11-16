@@ -218,7 +218,10 @@ export const makeSandboxLeaseService = (
   command = controlCommand,
   privateAccess?: {
     readonly native?: {
-      readonly gateway: Pick<DaemonCapability, "authorize" | "revoke" | "sessionBound">
+      readonly gateway: Pick<
+        DaemonCapability,
+        "authorize" | "revoke" | "sessionBound" | "startRevoke"
+      >
     }
   },
 ) =>
@@ -342,17 +345,10 @@ export const makeSandboxLeaseService = (
     const release = Effect.fn("SandboxLease.release")(function* (runId: string) {
       const lease = yield* required(runId)
       if (lease.policy.privateBootstrap?.mode === "actions-native" && privateAccess?.native) {
-        // The release does not wait on the gateway: a gateway that is down or refuses gets the
-        // revoke from workflowd's next reconcile, which names only live runs.
-        yield* privateAccess.native.gateway
-          .revoke(runId)
-          .pipe(
-            Effect.catch((cause) =>
-              Effect.logWarning(
-                `Sandbox gateway revoke unconfirmed for ${runId}; the next reconcile revokes it: ${sandboxDiagnostic("lease.release", cause).message}`,
-              ),
-            ),
-          )
+        // The release does not wait on the gateway: it starts the revoke and goes on. A revoke
+        // that fails is logged, and workflowd's next reconcile, which names only live runs,
+        // revokes the run.
+        yield* privateAccess.native.gateway.startRevoke(runId)
       }
       yield* store.beginRelease(runId)
       yield* Effect.gen(function* () {
