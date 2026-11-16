@@ -128,30 +128,30 @@ const sealedResultLayer = (config: AutomationConfig, runnerAliases: ReadonlyArra
 /**
  * The runner placement of the sandbox dispatch: its aliases, its bound of runs, the gateway, the
  * one git runner of sealed results and the agent identity. None without a runner alias or a
- * gateway; a runner alias with no git runner or no agent identity fails the daemon's start.
+ * gateway. Agent runs require the agent identity at config load, and a runner alias brings the
+ * git runner (`sealedResultLayer`), so a runner alias with a gateway always has both.
  */
 const runnerDispatch = (
   config: AutomationConfig,
   runnerAliases: ReadonlyArray<string>,
   native: { readonly gateway: DaemonCapability } | undefined,
 ) =>
-  Effect.gen(function* () {
-    if (native === undefined || runnerAliases.length === 0) return {}
-    const sealed = yield* Effect.serviceOption(SealedResultGit)
-    if (Option.isNone(sealed))
-      return yield* Effect.fail(new Error("The check of sealed results is unavailable"))
-    if (config.agentGit === undefined)
-      return yield* Effect.fail(new Error("A runner placement needs the agent Git identity"))
-    return {
-      runner: {
-        aliases: runnerAliases,
-        maxRuns: config.agentRuns?.runnerMaxRuns ?? maxRunnerRuns,
-        gateway: native.gateway,
-        sealed: sealed.value,
-        agentGit: config.agentGit,
-      },
-    }
-  })
+  Effect.map(Effect.serviceOption(SealedResultGit), (sealed) =>
+    native === undefined ||
+    runnerAliases.length === 0 ||
+    config.agentGit === undefined ||
+    Option.isNone(sealed)
+      ? {}
+      : {
+          runner: {
+            aliases: runnerAliases,
+            maxRuns: config.agentRuns?.runnerMaxRuns ?? maxRunnerRuns,
+            gateway: native.gateway,
+            sealed: sealed.value,
+            agentGit: config.agentGit,
+          },
+        },
+  )
 
 const makeAutomationLayer = (config: AutomationConfig) => {
   const {

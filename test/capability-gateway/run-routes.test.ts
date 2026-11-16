@@ -4,7 +4,7 @@ import { mkdtemp, rm } from "node:fs/promises"
 import { connect } from "node:net"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { Effect, Exit, Layer, Scope } from "effect"
+import { Effect, Exit, Layer, Schema, Scope } from "effect"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
 import { SqlClient } from "effect/unstable/sql"
 import { fixtureExecutable } from "../helpers/fixture-executable.mjs"
@@ -19,6 +19,7 @@ import { makeCapabilityStore } from "../../src/capability-gateway/store"
 import { runGatewayMigrations } from "../../src/capability-gateway/migrations"
 import { serveCapabilityListener } from "../../src/capability-gateway/http"
 import { liveGrants } from "../../src/sandbox/capability-control"
+import { maxLaunchPromptBytes, RunLaunch } from "../../src/capability-control/protocol"
 import { defaultRunBudget } from "../../src/sandbox/config"
 import {
   bindRunSession,
@@ -209,6 +210,22 @@ test("event batches are numbered with no gap, and the last one sent again change
   expect((await readEvents(1)).batches).toEqual([{ sequence: 2, lines: ["second"] }])
 })
 
+test("a fault of the gateway's store on a run route answers 503 and holds nothing", async () => {
+  await inStore(
+    sql`CREATE TRIGGER fixture_events_fault BEFORE INSERT ON capability_run_events
+      BEGIN SELECT RAISE(FAIL,'fixture store fault'); END`,
+  )
+  try {
+    const last = (await readEvents()).batches.at(-1)?.sequence ?? 0
+    const body = events(last + 1, ['{"type":"fault"}'])
+    const response = await call("events", { body, signature: signed("events", body) })
+    expect(response.status).toBe(503)
+    expect((await readEvents(last)).batches).toEqual([])
+  } finally {
+    await inStore(sql`DROP TRIGGER fixture_events_fault`)
+  }
+})
+
 test("a batch whose declared size passes the bound is refused before its body is read", async () => {
   let pulled = false
   const body = new ReadableStream<Uint8Array>(
@@ -346,4 +363,13 @@ test("the listener refuses a run route reached by a path that a URL parser chang
     await close()
     await rm(directory, { recursive: true, force: true })
   }
+})
+
+test("workflowd's grant of a launch whose prompt passes the bound is refused at the control socket", () => {
+  const launch = (prompt: string) =>
+    Schema.decodeUnknownExit(RunLaunch)({ prompt, image, identity })
+  expect(Exit.isSuccess(launch("é".repeat(maxLaunchPromptBytes / 2)))).toBe(true)
+  const refused = launch("é".repeat(maxLaunchPromptBytes / 2) + "x")
+  expect(Exit.isFailure(refused)).toBe(true)
+  expect(String(refused)).toContain(`Expected at most ${maxLaunchPromptBytes} bytes`)
 })

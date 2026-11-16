@@ -1099,6 +1099,7 @@ describe("runner placement", () => {
   const dispatchRunner = async (
     repository?: () => Response,
     input: import("../../src/agent-run-contract").AgentRunSubmission = submission,
+    claudeModel: string | null = "claude-opus-5-5",
   ) => {
     const { RepositoryVisibility } = await import("../../src/sandbox/github")
     const state = defaultState()
@@ -1108,7 +1109,7 @@ describe("runner placement", () => {
       const base = makeLayer(makeProvider(state), worktrees(trees), undefined, {
         placements: { workflowd: "runner" },
         sandboxRepositories: [runnerPolicy],
-        claudeRoutes: [{ name: "claude", modelID: "claude-opus-5-5" }],
+        claudeRoutes: [{ name: "claude", modelID: claudeModel }],
       })
       const layer =
         stub === undefined
@@ -1156,6 +1157,18 @@ describe("runner placement", () => {
     // A Claude run within the bounds goes on to the runner's sandbox, which this harness lacks.
     const accepted = await dispatchRunner(visible({ visibility: "public" }), claude)
     expect(accepted.refusal.detail).toBe("The required repository sandbox is unavailable")
+  })
+
+  test("a Claude runner run of a route that names no model is refused", async () => {
+    const unnamed = await dispatchRunner(
+      visible({ visibility: "public" }),
+      { ...submission, route: "claude" },
+      null,
+    )
+    expect(unnamed.refusal).toMatchObject({
+      reason: "executor_unavailable",
+      detail: "A runner run needs an explicit configured model",
+    })
   })
 
   test("a private or internal repository is refused for a runner", async () => {

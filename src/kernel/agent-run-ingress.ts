@@ -304,14 +304,12 @@ const make = (options: AgentRunIngressOptions) =>
           )
       })
     /**
-     * The selection of a runner run: Claude with an explicit model and no thinking request, on
-     * the host `github-actions` with the executor `claude:actions`. The run needs no login on this
-     * host, so no readiness of a local client is read.
+     * The selection of a runner run: Claude with an explicit model, on the host `github-actions`
+     * with the executor `claude:actions`. The run needs no login on this host, so no readiness of
+     * a local client is read. A Claude selection comes only from an alias, which refuses any
+     * thinking request before this.
      */
-    const runnerSelection = (
-      selection: ResolvedSelection,
-      thinking: Readonly<Record<string, unknown>> | undefined,
-    ) =>
+    const runnerSelection = (selection: ResolvedSelection) =>
       Effect.gen(function* () {
         if (selection.executorKind !== "claude")
           return yield* refuse("executor_unavailable", "A runner runs Claude only")
@@ -319,11 +317,6 @@ const make = (options: AgentRunIngressOptions) =>
           return yield* refuse(
             "executor_unavailable",
             "A runner run needs an explicit configured model",
-          )
-        if (thinking !== undefined && Object.keys(thinking).length > 0)
-          return yield* refuse(
-            "unsupported_thinking",
-            "A runner run cannot verify a thinking request before it runs",
           )
         return {
           ...selection,
@@ -879,8 +872,7 @@ const make = (options: AgentRunIngressOptions) =>
         const runner = options.placements?.[repository.name] === "runner"
         if (runner) {
           yield* checkRunnerRepository(repository.name)
-          if (keyed?.resolvedSelection == null)
-            selection = yield* runnerSelection(selection, submission.thinking)
+          if (keyed?.resolvedSelection == null) selection = yield* runnerSelection(selection)
         }
         if (dispatch.sandboxRepositories?.some((policy) => policy.alias === repository.name)) {
           if (sandbox === undefined)

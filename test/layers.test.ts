@@ -133,9 +133,10 @@ function runWithAvailabilityDeadline<A, E>(effect: Effect.Effect<A, E>) {
   )
 }
 
-test.each([false, true])(
-  "starts and restarts the full live layer with both kernel stores (sandbox %s)",
-  async (sandbox) => {
+test.each(["host", "sandbox", "runner"] as const)(
+  "starts and restarts the full live layer with both kernel stores (placement %s)",
+  async (placement) => {
+    const sandbox = placement !== "host"
     const directory = await mkdtemp(join(tmpdir(), "workflowd-layers-kernel-stores-"))
     try {
       const privateKeyPath = join(directory, "github.pem")
@@ -162,8 +163,19 @@ test.each([false, true])(
                   agentImage: "ghcr.io/bnasraoui/workflowd-agent-base@sha256:" + "f".repeat(64),
                   tailscaleClientId: "fixture",
                   tailscaleAudience: "fixture",
+                  ...(placement === "runner"
+                    ? { privateBootstrap: { mode: "actions-native", repositoryOwnerId: 1 } }
+                    : {}),
                 },
               ]),
+            }
+          : {}),
+        ...(placement === "runner"
+          ? {
+              WORKFLOWD_AGENT_RUN_PLACEMENTS: '{"workflowd":"runner"}',
+              WORKFLOWD_CAPABILITY_CONTROL: JSON.stringify({
+                socket: join(directory, "control", "gateway.sock"),
+              }),
             }
           : {}),
         WORKFLOWD_EXECUTION_CAPABILITIES_CODEX_ENABLED: "false",
