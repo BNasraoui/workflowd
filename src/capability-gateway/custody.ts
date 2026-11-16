@@ -646,6 +646,11 @@ async function access(path: string, provider: CustodyProvider, url: string) {
 async function renewedAccess(directory: Directory, provider: CustodyProvider, url: string) {
   let state = await readState(directory, provider)
   if (state?.state === "import-required") throw new LoginImportRequired(provider)
+  // A wait on disk longer from now than it can be (a clock set back) is read as its longest.
+  if (state?.state === "renewing")
+    state = { ...state, retryAt: Math.min(state.retryAt, Date.now() + retryWaitCapMs) }
+  if (state?.state === "renewed")
+    state = { ...state, renewAfter: Math.min(state.renewAfter, Date.now() + firstRetryWaitMs) }
   let { document, oauth } = await readLogin(directory, provider)
   if (state?.state === "renewing" && (await recover(directory, provider, oauth))) {
     ;({ document, oauth } = await readLogin(directory, provider))

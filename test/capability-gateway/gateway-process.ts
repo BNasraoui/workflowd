@@ -666,7 +666,7 @@ export function oauthFixture(host = "127.0.0.1") {
     | "norotate"
     | "short"
   let mode: Mode = "renew"
-  let retryAfter = 0
+  let retryAfter: number | string = 0
   let next = { access: syntheticValue("access"), refresh: syntheticValue("refresh") }
   let onCut: (() => void) | undefined
   let released = Promise.withResolvers<void>()
@@ -726,7 +726,7 @@ export function oauthFixture(host = "127.0.0.1") {
     requests: (): ReadonlyArray<OAuthRequest> => requests,
     mode: (
       value: Mode,
-      options: { readonly cut?: () => void; readonly retryAfter?: number } = {},
+      options: { readonly cut?: () => void; readonly retryAfter?: number | string } = {},
     ) => {
       mode = value
       onCut = options.cut
