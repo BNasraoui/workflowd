@@ -1,20 +1,10 @@
 import { randomBytes, randomUUID } from "node:crypto"
-import { dlopen, FFIType } from "bun:ffi"
+import { attachedToParent } from "./parent-death"
 
 /** The noscope command contract; the entrypoint owns process lifetime and stdio. */
 export function capabilityProvider([operation, ...args]: readonly string[]) {
-  // Noscope uses a separate process group. Parent-death signaling ends this
-  // adapter if mint is cancelled.
-  const parent = process.ppid
-  const libc = dlopen("libc.so.6", {
-    prctl: {
-      args: [FFIType.i32, FFIType.u64, FFIType.u64, FFIType.u64, FFIType.u64],
-      returns: FFIType.i32,
-    },
-  })
-  const attached = parent > 1 && libc.symbols.prctl(1, 9, 0, 0, 0) === 0 && process.ppid === parent
-  libc.close()
-  if (!attached) throw new Error("capability provider refused")
+  // Parent-death signaling (SIGKILL) ends this adapter if mint is cancelled.
+  if (!attachedToParent(9)) throw new Error("capability provider refused")
   const ttl = Number(args.at(-1))
   if (!Number.isInteger(ttl) || ttl < 1 || ttl > 3600)
     throw new Error("capability provider refused")

@@ -5,6 +5,7 @@
     "test/resources/{preload,launcher,proxy,guardian,run}.ts",
     "src/worker-identity/command.ts",
     "src/capability-gateway/noscope-provider.ts",
+    "src/capability-gateway/custody-process.ts",
     "src/resident/subscribe.ts",
     "src/resident/mcp.ts",
     "test/kernel/register-wait-process.ts",

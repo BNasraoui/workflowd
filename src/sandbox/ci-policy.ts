@@ -14,7 +14,13 @@ const setupNode = "actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020"
 // tokenless pinned Bun setup, locked build/determinism/E2E, and artifact upload
 // restricted to main pushes.
 // Any dependency, permission, input or script edit requires a fresh review.
-const imageWorkflowSha256 = "5cbed263784fda5a91137a9c935d7f1ba4ccb809b31d479b329a76aa9a79a857"
+// gateway-image.yml: the same checkout, Nix, Bun and main-only upload, plus a job that finds
+// whether a pull request changes an input of the image, a second build of the commit and a job
+// that requires equal digests and the recorded noscope output hash.
+const imageWorkflowSha256 = new Map([
+  ["agent-image.yml", "5cbed263784fda5a91137a9c935d7f1ba4ccb809b31d479b329a76aa9a79a857"],
+  ["gateway-image.yml", "b5f6d7ce48d94f53ddf94ff2932d6df93118db25d622e0d794af11f16024dc57"],
+])
 const head = "${{ github.event.pull_request.head.sha || github.sha }}"
 const base = "${{ github.event.pull_request.base.sha || github.event.before }}"
 const checkout = `set -euo pipefail
@@ -56,12 +62,15 @@ function assertStep(value: Schema.Json) {
 function assertJob(value: Schema.Json, workflows: Record<string, string>) {
   const job = object(value)
   requireEmpty(job.permissions)
-  if (job.uses === "./.github/workflows/agent-image.yml") {
-    const source = workflows["agent-image.yml"]
+  const imageWorkflow =
+    typeof job.uses === "string" ? job.uses.replace(/^\.\/\.github\/workflows\//, "") : ""
+  const pinned = imageWorkflowSha256.get(imageWorkflow)
+  if (pinned !== undefined && job.uses === `./.github/workflows/${imageWorkflow}`) {
+    const source = workflows[imageWorkflow]
     if (
       Object.keys(job).some((key) => key !== "uses" && key !== "permissions") ||
       source === undefined ||
-      createHash("sha256").update(source).digest("hex") !== imageWorkflowSha256
+      createHash("sha256").update(source).digest("hex") !== pinned
     )
       throw new Error("Image build differs from the reviewed unprivileged snapshot")
     return
@@ -173,7 +182,7 @@ function assertPublishIsolation(
   }
 }
 
-/** PR paths may call the two reviewed setup actions or the exact image workflow snapshot.
+/** PR paths may call the two reviewed setup actions or the exact image workflow snapshots.
  * Other local/composite/reusable dependencies and inherited secrets are refused. This
  * runs against the PR head to aid review; untrusted code cannot secure its own edits.
  */

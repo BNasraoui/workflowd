@@ -1,7 +1,7 @@
 import { mkdir } from "node:fs/promises"
 import { dirname } from "node:path"
 import { BunRuntime } from "@effect/platform-bun"
-import { SqliteClient } from "@effect/sql-sqlite-bun"
+import { workflowdDatabase } from "./store/database"
 import { Effect, Layer } from "effect"
 import { AgentRunDispatchSettings, startConfigReload } from "./config-reload"
 import { makeLiveLayer } from "./layers"
@@ -25,9 +25,7 @@ export const mainProgram = (env: Record<string, string | undefined>) =>
       try: () => mkdir(dirname(config.storage.databasePath), { recursive: true }),
       catch: (cause) => new Error(`Could not create state directory: ${String(cause)}`),
     })
-    const DatabaseLive = SqliteClient.layer({
-      filename: config.storage.databasePath,
-    })
+    const DatabaseLive = workflowdDatabase(config.storage.databasePath)
     return yield* runHookService(config).pipe(
       Effect.provide(
         makeLiveLayer(config).pipe(

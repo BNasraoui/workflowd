@@ -1,0 +1,219 @@
+import { expect, test } from "bun:test"
+import { randomUUID } from "node:crypto"
+import { readFile, readdir, writeFile } from "node:fs/promises"
+import { join } from "node:path"
+import { Schema } from "effect"
+import { claudeLogin, client, sse, storedAccess, syntheticValue } from "./gateway-process"
+import {
+  descendants,
+  ended,
+  imported,
+  loginDirectory,
+  loginFile,
+  runToken,
+  until,
+  withCustody,
+  works,
+} from "./custody-fixture"
+
+/**
+ * A renewal of the gateway's Claude login that stops part way, through the gateway process and
+ * a fixture OAuth server: a stop of the gateway, a stop before the rename of the renewed login;
+ * and the scope of a renewal answer.
+ */
+
+test("a stop of the gateway while the OAuth server holds the renewal past custody's request limit: after a start and the wait, the same refresh value is sent once more and the call works", async () => {
+  await withCustody(async (f, oauth, start) => {
+    const old = claudeLogin(syntheticValue("access"), syntheticValue("refresh"), Date.now() - 1000)
+    await imported(f, old)
+    oauth.mode("hold")
+    const gateway = await start()
+    const token = await runToken(gateway, "jti-stop")
+    const first = client(gateway)
+      .call(token)
+      .catch(() => "gone")
+    await until(() => oauth.requests().length === 1)
+    // The stop waits for the renewal; custody's own limit ends its request with no answer.
+    await gateway.terminate?.()
+    await first
+    oauth.release()
+    expect(storedAccess(await readFile(loginFile(f), "utf8"))).toBe(old.claudeAiOauth.accessToken)
+    const { retryAt } = Schema.decodeUnknownSync(
+      Schema.fromJsonString(Schema.Struct({ retryAt: Schema.Number })),
+    )(await readFile(join(loginDirectory(f), "claude.state"), "utf8"))
+    oauth.mode("renew")
+    const restarted = await start()
+    const restartedToken = await runToken(restarted, "jti-restart")
+    while (Date.now() <= retryAt) await Bun.sleep(retryAt - Date.now() + 1)
+    await works(restarted, restartedToken, oauth, old.claudeAiOauth.refreshToken)
+    expect(oauth.requests()).toHaveLength(2)
+    expect(storedAccess(await readFile(loginFile(f), "utf8"))).toBe(oauth.next().access)
+  })
+}, 40000)
+
+test("a stop after the renewed login is complete and before its rename: the next call stores it and sends no request", async () => {
+  await withCustody(async (f, oauth, start) => {
+    const old = claudeLogin(syntheticValue("access"), syntheticValue("refresh"), Date.now() - 1000)
+    await imported(f, old)
+    // What such a stop leaves: the state written before the request, and the complete new login
+    // in a temporary file of mode 0600 beside the old one.
+    const renewed = claudeLogin(
+      syntheticValue("access"),
+      syntheticValue("refresh"),
+      Date.now() + 3600000,
+    )
+    const older = claudeLogin(
+      syntheticValue("access"),
+      syntheticValue("refresh"),
+      Date.now() - 5000,
+    )
+    await writeFile(
+      join(loginDirectory(f), "claude.state"),
+      JSON.stringify({ state: "renewing", failures: 0, retryAt: 0 }),
+      { mode: 0o600 },
+    )
+    await writeFile(
+      join(loginDirectory(f), `claude.json.${randomUUID()}.tmp`),
+      JSON.stringify(renewed),
+      { mode: 0o600 },
+    )
+    // A temporary file that ends earlier, and one cut short, are not the login.
+    await writeFile(
+      join(loginDirectory(f), `claude.json.${randomUUID()}.tmp`),
+      JSON.stringify(older),
+      { mode: 0o600 },
+    )
+    await writeFile(
+      join(loginDirectory(f), `claude.json.${randomUUID()}.tmp`),
+      JSON.stringify(renewed).slice(0, 60),
+      { mode: 0o600 },
+    )
+    const gateway = await start()
+    const token = await runToken(gateway, "jti-tmp")
+    const call = await client(gateway).call(token)
+    expect(call.status).toBe(200)
+    expect(await call.text()).toBe(sse)
+    expect(oauth.requests()).toHaveLength(0)
+    expect(JSON.parse(await readFile(loginFile(f), "utf8"))).toEqual(renewed)
+    expect((await readdir(loginDirectory(f))).sort()).toEqual(["claude.json", "claude.lock"])
+    expect(f.upstreamRequests().map((request) => request.headers.authorization)).toEqual([
+      `Bearer ${renewed.claudeAiOauth.accessToken}`,
+    ])
+  })
+}, 30000)
+
+test("a renewal answer with no scope keeps the scope; one without user:inference is stored, and calls are refused for that scope", async () => {
+  await withCustody(async (f, oauth, start) => {
+    const old = claudeLogin(syntheticValue("access"), syntheticValue("refresh"), Date.now() - 1000)
+    await imported(f, old)
+    oauth.mode("unscoped")
+    const gateway = await start()
+    const token = await runToken(gateway, "jti-scope")
+    const call = await client(gateway).call(token)
+    expect(call.status).toBe(200)
+    expect(await call.text()).toBe(sse)
+    const kept = JSON.parse(await readFile(loginFile(f), "utf8")).claudeAiOauth
+    expect([kept.accessToken, kept.scopes]).toEqual([
+      oauth.next().access,
+      ["user:inference", "user:profile"],
+    ])
+
+    // The server answers with a narrower scope: it has replaced the refresh value, so the new
+    // values are stored, and no call gets an access value.
+    await imported(
+      f,
+      claudeLogin(syntheticValue("access"), syntheticValue("refresh"), Date.now() - 1000),
+    )
+    const narrow = { access: syntheticValue("access"), refresh: syntheticValue("refresh") }
+    oauth.renewWith(narrow)
+    oauth.mode("narrow")
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const refused = await client(gateway).call(token)
+      expect(refused.status).toBe(503)
+      await refused.text()
+    }
+    expect(oauth.requests()).toHaveLength(2)
+    const stored = JSON.parse(await readFile(loginFile(f), "utf8")).claudeAiOauth
+    expect([stored.accessToken, stored.refreshToken, stored.scopes]).toEqual([
+      narrow.access,
+      narrow.refresh,
+      ["user:profile"],
+    ])
+    expect(gateway.output?.()).toContain(
+      "custody: the claude login does not hold the scope user:inference",
+    )
+    expect(gateway.output?.()).not.toContain("needs a new import")
+    expect(f.upstreamRequests()).toHaveLength(1)
+  })
+}, 30000)
+
+test("a stop of the gateway while the OAuth server holds the renewal waits for its answer: the next start uses the renewed login and sends no request", async () => {
+  await withCustody(async (f, oauth, start) => {
+    const old = claudeLogin(syntheticValue("access"), syntheticValue("refresh"), Date.now() - 1000)
+    await imported(f, old)
+    oauth.mode("hold")
+    const gateway = await start()
+    const token = await runToken(gateway, "jti-stop-wait")
+    const first = client(gateway)
+      .call(token)
+      .catch(() => "gone")
+    await until(() => oauth.requests().length === 1)
+    const stopped = gateway.terminate!()
+    // The gateway's stop waits for the renewal in flight; then the OAuth server answers.
+    await until(() => gateway.output!().includes("the gateway waits for a renewal in flight"))
+    oauth.release()
+    const released = performance.now()
+    await stopped
+    await first
+    expect(
+      released - oauth.requests()[0]!.at,
+      "the OAuth server answered within custody's request limit",
+    ).toBeLessThan(5000)
+    expect(storedAccess(await readFile(loginFile(f), "utf8"))).toBe(oauth.next().access)
+    expect(await readdir(loginDirectory(f))).not.toContain("claude.state")
+    const restarted = await start()
+    const call = await client(restarted).call(await runToken(restarted, "jti-after-stop"))
+    expect(call.status).toBe(200)
+    expect(await call.text()).toBe(sse)
+    expect(oauth.requests()).toHaveLength(1)
+  })
+}, 40000)
+
+test("a stop of the gateway's control group, SIGTERM to the gateway, noscope and custody at one moment, while the OAuth server holds the renewal: custody stores the answer, and the next start sends no request", async () => {
+  await withCustody(async (f, oauth, start) => {
+    const old = claudeLogin(syntheticValue("access"), syntheticValue("refresh"), Date.now() - 1000)
+    await imported(f, old)
+    oauth.mode("hold")
+    const gateway = await start()
+    const token = await runToken(gateway, "jti-stop-group")
+    const first = client(gateway)
+      .call(token)
+      .catch(() => "gone")
+    await until(() => oauth.requests().length === 1)
+    // What a service manager's default stop sends: SIGTERM to each process of the unit.
+    const below = descendants(gateway.pid!)
+    const custody = below.find(({ command }) => command.includes("custody-process.ts"))
+    expect(below.map(({ command }) => command.split(" ")[0])).toContain(f.config.noscope.binary)
+    expect(custody, "custody runs below the gateway while its request is held").toBeDefined()
+    for (const pid of [gateway.pid!, ...below.map((process) => process.pid)])
+      process.kill(pid, "SIGTERM")
+    await gateway.exited
+    await first
+    // The OAuth server answers after the stop of each process; custody's request limit has not
+    // passed.
+    oauth.release()
+    const released = performance.now()
+    await until(() => ended(custody!.pid))
+    expect(
+      released - oauth.requests()[0]!.at,
+      "the OAuth server answered within custody's request limit",
+    ).toBeLessThan(5000)
+    expect(storedAccess(await readFile(loginFile(f), "utf8"))).toBe(oauth.next().access)
+    expect(await readdir(loginDirectory(f))).not.toContain("claude.state")
+    const restarted = await start()
+    const call = await client(restarted).call(await runToken(restarted, "jti-after-group"))
+    expect(call.status).toBe(200)
+    expect(await call.text()).toBe(sse)
+    expect(oauth.requests()).toHaveLength(1)
+  })
+}, 40000)

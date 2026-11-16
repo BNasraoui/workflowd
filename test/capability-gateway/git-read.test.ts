@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test"
+import { SqlClient } from "effect/unstable/sql"
 import { gitHttpBackend } from "./git-backend"
 import { Effect } from "effect"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
@@ -7,8 +8,10 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { AgentRunStoreLive } from "../../src/kernel/agent-run-store"
 import { makeCapabilityGateway } from "../../src/capability-gateway/service"
+import { capabilityDigest } from "../../src/capability-gateway/store"
 import {
   bindRunSession,
+  grantLiveRuns,
   runCapabilityMint,
   seedCapabilityRun,
   writeNoscopeProvider,
@@ -264,13 +267,15 @@ test(`a changed saved repository is refused and the policy row is immutable`, ()
         ))._tag,
       ).toBe("Failure")
       yield* sql`UPDATE kernel_agent_runs SET repository='foreign' WHERE run_id='run'`
+      // workflowd's reconcile names no grant for a run that no longer matches its lease.
+      yield* grantLiveRuns(Date.now()).pipe(Effect.provideService(SqlClient.SqlClient, sql))
       expect((yield* call(direct())).status).toBe(403)
       expect(state.attempts).toBe(0)
     }),
   ))
 
 test(`redirects and slow streams stay inside run authority`, () =>
-  withGitGateway(({ state, runs, direct, call }) =>
+  withGitGateway(({ state, runs, sql, direct, call }) =>
     Effect.gen(function* () {
       state.fault = "redirect"
       const redirected = yield* call(direct())
@@ -282,6 +287,7 @@ test(`redirects and slow streams stay inside run authority`, () =>
       expect((yield* Effect.promise(() => reader.read())).value?.length).toBeGreaterThan(0)
       expect((yield* call(direct())).status).toBe(429)
       yield* runs.cancel({ runId: "run", now: new Date() })
+      yield* grantLiveRuns(Date.now()).pipe(Effect.provideService(SqlClient.SqlClient, sql))
       expect(
         yield* Effect.promise(() =>
           reader.read().then(
@@ -291,6 +297,23 @@ test(`redirects and slow streams stay inside run authority`, () =>
         ),
       ).toBe("interrupted")
       expect(state.upstreamCancelled).toBe(true)
+      const attempts = state.attempts
+      expect((yield* call(direct())).status).toBe(403)
+      expect(state.attempts).toBe(attempts)
+    }),
+  ))
+
+test(`a run token whose successor has made a call is refused on the Git read before the upstream`, () =>
+  withGitGateway(({ state, sql, grant, direct, call }) =>
+    Effect.gen(function* () {
+      const served = yield* call(direct())
+      expect(served.status).toBe(200)
+      yield* Effect.promise(() => served.arrayBuffer())
+      // The token's successor, as a renewal stores it, has authorized a call.
+      const predecessor = capabilityDigest(grant.token)
+      yield* sql`INSERT INTO capability_tokens(digest,run_id,predecessor,expires_at,session,used_at)
+        SELECT ${"e".repeat(64)},run_id,digest,expires_at,session,${Date.now()}
+        FROM capability_tokens WHERE digest=${predecessor}`
       const attempts = state.attempts
       expect((yield* call(direct())).status).toBe(403)
       expect(state.attempts).toBe(attempts)

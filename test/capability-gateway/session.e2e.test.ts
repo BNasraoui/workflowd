@@ -1,24 +1,26 @@
 import { expect, test } from "bun:test"
-import { connect } from "node:net"
+import { connect } from "node:tls"
 import { Cause, Effect, Exit, Schema } from "effect"
-import { SqlClient } from "effect/unstable/sql"
 import { AgentRunStore } from "../../src/kernel/agent-run-store"
-import { capabilityDigest, makeCapabilityStore } from "../../src/capability-gateway/store"
-import { makeCapabilityRevoke } from "../../src/capability-gateway/service"
+import { join } from "node:path"
+import { capabilityDigest } from "../../src/capability-gateway/store"
 import { makeSandboxStore } from "../../src/sandbox/store"
 import { serveCapabilityGateway } from "../../src/capability-gateway-server"
+import { tlsFront, type Front } from "../helpers/loopback-tls"
 import {
   client,
   fixture,
   inProcessGateway,
   processGateway,
   proof,
+  runnerKey,
   seedLease,
   sse,
   streamEnd,
   type Fixture,
   type Gateway,
 } from "./gateway-process"
+import { sessionBinder } from "../../deploy/sandbox/renewal.mjs"
 
 async function scenario(start: (f: Fixture) => Promise<Gateway>) {
   const f = await fixture()
@@ -31,22 +33,25 @@ async function scenario(start: (f: Fixture) => Promise<Gateway>) {
   )
   let gateway = await start(f)
   let other: Gateway | undefined
+  let otherFront: Front | undefined
   try {
-    const at = (port = gateway.port) => client(port)
-    const url = (path: string) => at().url(path)
+    const at = (on: Gateway = gateway) => client(on)
     const challenge = (lease: string) => at().challenge(lease)
-    const audienceOf = async (lease: string, port?: number) => {
-      const issued = await at(port).challenge(lease)
+    // The channel of each lease, as its challenge named it.
+    const channels = new Map<string, string>()
+    const audienceOf = async (lease: string, on?: Gateway) => {
+      const issued = await at(on).challenge(lease)
       expect(issued.status).toBe(200)
       expect(issued.headers.get("cache-control")).toBe("no-store")
       const value = Schema.decodeUnknownSync(
         Schema.Struct({ channel: Schema.String, nonce: Schema.String }),
       )(await issued.json())
-      return `workflowd:${value.channel}:${value.nonce}`
+      channels.set(lease, value.channel)
+      return `workflowd:${value.channel}:${sessionBinder(value.nonce, runnerKey.publicKey)}`
     }
-    const session = (token: string, port?: number) => at(port).session(token)
+    const session = (token: string, on?: Gateway) => at(on).session(token)
     const call = (token: string) => at().call(token)
-    const renew = (token: string) => at().renew(token)
+    const renew = (token: string) => at().renew(token, channels.get("lease") ?? "")
     const Grant = async (response: Response) => {
       const grant = await at().grant(response)
       expect(grant.deadline).toBeNumber()
@@ -54,9 +59,8 @@ async function scenario(start: (f: Fixture) => Promise<Gateway>) {
     }
     const Renewed = (response: Response) => at().grant(response)
     const sessionOfRun = () =>
-      f.store(
-        Effect.gen(function* () {
-          const sql = yield* SqlClient.SqlClient
+      f.gatewaySql(
+        Effect.fnUntraced(function* (sql) {
           const rows = yield* sql`SELECT session FROM capability_bindings WHERE run_id='run'`
           return rows[0]?.session
         }),
@@ -65,7 +69,7 @@ async function scenario(start: (f: Fixture) => Promise<Gateway>) {
     // (g) An unknown lease and a lease that is not actions-native are not ready for a challenge;
     // a malformed query gets nothing.
     expect((await challenge("other")).status).toBe(503)
-    expect((await fetch(url("/capabilities/v1/challenge?lease=lease&x=1"))).status).toBe(403)
+    expect((await at().request("/capabilities/v1/challenge?lease=lease&x=1")).status).toBe(403)
     expect((await challenge("lease-d")).status).toBe(503)
     const first = await audienceOf("lease")
 
@@ -74,7 +78,7 @@ async function scenario(start: (f: Fixture) => Promise<Gateway>) {
     expect((await session("not-a-jwt")).status).toBe(403)
     expect(
       (
-        await fetch(url("/capabilities/v1/session"), {
+        await at().request("/capabilities/v1/session", {
           method: "POST",
           headers: { "content-type": "text/plain" },
           body: "{}",
@@ -87,12 +91,16 @@ async function scenario(start: (f: Fixture) => Promise<Gateway>) {
     // (a) A client sends a complete session request and leaves before the answer. The gateway
     // finishes the session without it; the runner proves itself again and gets the next one.
     await f.slowMints(true)
-    const body = JSON.stringify({ token: proof(first, "jti-1") })
-    const socket = connect(gateway.port, "127.0.0.1")
+    const body = JSON.stringify({ token: proof(first, "jti-1"), key: runnerKey.publicKey })
+    const socket = connect({
+      host: "127.0.0.1",
+      port: Number(new URL(gateway.origin).port),
+      ca: gateway.ca,
+    })
     let answered = ""
     socket.on("data", (bytes) => (answered += bytes.toString()))
     socket.write(
-      `POST /capabilities/v1/session HTTP/1.1\r\nhost: 127.0.0.1\r\ncontent-type: application/json\r\ncontent-length: ${Buffer.byteLength(body)}\r\n\r\n${body}`,
+      `POST /capabilities/v1/session HTTP/1.1\r\nhost: ${new URL(gateway.origin).host}\r\ncontent-type: application/json\r\ncontent-length: ${Buffer.byteLength(body)}\r\n\r\n${body}`,
     )
     // The gateway has read the proof once its run token mint is running.
     for (let tries = 0; (await f.liveMints()) === 0 && tries < 400; tries++) await Bun.sleep(50)
@@ -127,12 +135,9 @@ async function scenario(start: (f: Fixture) => Promise<Gateway>) {
 
     // A token with more than 330 seconds left is not renewed; in its last minutes it is.
     expect((await renew(grant.token)).status).toBe(403)
-    await f.store(
-      Effect.gen(function* () {
-        const sql = yield* SqlClient.SqlClient
-        yield* sql`UPDATE capability_tokens SET expires_at=${Date.now() + 300000}
-          WHERE digest=${capabilityDigest(grant.token)}`
-      }),
+    await f.gatewaySql(
+      (sql) => sql`UPDATE capability_tokens SET expires_at=${Date.now() + 300000}
+          WHERE digest=${capabilityDigest(grant.token)}`,
     )
     const renewed = await renew(grant.token)
     expect(renewed.status).toBe(200)
@@ -147,9 +152,8 @@ async function scenario(start: (f: Fixture) => Promise<Gateway>) {
     gateway = await start(f)
     expect(await (await call(next.token)).text()).toBe(sse)
 
-    // When it starts, workflowd builds only the revoke of the capability store, on the same
-    // store; building it revokes nothing.
-    await f.store(makeCapabilityRevoke.pipe(Effect.andThen(Effect.sleep("10 millis"))))
+    // workflowd reconciles when it starts; a live run stays granted.
+    await f.reconcile()
     expect(await (await call(next.token)).text()).toBe(sse)
 
     // (e) A new session, opened through another gateway on the same store, ends a live stream
@@ -159,14 +163,30 @@ async function scenario(start: (f: Fixture) => Promise<Gateway>) {
     expect(live.status).toBe(200)
     const reader = live.body!.getReader()
     expect((await reader.read()).done).toBe(false)
-    other = await start(f)
-    const third = await session(proof(await audienceOf("lease", other.port), "jti-3"), other.port)
+    const listenSocket = join(f.root, "front-2", "gateway.sock")
+    otherFront = await tlsFront(f.tls, listenSocket)
+    other = await start({
+      ...f,
+      front: otherFront,
+      env: {
+        ...f.env,
+        WORKFLOWD_CAPABILITY_GATEWAY: JSON.stringify({
+          ...f.config,
+          controlSocket: join(f.root, "control-2", "gateway.sock"),
+          listen: { ...f.config.listen, socket: listenSocket, service: otherFront.service },
+        }),
+      },
+      reconcile: async () => undefined,
+    })
+    const third = await session(proof(await audienceOf("lease", other), "jti-3"), other)
     expect(third.status).toBe(200)
     const current = await Grant(third)
     expect(await streamEnd(reader, 10000)).toBe("ended")
     f.setStall(false)
     await other.stop()
     other = undefined
+    otherFront.close()
+    otherFront = undefined
 
     // (d) The earlier token and its renewed successor are refused on a call and on renewal; a
     // session post of that token, or of a used proof for a fresh challenge, is refused.
@@ -190,24 +210,22 @@ async function scenario(start: (f: Fixture) => Promise<Gateway>) {
         yield* (yield* AgentRunStore).cancel({ runId: "run-c", now: new Date() })
       }),
     )
+    await f.reconcile()
     expect((await challenge("lease-b")).status).toBe(503)
     expect((await challenge("lease-c")).status).toBe(503)
 
-    // A revoke written by another process aborts a live stream.
+    // workflowd's revoke on the control socket aborts a live stream at once.
     f.setStall(true)
     const stream = await call(current.token)
     expect(stream.status).toBe(200)
     const streamed = stream.body!.getReader()
     expect((await streamed.read()).done).toBe(false)
-    await f.store(
-      Effect.gen(function* () {
-        yield* (yield* makeCapabilityStore).revoke("run")
-      }),
-    )
+    await f.daemon((capability) => capability.revoke("run"))
     expect(await streamEnd(streamed, 10000)).toBe("ended")
     expect((await call(current.token)).status).toBe(403)
   } finally {
     await other?.stop()
+    otherFront?.close()
     await gateway.stop()
     await f.close()
   }

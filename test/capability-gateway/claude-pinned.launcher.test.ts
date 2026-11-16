@@ -3,7 +3,8 @@ import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { readFileSync } from "node:fs"
 import { join } from "node:path"
-import { claudeBetas } from "../../src/capability-gateway/claude"
+import { budgetHeld, claudeBetas } from "../../src/capability-gateway/claude"
+import { defaultRunBudget } from "../../src/sandbox/config"
 import { fixtureExecutable } from "../helpers/fixture-executable.mjs"
 import { client, processGateway, proof, sse, withGateway } from "./gateway-process"
 
@@ -29,8 +30,9 @@ function requireLoopbackOnly() {
 const pinned = `${readFileSync("test/resources/claude-code-version", "utf8").trim()} (Claude Code)`
 const claude = fixtureExecutable("claude")
 
-/** A request that the pinned client sent: its anthropic-beta values and its body text. */
+/** A request that the pinned client sent: its path, its anthropic-beta values and its body text. */
 interface Sent {
+  readonly path: string
   readonly betas: ReadonlyArray<string>
   readonly body: string
 }
@@ -54,6 +56,7 @@ async function runPinned(
     async fetch(request) {
       const body = await request.text()
       sent.push({
+        path: new URL(request.url).pathname,
         betas: (request.headers.get("anthropic-beta") ?? "").split(",").map((v) => v.trim()),
         body,
       })
@@ -117,20 +120,56 @@ for (const model of [
     // The record of this run: the values that the pinned client sent for this model.
     console.log(`${pinned} ${model} anthropic-beta: ${values.join(",")}`)
     expect(values.filter((value) => !claudeBetas.has(value))).toEqual([])
+    // Each messages call asks a max_tokens that the gateway's default cap admits.
+    const asked = run.sent
+      .filter((request) => request.path === "/v1/messages")
+      .map((request): unknown => Reflect.get(Object(JSON.parse(request.body)), "max_tokens"))
+    console.log(`${pinned} ${model} max_tokens: ${asked.join(",")}`)
+    expect(asked.length).toBeGreaterThan(0)
+    expect(
+      asked.filter(
+        (value) =>
+          typeof value !== "number" ||
+          !Number.isSafeInteger(value) ||
+          value < 1 ||
+          value > defaultRunBudget.maxTokens,
+      ),
+    ).toEqual([])
   }, 90000)
+
+test("the pinned Claude Code waits the retry-after of the gateway's 429 for a call that open calls hold back, asks again and completes", async () => {
+  const asked: number[] = []
+  const run = await runPinned("claude-opus-5-5", "fixture-oauth", async (request) => {
+    if (new URL(request.url).pathname !== "/v1/messages")
+      return new Response(sse, { headers: { "content-type": "text/event-stream" } })
+    asked.push(Date.now())
+    return asked.length === 1
+      ? budgetHeld()
+      : new Response(sse, { headers: { "content-type": "text/event-stream" } })
+  })
+  expect({ code: run.code, output: run.output.trim() }).toEqual({ code: 0, output: "ok" })
+  expect(asked.length).toBeGreaterThanOrEqual(2)
+  // retry-after: 5
+  expect(asked[1]! - asked[0]!).toBeGreaterThanOrEqual(5000)
+}, 90000)
 
 test("the pinned Claude Code completes a call through the gateway process, and its body keeps its meaning", async () => {
   await withGateway(processGateway, async (f, gateway) => {
-    const runner = client(gateway.port)
+    const runner = client(gateway)
     const { audience } = await runner.audience()
     const { token } = await runner.grant(await runner.session(proof(audience, "jti-pinned")))
-    const run = await runPinned("fixture-model", token, (request, body) =>
-      fetch(
-        runner.url(`/capabilities/v1/providers/anthropic${new URL(request.url).pathname}`) +
-          new URL(request.url).search,
-        { method: request.method, headers: request.headers, body },
-      ),
-    )
+    const run = await runPinned("fixture-model", token, (request, body) => {
+      const { pathname, search } = new URL(request.url)
+      // The runner names the front's host, as a runner names the Service; the client's Host
+      // names this local server.
+      const headers = new Headers(request.headers)
+      headers.delete("host")
+      return runner.request(`/capabilities/v1/providers/anthropic${pathname}${search}`, {
+        method: request.method,
+        headers,
+        body,
+      })
+    })
     expect({ code: run.code, output: run.output.trim() }).toEqual({ code: 0, output: "ok" })
     const received = f.upstreamRequests()
     const parsed = (body: string): unknown => JSON.parse(body)

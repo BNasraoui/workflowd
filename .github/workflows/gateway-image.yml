@@ -1,0 +1,233 @@
+name: Gateway image reusable build
+
+on:
+  workflow_call:
+    outputs:
+      changed:
+        description: Whether the image builds, as for a push or a pull request that changes an input
+        value: ${{ jobs.inputs.outputs.changed }}
+
+permissions: {}
+
+jobs:
+  inputs:
+    name: Gateway image inputs
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {}
+    outputs:
+      changed: ${{ steps.inputs.outputs.changed }}
+    steps:
+      - name: Anonymous checkout
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          set -euo pipefail
+          [[ "$HEAD_SHA" =~ ^[a-f0-9]{40}$ ]]
+          [[ "$BASE_SHA" =~ ^[a-f0-9]{40}$ ]]
+          export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0
+          git init .
+          git remote add origin https://github.com/BNasraoui/workflowd.git
+          git -c credential.helper= -c http.extraHeader= fetch --no-tags origin "$HEAD_SHA" "$BASE_SHA"
+          git checkout --detach "$HEAD_SHA"
+      - name: Find whether the change touches an input of the image
+        id: inputs
+        env:
+          EVENT: ${{ github.event_name }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          set -euo pipefail
+          changed=true
+          if [[ $EVENT == pull_request ]]; then
+            # The files of nix/gateway-image.nix and what builds, checks and runs them.
+            inputs='^(flake\.(nix|lock)|nix/|src/|package\.json|bun\.lock|tsconfig\.json|deploy/opencode/sandbox\.json|deploy/sandbox/(capability-limits\.mjs|publication\.mjs|casefold\.json|publication-unicode\.json|public-status\.mjs|renewal\.mjs|skills/catalog\.json)|\.github/workflows/gateway-image\.yml|test/gateway-image/|test/capability-gateway/|test/resources/)'
+            base=$(git merge-base "$BASE_SHA" "$HEAD_SHA")
+            git diff --name-only "$base" "$HEAD_SHA" > "$RUNNER_TEMP/changed-files"
+            status=0
+            grep -E "$inputs" "$RUNNER_TEMP/changed-files" || status=$?
+            if ((status > 1)); then exit "$status"; fi
+            if ((status == 1)); then changed=false; fi
+          fi
+          echo "changed=$changed" >> "$GITHUB_OUTPUT"
+          printf 'Image inputs changed: %s\n' "$changed" | tee -a "$GITHUB_STEP_SUMMARY"
+
+  build:
+    name: Gateway image build and E2E
+    needs: inputs
+    if: needs.inputs.outputs.changed == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    permissions: {}
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+      parts: ${{ steps.build.outputs.parts }}
+    steps:
+      - name: Anonymous checkout
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          set -euo pipefail
+          [[ "$HEAD_SHA" =~ ^[a-f0-9]{40}$ ]]
+          [[ "$BASE_SHA" =~ ^[a-f0-9]{40}$ ]]
+          export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0
+          git init .
+          git remote add origin https://github.com/BNasraoui/workflowd.git
+          git -c credential.helper= -c http.extraHeader= fetch --no-tags origin "$HEAD_SHA" "$BASE_SHA"
+          git checkout --detach "$HEAD_SHA"
+      - name: Install pinned Nix without credentials
+        env:
+          INPUT_ENABLE_KVM: "true"
+          INPUT_SET_AS_TRUSTED_USER: "true"
+          INPUT_INSTALL_OPTIONS: ""
+          INPUT_EXTRA_NIX_CONFIG: experimental-features = nix-command flakes
+        run: |
+          set -euo pipefail
+          installer="$RUNNER_TEMP/install-nix.sh"
+          curl --proto '=https' --proto-redir '=https' -fsSL https://raw.githubusercontent.com/cachix/install-nix-action/13d8dd58da0234aa297dedd986986ccb8e7f3e24/install-nix.sh -o "$installer"
+          echo "836671507d9b4ea84252f968bd0622c5c2fa72f5deea93f5764f1c60821062f6  $installer" | sha256sum -c -
+          env -u GITHUB_TOKEN -u INPUT_GITHUB_ACCESS_TOKEN bash "$installer"
+      - name: Build locked image
+        id: build
+        run: |
+          set -euo pipefail
+          started=$SECONDS
+          nix build .#gateway-image --no-update-lock-file
+          ./result > gateway-image.tar
+          seconds=$((SECONDS - started))
+          digest=$(sha256sum gateway-image.tar | cut -d' ' -f1)
+          parts=""
+          for part in bun noscope modules app; do
+            path=$(nix build ".#gateway-$part" --no-update-lock-file --no-link --print-out-paths)
+            parts+="$part=$(nix hash path "$path") "
+          done
+          {
+            echo "digest=$digest"
+            echo "parts=$parts"
+          } >> "$GITHUB_OUTPUT"
+          {
+            printf 'Build: %s seconds\n' "$seconds"
+            printf 'Archive sha256: %s\n' "$digest"
+            printf 'Parts: %s\n' "$parts"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Load image and record its size
+        run: |
+          set -euo pipefail
+          docker load -i gateway-image.tar
+          gzip -n gateway-image.tar
+          {
+            printf 'Image id: %s\n' "$(docker image inspect --format '{{.Id}}' workflowd-gateway:local)"
+            printf 'Uncompressed image: %s bytes\n' "$(docker image inspect --format '{{.Size}}' workflowd-gateway:local)"
+            printf 'Compressed archive: %s bytes\n' "$(stat -c %s gateway-image.tar.gz)"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Set up Bun for the test resource guard
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version: 1.3.14
+          token: ""
+          no-cache: true
+      - name: Install test dependencies without scripts
+        run: bun install --frozen-lockfile --ignore-scripts
+      - name: Check the image's user, entrypoint and contents
+        run: timeout 600 bash test/gateway-image/e2e.sh
+      - name: Find the image's noscope for the session fixtures
+        run: echo "WORKFLOWD_FIXTURE_NOSCOPE=$(nix build .#gateway-noscope --no-update-lock-file --no-link --print-out-paths)/bin/noscope" >> "$GITHUB_ENV"
+      - name: Run the image against the session fixtures
+        timeout-minutes: 15
+        run: bun test/gateway-image/drive.ts
+      - name: Save tested image for publication
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: gateway-image
+          path: gateway-image.tar.gz
+          compression-level: 0
+          retention-days: 1
+
+  rebuild:
+    name: Gateway image second build
+    needs: inputs
+    if: needs.inputs.outputs.changed == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    permissions: {}
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+      parts: ${{ steps.build.outputs.parts }}
+    steps:
+      - name: Anonymous checkout
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          set -euo pipefail
+          [[ "$HEAD_SHA" =~ ^[a-f0-9]{40}$ ]]
+          [[ "$BASE_SHA" =~ ^[a-f0-9]{40}$ ]]
+          export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0
+          git init .
+          git remote add origin https://github.com/BNasraoui/workflowd.git
+          git -c credential.helper= -c http.extraHeader= fetch --no-tags origin "$HEAD_SHA" "$BASE_SHA"
+          git checkout --detach "$HEAD_SHA"
+      - name: Install pinned Nix without credentials
+        env:
+          INPUT_ENABLE_KVM: "true"
+          INPUT_SET_AS_TRUSTED_USER: "true"
+          INPUT_INSTALL_OPTIONS: ""
+          INPUT_EXTRA_NIX_CONFIG: experimental-features = nix-command flakes
+        run: |
+          set -euo pipefail
+          installer="$RUNNER_TEMP/install-nix.sh"
+          curl --proto '=https' --proto-redir '=https' -fsSL https://raw.githubusercontent.com/cachix/install-nix-action/13d8dd58da0234aa297dedd986986ccb8e7f3e24/install-nix.sh -o "$installer"
+          echo "836671507d9b4ea84252f968bd0622c5c2fa72f5deea93f5764f1c60821062f6  $installer" | sha256sum -c -
+          env -u GITHUB_TOKEN -u INPUT_GITHUB_ACCESS_TOKEN bash "$installer"
+      - name: Build locked image
+        id: build
+        run: |
+          set -euo pipefail
+          started=$SECONDS
+          nix build .#gateway-image --no-update-lock-file
+          ./result > gateway-image.tar
+          seconds=$((SECONDS - started))
+          digest=$(sha256sum gateway-image.tar | cut -d' ' -f1)
+          parts=""
+          for part in bun noscope modules app; do
+            path=$(nix build ".#gateway-$part" --no-update-lock-file --no-link --print-out-paths)
+            parts+="$part=$(nix hash path "$path") "
+          done
+          {
+            echo "digest=$digest"
+            echo "parts=$parts"
+          } >> "$GITHUB_OUTPUT"
+          {
+            printf 'Build: %s seconds\n' "$seconds"
+            printf 'Archive sha256: %s\n' "$digest"
+            printf 'Parts: %s\n' "$parts"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+  compare:
+    name: Gateway image digests are equal
+    needs: [build, rebuild]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Require the same digest from both builds
+        env:
+          FIRST: ${{ needs.build.outputs.digest }}
+          SECOND: ${{ needs.rebuild.outputs.digest }}
+          FIRST_PARTS: ${{ needs.build.outputs.parts }}
+          SECOND_PARTS: ${{ needs.rebuild.outputs.parts }}
+          # The NAR hash of nix/noscope.nix's output. A change of its revision, of flake.lock or of
+          # the toolchain that changes the build output must change this line too.
+          NOSCOPE: sha256-10fV179tWOSWf68LoizIAwUpWh8UjkSLm0NWvZHrH0E=
+        run: |
+          set -euo pipefail
+          printf 'First:  %s %s\nSecond: %s %s\n' "$FIRST" "$FIRST_PARTS" "$SECOND" "$SECOND_PARTS" | tee -a "$GITHUB_STEP_SUMMARY"
+          [[ "$FIRST" =~ ^[a-f0-9]{64}$ ]]
+          for parts in "$FIRST_PARTS" "$SECOND_PARTS"; do
+            [[ " $parts" == *" noscope=$NOSCOPE "* ]] || { echo "noscope output is not $NOSCOPE: $parts" >&2; exit 1; }
+          done
+          test "$FIRST_PARTS" = "$SECOND_PARTS"
+          test "$FIRST" = "$SECOND"

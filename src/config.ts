@@ -2,6 +2,7 @@ import { requireAgentHostSocket } from "./agent-host/config"
 import { loadAgentGitConfig, type AgentGitConfig } from "./agent-git/config"
 import { loadPrRepositories, type PrRepositories } from "./pr-automation-config"
 import {
+  CapabilityControlConfig,
   CapabilityGatewayConfig,
   parseSandboxRepositories,
   type SandboxPolicy,
@@ -117,7 +118,7 @@ export interface QrspiConfig {
 }
 
 export interface AgentRunConfig {
-  readonly capabilityGateway?: CapabilityGatewayConfig
+  readonly capabilityControl?: CapabilityControlConfig
   /** Repositories placed off the host; an alias that is absent is `host`. */
   readonly placements?: Readonly<Record<string, Placement>>
   readonly sandboxRepositories?: ReadonlyArray<SandboxPolicy>
@@ -491,13 +492,16 @@ function loadAgentRunConfig(
   }
   const repositories = parseAgentRunRepositories(required(env, "WORKFLOWD_AGENT_RUN_REPOSITORIES"))
   const sandboxRepositories = parseSandboxRepositories(env.WORKFLOWD_AGENT_RUN_SANDBOX_REPOSITORIES)
-  const capabilityGateway =
-    env.WORKFLOWD_CAPABILITY_GATEWAY === undefined
+  // The gateway's section names its store; workflowd reaches the gateway only by its socket.
+  if (env.WORKFLOWD_CAPABILITY_GATEWAY !== undefined)
+    throw new Error("WORKFLOWD_CAPABILITY_GATEWAY belongs to the gateway process")
+  const capabilityControl =
+    env.WORKFLOWD_CAPABILITY_CONTROL === undefined
       ? undefined
-      : decodeCapabilityGateway(env.WORKFLOWD_CAPABILITY_GATEWAY)
+      : decodeCapabilityControl(env.WORKFLOWD_CAPABILITY_CONTROL)
   if (
     sandboxRepositories.some((policy) => policy.privateBootstrap?.mode === "actions-native") &&
-    capabilityGateway === undefined
+    capabilityControl === undefined
   )
     throw new Error("Native Actions requires an explicit capability gateway configuration")
   if (
@@ -514,7 +518,7 @@ function loadAgentRunConfig(
   return {
     ...(sandboxRepositories.length === 0 ? {} : { sandboxRepositories }),
     ...(Object.keys(placements).length === 0 ? {} : { placements }),
-    ...(capabilityGateway === undefined ? {} : { capabilityGateway }),
+    ...(capabilityControl === undefined ? {} : { capabilityControl }),
     token,
     claudeBinary: env.WORKFLOWD_AGENT_RUN_CLAUDE_BIN ?? "claude",
     claudeHosts:
@@ -635,23 +639,19 @@ function workerHostId(env: Record<string, string | undefined>): string {
   return agentId(env.WORKFLOWD_HOST_ID ?? env.HOSTNAME ?? "localhost", "WORKFLOWD_HOST_ID")
 }
 
-function decodeCapabilityGateway(value: string): CapabilityGatewayConfig {
-  return Schema.decodeUnknownSync(CapabilityGatewayConfig, { onExcessProperty: "error" })(
+function decodeCapabilityControl(value: string): CapabilityControlConfig {
+  return Schema.decodeUnknownSync(CapabilityControlConfig, { onExcessProperty: "error" })(
     JSON.parse(value),
   )
 }
 
-/** The gateway's own process reads only its section and the store it shares with workflowd. */
-export function loadCapabilityGatewayConfig(
-  env: Record<string, string | undefined>,
-  home = homedir(),
-) {
+/** The gateway's own process reads only its section: its store, socket and listener. */
+export function loadCapabilityGatewayConfig(env: Record<string, string | undefined>) {
   const value = env.WORKFLOWD_CAPABILITY_GATEWAY
   if (value === undefined) throw new Error("WORKFLOWD_CAPABILITY_GATEWAY is required")
-  const gateway = decodeCapabilityGateway(value)
-  if (gateway.listen === undefined)
-    throw new Error("WORKFLOWD_CAPABILITY_GATEWAY requires a listen address")
-  return { gateway: { ...gateway, listen: gateway.listen }, ...storageSection(env, home) }
+  return Schema.decodeUnknownSync(CapabilityGatewayConfig, { onExcessProperty: "error" })(
+    JSON.parse(value),
+  )
 }
 
 function stateRoot(env: Record<string, string | undefined>, home: string): string {

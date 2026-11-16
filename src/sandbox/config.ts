@@ -1,4 +1,4 @@
-import { Schema } from "effect"
+import { Effect, Schema } from "effect"
 import { safePublication } from "../../deploy/sandbox/publication.mjs"
 import skills from "../../deploy/sandbox/skills/catalog.json"
 import { publicBootstrapFields } from "../../deploy/sandbox/public-status.mjs"
@@ -7,6 +7,7 @@ import {
   maxStreamsPerRun,
   providerIdPattern,
 } from "../../deploy/sandbox/capability-limits.mjs"
+import { configuredRunBudget } from "../capability-control/protocol"
 
 const PublicationCoAuthor = Schema.String.check(
   Schema.makeFilter(
@@ -35,12 +36,27 @@ export const PrivateBootstrapPolicy = Schema.Struct({
   repositoryOwnerId: positiveId,
   mode: Schema.Literal("actions-native"),
 })
+const AbsolutePath = Schema.String.check(Schema.isPattern(/^\/[A-Za-z0-9/_.-]+$/))
+const Id = Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 4294967294 }))
+/** The gateway process's own section. It names the gateway's store, never workflowd's. */
 export const CapabilityGatewayConfig = Schema.Struct({
   gitRead: Schema.optionalKey(Schema.Boolean),
   noscope: Schema.Struct({
-    binary: Schema.String.check(Schema.isPattern(/^\/[A-Za-z0-9/_.-]+$/)),
-    configHome: Schema.String.check(Schema.isPattern(/^\/[A-Za-z0-9/_.-]+$/)),
+    binary: AbsolutePath,
+    configHome: AbsolutePath,
   }),
+  /** The gateway's own database. */
+  storePath: AbsolutePath,
+  /** The control socket; the gateway owns its directory, mode 0710 with the daemon's group. */
+  controlSocket: AbsolutePath,
+  /** The only caller the control socket answers, and the group that may reach the socket. */
+  daemon: Schema.Struct({ uid: Id, gid: Id }),
+  /**
+   * The directory of the provider login that custody holds for `credentialRole`; the gateway's
+   * uid owns it, mode 0700. It is the one source of the directory: the gateway refuses to start
+   * when the noscope provider `provider-access` names another.
+   */
+  login: Schema.optionalKey(Schema.Struct({ directory: AbsolutePath })),
   providerId: Schema.String.check(Schema.isPattern(providerIdPattern)),
   credentialRole: Schema.String.check(Schema.isPattern(/^[A-Za-z0-9_.-]{1,128}$/)),
   maxStreams: Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 512 })),
@@ -53,16 +69,28 @@ export const CapabilityGatewayConfig = Schema.Struct({
     Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: maxStreamIdleMs })),
   ),
   /**
-   * Where the gateway's own process listens; workflowd ignores it. The listener is clear text,
-   * so it takes a loopback address only.
+   * Milliseconds between two sweeps that end the streams of revoked or replaced sessions, 100 to
+   * 60000; 1000 when absent.
    */
-  listen: Schema.optionalKey(
-    Schema.Struct({
-      host: Schema.Literals(["127.0.0.1", "::1"]),
-      // Port 0 asks the kernel for a free port; the process prints the port it bound.
-      port: Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 65535 })),
-    }),
+  staleSweepMs: Schema.optionalKey(
+    Schema.Int.check(Schema.isBetween({ minimum: 100, maximum: 60000 })),
   ),
+  /**
+   * The gateway's one listener: the Unix socket `socket`, which only its front, Tailscale Serve,
+   * reaches; the gateway has no TCP listener. The gateway owns the socket's directory, mode 0710
+   * with the front's group `front.gid`, and serves only the uid `front.uid`. `service` is the
+   * Service as its clients name it, which Serve sends on as `X-Forwarded-Host`: its MagicDNS name,
+   * with `:<port>` when Serve serves it on a port other than 443.
+   */
+  listen: Schema.Struct({
+    socket: AbsolutePath,
+    front: Schema.Struct({ uid: Id, gid: Id }),
+    service: Schema.String.check(
+      Schema.isPattern(
+        /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*(?::[1-9][0-9]{0,4})?$/,
+      ),
+    ),
+  }),
 }).check(
   Schema.makeFilter((config) =>
     config.maxStreamsPerRun <= config.maxStreams
@@ -71,6 +99,19 @@ export const CapabilityGatewayConfig = Schema.Struct({
   ),
 )
 export type CapabilityGatewayConfig = typeof CapabilityGatewayConfig.Type
+/** The budget that workflowd fixes for a run when it first authorizes it, when the config names none. */
+export const defaultRunBudget = { calls: 2000, outputTokens: 600000, maxTokens: 128000 } as const
+/**
+ * workflowd's side of the gateway: the control socket, never the gateway's store, and the budget
+ * of a new run. A change of the budget changes no run that workflowd has authorized.
+ */
+export const CapabilityControlConfig = Schema.Struct({
+  socket: AbsolutePath,
+  budget: configuredRunBudget(defaultRunBudget).pipe(
+    Schema.withDecodingDefaultKey(Effect.succeed({})),
+  ),
+})
+export type CapabilityControlConfig = typeof CapabilityControlConfig.Type
 export const SandboxPolicy = Schema.Struct({
   privateBootstrap: Schema.optionalKey(PrivateBootstrapPolicy),
   alias: Schema.String.check(Schema.isPattern(/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$/)),

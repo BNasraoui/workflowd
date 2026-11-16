@@ -46,9 +46,19 @@ test("each gateway test file belongs to exactly one suite, or names the job that
       file,
       suites: file in ownStep ? 0 : 1,
     })
-  expect(suites["gateway"]).toEqual(
+  expect(
+    [...suites["gateway"]!, ...suites["gateway-budget"]!, ...suites["gateway-renewal"]!].sort(
+      (a, b) => a.localeCompare(b),
+    ),
+  ).toEqual(
     files.filter((file) => file.endsWith(".e2e.test.ts")).sort((a, b) => a.localeCompare(b)),
   )
+  expect(suites["gateway-budget"]).toEqual([
+    `${gatewayTestDirectory}/budget-settlement.e2e.test.ts`,
+    `${gatewayTestDirectory}/budget-upstream.e2e.test.ts`,
+    `${gatewayTestDirectory}/budget.e2e.test.ts`,
+  ])
+  expect(suites["gateway-renewal"]).toEqual([`${gatewayTestDirectory}/renewal.e2e.test.ts`])
 })
 
 test("each suite names existing test files, and no file runs in two suites", async () => {
@@ -96,14 +106,17 @@ test("one step of the Tests job runs each own-step file, with loopback as its on
     Schema.Struct({
       jobs: Schema.Record(
         Schema.String,
+        // A job that calls a reusable workflow has no steps of its own.
         Schema.Struct({
-          steps: Schema.Array(Schema.Struct({ run: Schema.optionalKey(Schema.String) })),
+          steps: Schema.optionalKey(
+            Schema.Array(Schema.Struct({ run: Schema.optionalKey(Schema.String) })),
+          ),
         }),
       ),
     }),
   )(Bun.YAML.parse(await Bun.file(".github/workflows/ci.yml").text()))
   for (const file of Object.keys(ownStep)) {
-    const runs = Object.entries(workflow.jobs).flatMap(([job, { steps }]) =>
+    const runs = Object.entries(workflow.jobs).flatMap(([job, { steps = [] }]) =>
       steps.flatMap(({ run }) => (run?.includes(file) ? [{ job, run }] : [])),
     )
     expect(runs.map(({ job }) => job)).toEqual(["tests"])

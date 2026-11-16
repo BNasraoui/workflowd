@@ -11,7 +11,10 @@ import {
   reconciliationObservationSequence,
   runStoreMigrations,
   runStoreMigrationsThrough0029,
+  runStoreMigrationsThrough0043,
 } from "../../src/store/migrations"
+import { AgentRunStore, AgentRunStoreLive } from "../../src/kernel/agent-run-store"
+import { makeSandboxStore } from "../../src/sandbox/store"
 import { makeStoreLayer } from "./harness"
 
 const timestamp = "2026-07-19T12:00:00.000Z"
@@ -178,7 +181,8 @@ describe("strict initial store schema", () => {
              'kernel_resume_requests', 'kernel_resume_attempts', 'kernel_resume_checkpoints',
              'kernel_resume_results', 'kernel_resume_observations', 'kernel_cleanup_requests',
               'kernel_cleanup_attempts', 'kernel_cleanup_outcomes',
-              'kernel_agent_completion_watches', 'kernel_agent_runs', 'sandbox_leases', 'sandbox_cleanup_runs', 'sandbox_lease_operations', 'sandbox_publications'
+              'kernel_agent_completion_watches', 'kernel_agent_runs', 'sandbox_leases', 'sandbox_cleanup_runs', 'sandbox_lease_operations', 'sandbox_publications',
+              'sandbox_run_budgets'
           )
           ORDER BY name
         `
@@ -235,8 +239,10 @@ describe("strict initial store schema", () => {
       { migration_id: 41, name: "session_lease_ready" },
       { migration_id: 42, name: "capability_renewal" },
       { migration_id: 43, name: "capability_replacements" },
+      { migration_id: 44, name: "capability_store_split" },
+      { migration_id: 45, name: "capability_run_budget" },
     ])
-    expect(result.tables).toHaveLength(36)
+    expect(result.tables).toHaveLength(37)
     expect(result.tables.every((table) => table.strict === 1)).toBe(true)
     expect(result.foreignKeys).toEqual([{ foreign_keys: 1 }])
     expect(result.busyTimeout).toEqual([{ timeout: 5000 }])
@@ -1005,5 +1011,78 @@ test("migration 30 preserves lease authority, backfills cleanup pairs and is rep
       expect(yield* sql`SELECT count(*) AS n FROM sandbox_cleanup_runs`).toEqual([{ n: 3 }])
       expect(yield* sql`PRAGMA foreign_key_check`).toEqual([])
     }).pipe(Effect.provide(SqliteClient.layer({ filename: ":memory:" }))),
+  )
+})
+
+test("migration 44 takes the gateway's tables and triggers out of a store that holds their rows", async () => {
+  await Effect.runPromise(
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient
+      yield* sql`PRAGMA foreign_keys = ON`
+      // The store at the head of the shared-store gateway: a native run and lease, bound.
+      yield* runStoreMigrationsThrough0043
+      yield* sql`INSERT INTO directory_local_identity(singleton,host_id) VALUES(1,'fixture-controller')`
+      const runs = yield* AgentRunStore
+      yield* runs.create({
+        runId: "run",
+        route: "fixture",
+        providerId: "anthropic",
+        modelId: "fixture-model",
+        executorKind: "claude",
+        agent: "sandbox",
+        repository: "fixture",
+        directory: "/fixture",
+        prompt: "fixture",
+        promptSha256: "c".repeat(64),
+        parentSessionId: null,
+        resumePrompt: null,
+        maxAttempts: 1,
+        createdAt: new Date(),
+      })
+      yield* runs.claimSpawn({ runId: "run", now: new Date() })
+      const leases = yield* makeSandboxStore
+      yield* leases.request({
+        runId: "run",
+        leaseId: "lease",
+        policy: {
+          privateBootstrap: { mode: "actions-native", repositoryOwnerId: 1 },
+          alias: "fixture",
+          repository: "fixture/repo",
+          repositoryId: 12,
+          installationId: 1,
+          workflowSha: "a".repeat(40),
+          appActorId: 56,
+          agentImage: `ghcr.io/bnasraoui/workflowd-agent-base@sha256:${"b".repeat(64)}`,
+          tailscaleClientId: "fixture",
+          tailscaleAudience: "fixture",
+        },
+        sourceSha: "d".repeat(40),
+        now: Date.now(),
+      })
+      yield* leases.beginStart("run")
+      yield* leases.recordRun("run", 78, 1)
+      yield* sql`INSERT INTO capability_bindings(run_id,channel,challenge,challenge_expires,authority,session,nonce)
+        VALUES('run',${"c".repeat(64)},${"d".repeat(64)},0,'{}',1,NULL)`
+      yield* sql`INSERT INTO capability_tokens(digest,run_id,expires_at,session) VALUES(${"a".repeat(64)},'run',${Date.now() + 60000},1)`
+      yield* sql`INSERT INTO capability_tokens(digest,run_id,predecessor,expires_at,session)
+        VALUES(${"b".repeat(64)},'run',${"a".repeat(64)},${Date.now() + 600000},1)`
+      yield* sql`INSERT INTO capability_proofs(jti_digest,run_id,expires_at) VALUES(${"e".repeat(64)},'run',${Date.now() + 600000})`
+      const before = yield* sql`SELECT * FROM sandbox_leases`
+      yield* runStoreMigrations
+      // The gateway's tables, their rows and both triggers are gone; workflowd's rows stay.
+      expect(
+        yield* sql`SELECT type,name FROM sqlite_master WHERE name LIKE 'capability_%' ORDER BY name`,
+      ).toEqual([])
+      expect(yield* sql`SELECT * FROM sandbox_leases`).toEqual(before)
+      expect((yield* runs.read("run"))?.state).toBe("spawning")
+      // A run that ends, and a lease that is released, write no gateway table.
+      yield* leases.beginRelease("run")
+      yield* runs.cancel({ runId: "run", now: new Date() })
+      expect((yield* runs.read("run"))?.state).toBe("cancelled")
+      yield* runStoreMigrations
+    }).pipe(
+      Effect.provide(AgentRunStoreLive),
+      Effect.provide(SqliteClient.layer({ filename: ":memory:" })),
+    ),
   )
 })
