@@ -188,7 +188,55 @@ function assertPublishIsolation(
  * Other local/composite/reusable dependencies and inherited secrets are refused. This
  * runs against the PR head to aid review; untrusted code cannot secure its own edits.
  */
+const legacyMode = "inputs.bootstrap-mode == 'legacy-artifact'"
+/** The conditions under which a step of agent-sandbox.yml may upload an artifact. */
+const legacyUploads = new Set([legacyMode, `success() && ${legacyMode}`])
+
+/**
+ * A runner run's sealed result is no artifact of a private-mode run: each upload step of
+ * agent-sandbox.yml runs only in the legacy-artifact mode, the workflow gives its mode to its
+ * caller, and a caller's agent-publish job, the legacy publisher of that artifact, runs only
+ * after a legacy-artifact run of agent-sandbox.yml.
+ */
+function assertSandboxResultIsolation(workflows: Record<string, string>) {
+  const sandboxSource = workflows["agent-sandbox.yml"]
+  if (sandboxSource === undefined) return
+  const sandbox = object(Bun.YAML.parse(sandboxSource))
+  const outputs = object(object(object(sandbox.on).workflow_call).outputs ?? {})
+  const runner = object(object(sandbox.jobs).runner)
+  if (
+    object(outputs["bootstrap-mode"] ?? {}).value !== "${{ jobs.runner.outputs.bootstrap-mode }}" ||
+    object(runner.outputs ?? {})["bootstrap-mode"] !== "${{ inputs.bootstrap-mode }}"
+  )
+    throw new Error("Sealed result isolation: agent-sandbox.yml must give its caller its mode")
+  for (const job of Object.values(object(sandbox.jobs)))
+    for (const value of Schema.decodeUnknownSync(Schema.Array(Schema.Json))(
+      object(job).steps ?? [],
+    )) {
+      const { uses, if: condition } = object(value)
+      if (
+        typeof uses === "string" &&
+        uses.startsWith("actions/upload-artifact@") &&
+        (typeof condition !== "string" || !legacyUploads.has(condition))
+      )
+        throw new Error("Sealed result isolation: an artifact is uploaded only by a legacy run")
+    }
+  for (const [name, source] of Object.entries(workflows)) {
+    if (name === "ben-approval.yml") continue
+    const jobs = object(object(Bun.YAML.parse(source)).jobs ?? {})
+    if (jobs["agent-publish"] === undefined) continue
+    const publish = object(jobs["agent-publish"])
+    if (
+      publish.needs !== "sandbox" ||
+      object(jobs.sandbox ?? {}).uses !== "./.github/workflows/agent-sandbox.yml" ||
+      publish.if !== "needs.sandbox.outputs.bootstrap-mode == 'legacy-artifact'"
+    )
+      throw new Error(`Sealed result isolation: ${name} publishes only after a legacy run`)
+  }
+}
+
 export function assertUnprivilegedPrWorkflows(workflows: Record<string, string>): void {
+  assertSandboxResultIsolation(workflows)
   let pullRequests = 0
   for (const [name, source] of Object.entries(workflows)) {
     if (name === "ben-approval.yml") {

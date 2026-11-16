@@ -328,3 +328,34 @@ for (const environment of [
       "Publisher environment must be agent-publish",
     )
   })
+
+// A private-mode run's sealed result goes to the daemon through the gateway alone: the job never
+// uploads it as an artifact of the repository, and the legacy publish job never runs after it.
+test("the sealed result is an artifact only of a legacy run, and the legacy publish job runs only after one", async () => {
+  const files = await workflows()
+  expect(() => assertUnprivilegedPrWorkflows(files)).not.toThrow()
+  const sandbox = files["agent-sandbox.yml"]!
+  const caller = files["agent-sandbox-caller.yml"]!
+  const upload = "        if: success() && inputs.bootstrap-mode == 'legacy-artifact'\n"
+  const publish = "    if: needs.sandbox.outputs.bootstrap-mode == 'legacy-artifact'\n"
+  expect(sandbox).toContain(upload)
+  expect(caller).toContain(publish)
+  for (const changed of [
+    { "agent-sandbox.yml": sandbox.replace(upload, "        if: success()\n") },
+    { "agent-sandbox.yml": sandbox.replace(upload, "") },
+    {
+      "agent-sandbox.yml": sandbox.replace(
+        "      bootstrap-mode: ${{ inputs.bootstrap-mode }}",
+        "      bootstrap-mode: legacy-artifact",
+      ),
+    },
+    { "agent-sandbox-caller.yml": caller.replace(publish, "") },
+    {
+      "agent-sandbox-caller.yml": caller.replace(
+        publish,
+        "    if: needs.sandbox.result == 'success'\n",
+      ),
+    },
+  ])
+    expect(() => assertUnprivilegedPrWorkflows({ ...files, ...changed })).toThrow("Sealed result")
+})

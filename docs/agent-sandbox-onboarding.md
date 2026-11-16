@@ -56,6 +56,7 @@ jobs:
       tailscale-audience: ${{ vars.TS_AGENT_AUDIENCE }}
   agent-publish:
     needs: sandbox
+    if: needs.sandbox.outputs.bootstrap-mode == 'legacy-artifact'
     environment: agent-publish
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -74,7 +75,7 @@ jobs:
 
 Set `co-author` explicitly for each repository in its reviewed caller publish configuration; it is not an agent input or a global publisher default. Ben's decision for ghettimonster publications is `Ben Nasraoui <81005232+BNasraoui@users.noreply.github.com>`. Set the same value in that repository's sandbox policy as `publish.coAuthor`. The required value is a single `Name <email>` line, without the `Co-authored-by:` prefix, controls or extra lines. Validation rejects a missing or malformed value before token minting. During re-pin, update existing publish policies too; publishing cannot resume with the old policy shape.
 
-Save as `.github/workflows/agent-sandbox-caller.yml`. Keep the job IDs `sandbox` and `agent-publish`: the controller binds to `sandbox / runner` and `agent-publish`. The publish job belongs to the target caller and resolves its own `agent-publish` environment. The lease call passes no secrets. Do not use `secrets: inherit`, including between repositories with the same owner.
+Save as `.github/workflows/agent-sandbox-caller.yml`. Keep the job IDs `sandbox` and `agent-publish`: the controller binds to `sandbox / runner` and `agent-publish`. The `agent-publish` job runs only after a `legacy-artifact` run, whose sealed result is an artifact; a run in the private mode uploads no artifact, and the daemon checks and pushes its result. The CI policy holds both conditions in this repository's workflows. The publish job belongs to the target caller and resolves its own `agent-publish` environment. The lease call passes no secrets. Do not use `secrets: inherit`, including between repositories with the same owner.
 
 The composite action runs reviewed `deploy/sandbox/publish.mjs` and its adjacent validator from the action's pinned installation; no target-source checkout, copied scripts, installation of agent dependencies, or caller working-directory convention is needed. It validates the existing approval, recorded base and immutable artifact before the pinned token-mint action receives the key. Explicit inputs keep the read token in validation and the key in the token-mint step. The token is scoped to the caller repository with Contents write and Pull requests write, passed only to publication/revocation steps, and revoked with an always-run step plus the token action's post-job fallback. The guard pins the composite's reviewed shape so another step cannot consume the key input. See [composite action paths](https://docs.github.com/en/actions/reference/workflows-and-actions/metadata-syntax#runs-for-composite-actions).
 

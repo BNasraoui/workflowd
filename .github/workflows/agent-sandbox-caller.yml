@@ -26,6 +26,9 @@ jobs:
 
   agent-publish:
     needs: sandbox
+    # The legacy publisher reads the artifact of a legacy-artifact run; it never runs after a
+    # private-mode run, whose result the daemon checks and pushes.
+    if: needs.sandbox.outputs.bootstrap-mode == 'legacy-artifact'
     environment: agent-publish
     runs-on: ubuntu-24.04
     timeout-minutes: 15

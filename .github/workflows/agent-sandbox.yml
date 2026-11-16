@@ -32,6 +32,10 @@ on:
         type: string
         required: false
         default: ""
+    outputs:
+      bootstrap-mode:
+        description: The bootstrap mode of the run; a caller's legacy publish job runs only after a legacy-artifact run.
+        value: ${{ jobs.runner.outputs.bootstrap-mode }}
 
 permissions: {}
 
@@ -45,6 +49,8 @@ jobs:
       github.event.repository.fork == false
     runs-on: ubuntu-24.04
     timeout-minutes: 300
+    outputs:
+      bootstrap-mode: ${{ inputs.bootstrap-mode }}
     permissions:
       contents: read
       id-token: write
@@ -97,7 +103,8 @@ jobs:
         shell: /usr/bin/env -u ACTIONS_ID_TOKEN_REQUEST_TOKEN -u ACTIONS_ID_TOKEN_REQUEST_URL /bin/bash --noprofile --norc -e -o pipefail {0}
         run: exec node deploy/sandbox/public-output.mjs audit -- /usr/local/bin/container-use hold
       - name: Upload sealed result
-        if: success()
+        # A private-mode run's sealed result goes to the daemon through the gateway alone.
+        if: success() && inputs.bootstrap-mode == 'legacy-artifact'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: sandbox-result-${{ github.run_id }}-${{ github.run_attempt }}
