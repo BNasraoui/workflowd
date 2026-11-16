@@ -15,9 +15,13 @@ import { Cause, Effect, Exit } from "effect"
 import { readRequestBody } from "./claude"
 import { capabilityOrigin } from "./headers"
 import { runRoutePrefix } from "./run-routes"
-import { maxHeaderBytes, maxStreamIdleMs } from "../../deploy/sandbox/capability-limits.mjs"
+import {
+  maxHeaderBytes,
+  maxRelaySockets,
+  maxStreamIdleMs,
+} from "../../deploy/sandbox/capability-limits.mjs"
 import { CapabilityRefused } from "./store"
-import type { CapabilityGateway } from "./service"
+import { maxMints, type CapabilityGateway } from "./service"
 import { peerCredentials, serveSocket } from "../peer-socket"
 import type { CapabilityGatewayConfig } from "../sandbox/config"
 
@@ -93,11 +97,12 @@ const tailnetIpv6 = new BlockList()
 tailnetIpv6.addSubnet("fd7a:115c:a1e0::", 48, "ipv6")
 
 /**
- * True when `rawHeaders` (name, value, name, value...) are those of the front for `service`: each
- * header of `frontHeaders.set` exactly once, the proto `https`, the host `service`, and one tailnet
- * address (100.64.0.0/10 or fd7a:115c:a1e0::/48) as `X-Forwarded-For`; and no refused header.
+ * The runner's tailnet address when `rawHeaders` (name, value, name, value...) are those of the
+ * front for `service`: each header of `frontHeaders.set` exactly once, the proto `https`, the host
+ * `service`, and one tailnet address (100.64.0.0/10 or fd7a:115c:a1e0::/48) as `X-Forwarded-For`;
+ * and no refused header. Undefined otherwise.
  */
-export function fromFront(rawHeaders: ReadonlyArray<string>, service: string) {
+function frontPeer(rawHeaders: ReadonlyArray<string>, service: string) {
   const values = new Map<string, Array<string>>()
   for (let index = 0; index < rawHeaders.length; index += 2) {
     const name = rawHeaders[index]!.toLowerCase()
@@ -107,7 +112,7 @@ export function fromFront(rawHeaders: ReadonlyArray<string>, service: string) {
       (frontHeaders.refused as ReadonlyArray<string>).includes(name) ||
       frontHeaders.refusedPrefixes.some((prefix) => name.startsWith(prefix))
     )
-      return false
+      return undefined
   }
   const one = (name: string) => {
     const all = values.get(name)
@@ -115,33 +120,74 @@ export function fromFront(rawHeaders: ReadonlyArray<string>, service: string) {
   }
   const address = one("x-forwarded-for") ?? ""
   const family = isIP(address)
-  return (
-    one("x-forwarded-proto") === "https" &&
+  return one("x-forwarded-proto") === "https" &&
     one("x-forwarded-host") === service &&
     ((family === 4 && tailnetIpv4.check(address, "ipv4")) ||
       (family === 6 && tailnetIpv6.check(address, "ipv6")))
-  )
+    ? address
+    : undefined
+}
+
+/**
+ * The most requests of one runner, by its tailnet address, that the listener serves at once: as
+ * many as the run's relay sends at once (`maxRelaySockets`), as the runner's helper opens the
+ * session before the relay starts. Serve sends one request at a time on each of its connections
+ * to the gateway, so this bounds the connections that one runner holds.
+ */
+export const maxPeerRequests = maxRelaySockets
+
+/**
+ * The most connections that the listener holds at once for a gateway that admits `maxStreams`
+ * streams: one for each stream; one for each run token mint that runs at once (`maxMints`), each
+ * the session or renewal that waits on it; and one runner's whole share (`maxPeerRequests`), so
+ * that a runner at its own bound leaves those of the streams and mints to the other runs. Each
+ * other request waits on no stream and no mint: it is answered at once, or within the 10 s bound
+ * of its body or of the job keys.
+ */
+export const maxListenerConnections = (maxStreams: number) =>
+  maxStreams + maxMints + maxPeerRequests
+
+/** The open requests of each runner: `take` refuses one above `maxPeerRequests`. */
+function peerRequests() {
+  const open = new Map<string, number>()
+  return {
+    take: (peer: string) => {
+      const held = open.get(peer) ?? 0
+      if (held >= maxPeerRequests) return false
+      open.set(peer, held + 1)
+      return true
+    },
+    release: (peer: string) => {
+      const held = (open.get(peer) ?? 1) - 1
+      if (held === 0) open.delete(peer)
+      else open.set(peer, held)
+    },
+  }
 }
 
 /**
  * The gateway's HTTP server, behind the gate of `serveCapabilityListener`. A request without the
- * front's headers for `service` (`fromFront`) gets an empty 403 and reaches no route. Each other
- * request reaches `handle` at the capability origin, without the front's three headers and with
- * no Host header: Host names this listener, not a capability. An incomplete response stays a
- * connection failure, including on Bun 1.3.14.
+ * front's headers for `service` (`frontPeer`) gets an empty 403 and reaches no route. A runner's
+ * request above `maxPeerRequests` is refused as the gate refuses a connection: its connection
+ * ends at once, with no answer. Each other request reaches `handle` at the capability origin,
+ * without the front's three headers and with no Host header: Host names this listener, not a
+ * capability. An incomplete response stays a connection failure, including on Bun 1.3.14.
  */
 function capabilityHttpServer(handle: (request: Request) => Promise<Response>, service: string) {
   const sockets = new Set<Socket>()
   const pending = new Set<Promise<void>>()
   const responses = new Set<ServerResponse>()
+  const peers = peerRequests()
   const server = createServer({ maxHeaderSize: maxHeaderBytes }, (incoming, outgoing) => {
+    const peer = frontPeer(incoming.rawHeaders, service)
+    if (peer !== undefined && !peers.take(peer)) return void incoming.socket.destroy()
     responses.add(outgoing)
     const lifetime = new AbortController()
     const abort = () => lifetime.abort()
     incoming.socket.once("close", abort)
     const work = (async () => {
       try {
-        if (!fromFront(incoming.rawHeaders, service)) {
+        if (peer === undefined) {
           outgoing.writeHead(403)
           outgoing.end()
           return
@@ -190,6 +236,7 @@ function capabilityHttpServer(handle: (request: Request) => Promise<Response>, s
     void work.finally(() => {
       pending.delete(work)
       responses.delete(outgoing)
+      if (peer !== undefined) peers.release(peer)
     })
   })
   server.requestTimeout = 120000
@@ -220,20 +267,25 @@ function capabilityHttpServer(handle: (request: Request) => Promise<Response>, s
  * ended there, and no route runs. Each other connection goes on to the HTTP server, which listens
  * on a socket in a new directory of the gateway's own below the temporary directory, mode 0700,
  * that only the gateway's uid enters: Bun's HTTP server gives no descriptor of a connection that
- * it accepts, and serves no socket that another server accepted, so the uid is read here.
+ * it accepts, and serves no socket that another server accepted, so the uid is read here. The gate
+ * holds at most `maxListenerConnections(maxStreams)` connections at once; it ends each one above
+ * that as it accepts it, and queues none.
  * Resolves to the close of both, which removes that directory.
  */
 export async function serveCapabilityListener(
   listen: CapabilityGatewayConfig["listen"],
+  maxStreams: number,
   handle: (request: Request) => Promise<Response>,
 ) {
   const { server, finish } = capabilityHttpServer(handle, listen.service)
   const directory = await mkdtemp(join(tmpdir(), "workflowd-gateway-"))
   const inner = join(directory, "http.sock")
   const connections = new Set<Socket>()
+  const maxConnections = maxListenerConnections(maxStreams)
   const gate = createNetServer((caller) => {
     caller.on("error", () => caller.destroy())
     if (peerCredentials(caller)?.uid !== listen.front.uid) return caller.destroy()
+    if (connections.size >= maxConnections) return caller.destroy()
     connections.add(caller)
     const onward = createConnection(inner)
     onward.on("error", () => onward.destroy())

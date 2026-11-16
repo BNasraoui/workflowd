@@ -108,7 +108,8 @@ export const serveCapabilityGateway = (
       })
       yield* Effect.acquireRelease(
         Effect.tryPromise({
-          try: () => serveCapabilityListener(config.listen, capabilityApi(gateway)),
+          try: () =>
+            serveCapabilityListener(config.listen, config.maxStreams, capabilityApi(gateway)),
           catch: (error) =>
             error instanceof Error ? error : new Error("capability listener unavailable"),
         }),

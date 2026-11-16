@@ -42,6 +42,13 @@ node's request passes. The three headers are removed before the route: no route 
 store keeps none, none is an identity, and none reaches the provider. `Host`, which Serve sets
 to `localhost` for a `unix:` target, names the listener and reaches no route.
 
+The listener holds at most `maxStreams` + 12 connections at once: one for each stream that the
+gateway admits, one for each of the 4 run token mints that it runs at once, and 8 more, the
+share of one runner. It ends each connection above that as it accepts it, with no answer, and
+queues none. One runner, by the address of `X-Forwarded-For`, has at most 8 requests open at
+once, as many as its relay sends; the connection of a further request ends at once, with no
+answer. The address only counts the runner's open requests: it grants nothing.
+
 ## Git reads
 
 `capabilityGateway.gitRead` defaults to false. When it is true, a run reads its saved

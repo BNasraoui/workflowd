@@ -164,7 +164,13 @@ test("an event batch is held only with the session key's signature over its exac
     "A".repeat(86),
     signed("events", events(1, ["other"])),
     signed("result", first),
-    signRenewal(fixtureSessionKey.privateKey, channel, "a".repeat(64), "1"),
+    signRenewal(
+      fixtureSessionKey.privateKey,
+      channel,
+      "a".repeat(64),
+      "1",
+      String(Math.floor(Date.now() / 1000)),
+    ),
   ]) {
     const response = await call("events", { body: first, signature })
     expect(response.status).toBe(403)
@@ -308,6 +314,7 @@ test("the listener refuses a run route reached by a path that a URL parser chang
       front: { uid: process.getuid!(), gid: process.getgid!() },
       service: "gateway.fixture",
     },
+    1,
     async (request) => {
       seen.push(new URL(request.url).pathname)
       return new Response(null, { status: 204 })

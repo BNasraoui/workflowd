@@ -78,48 +78,89 @@ function isRenewalAttempt(text) {
 }
 
 /**
- * The exact bytes that the relay signs to renew the run token whose digest is `predecessor`, as
- * its request numbered `attempt` of the session.
+ * The relay ends one renewal request after this many milliseconds without a byte, both while it
+ * connects and while it waits for the answer: a single try that the relay can still read the
+ * answer of lasts at most twice this long.
  */
-export function renewalMessage(channel, predecessor, attempt) {
-  return Buffer.from(`workflowd-renew:${channel}:${predecessor}:${attempt}`, "utf8")
+export const renewalTryMs = 10000
+
+/**
+ * The time of a renewal request: the relay's clock when it signed the request, in whole seconds
+ * since the epoch, as its exact decimal text. The text has no sign, no leading zero and at most
+ * ten digits: the bound, 9999999999, is the year 2286.
+ */
+export const maxRenewalTime = 9999999999
+function isRenewalTime(text) {
+  return typeof text === "string" && /^[1-9][0-9]{0,9}$/.test(text)
 }
 
 /**
- * The renewal's body is `{"signature":"<signature>","attempt":"<attempt>"}`; the gateway reads at
- * most this many bytes.
+ * The gateway takes a renewal only when its time is at most this many milliseconds before or
+ * after the gateway's own clock, so a signed request that the gateway refused or could not serve
+ * is void a minute after the relay signed it. 60 s is longer than what an honest request needs:
+ * the relay's longest single try, two times `renewalTryMs` (20 s), and an honest difference
+ * between the clocks of a GitHub runner and of the gateway's host, which the renewal window
+ * already bounds by its 30 s of slack over the relay's latest lead (`renewalWindowMs -
+ * renewLeadMaxMs`); 20 s + 30 s is 50 s. It is far shorter than the 570 s for which a new run
+ * token is renewed by no request (its life of 900 s less `renewalWindowMs`), so a request that
+ * was refused because it came too early is void long before the token's window opens.
  */
-export const maxRenewalBody = 128
+export const renewalTimeSkewMs = 60000
+
+/**
+ * True when `time` is the time of a renewal request and is at most `renewalTimeSkewMs` from
+ * `now`, the gateway's clock in milliseconds.
+ */
+export function isTimelyRenewal(time, now) {
+  return isRenewalTime(time) && Math.abs(now - Number(time) * 1000) <= renewalTimeSkewMs
+}
+
+/**
+ * The exact bytes that the relay signs to renew the run token whose digest is `predecessor`, as
+ * its request numbered `attempt` of the session, signed at `time`.
+ */
+export function renewalMessage(channel, predecessor, attempt, time) {
+  return Buffer.from(`workflowd-renew:${channel}:${predecessor}:${attempt}:${time}`, "utf8")
+}
+
+/**
+ * The renewal's body is `{"signature":"<signature>","attempt":"<attempt>","time":"<time>"}`; the
+ * gateway reads at most this many bytes, the length of the body with an attempt number and a time
+ * of the most digits.
+ */
+export const maxRenewalBody = 144
 
 /**
  * The relay's signature, in base64url, of its renewal request numbered `attempt` of
- * `predecessor` on `channel`. It throws when `privateKey` is not an Ed25519 key as PKCS #8 in
- * base64url, or when `attempt` is not an attempt number.
+ * `predecessor` on `channel`, signed at `time`. It throws when `privateKey` is not an Ed25519 key
+ * as PKCS #8 in base64url, when `attempt` is not an attempt number, or when `time` is not a time.
  */
-export function signRenewal(privateKey, channel, predecessor, attempt) {
+export function signRenewal(privateKey, channel, predecessor, attempt, time) {
   if (!isRenewalAttempt(attempt)) throw new Error("renewal attempt refused")
+  if (!isRenewalTime(time)) throw new Error("renewal time refused")
   const key = createPrivateKey({
     key: Buffer.from(privateKey, "base64url"),
     format: "der",
     type: "pkcs8",
   })
   if (key.asymmetricKeyType !== "ed25519") throw new Error("session key refused")
-  return sign(null, renewalMessage(channel, predecessor, attempt), key).toString("base64url")
+  return sign(null, renewalMessage(channel, predecessor, attempt, time), key).toString("base64url")
 }
 
 /**
- * True when `attempt` is an attempt number and `signature` is the base64url form of exactly 64
- * bytes and an Ed25519 signature by `publicKey` of the renewal request numbered `attempt` of
- * `predecessor` on `channel`.
+ * True when `attempt` is an attempt number, `time` is a time, and `signature` is the base64url
+ * form of exactly 64 bytes and an Ed25519 signature by `publicKey` of the renewal request
+ * numbered `attempt` of `predecessor` on `channel`, signed at `time`.
  */
-export function verifyRenewal(publicKey, channel, predecessor, attempt, signature) {
+export function verifyRenewal(publicKey, channel, predecessor, attempt, time, signature) {
   const key = publicSessionKey(publicKey)
   const bytes = exactBytes(signature, 64)
   return (
     isRenewalAttempt(attempt) &&
+    isRenewalTime(time) &&
     key !== undefined &&
     bytes !== undefined &&
-    verify(null, renewalMessage(channel, predecessor, attempt), key, bytes)
+    verify(null, renewalMessage(channel, predecessor, attempt, time), key, bytes)
   )
 }
 

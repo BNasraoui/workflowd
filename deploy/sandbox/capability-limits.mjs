@@ -5,6 +5,12 @@
  */
 export const maxStreamsPerRun = 4
 /**
+ * The most connections that a run's relay holds to the gateway at once. Once the run's session is
+ * open, the relay is its runner's one client of the gateway: each model call, Git read, renewal
+ * and run route request of the run goes through it.
+ */
+export const maxRelaySockets = 8
+/**
  * The form of a provider id. The gateway's config holds it, the session grant names it, and the
  * relay puts it in the path of each model call.
  */

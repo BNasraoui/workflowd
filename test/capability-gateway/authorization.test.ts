@@ -85,7 +85,7 @@ test("renewal cannot resurrect expiry or survive durable revocation and restart"
       yield* store.renew(
         binding,
         "a".repeat(64),
-        signedRenewal(binding, "a".repeat(64), 1),
+        signedRenewal(binding, "a".repeat(64), 1, now),
         "b".repeat(64),
         now + 3600000,
         now + 1,
@@ -96,7 +96,7 @@ test("renewal cannot resurrect expiry or survive durable revocation and restart"
       yield* store.renew(
         binding,
         "a".repeat(64),
-        signedRenewal(binding, "a".repeat(64), 2),
+        signedRenewal(binding, "a".repeat(64), 2, now),
         "c".repeat(64),
         now + 7200000,
         now + 2,
@@ -113,7 +113,7 @@ test("renewal cannot resurrect expiry or survive durable revocation and restart"
             store.renew(
               binding,
               "a".repeat(64),
-              signedRenewal(binding, "a".repeat(64), 3),
+              signedRenewal(binding, "a".repeat(64), 3, now + 60000),
               "d".repeat(64),
               now + 7200000,
               now + 60000,
@@ -152,7 +152,7 @@ test("a signed renewal whose attempt number is not higher than one taken renews 
           store.renew(
             binding,
             "a".repeat(64),
-            signedRenewal(binding, "a".repeat(64), attempt),
+            signedRenewal(binding, "a".repeat(64), attempt, at),
             successor.repeat(64),
             now + 3600000,
             at,
@@ -163,7 +163,7 @@ test("a signed renewal whose attempt number is not higher than one taken renews 
           store.renewable(
             binding,
             "a".repeat(64),
-            signedRenewal(binding, "a".repeat(64), attempt),
+            signedRenewal(binding, "a".repeat(64), attempt, at),
             () => now + 3600000,
             at,
           ),
@@ -207,7 +207,7 @@ test("a binding with no session key renews no run token", async () => {
             store.renew(
               binding,
               "a".repeat(64),
-              signedRenewal(binding, "a".repeat(64), 1),
+              signedRenewal(binding, "a".repeat(64), 1, now),
               "b".repeat(64),
               now + 3600000,
               now + 1,
@@ -233,7 +233,7 @@ test("a run token whose successor has authorized a call is retired at each check
       yield* store.renew(
         binding,
         "a".repeat(64),
-        signedRenewal(binding, "a".repeat(64), 1),
+        signedRenewal(binding, "a".repeat(64), 1, now),
         "b".repeat(64),
         now + 3600000,
         now + 1,
@@ -247,7 +247,7 @@ test("a run token whose successor has authorized a call is retired at each check
       const renewal = yield* store.renewable(
         binding,
         "a".repeat(64),
-        signedRenewal(binding, "a".repeat(64), 2),
+        signedRenewal(binding, "a".repeat(64), 2, now),
         () => now + 3600000,
         now + 3,
       )
@@ -293,7 +293,7 @@ test("accepted grant rejects each durable identity/context swap with adjacent ro
                     store.renew(
                       binding,
                       "a".repeat(64),
-                      signedRenewal(binding, "a".repeat(64), 1),
+                      signedRenewal(binding, "a".repeat(64), 1, now),
                       "b".repeat(64),
                       now + 200000,
                       now,
@@ -318,7 +318,7 @@ test("accepted grant rejects each durable identity/context swap with adjacent ro
             .renew(
               binding,
               "a".repeat(64),
-              signedRenewal(binding, "a".repeat(64), 1),
+              signedRenewal(binding, "a".repeat(64), 1, now),
               "b".repeat(64),
               now + 200000,
               now + 1,
@@ -328,7 +328,7 @@ test("accepted grant rejects each durable identity/context swap with adjacent ro
             .renew(
               binding,
               "a".repeat(64),
-              signedRenewal(binding, "a".repeat(64), 2),
+              signedRenewal(binding, "a".repeat(64), 2, now),
               "c".repeat(64),
               now + 200000,
               now + 1,
@@ -351,7 +351,7 @@ test("accepted grant rejects each durable identity/context swap with adjacent ro
             .renew(
               binding,
               valid[0]!.repeat(64),
-              signedRenewal(binding, valid[0]!.repeat(64), 3),
+              signedRenewal(binding, valid[0]!.repeat(64), 3, now),
               "d".repeat(64),
               now + 400000,
               now + 2,
@@ -389,7 +389,7 @@ test("a new session ends every token of the earlier one, and a proof opens one s
       yield* store.renew(
         run,
         "a".repeat(64),
-        signedRenewal(run, "a".repeat(64), 1),
+        signedRenewal(run, "a".repeat(64), 1, now),
         "b".repeat(64),
         now + 200000,
         now + 1,
@@ -450,7 +450,7 @@ test("a new session ends every token of the earlier one, and a proof opens one s
             store.renew(
               run,
               "b".repeat(64),
-              signedRenewal(run, "b".repeat(64), 2),
+              signedRenewal(run, "b".repeat(64), 2, now),
               "d".repeat(64),
               now + 400000,
               now + 5,
@@ -463,7 +463,7 @@ test("a new session ends every token of the earlier one, and a proof opens one s
       yield* store.renew(
         run,
         "c".repeat(64),
-        signedRenewal(run, "c".repeat(64), 1),
+        signedRenewal(run, "c".repeat(64), 1, now),
         "d".repeat(64),
         now + 400000,
         now + 5,
@@ -502,7 +502,7 @@ test("a run token with exactly 330 seconds left is renewed, and one with 330 sec
         store.renew(
           binding,
           "a".repeat(64),
-          signedRenewal(binding, "a".repeat(64), 1),
+          signedRenewal(binding, "a".repeat(64), 1, opens - 1),
           "b".repeat(64),
           expiresAt + 600000,
           opens - 1,
@@ -516,7 +516,7 @@ test("a run token with exactly 330 seconds left is renewed, and one with 330 sec
       yield* store.renew(
         binding,
         "a".repeat(64),
-        signedRenewal(binding, "a".repeat(64), 1),
+        signedRenewal(binding, "a".repeat(64), 1, opens),
         "b".repeat(64),
         expiresAt + 600000,
         opens,

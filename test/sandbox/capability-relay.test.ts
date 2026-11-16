@@ -253,13 +253,14 @@ test("the relay refuses a gateway that is not an HTTPS origin", async () => {
   }
 })
 
-test("the relay asks one renewal no more often than the gateway permits, and its last failure ends the session with a logged reason", async () => {
+test("the relay asks one renewal no more often than the gateway permits, each request with a higher number and a later time, and its last failure ends the session with a logged reason", async () => {
   await withGateway(processGateway, async (f, gateway) => {
     const root = await mkdtemp(join(tmpdir(), "relay-renewals-"))
     // Each renewal that the gateway grants is lost on the way back: the gateway has replaced the
     // successor, the relay never gets it.
     const renewals: Array<number | undefined> = []
     const attempts: Array<unknown> = []
+    const times: Array<{ readonly time: unknown; readonly at: number }> = []
     f.front.hook({
       lost: (path, status) => {
         if (path !== "/capabilities/v1/renew") return false
@@ -267,7 +268,10 @@ test("the relay asks one renewal no more often than the gateway permits, and its
         return status === 200
       },
       copied: (path, _, body) => {
-        if (path === "/capabilities/v1/renew") attempts.push(JSON.parse(body).attempt)
+        if (path !== "/capabilities/v1/renew") return
+        const { attempt, time } = JSON.parse(body)
+        attempts.push(attempt)
+        times.push({ time, at: Date.now() })
       },
     })
     const runner = client(gateway)
@@ -309,8 +313,17 @@ test("the relay asks one renewal no more often than the gateway permits, and its
       // The gateway permits one successor and three replacements of it: four renewals, all granted.
       expect(renewalRequests).toBe(4)
       expect(renewals).toEqual(Array.from({ length: renewalRequests }, () => 200))
-      // Each request, each retry too, has the next attempt number of the session.
+      // Each request, each retry too, has the next attempt number of the session, and the time
+      // at which the relay signed it, in whole seconds: a retry waits at least a second, so each
+      // time is later than the one before.
       expect(attempts).toEqual(["1", "2", "3", "4"])
+      for (const [index, { time, at }] of times.entries()) {
+        expect(time).toMatch(/^[1-9][0-9]{9}$/)
+        expect(Number(time) * 1000).toBeLessThanOrEqual(at)
+        expect(Number(time) * 1000).toBeGreaterThan(at - 2000)
+        if (index > 0) expect(Number(time)).toBeGreaterThan(Number(times[index - 1]!.time))
+      }
+      expect(times).toHaveLength(renewalRequests)
       expect(await readFile(join(root, "relay-ended"), "utf8")).toBe("renewal\n")
     } finally {
       await rm(root, { recursive: true, force: true })
