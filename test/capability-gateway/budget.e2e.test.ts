@@ -13,13 +13,23 @@ import {
 } from "./budget-fixture"
 
 for (const [mode, start] of gateways) {
-  test(`[${mode}] a model call whose max_tokens is above the cap, absent or not a positive integer gets the empty 403, and the upstream sees nothing`, async () => {
+  test(`[${mode}] a model call whose max_tokens is above the default cap of 128000, absent or not a positive integer gets the empty 403, and the upstream sees nothing; 128000 passes`, async () => {
     await withBudget(start, defaultRunBudget, async (f, gateway) => {
       const token = await runToken(gateway)
       const runner = client(gateway)
       const body = (maxTokens: string | null) =>
         `{"model":"fixture-model","stream":true,"messages":[]${maxTokens === null ? "" : `,"max_tokens":${maxTokens}`}}`
-      for (const refused of ["64001", null, "0", "-1", "1.5", '"64000"', "null", "[1]", "1e100"]) {
+      for (const refused of [
+        "128001",
+        null,
+        "0",
+        "-1",
+        "1.5",
+        '"128000"',
+        "null",
+        "[1]",
+        "1e100",
+      ]) {
         const answer = await runner.provider(token, body(refused))
         expect({ refused, status: answer.status, text: await answer.text() }).toEqual({
           refused,
@@ -29,7 +39,7 @@ for (const [mode, start] of gateways) {
       }
       expect(f.upstreamRequests()).toEqual([])
       expect(await usage(f)).toMatchObject({ calls: 0, outputTokens: 0, spent: false })
-      const served = await answered(runner.provider(token, body("64000")))
+      const served = await answered(runner.provider(token, body("128000")))
       expect(served.status).toBe(200)
       expect(f.upstreamRequests().length).toBe(1)
     })
@@ -163,3 +173,29 @@ test("[process] a change of the config's budget changes no run that workflowd ha
     expect(stored).toEqual([{ calls: 1, output_tokens: 1000, max_tokens: 400 }])
   })
 }, 30000)
+
+for (const [mode, start] of gateways) {
+  test(`[${mode}] with the default budget a call is accepted while charged + reserved + max_tokens is at most 600000 output tokens, and the call at 600001 gets the budget body`, async () => {
+    expect(defaultRunBudget).toEqual({ calls: 2000, outputTokens: 600000, maxTokens: 128000 })
+    await withBudget(start, defaultRunBudget, async (f, gateway) => {
+      const token = await runToken(gateway)
+      const runner = client(gateway)
+      // Four calls that each reserve 128000 and report 118000: 472000 charged.
+      f.setAnswerText(usageStream({ output_tokens: 1 }, { output_tokens: 118000 }))
+      for (let served = 0; served < 4; served++)
+        expect((await answered(runner.call(token, 128000))).status).toBe(200)
+      expect(await usage(f)).toMatchObject({ calls: 4, outputTokens: 472000, spent: false })
+      // 472000 charged and 128000 asked is 600000: the last call that fits. It reports 1.
+      f.setAnswerText(usageStream({ output_tokens: 1 }, { output_tokens: 1 }))
+      expect((await answered(runner.call(token, 128000))).status).toBe(200)
+      expect(await usage(f)).toMatchObject({ calls: 5, outputTokens: 472001, spent: false })
+      // 472001 charged and 128000 asked is 600001: the first call that does not fit.
+      const refused = await runner.call(token, 128000)
+      expect(refused.status).toBe(403)
+      expect(refused.headers.get("content-type")).toBe("application/json")
+      expect(await refused.json()).toEqual(spentBody)
+      expect(f.upstreamRequests().length).toBe(5)
+      expect(await usage(f)).toMatchObject({ calls: 5, outputTokens: 472001, spent: true })
+    })
+  }, 30000)
+}

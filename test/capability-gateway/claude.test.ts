@@ -37,7 +37,7 @@ const call = async (extra: Record<string, string | undefined> = {}, body = nativ
       sent.push({ url, input })
       return new Response("{}", { headers: { "content-type": "application/json" } })
     },
-    64000,
+    128000,
   )
   return { result, sent }
 }
@@ -113,7 +113,7 @@ const metered = async (answer: Response, path = "/v1/messages") => {
       reservations.push(reservation)
       return answer
     },
-    64000,
+    128000,
   )
   const text = await result.response.text()
   return { text, usage: result.usage(), reservations }

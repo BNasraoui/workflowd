@@ -99,7 +99,7 @@ export const CapabilityGatewayConfig = Schema.Struct({
 )
 export type CapabilityGatewayConfig = typeof CapabilityGatewayConfig.Type
 /** The budget that workflowd fixes for a run when it first authorizes it, when the config names none. */
-export const defaultRunBudget = { calls: 2000, outputTokens: 300000, maxTokens: 64000 } as const
+export const defaultRunBudget = { calls: 2000, outputTokens: 600000, maxTokens: 128000 } as const
 const budgetCount = (value: number) =>
   Schema.Int.check(Schema.isGreaterThan(0)).pipe(
     Schema.withDecodingDefaultKey(Effect.succeed(value)),

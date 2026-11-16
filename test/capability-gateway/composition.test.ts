@@ -82,9 +82,9 @@ test("configured live composition settles prior leases, which revokes their gran
       { socket, storePath: gateway.storePath },
       { socket: "relative.sock" },
       { socket, budget: { calls: 0 } },
-      { socket, budget: { outputTokens: -300000 } },
+      { socket, budget: { outputTokens: -600000 } },
       { socket, budget: { maxTokens: 1.5 } },
-      { socket, budget: { maxTokens: "64000" } },
+      { socket, budget: { maxTokens: "128000" } },
       { socket, budget: { calls: 2000, unexpected: 1 } },
     ])
       await expect(
@@ -96,7 +96,7 @@ test("configured live composition settles prior leases, which revokes their gran
     const loaded = await loadConfig(environment, { home: root })
     expect(loaded.agentRuns?.capabilityControl).toEqual({
       socket,
-      budget: { calls: 2000, outputTokens: 300000, maxTokens: 64000 },
+      budget: { calls: 2000, outputTokens: 600000, maxTokens: 128000 },
     })
     const named = await loadConfig(
       {
@@ -108,7 +108,7 @@ test("configured live composition settles prior leases, which revokes their gran
     expect(named.agentRuns?.capabilityControl?.budget).toEqual({
       calls: 2000,
       outputTokens: 5000,
-      maxTokens: 64000,
+      maxTokens: 128000,
     })
     // The gateway's process reads its section alone, with its listener, store and socket.
     expect(
