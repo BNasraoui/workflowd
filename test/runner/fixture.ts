@@ -431,6 +431,10 @@ export function daemonRuntime(
     readonly verifyTimeoutMs?: number
     /** The pause between two passes of the sandbox workers (30 s in the daemon). */
     readonly reconcileEveryMs?: number
+    /** Runs as the push of a checked result starts. */
+    readonly beforePush?: () => Promise<void>
+    /** The git of the check and the push; /usr/bin/git unless named. */
+    readonly gitBinary?: string
   } = {},
 ) {
   const stores = Layer.mergeAll(KernelSessionStoreLive, AgentRunStoreLive).pipe(
@@ -448,7 +452,7 @@ export function daemonRuntime(
       // The check makes its scratch root, or takes the one of a daemon that ran before.
       const live = yield* makeSealedResultGit({
         scratchRoot: join(f.root, "sealed-scratch"),
-        binary: "/usr/bin/git",
+        binary: options.gitBinary ?? "/usr/bin/git",
         timeLimitMs: sealedResultLimits.timeLimitMs,
         waitLimitMs: sealedResultLimits.waitLimitMs,
         protocols: ["file"],
@@ -456,8 +460,16 @@ export function daemonRuntime(
       })
       // The daemon pushes to https://github.com/fixture/repo.git; here, to the fixture remote.
       const port: SealedResultGitPort = {
-        check: (result, target, options) =>
-          live.check(result, target, { ...options, remote: bare }),
+        check: (result, target, check) =>
+          live.check(result, target, { ...check, remote: bare }).pipe(
+            Effect.map((checked) => ({
+              ...checked,
+              push: () =>
+                Effect.promise(() => options.beforePush?.() ?? Promise.resolve()).pipe(
+                  Effect.andThen(checked.push()),
+                ),
+            })),
+          ),
       }
       return port
     }),

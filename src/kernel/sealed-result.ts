@@ -1358,6 +1358,12 @@ const pushChecked = (
       return { ref: target.ref, sha: resultSha }
     if (status?.startsWith("!\t"))
       return yield* refused(target.expectedHead === null ? "target_exists" : "target_moved")
+    // A push whose answer was lost after the remote took the ref: the target holds the result,
+    // so the push is done.
+    const landed = yield* readTarget(context, remote, target.ref).pipe(
+      Effect.orElseSucceed(() => null),
+    )
+    if (landed === resultSha) return { ref: target.ref, sha: resultSha }
     return yield* new SealedResultFault({
       operation: "push",
       message: redact(`git push exited ${run.status}: ${run.stderr}`, context.secrets),

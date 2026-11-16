@@ -229,6 +229,11 @@ async function withDispatch<A>(
     readonly verifyTimeoutMs?: number
     /** Whether GitHub reports the job's Actions run completed from its start. */
     readonly jobEnded?: boolean
+    /** The daemon's options: a hook as the push starts, the git of the check and the push. */
+    readonly daemon?: {
+      readonly beforePush?: () => Promise<void>
+      readonly gitBinary?: string
+    }
   } = {},
 ) {
   const root = await mkdtemp(join(tmpdir(), "runner-dispatch-"))
@@ -249,7 +254,12 @@ async function withDispatch<A>(
     options.pushTo ?? remote.bare,
     runnerPolicy(image),
     Effect.succeed(await gateway(remote, root)),
-    options.verifyTimeoutMs === undefined ? {} : { verifyTimeoutMs: options.verifyTimeoutMs },
+    {
+      ...(options.verifyTimeoutMs === undefined
+        ? {}
+        : { verifyTimeoutMs: options.verifyTimeoutMs }),
+      ...options.daemon,
+    },
   )
   try {
     return await use(runtime, remote)
@@ -641,4 +651,49 @@ test("a remote that the check cannot reach ends the run with the check's fault, 
   expect(end.run.state).toBe("operator_required")
   expect(end.run.diagnostic).toContain("runner.result")
   expect(end.branch).toBeNull()
+})
+
+// A stop that the caller sends while the checked result is pushed, and a push whose answer the
+// remote loses after it took the ref: the push is done, so the run completes with it.
+test("a stop during the push of a checked result, whose answer the remote loses after it took the ref, ends the run completed with that branch", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-push-"))
+  try {
+    // A git whose push updates the remote and then fails, as a lost answer does.
+    const git = join(root, "git")
+    await writeFile(
+      git,
+      '#!/bin/sh\nfor argument in "$@"; do\n  if [ "$argument" = push ]; then /usr/bin/git "$@" >/dev/null 2>&1; echo "fatal: the remote hung up" >&2; exit 128; fi\ndone\nexec /usr/bin/git "$@"\n',
+      { mode: 0o755 },
+    )
+    const daemon: { runtime?: ReturnType<typeof daemonRuntime>; runId?: string } = {}
+    const end = await withDispatch(
+      async (remote, scratch) => scripted({ body: bodyOf(await seal(scratch, remote)) }),
+      async (runtime, remote) => {
+        daemon.runtime = runtime
+        const receipt = await register(runtime)
+        if (receipt._tag === "Failure") throw new Error(JSON.stringify(receipt.failure))
+        daemon.runId = receipt.success.runId
+        return ended(runtime, remote, receipt.success.runId)
+      },
+      {
+        daemon: {
+          gitBinary: git,
+          beforePush: () =>
+            daemon.runtime!.runPromise(
+              Effect.flatMap(AgentRunIngress, (ingress) =>
+                ingress.cancel(daemon.runId!, new Date()),
+              ),
+            ),
+        },
+      },
+    )
+    expect({ state: end.run.state, diagnostic: end.run.diagnostic }).toEqual({
+      state: "completed",
+      diagnostic: null,
+    })
+    expect(end.branch).not.toBeNull()
+    expect(end.message).toMatchObject({ status: "completed", final_message: "Done." })
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
 })

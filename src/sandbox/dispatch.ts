@@ -485,9 +485,15 @@ export const makeSandboxDispatch = (options: {
         runnerEnds.set(runId, { kind: "cancelled" })
         return { exitCode: 1, stderr: "cancelled" }
       })
-    /** Checks the run's sealed result and pushes it to `agent-run/<id>`, which must be new. */
-    const publishRunner = (run: AgentRunRecord, handle: RunnerHandle, policy: SandboxPolicy) =>
-      Effect.scoped(
+    /**
+     * Checks the run's sealed result and pushes it to `agent-run/<id>`, which must be new. A stop
+     * before the push ends the run cancelled with nothing pushed; a push that began runs to its end,
+     * also through a stop of the run or of the daemon, and its end is the run's: completed once
+     * the target holds the result, or the push's fault.
+     */
+    const publishRunner = (run: AgentRunRecord, handle: RunnerHandle, policy: SandboxPolicy) => {
+      let pushing = false
+      return Effect.scoped(
         Effect.gen(function* () {
           const lease = yield* store.read(run.runId)
           if (lease === null || runnerExecutor === undefined || runnerOptions === undefined)
@@ -525,7 +531,9 @@ export const makeSandboxDispatch = (options: {
               agentGit: runnerOptions.agentGit,
             },
           )
-          yield* checked.push()
+          if (handle.stopping) return yield* runnerCancelled(run.runId)
+          pushing = true
+          yield* Effect.uninterruptible(checked.push())
           runnerEnds.set(run.runId, {
             kind: "sealed",
             finalMessage: result.finalMessage,
@@ -535,7 +543,7 @@ export const makeSandboxDispatch = (options: {
         }),
       ).pipe(
         Effect.catch((error) =>
-          handle.stopping
+          handle.stopping && !pushing
             ? runnerCancelled(run.runId)
             : runnerExit(
                 run.runId,
@@ -547,6 +555,7 @@ export const makeSandboxDispatch = (options: {
               ),
         ),
       )
+    }
     /** The CLI of one runner run: its events from the gateway, its exit once its result is pushed. */
     const runnerCli = (run: AgentRunRecord, policy: SandboxPolicy, sourceSha: string): CliPort => ({
       ownership: "transient-exec",
