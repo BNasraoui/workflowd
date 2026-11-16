@@ -26,11 +26,11 @@ import { CapabilityRefused, type makeCapabilityStore } from "./store"
  * of the exact body, with a prefix of its own (`runMessage` in renewal.mjs).
  */
 export const runRoutePrefix = "/capabilities/v1/run/"
-const routes = {
-  "/capabilities/v1/run/launch": "launch",
-  "/capabilities/v1/run/events": "events",
-  "/capabilities/v1/run/result": "result",
-} as const
+const routes = new Map<string, "launch" | "events" | "result">([
+  ["/capabilities/v1/run/launch", "launch"],
+  ["/capabilities/v1/run/events", "events"],
+  ["/capabilities/v1/run/result", "result"],
+])
 
 const denied = () => new Response(null, { status: 403 })
 const unavailable = () => new Response(null, { status: 503, headers: { "retry-after": "5" } })
@@ -94,7 +94,7 @@ export const makeRunRoutes = Effect.gen(function* () {
   return (store: Store) =>
     Effect.fn("CapabilityGateway.runRoute")(
       function* (request: Request, target: string, binding: Binding, grant: RunGrant) {
-        const route = Object.hasOwn(routes, target) ? routes[target as keyof typeof routes] : null
+        const route = routes.get(target) ?? null
         const launch = grant.launch
         if (route === null || launch === undefined) return denied()
         if (route === "launch") {

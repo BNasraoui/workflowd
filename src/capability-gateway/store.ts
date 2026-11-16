@@ -736,7 +736,7 @@ export const makeCapabilityStore = Effect.gen(function* () {
       batches.push(
         yield* Schema.decodeUnknownEffect(EventBatch)({
           sequence: row.sequence,
-          lines: JSON.parse(row.lines),
+          lines: JSON.parse(row.lines) as unknown,
         }),
       )
     }

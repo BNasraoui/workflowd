@@ -6,7 +6,7 @@ import { gatewayMigrationsTable } from "../../src/capability-control/protocol"
 import { runGatewayMigrations } from "../../src/capability-gateway/migrations"
 import { maxRenewalAttempt } from "../../deploy/sandbox/renewal.mjs"
 
-test("the gateway's store runs its migrations in order: the capability store, the usage of each run, the session key", async () => {
+test("the gateway's store runs its migrations in order: the capability store, the usage of each run, the session key, the records of runner runs", async () => {
   const applied = await Effect.runPromise(
     Effect.gen(function* () {
       yield* runGatewayMigrations
@@ -18,6 +18,7 @@ test("the gateway's store runs its migrations in order: the capability store, th
     { migration_id: 1, name: "capability_store" },
     { migration_id: 2, name: "run_usage" },
     { migration_id: 3, name: "session_key" },
+    { migration_id: 4, name: "run_records" },
   ])
 })
 

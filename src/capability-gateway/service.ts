@@ -782,7 +782,8 @@ export const makeCapabilityGateway = (
         if (grant.providerId !== config.providerId) return denied()
         if (target === "/capabilities/v1/renew") return yield* renewRoute(request, binding, digest)
         // A runner run's own routes: outside its budget, and never a stream.
-        if (target.startsWith(runRoutePrefix)) return yield* runRoute(request, target, binding, grant)
+        if (target.startsWith(runRoutePrefix))
+          return yield* runRoute(request, target, binding, grant)
         const prefix = `/capabilities/v1/providers/${config.providerId}`
         const isGit = config.gitRead === true && target.startsWith("/capabilities/v1/git/")
         if (!isGit && !target.startsWith(`${prefix}/`)) return denied()

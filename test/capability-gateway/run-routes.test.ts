@@ -12,11 +12,7 @@ import {
   maxEventBatchBytes,
   maxResultManifestBytes,
 } from "../../deploy/sandbox/capability-limits.mjs"
-import {
-  runSignatureHeader,
-  signRenewal,
-  signRunBody,
-} from "../../deploy/sandbox/renewal.mjs"
+import { runSignatureHeader, signRenewal, signRunBody } from "../../deploy/sandbox/renewal.mjs"
 import { AgentRunStoreLive } from "../../src/kernel/agent-run-store"
 import { makeCapabilityGateway } from "../../src/capability-gateway/service"
 import { makeCapabilityStore } from "../../src/capability-gateway/store"
@@ -24,7 +20,12 @@ import { runGatewayMigrations } from "../../src/capability-gateway/migrations"
 import { serveCapabilityListener } from "../../src/capability-gateway/http"
 import { liveGrants } from "../../src/sandbox/capability-control"
 import { defaultRunBudget } from "../../src/sandbox/config"
-import { bindRunSession, fixtureSessionKey, seedCapabilityRun, writeNoscopeProviders } from "./fixture"
+import {
+  bindRunSession,
+  fixtureSessionKey,
+  seedCapabilityRun,
+  writeNoscopeProviders,
+} from "./fixture"
 
 const origin = "http://capability.invalid"
 const image = `ghcr.io/bnasraoui/workflowd-agent-base@sha256:${"b".repeat(64)}`
@@ -89,7 +90,12 @@ afterAll(async () => {
 
 const call = (
   path: string,
-  init: { method?: string; body?: Uint8Array | string; signature?: string | null; length?: string } = {},
+  init: {
+    method?: string
+    body?: Uint8Array | string
+    signature?: string | null
+    length?: string
+  } = {},
 ) => {
   const headers: Record<string, string> = { authorization: `Bearer ${token}` }
   if (init.signature != null) headers[runSignatureHeader] = init.signature
@@ -123,7 +129,7 @@ test("the launch answers the run token with the run's prompt, image, model, sour
   const response = await call("launch")
   expect(response.status).toBe(200)
   expect(response.headers.get("cache-control")).toBe("no-store")
-  const value = (await response.json()) as Record<string, unknown>
+  const value: unknown = await response.json()
   expect(value).toEqual({
     prompt: "fixture prompt",
     image,
@@ -215,7 +221,7 @@ test("a batch whose declared size passes the bound is refused before its body is
         },
         body,
         duplex: "half",
-      } as RequestInit),
+      }),
     ),
   )
   expect(response.status).toBe(403)
@@ -251,7 +257,7 @@ test("the one result is held once, as its exact bytes, and read back in parts", 
   const parts: Array<Buffer> = []
   let size = 0
   let sha256 = ""
-  for (let offset = 0; offset === 0 || offset < size; ) {
+  for (let offset = 0; offset === 0 || offset < size;) {
     const part = await inStore(store.readResult("run", offset))
     size = part.size
     sha256 = part.sha256
@@ -261,7 +267,13 @@ test("the one result is held once, as its exact bytes, and read back in parts", 
   expect(parts.length).toBe(2)
   expect(Buffer.concat(parts).equals(body)).toBe(true)
   expect(sha256).toBe(createHash("sha256").update(body).digest("hex"))
-  expect(Exit.isFailure(await Effect.runPromiseExit(Effect.provideService(store.readResult("run", size), SqlClient.SqlClient, sql)))).toBe(true)
+  expect(
+    Exit.isFailure(
+      await Effect.runPromiseExit(
+        Effect.provideService(store.readResult("run", size), SqlClient.SqlClient, sql),
+      ),
+    ),
+  ).toBe(true)
 })
 
 test("the run routes cost the run no call", async () => {
@@ -270,7 +282,9 @@ test("the run routes cost the run no call", async () => {
 
 test("the gateway's own end of a run is read with the counts it used", async () => {
   expect((await readEvents()).ended).toBeNull()
-  await inStore(sql`UPDATE capability_usage SET calls=3,output_tokens=900,spent=1 WHERE run_id='run'`)
+  await inStore(
+    sql`UPDATE capability_usage SET calls=3,output_tokens=900,spent=1 WHERE run_id='run'`,
+  )
   expect((await readEvents()).ended).toEqual({ reason: "budget", calls: 3, outputTokens: 900 })
   await inStore(store.revokeTwoHolders("run"))
   expect((await readEvents()).ended).toEqual({ reason: "two holders", calls: 3, outputTokens: 900 })
