@@ -187,7 +187,7 @@ test("a stop after the answer of the OAuth server and before the write keeps the
   })
 }, 30000)
 
-test("an OAuth server that refuses the connection leaves the login as it was, and the next run sends nothing before the first wait ends", async () => {
+test("an OAuth server that refuses the connection leaves the login as it was, the next run sends nothing before the first wait ends, and a run after it renews", async () => {
   await withLogin(async (root, oauth, env) => {
     const old = claudeLogin(syntheticValue("access"), syntheticValue("refresh"), Date.now() - 1000)
     expect((await importLogin(env, JSON.stringify(old))).code).toBe(0)
@@ -219,6 +219,18 @@ test("an OAuth server that refuses the connection leaves the login as it was, an
     const waiting = await custody(oauth.url)
     expect(waiting.stderr).toStartWith("custody: the claude login waits to renew until ")
     expect(oauth.requests()).toHaveLength(0)
+    // After the wait that custody wrote, on the clock that it reads, the next run renews.
+    const { retryAt } = Schema.decodeUnknownSync(
+      Schema.fromJsonString(Schema.Struct({ retryAt: Schema.Number })),
+    )(await readFile(join(root, "login", "claude.state"), "utf8"))
+    while (Date.now() <= retryAt) await Bun.sleep(retryAt - Date.now() + 1)
+    const renewed = await custody(oauth.url)
+    expect(renewed.code).toBe(0)
+    expect(Schema.decodeUnknownSync(Schema.fromJsonString(Provided))(renewed.stdout).token).toBe(
+      oauth.next().access,
+    )
+    expect(oauth.requests()).toHaveLength(1)
+    expect(oauth.requests()[0]!.time).toBeGreaterThanOrEqual(retryAt)
   })
 }, 30000)
 

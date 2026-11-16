@@ -2,6 +2,7 @@ import { expect, test } from "bun:test"
 import { readFile } from "node:fs/promises"
 import { dlopen, FFIType, ptr } from "bun:ffi"
 import { join } from "node:path"
+import { Schema } from "effect"
 import {
   claudeLogin,
   client,
@@ -9,6 +10,7 @@ import {
   sse,
   storedAccess,
   syntheticValue,
+  type Fixture,
   type Gateway,
   type OAuthFixture,
 } from "./gateway-process"
@@ -19,7 +21,6 @@ import {
   runToken,
   until,
   withCustody,
-  works,
 } from "./custody-fixture"
 
 /**
@@ -28,30 +29,42 @@ import {
  * call ends that call's wait only.
  */
 
+/** Custody's state of the login: its failed tries, and the time before which it sends nothing. */
+const stateOf = async (f: Fixture) =>
+  Schema.decodeUnknownSync(
+    Schema.fromJsonString(Schema.Struct({ failures: Schema.Number, retryAt: Schema.Number })),
+  )(await readFile(join(loginDirectory(f), "claude.state"), "utf8"))
+
 /**
- * Custody's wait of `ms` after a call that failed: it starts no sooner than `sentAt`, when that
- * call was sent, and no later than `answeredAt`, when its 503 came back (times of `Date.now()`).
- * Calls on `token` until the earliest end of the wait each get 503 and ask the OAuth server
- * nothing; this returns once the latest end has passed.
+ * After a failed try: calls on `token` each get 503 and ask the OAuth server nothing, until the
+ * one that renews with `old`, which works. Its request comes no sooner than the `retryAt` that
+ * custody wrote, on the clock that custody reads: no margin of time decides the case.
  */
-async function quietUntil(
+async function renewsAfterWait(
+  f: Fixture,
   gateway: Gateway,
   token: string,
   oauth: OAuthFixture,
-  wait: { readonly sentAt: number; readonly answeredAt: number; readonly ms: number },
+  old: string,
 ) {
+  const { retryAt } = await stateOf(f)
   const before = oauth.requests().length
-  let calls = 0
-  while (Date.now() < wait.sentAt + wait.ms - 400) {
+  let quiet = 0
+  for (;;) {
     const call = await client(gateway).call(token)
+    const text = await call.text()
+    if (oauth.requests().length > before) {
+      expect([call.status, text]).toEqual([200, sse])
+      break
+    }
     expect(call.status).toBe(503)
-    await call.text()
-    calls++
+    quiet++
     await Bun.sleep(250)
   }
-  expect(calls).toBeGreaterThan(0)
-  expect(oauth.requests()).toHaveLength(before)
-  await Bun.sleep(Math.max(0, wait.answeredAt + wait.ms - Date.now()) + 100)
+  expect(quiet).toBeGreaterThan(0)
+  expect(oauth.requests()).toHaveLength(before + 1)
+  expect(oauth.requests()[before]!.time).toBeGreaterThanOrEqual(retryAt)
+  expect(sentRefresh(oauth.requests()[before])).toBe(old)
 }
 
 /** An exclusive advisory lock on `path`, as a custody process takes it, until `release`. */
@@ -78,14 +91,12 @@ const silent = async () => {
     const gateway = await start()
     const token = await runToken(gateway, "jti-silent")
     const began = performance.now()
-    const sentAt = Date.now()
     const call = await client(gateway).call(token)
-    const answeredAt = Date.now()
-    const took = performance.now() - began
     expect(call.status).toBe(503)
-    expect(took).toBeGreaterThanOrEqual(5000)
-    expect(took).toBeLessThan(9000)
+    expect(performance.now() - began).toBeGreaterThanOrEqual(5000)
     expect(oauth.requests()).toHaveLength(1)
+    // Custody's own limit ended the request: custody wrote the failed try and its cause.
+    expect((await stateOf(f)).failures).toBe(1)
     expect(f.upstreamRequests()).toHaveLength(0)
     expect(JSON.parse(await readFile(loginFile(f), "utf8"))).toEqual(old)
     expect(gateway.output?.()).toContain(
@@ -93,9 +104,7 @@ const silent = async () => {
     )
     expect(gateway.output?.()).not.toContain("needs a new import")
     oauth.mode("renew")
-    // Custody's wait starts once its request has had no answer for 5 seconds.
-    await quietUntil(gateway, token, oauth, { sentAt: sentAt + 5000, answeredAt, ms: 5000 })
-    await works(gateway, token, oauth, old.claudeAiOauth.refreshToken)
+    await renewsAfterWait(f, gateway, token, oauth, old.claudeAiOauth.refreshToken)
     expect(f.upstreamRequests().map((request) => request.headers.authorization)).toEqual([
       `Bearer ${oauth.next().access}`,
     ])
@@ -114,9 +123,12 @@ const limited = async () => {
     const sentAt = Date.now()
     expect((await client(gateway).call(token)).status).toBe(503)
     const answeredAt = Date.now()
+    // Custody read its clock between the call and its answer.
+    const { retryAt } = await stateOf(f)
+    expect(retryAt - 7000).toBeGreaterThanOrEqual(sentAt)
+    expect(retryAt - 7000).toBeLessThanOrEqual(answeredAt)
     oauth.mode("renew")
-    await quietUntil(gateway, token, oauth, { sentAt, answeredAt, ms: 7000 })
-    await works(gateway, token, oauth, old.claudeAiOauth.refreshToken)
+    await renewsAfterWait(f, gateway, token, oauth, old.claudeAiOauth.refreshToken)
     expect(gateway.output?.()).not.toContain("needs a new import")
     expect(JSON.parse(await readFile(loginFile(f), "utf8")).claudeAiOauth.refreshToken).toBe(
       oauth.next().refresh,
@@ -124,7 +136,7 @@ const limited = async () => {
   })
 }
 
-/** A 503 waits the first wait, 5 seconds; the in-process cases show the doubling and its cap. */
+/** A 503 waits the first wait, 5 seconds, and a second 503 after it waits twice as long. */
 const busy = async () => {
   await withCustody(async (f, oauth, start) => {
     const old = claudeLogin(syntheticValue("access"), syntheticValue("refresh"), Date.now() - 1000)
@@ -132,13 +144,26 @@ const busy = async () => {
     const gateway = await start()
     const token = await runToken(gateway, "jti-busy")
     oauth.mode("busy")
-    const sentAt = Date.now()
-    expect((await client(gateway).call(token)).status).toBe(503)
-    const answeredAt = Date.now()
+    for (const [failures, wait] of [
+      [1, 5000],
+      [2, 10000],
+    ] as const) {
+      if (failures > 1) {
+        const { retryAt } = await stateOf(f)
+        while (Date.now() <= retryAt) await Bun.sleep(retryAt - Date.now() + 1)
+      }
+      const sentAt = Date.now()
+      expect((await client(gateway).call(token)).status).toBe(503)
+      const answeredAt = Date.now()
+      const state = await stateOf(f)
+      expect(state.failures).toBe(failures)
+      expect(state.retryAt - wait).toBeGreaterThanOrEqual(sentAt)
+      expect(state.retryAt - wait).toBeLessThanOrEqual(answeredAt)
+    }
     oauth.mode("renew")
-    await quietUntil(gateway, token, oauth, { sentAt, answeredAt, ms: 5000 })
-    await works(gateway, token, oauth, old.claudeAiOauth.refreshToken)
+    await renewsAfterWait(f, gateway, token, oauth, old.claudeAiOauth.refreshToken)
     expect(oauth.requests().map(sentRefresh)).toEqual([
+      old.claudeAiOauth.refreshToken,
       old.claudeAiOauth.refreshToken,
       old.claudeAiOauth.refreshToken,
     ])
@@ -155,12 +180,9 @@ const invalid = async () => {
     oauth.mode("invalid")
     const gateway = await start()
     const token = await runToken(gateway, "jti-invalid")
-    const sentAt = Date.now()
     expect((await client(gateway).call(token)).status).toBe(503)
-    const answeredAt = Date.now()
     oauth.mode("renew")
-    await quietUntil(gateway, token, oauth, { sentAt, answeredAt, ms: 5000 })
-    await works(gateway, token, oauth, old.claudeAiOauth.refreshToken)
+    await renewsAfterWait(f, gateway, token, oauth, old.claudeAiOauth.refreshToken)
     expect(gateway.output?.()).not.toContain("needs a new import")
   })
 }
@@ -176,11 +198,10 @@ const timer = async () => {
     const release = holdLock(join(loginDirectory(f), "claude.lock"))
     let released = false
     try {
-      const began = performance.now()
       const call = await client(gateway).call(token)
       expect(call.status).toBe(503)
-      expect(performance.now() - began).toBeLessThan(12000)
       expect(oauth.requests()).toHaveLength(0)
+      // Custody still waits for the lock: the call ended by the gateway's own limit.
       release()
       released = true
       await until(() => oauth.requests().length === 1)

@@ -106,7 +106,7 @@ const providers = {
     },
   },
 } as const
-export type CustodyProvider = keyof typeof providers
+type CustodyProvider = keyof typeof providers
 export const custodyProvider = (name: string): CustodyProvider | undefined =>
   Object.keys(providers).find((key): key is CustodyProvider => key === name)
 
