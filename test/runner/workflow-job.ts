@@ -178,7 +178,13 @@ export interface JobStep {
 }
 
 const object = (value: unknown): Record<string, unknown> =>
-  typeof value === "object" && value !== null ? (value as Record<string, unknown>) : {}
+  typeof value === "object" && value !== null ? Object.fromEntries(Object.entries(value)) : {}
+/** A scalar value of a workflow file as text; any other value fails. */
+const scalar = (value: unknown): string => {
+  if (typeof value === "string") return value
+  if (typeof value === "number" || typeof value === "boolean") return String(value)
+  throw new Error(`a workflow value is not a scalar: ${JSON.stringify(value)}`)
+}
 
 /**
  * The runner job of `push`, with the caller's variables `vars`: its inputs as the caller gives
@@ -208,8 +214,8 @@ export async function runnerJob(
     ref: `refs/heads/workflowd/leases/${push.leaseId}`,
     sha: push.sha,
     repository: push.repository,
-    repository_id: push.repositoryId ?? String(callerJob.with?.["repository-id"] ?? ""),
-    actor_id: push.actorId ?? String(callerJob.with?.["app-actor-id"] ?? ""),
+    repository_id: push.repositoryId ?? scalar(callerJob.with?.["repository-id"] ?? ""),
+    actor_id: push.actorId ?? scalar(callerJob.with?.["app-actor-id"] ?? ""),
     run_id: "79",
     run_attempt: "1",
     event: { deleted: false, repository: { fork: false } },
@@ -225,7 +231,9 @@ export async function runnerJob(
   const path = (base: unknown, keys: ReadonlyArray<string>): Value => {
     let value: unknown = base
     for (const key of keys) value = object(value)[key]
-    return value === undefined ? null : (value as Value)
+    return typeof value === "string" || typeof value === "number" || typeof value === "boolean"
+      ? value
+      : null
   }
   const callerContext: Context = {
     functions,
@@ -245,7 +253,7 @@ export async function runnerJob(
   const given = Object.fromEntries(
     Object.entries(callerJob.with ?? {}).map(([name, value]) => [
       name,
-      interpolate(String(value), callerContext),
+      interpolate(scalar(value), callerContext),
     ]),
   )
   const declared = reusable.on.workflow_call.inputs
@@ -301,7 +309,7 @@ export async function runnerJob(
       with: Object.fromEntries(
         Object.entries(step.with ?? {}).map(([name, value]) => [
           name,
-          interpolate(String(value), scope),
+          interpolate(scalar(value), scope),
         ]),
       ),
     })
