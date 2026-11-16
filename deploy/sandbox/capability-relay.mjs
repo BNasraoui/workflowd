@@ -5,7 +5,13 @@ import { writeFileSync } from "node:fs"
 import { chmod } from "node:fs/promises"
 import { pathToFileURL } from "node:url"
 import { gatewayOrigin } from "./bootstrap-helper.mjs"
-import { maxRenewalAttempt, renewalRequests, signRenewal } from "./renewal.mjs"
+import {
+  maxRenewalAttempt,
+  renewalRequests,
+  runSignatureHeader,
+  signRenewal,
+  signRunBody,
+} from "./renewal.mjs"
 import {
   maxHeaderBytes,
   maxStreamIdleMs,
@@ -273,12 +279,47 @@ export async function serveRunnerRelay(config, directory = root) {
     agent.destroy()
     http.close()
   }
+  /**
+   * One request of the run routes, which only the job's own run client makes, in this process: the
+   * box reaches none of them. It carries the current run token and, with a body, the session key's
+   * signature over that body. Resolves to the status and at most 1 MiB of the answer.
+   */
+  function runRoute(route, body) {
+    if (closed) return Promise.reject(new Error("relay stopped"))
+    const headers = { authorization: `Bearer ${credential.token}` }
+    if (body !== undefined) {
+      headers["content-length"] = String(body.length)
+      headers[runSignatureHeader] = signRunBody(config.sessionKey, config.channel, route, body)
+    }
+    return new Promise((resolve, reject) => {
+      const call = httpsRequest(
+        new URL(`/capabilities/v1/run/${route}`, origin),
+        { method: body === undefined ? "GET" : "POST", headers, agent, timeout: 120000 },
+        (reply) => {
+          const chunks = []
+          let size = 0
+          reply.on("data", (bytes) => {
+            size += bytes.length
+            if (size > 1048576) reply.destroy(new Error("run route answer too long"))
+            else chunks.push(bytes)
+          })
+          reply.once("end", () =>
+            resolve({ status: reply.statusCode ?? 0, body: Buffer.concat(chunks) }),
+          )
+          reply.once("error", reject)
+        },
+      )
+      call.once("timeout", () => call.destroy(new Error("run route unavailable")))
+      call.once("error", reject)
+      call.end(body)
+    })
+  }
   await new Promise((resolve, reject) => {
     http.once("error", reject)
     http.listen(`${directory}/gateway.sock`, resolve)
   })
   await chmod(`${directory}/gateway.sock`, 0o600)
-  return { close: stop }
+  return { close: stop, runRoute }
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
