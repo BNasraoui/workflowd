@@ -3,7 +3,11 @@ import { Effect, Result } from "effect"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
 import { SqlClient } from "effect/unstable/sql"
 import { AgentRunStoreLive, AgentRunStore } from "../../src/kernel/agent-run-store"
-import { CapabilityRefused, makeCapabilityStore } from "../../src/capability-gateway/store"
+import {
+  CapabilityRefused,
+  CapabilityRetired,
+  makeCapabilityStore,
+} from "../../src/capability-gateway/store"
 import {
   bindRunSession,
   fixtureSessionKey,
@@ -133,6 +137,40 @@ test("renewal cannot resurrect expiry or survive durable revocation and restart"
       expect(
         refusal(yield* Effect.result(restarted.authorize(binding, "c".repeat(64), now + 4))),
       ).toBeInstanceOf(CapabilityRefused)
+    }),
+  )
+})
+
+test("a run token whose successor has authorized a call is retired at each check of a call: the check before its body, and the check as it launches a call, which charges the budget", async () => {
+  await run(
+    Effect.gen(function* () {
+      const { store } = yield* seed
+      const { binding } = yield* bindRunSession(now, {
+        digest: "a".repeat(64),
+        expiresAt: now + 60000,
+      })
+      yield* store.renew(
+        binding,
+        "a".repeat(64),
+        renewalSignature(binding, "a".repeat(64)),
+        "b".repeat(64),
+        now + 3600000,
+        now + 1,
+      )
+      // Until its successor authorizes a call, the predecessor still authorizes one.
+      expect((yield* store.authorizeCall(binding, "a".repeat(64), now + 2)).expiresAt).toBe(
+        now + 60000,
+      )
+      yield* store.authenticate("b".repeat(64), now + 2)
+      expect(
+        refusal(yield* Effect.result(store.authorizeCall(binding, "a".repeat(64), now + 3))),
+      ).toBeInstanceOf(CapabilityRetired)
+      expect(
+        refusal(yield* Effect.result(store.authenticate("a".repeat(64), now + 3))),
+      ).toBeInstanceOf(CapabilityRetired)
+      // The renewal's own check still reads the predecessor, so its signed renewal can show that
+      // the run has two holders.
+      expect((yield* store.authorize(binding, "a".repeat(64), now + 3)).expiresAt).toBe(now + 60000)
     }),
   )
 })

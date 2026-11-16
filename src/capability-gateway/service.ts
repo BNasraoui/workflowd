@@ -446,7 +446,7 @@ export const makeCapabilityGateway = (
       ),
     )
     type Binding = { readonly runId: string; readonly channel: string }
-    type Grant = Effect.Success<ReturnType<typeof store.authorize>>
+    type Grant = Effect.Success<ReturnType<typeof store.authorizeCall>>
     /**
      * The renew route: a body of the relay's signature, at most `maxRenewalBody` bytes, and the
      * successor of the presented token.
@@ -490,7 +490,7 @@ export const makeCapabilityGateway = (
     const admit = (binding: Binding, session: number, digest: string, grant: Grant) =>
       authority.withPermit(
         Effect.gen(function* () {
-          yield* store.authorize(binding, digest, Date.now())
+          yield* store.authorizeCall(binding, digest, Date.now())
           const owned =
             active.get(binding.runId) ??
             new Map<AbortController, { readonly session: number; readonly digest: string }>()
@@ -645,7 +645,7 @@ export const makeCapabilityGateway = (
           const started = await Effect.runPromise(
             authority.withPermit(
               Effect.gen(function* () {
-                yield* store.authorize(binding, digest, Date.now())
+                yield* store.authorizeCall(binding, digest, Date.now())
                 if (tokens !== undefined) {
                   const reservation = yield* store.reserve(binding.runId, tokens, Date.now())
                   if (reservation === null) return { spent: true as const }

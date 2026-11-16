@@ -482,17 +482,29 @@ export const makeCapabilityStore = Effect.gen(function* () {
     })
   })
   /**
+   * The authority of a run token for a call: `authorize`, and refused as `CapabilityRetired` when
+   * its successor has authorized a call. A call checks it once before it reads a body, and again
+   * as it admits its stream and as it launches each upstream request, which charges the budget.
+   */
+  const authorizeCall = Effect.fn("CapabilityStore.authorizeCall")(function* (
+    binding: CapabilityBinding,
+    digest: string,
+    now: number,
+  ) {
+    const grant = yield* authorize(binding, digest, now)
+    if (yield* successorUsed(digest)) return yield* Effect.fail(new CapabilityRetired(binding))
+    return grant
+  })
+  /**
    * The one check of a run token, for each route that takes one: its binding, the session it
-   * belongs to and its authority. A token whose successor has authorized a call is refused as
-   * `CapabilityRetired`. The first call that a token authorizes is recorded.
+   * belongs to and `authorizeCall`. The first call that a token authorizes is recorded.
    */
   const authenticate = Effect.fn("CapabilityStore.authenticate")(function* (
     digest: string,
     now: number,
   ) {
     const { session, ...binding } = yield* bindingFor(digest, now)
-    const grant = yield* authorize(binding, digest, now)
-    if (yield* successorUsed(digest)) return yield* Effect.fail(new CapabilityRetired(binding))
+    const grant = yield* authorizeCall(binding, digest, now)
     yield* sql`UPDATE capability_tokens SET used_at=${now} WHERE digest=${digest} AND used_at IS NULL`
     return { binding, session, grant }
   })
@@ -627,6 +639,7 @@ export const makeCapabilityStore = Effect.gen(function* () {
     revoke: Effect.fn("CapabilityStore.revoke")((runId: string) =>
       sql.withTransaction(revokeRun(runId)),
     ),
+    authorizeCall,
     authenticate,
     revokeTwoHolders: Effect.fn("CapabilityStore.revokeTwoHolders")((runId: string) =>
       sql.withTransaction(
