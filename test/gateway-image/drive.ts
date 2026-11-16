@@ -189,23 +189,48 @@ process.stdout.write(JSON.stringify(out))`,
 
 /**
  * A request for a challenge on the listener's socket, with the headers of the front, from a
- * container as `user` with the listener's volume. `stat` is `ok`, or the code of the error of a
- * stat of the socket; `call` is the status line of the answer, `ended` when the connection ends
- * with no answer, or `error` and the code of the connect's error, which Bun reports as ENOENT
- * where the kernel refuses the connect with EACCES.
+ * container as `user` with the listener's volume, by libc's calls through Bun's FFI: Bun's own
+ * client reports a connection that the server ends at accept as a refused connect. `stat` is
+ * `ok`, or the error of a stat of the socket; `call` is the status line of the answer, `ended`
+ * when the connection ends with no byte of an answer, or `error` and the errno of the connect.
  */
 async function socketCall(user: string, service: string) {
   const request = `GET /capabilities/v1/challenge?lease=lease HTTP/1.1\r\nhost: localhost\r\nx-forwarded-for: 100.64.0.7\r\nx-forwarded-proto: https\r\nx-forwarded-host: ${service}\r\nconnection: close\r\n\r\n`
   const result = await probe(
-    `let answer = "", done = false
+    `import { dlopen, FFIType, ptr, read } from "bun:ffi"
+const path = ${JSON.stringify(listenSocket)}
 let stat = "ok"
-try { require("node:fs").statSync(${JSON.stringify(listenSocket)}) } catch (error) { stat = error.code }
-const end = (call) => { if (!done) { done = true; process.stdout.write(JSON.stringify({ stat, call })) } }
-const socket = require("node:net").connect(${JSON.stringify(listenSocket)})
-socket.on("connect", () => socket.write(${JSON.stringify(request)}))
-socket.on("data", (bytes) => (answer += bytes))
-socket.on("error", (error) => end("error " + error.code))
-socket.on("close", () => end(answer === "" ? "ended" : answer.split("\\r\\n")[0]))`,
+try { require("node:fs").statSync(path) } catch (error) { stat = error.code }
+const libc = dlopen("libc.so.6", {
+  socket: { args: [FFIType.i32, FFIType.i32, FFIType.i32], returns: FFIType.i32 },
+  connect: { args: [FFIType.i32, FFIType.ptr, FFIType.u32], returns: FFIType.i32 },
+  send: { args: [FFIType.i32, FFIType.ptr, FFIType.u64, FFIType.i32], returns: FFIType.i64 },
+  recv: { args: [FFIType.i32, FFIType.ptr, FFIType.u64, FFIType.i32], returns: FFIType.i64 },
+  __errno_location: { args: [], returns: FFIType.ptr },
+})
+const names = { 2: "ENOENT", 13: "EACCES", 104: "ECONNRESET", 111: "ECONNREFUSED" }
+const errno = () => { const code = read.i32(libc.symbols.__errno_location(), 0); return names[code] ?? String(code) }
+// AF_UNIX and SOCK_STREAM are 1; sockaddr_un is the family, then the path and its NUL.
+const fd = libc.symbols.socket(1, 1, 0)
+const address = Buffer.alloc(110)
+address.writeUInt16LE(1, 0)
+address.write(path, 2)
+let call
+if (libc.symbols.connect(fd, ptr(address), 2 + Buffer.byteLength(path) + 1) !== 0) call = "error " + errno()
+else {
+  const bytes = Buffer.from(${JSON.stringify(request)})
+  // MSG_NOSIGNAL: a socket that the server ended gives EPIPE, not SIGPIPE.
+  libc.symbols.send(fd, ptr(bytes), bytes.length, 0x4000)
+  const chunk = Buffer.alloc(65536)
+  let answer = Buffer.alloc(0)
+  for (;;) {
+    const size = Number(libc.symbols.recv(fd, ptr(chunk), chunk.length, 0))
+    if (size <= 0) break
+    answer = Buffer.concat([answer, chunk.subarray(0, size)])
+  }
+  call = answer.length === 0 ? "ended" : answer.toString("latin1").split("\\r\\n")[0]
+}
+process.stdout.write(JSON.stringify({ stat, call }))`,
     { user, volume: true },
   )
   if (result.code !== 0) throw new Error(`the call as ${user} failed: ${result.stderr}`)
@@ -636,17 +661,10 @@ process.stdout.write(JSON.stringify({ gateway, front: await connect(${JSON.strin
   // With the volume: a uid outside the front's group may not enter the listener's directory and
   // cannot connect; a uid of the group that is not the front's is ended at accept; the front's
   // uid is answered.
-  const outsider = await socketCall(`${outsiderId}:${outsiderId}`, frontContainer.service)
-  assert.ok(
-    typeof outsider === "object" &&
-      outsider !== null &&
-      "stat" in outsider &&
-      outsider.stat === "EACCES" &&
-      "call" in outsider &&
-      typeof outsider.call === "string" &&
-      outsider.call.startsWith("error "),
-    `a uid outside the group reached the socket: ${JSON.stringify(outsider)}`,
-  )
+  assert.deepEqual(await socketCall(`${outsiderId}:${outsiderId}`, frontContainer.service), {
+    stat: "EACCES",
+    call: "error EACCES",
+  })
   assert.deepEqual(await socketCall(`${groupMemberId}:${frontId}`, frontContainer.service), {
     stat: "ok",
     call: "ended",
