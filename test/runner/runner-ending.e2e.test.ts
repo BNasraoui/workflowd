@@ -714,3 +714,21 @@ test("a stop of the daemon while its runner run waits for the job's session ends
     await rm(root, { recursive: true, force: true })
   }
 }, 30000)
+
+test("a runner run that is live at a restart of the daemon, over the gateway that outlived it, ends once at the start: the gateway revokes its session, its Actions run is cancelled, its ref removed and its run client ends", async () => {
+  await withEnding("quiet", async (daemon) => {
+    const id = await dispatch(daemon)
+    const runtime = await step("restart", daemon.restart)
+    const end = await ended(runtime, id)
+    expect({ state: end.run.state, diagnostic: end.run.diagnostic }).toEqual({
+      state: "operator_required",
+      diagnostic: "Sandbox coordinator restarted",
+    })
+    expect(end.messages.length).toBe(1)
+    // The gateway process ran through the restart; the new daemon's start revoked the run there.
+    await released({ ...daemon, runtime }, false)
+    // The run client's next post is refused, so it ends, and with it the run's harness.
+    await step("job end", daemon.jobEnded, undefined, 60000)
+    expect((await runtime.runPromise(mailbox(id))).length).toBe(1)
+  })
+}, 90000)

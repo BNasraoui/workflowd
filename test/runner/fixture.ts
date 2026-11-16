@@ -425,10 +425,9 @@ export function daemonRuntime(
   const sealed = Layer.effect(
     SealedResultGit,
     Effect.gen(function* () {
-      const scratchRoot = join(f.root, "sealed-scratch")
-      yield* Effect.promise(() => mkdir(scratchRoot, { mode: 0o700 }))
+      // The check makes its scratch root, or takes the one of a daemon that ran before.
       const live = yield* makeSealedResultGit({
-        scratchRoot,
+        scratchRoot: join(f.root, "sealed-scratch"),
         binary: "/usr/bin/git",
         timeLimitMs: sealedResultLimits.timeLimitMs,
         waitLimitMs: sealedResultLimits.waitLimitMs,
@@ -551,6 +550,11 @@ export async function withRunnerDaemon<A>(
     /** The process id of the job's run client, once bootstrap started it. */
     readonly runClient: () => Promise<number | undefined>
     /**
+     * Stops the daemon and starts it again on the same store, as a restart of the daemon's
+     * service does; the gateway process, the job and GitHub go on. Gives the new daemon's runtime.
+     */
+    readonly restart: () => Promise<ReturnType<typeof daemonRuntime>>
+    /**
      * The job's record: the files of its run directory, its harness's record of its steps, the
      * model calls that reached the fixture model and the end of the gateway's output.
      */
@@ -585,18 +589,20 @@ export async function withRunnerDaemon<A>(
   let runtime: ReturnType<typeof daemonRuntime> | undefined
   try {
     gateway = await gitGateway(f, remote.url)
-    runtime = daemonRuntime(
-      f,
-      github,
-      remote.bare,
-      runnerPolicy(job.image),
-      makeDaemonCapability({
-        socket: f.config.controlSocket,
-        reconcileEveryMs: 3600000,
-        budget: defaultRunBudget,
-        runner: { aliases: ["runner"], identity: runnerIdentity },
-      }),
-    )
+    const daemon = () =>
+      daemonRuntime(
+        f,
+        github,
+        remote.bare,
+        runnerPolicy(job.image),
+        makeDaemonCapability({
+          socket: f.config.controlSocket,
+          reconcileEveryMs: 3600000,
+          budget: defaultRunBudget,
+          runner: { aliases: ["runner"], identity: runnerIdentity },
+        }),
+      )
+    runtime = daemon()
     const jobEnded = async () => {
       for (let tries = 0; jobStart === undefined; tries++) {
         if (tries > 6000) throw new Error("step job: the daemon created no lease ref")
@@ -615,6 +621,11 @@ export async function withRunnerDaemon<A>(
       github,
       leaseId: () => lease.id,
       runClient: () => runClientPid(job.directory),
+      restart: async () => {
+        await runtime?.dispose()
+        runtime = daemon()
+        return runtime
+      },
       record: async () =>
         [
           `run directory: ${(await readdir(job.directory).catch(() => [])).sort().join(" ")}`,
