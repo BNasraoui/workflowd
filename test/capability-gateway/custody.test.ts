@@ -64,7 +64,7 @@ test("import-login takes the login on standard input only, into a 0700 directory
 
     expect(await run(JSON.stringify(first))).toEqual({
       code: 0,
-      stdout: "imported the claude login\n",
+      stdout: `imported the claude login, owned by uid ${process.getuid!()}\n`,
       stderr: "",
     })
     const directory = await stat(loginDirectory(f))
@@ -76,7 +76,7 @@ test("import-login takes the login on standard input only, into a 0700 directory
     // A login that is there already is replaced as a whole, and the command says so.
     expect(await run(JSON.stringify(second))).toEqual({
       code: 0,
-      stdout: "replaced the claude login\n",
+      stdout: `replaced the claude login, owned by uid ${process.getuid!()}\n`,
       stderr: "",
     })
     expect(JSON.parse(await readFile(loginFile(f), "utf8"))).toEqual(second)
@@ -124,16 +124,27 @@ test("import-login takes the login on standard input only, into a 0700 directory
     )
     expect(leaked(outputs.join(""), values)).toEqual([])
 
-    // Not into a new directory whose parent belongs to another user: the gateway would refuse it.
-    const foreign = `/wfd-login-${randomUUID()}`
-    const rootOwner = (await stat("/")).uid
-    expect(rootOwner).not.toBe(process.getuid!())
-    expect(await importLogin(custodyEnv(f, foreign), JSON.stringify(first))).toEqual({
-      code: 1,
-      stdout: "",
-      stderr: `import-login refused: / belongs to uid ${rootOwner}: import-login runs as the gateway's user, which owns it\n`,
-    })
-    expect(await stat(foreign).catch(() => "absent")).toBe("absent")
+    // A new directory under a parent of another user is made for this uid, mode 0700, as the
+    // gateway's check at start requires; the owner of the parent decides nothing.
+    const below = join("/tmp", `wfd-login-${randomUUID()}`)
+    try {
+      expect((await stat("/tmp")).uid).not.toBe(process.getuid!())
+      expect(await importLogin(custodyEnv(f, below), JSON.stringify(first))).toEqual({
+        code: 0,
+        stdout: `imported the claude login, owned by uid ${process.getuid!()}\n`,
+        stderr: "",
+      })
+      expect([(await stat(below)).uid, await mode(below)]).toEqual([process.getuid!(), "0700"])
+    } finally {
+      await rm(below, { recursive: true, force: true })
+    }
+    // An existing directory that the gateway's check refuses: import-login refuses it the same.
+    await chmod(loginDirectory(f), 0o750)
+    await refused(
+      JSON.stringify(first),
+      `custody refused ${loginDirectory(f)}: mode 0750, custody requires 0700`,
+    )
+    await chmod(loginDirectory(f), 0o700)
   } finally {
     await f.close()
   }
@@ -658,3 +669,46 @@ test("a renewal that fails logs one line with the OAuth server's status and erro
     ).toEqual([])
   })
 }, 30000)
+
+test("import-login refuses root, here uid 0 of a new user namespace, and makes no directory", async () => {
+  const f = await fixture()
+  try {
+    const child = Bun.spawn(
+      [
+        "unshare",
+        "--user",
+        "--map-root-user",
+        process.execPath,
+        resolve("src/capability-gateway-server.ts"),
+        "import-login",
+        "claude",
+      ],
+      {
+        cwd: resolve("."),
+        env: custodyEnv(f, loginDirectory(f)),
+        stdin: "pipe",
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    )
+    child.stdin.write(
+      JSON.stringify(
+        claudeLogin(syntheticValue("access"), syntheticValue("refresh"), Date.now() + 3600000),
+      ),
+    )
+    await child.stdin.end()
+    const [stdout, stderr, code] = await Promise.all([
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+      child.exited,
+    ])
+    expect({ code, stdout, stderr }).toEqual({
+      code: 1,
+      stdout: "",
+      stderr: "import-login refused: import-login runs as the gateway's user, not as root\n",
+    })
+    expect(await stat(loginDirectory(f)).catch(() => "absent")).toBe("absent")
+  } finally {
+    await f.close()
+  }
+})

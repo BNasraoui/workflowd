@@ -771,7 +771,11 @@ process.stdout.write(JSON.stringify({ gateway, front: await connect(${JSON.strin
     ["import-login", "claude"],
     JSON.stringify(old),
   )
-  assert.deepEqual(importedLogin, { code: 0, stdout: "imported the claude login\n", stderr: "" })
+  assert.deepEqual(importedLogin, {
+    code: 0,
+    stdout: `imported the claude login, owned by uid ${imageUser}\n`,
+    stderr: "",
+  })
   outputs.push(importedLogin.stdout)
   const modes = await asImageUser(
     f,

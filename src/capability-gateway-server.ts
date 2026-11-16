@@ -160,8 +160,12 @@ export async function importLoginCommand(
     const config = loadCapabilityGatewayConfig(env)
     if (!config.login) throw new ImportRefused("the gateway's configuration names no login")
     // One byte past the limit shows a longer login; nothing past it is read.
-    const outcome = await importLogin(config.login.directory, provider, await read(loginLimit + 1))
-    return { code: 0, output: `${outcome} the ${provider} login\n` }
+    const { outcome, owner } = await importLogin(
+      config.login.directory,
+      provider,
+      await read(loginLimit + 1),
+    )
+    return { code: 0, output: `${outcome} the ${provider} login, owned by uid ${owner}\n` }
   } catch (error) {
     const reason =
       error instanceof ImportRefused || error instanceof CustodyRefused

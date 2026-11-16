@@ -284,12 +284,12 @@ test("in this process, import-login imports, replaces and refuses as its process
       importLoginCommand(with_, args, input(text, asked))
     expect(await run(["claude"], JSON.stringify(login))).toEqual({
       code: 0,
-      output: "imported the claude login\n",
+      output: `imported the claude login, owned by uid ${process.getuid!()}\n`,
     })
     expect(asked).toEqual([16385])
     expect(await run(["claude"], JSON.stringify(login))).toEqual({
       code: 0,
-      output: "replaced the claude login\n",
+      output: `replaced the claude login, owned by uid ${process.getuid!()}\n`,
     })
     const refused = async (
       args: ReadonlyArray<string>,

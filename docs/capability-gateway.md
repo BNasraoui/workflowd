@@ -99,7 +99,12 @@ coverage gate.
 ## Login custody
 
 With a `login` section, the gateway holds its provider's login in `login.directory` and renews
-it on demand. A renewal sends the stored refresh value to the OAuth server; the server replaces
+it on demand. The login comes in only through `import-login <provider>`, which reads it on
+standard input. The gateway runs as one uid, and `import-login` runs as that same uid, never as
+root: it makes a missing `login.directory` with mode 0700, refuses an existing one that the
+gateway's own check at start refuses (another owner, or a mode other than 0700), and names in its
+output the uid that owns the login. The gateway refuses at start a login directory or file of
+another owner, and names that owner as the cause. A renewal sends the stored refresh value to the OAuth server; the server replaces
 that value in its answer, so an answer that is lost (a kill of the gateway during the request,
 or a failed write of the answer) can leave a stored value that the server no longer takes, and
 the login then needs a new import.

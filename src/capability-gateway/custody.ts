@@ -1,16 +1,7 @@
 import { randomUUID } from "node:crypto"
 import { constants, type Stats } from "node:fs"
-import {
-  chmod,
-  lstat,
-  mkdir,
-  open,
-  readdir,
-  rename,
-  unlink,
-  type FileHandle,
-} from "node:fs/promises"
-import { dirname, join } from "node:path"
+import { lstat, mkdir, open, readdir, rename, unlink, type FileHandle } from "node:fs/promises"
+import { join } from "node:path"
 import { dlopen, FFIType, ptr } from "bun:ffi"
 import { Schema } from "effect"
 
@@ -457,8 +448,11 @@ export class ImportRefused extends Error {}
 /**
  * Imports the login of `provider` from `input`, which `import-login` read on standard input. A
  * login that is there already is replaced whole, and a state of the old one ends. The command
- * runs as the gateway's user: not root, and the owner of the directory, or of its parent when
- * the directory is not there yet. It makes nothing when it refuses.
+ * runs as the gateway's user, never as root: the login is this uid's, and the gateway, which runs
+ * as the same uid, refuses at start a directory of another owner. An existing directory must pass
+ * the gateway's own check at start (`checkLogin`); a missing one is made with mode 0700, set on
+ * the open directory, which a symbolic link put in its place is not. It writes nothing when it
+ * refuses. Resolves to the outcome and the uid that owns the login.
  */
 export async function importLogin(path: string, provider: CustodyProvider, input: Buffer) {
   if (input.length > loginLimit)
@@ -473,7 +467,8 @@ export async function importLogin(path: string, provider: CustodyProvider, input
   }
   if (!oauth.scopes.includes(inferenceScope))
     throw new ImportRefused(`the login does not hold the scope ${inferenceScope}`)
-  if (uid() === 0) throw new ImportRefused("import-login runs as the gateway's user, not as root")
+  const owner = uid()
+  if (owner === 0) throw new ImportRefused("import-login runs as the gateway's user, not as root")
   const exists = await lstat(path).then(
     () => true,
     (error: unknown) => {
@@ -482,17 +477,17 @@ export async function importLogin(path: string, provider: CustodyProvider, input
     },
   )
   if (!exists) {
-    const parent = dirname(path)
-    const owner = (await lstat(parent)).uid
-    if (owner !== uid())
-      throw new ImportRefused(
-        `${parent} belongs to uid ${owner}: import-login runs as the gateway's user, which owns it`,
-      )
     await mkdir(path, { mode: 0o700 })
     // 0700 whatever the umask, as the gateway requires at start.
-    await chmod(path, 0o700)
+    const made = await open(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW)
+    try {
+      await made.chmod(0o700)
+    } finally {
+      await made.close()
+    }
   }
-  return await holding(path, provider, async (directory) => {
+  await checkLogin(path, provider)
+  const outcome = await holding(path, provider, async (directory) => {
     const existed = await lstat(directory.at(loginName(provider))).then(
       () => true,
       (error: unknown) => {
@@ -506,6 +501,7 @@ export async function importLogin(path: string, provider: CustodyProvider, input
     await remove(directory, faultName(provider))
     return existed ? ("replaced" as const) : ("imported" as const)
   })
+  return { outcome, owner }
 }
 
 const loopback = new Set(["127.0.0.1", "[::1]", "localhost"])
