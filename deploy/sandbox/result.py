@@ -172,8 +172,6 @@ def publication_text(value, message=False):
     encoded = value.encode('utf8', errors='strict')
     if (len(encoded) > 10240) if message else (len(value) > 200):
         raise ValueError('Invalid publication text')
-    if message:
-        value = without_presentation(value)
     if any((unicodedata.category(c) == 'Cc' and not (message and c == '\n')) or invisible(c) for c in value):
         raise ValueError('Invalid publication text')
     if not message and any(c in value for c in ('\u2028', '\u2029')):
@@ -181,6 +179,14 @@ def publication_text(value, message=False):
     if message and (re.search(r'[<@$\\]', value) or '\\' in unicodedata.normalize('NFKC', value)):
         raise ValueError('HTML, mention, math or backslash in commit message')
     safe_publication(value)
+
+
+def commit_message(value):
+    """The rules of a run's commit message: U+FE0F only directly after a visible code point, then
+    the publication rules of a commit message, as the daemon's check holds them."""
+    if not isinstance(value, str):
+        raise ValueError('Invalid publication text')
+    publication_text(without_presentation(value), True)
 
 
 def publication_body(value):
@@ -322,7 +328,7 @@ def native_seal(source):
     if not isinstance(sensitive, list) or len(sensitive) > 32 or any(not isinstance(v, str) or not 16 <= len(v) <= 4096 for v in sensitive):
         raise ValueError('Invalid sensitive values')
     publication_text(completion['title'])
-    publication_text(completion['commitMessage'], True)
+    commit_message(completion['commitMessage'])
     publication_body(completion['body'])
     final_message(completion['finalMessage'])
     content_check(json.dumps(completion, ensure_ascii=False).encode(), sensitive)

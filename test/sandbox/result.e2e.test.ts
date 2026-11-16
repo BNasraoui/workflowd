@@ -750,7 +750,7 @@ m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
 rules = {
     'title': lambda value: m.publication_text(value),
-    'commitMessage': lambda value: m.publication_text(value, True),
+    'commitMessage': m.commit_message,
     'body': m.publication_body,
     'finalMessage': m.final_message,
     'path': lambda value: m.safe_path(base64.b64decode(value)),
