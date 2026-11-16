@@ -141,6 +141,8 @@ interface GatewayKeys {
   readonly staleSweepMs?: number
   /** The Git read route of a run's own repository, which a runner run clones through. */
   readonly gitRead?: boolean
+  /** The gateway's provider id; `anthropic` unless named. */
+  readonly providerId?: string
 }
 
 /**

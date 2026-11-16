@@ -202,6 +202,11 @@ export const controlProtocol = {
     request: Schema.Struct({ live: Schema.Array(CapabilityGrant) }),
     response: Schema.Null,
   }),
+  /**
+   * The provider id of the gateway's own configuration, which each grant of a runner run names:
+   * the gateway refuses a grant's calls to any other provider.
+   */
+  provider: schemas({ request: Schema.Struct({}), response: Schema.String }),
   /** Whether the runner of this Actions run and attempt holds a session. */
   sessionBound: schemas({
     request: Schema.Struct({

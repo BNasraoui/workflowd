@@ -98,6 +98,7 @@ export const controlClient = (socket: string) => ({
   revoke: (runId: string) => send(socket, "revoke", controlProtocol.revoke, { runId }),
   reconcile: (live: ReadonlyArray<CapabilityGrant>) =>
     send(socket, "reconcile", controlProtocol.reconcile, { live }),
+  provider: () => send(socket, "provider", controlProtocol.provider, {}),
   sessionBound: (runId: string, actionsRunId: number, actionsAttempt: number) =>
     send(socket, "sessionBound", controlProtocol.sessionBound, {
       runId,
@@ -126,14 +127,15 @@ export interface RunnerGrants {
  * The grant of each live native run in workflowd's store, or of `runId` alone: a run that
  * workflowd's worker authorization admits, whose lease is starting or ready with its Actions run
  * recorded and before its deadline. A run's budget is `budget` the first time the run is granted,
- * and the budget stored then each later time.
+ * and the budget stored then each later time. A runner run's grant names the gateway's provider
+ * `runner.providerId`, which the gateway answers from its own configuration.
  */
 export const liveGrants = Effect.fn("DaemonCapability.liveGrants")(function* (
   runId: string | null,
   now: number,
   budget: RunBudget,
   /** The runner placement: each run of one of its aliases carries its launch. */
-  runner?: RunnerGrants,
+  runner?: RunnerGrants & { readonly providerId: string },
 ) {
   const sql = yield* SqlClient.SqlClient
   const rows = yield* sql<Record<string, unknown>>`SELECT a.run_id AS runId,l.lease_id AS leaseId,
@@ -143,8 +145,7 @@ export const liveGrants = Effect.fn("DaemonCapability.liveGrants")(function* (
       json_extract(l.policy,'$.repository') AS repositoryName,
       json_extract(l.policy,'$.installationId') AS installationId,
       l.actions_run_id AS actionsRunId,l.actions_attempt AS actionsAttempt,l.deadline,l.policy,
-      a.prompt AS prompt,json_extract(l.policy,'$.agentImage') AS image,
-      json_extract(a.resolved_selection,'$.provider') AS selectedProvider
+      a.prompt AS prompt,json_extract(l.policy,'$.agentImage') AS image
       FROM kernel_agent_runs a JOIN sandbox_leases l ON l.run_id=a.run_id
       JOIN directory_managed d ON d.run_id=a.run_id
       WHERE a.repository=json_extract(l.policy,'$.alias')
@@ -152,18 +153,18 @@ export const liveGrants = Effect.fn("DaemonCapability.liveGrants")(function* (
       AND l.state IN ('starting','ready') AND l.actions_run_id IS NOT NULL
       AND (${runId} IS NULL OR a.run_id=${runId})`
   const live: CapabilityGrant[] = []
-  for (const { state, createdAt, policy, prompt, image, selectedProvider, ...row } of rows) {
+  for (const { state, createdAt, policy, prompt, image, ...row } of rows) {
     const created = new Date(String(createdAt))
     if (!authorizeWorker({ state: String(state), createdAt: created }, now)) continue
     const parsed: unknown = JSON.parse(String(policy))
     const grant = yield* Schema.decodeUnknownEffect(UnbudgetedGrant)({
       ...row,
-      // A runner run's provider at the gateway is its selection's: the run is Claude's
-      // ("claude-cli") on this host, and the gateway's provider ("anthropic") on the runner.
+      // A runner run's provider at the gateway is the gateway's own, as its configuration names
+      // it; the run's provider on this host ("claude-cli") is not the gateway's.
       ...(runner?.aliases.includes(String(row.repository)) === true
         ? {
             launch: { prompt, image, identity: runner.identity },
-            providerId: selectedProvider ?? row.providerId,
+            providerId: runner.providerId,
           }
         : {}),
       policy: parsed,
@@ -232,10 +233,26 @@ export const makeDaemonCapability = (options: {
         withinCallLimit(Effect.scoped(Effect.andThen(runs.acquire(runId), effect)))
     const watched = new Map<string, () => void>()
     const changed = yield* Queue.unbounded<string>()
-    const grants = (runId: string | null) =>
-      liveGrants(runId, Date.now(), options.budget ?? defaultRunBudget, options.runner).pipe(
-        Effect.provideService(SqlClient.SqlClient, sql),
-      )
+    /**
+     * The live grants, of `runId` alone unless null. With a runner placement the gateway's provider
+     * id is asked first, through `call`, which takes a place unless the caller holds them all.
+     */
+    const grants = (
+      runId: string | null,
+      call: <A, E>(effect: Effect.Effect<A, E>) => Effect.Effect<A, E> = placed,
+    ) =>
+      Effect.gen(function* () {
+        const runner =
+          options.runner === undefined
+            ? undefined
+            : { ...options.runner, providerId: yield* call(control.provider()) }
+        return yield* liveGrants(
+          runId,
+          Date.now(),
+          options.budget ?? defaultRunBudget,
+          runner,
+        ).pipe(Effect.provideService(SqlClient.SqlClient, sql))
+      })
     const watch = (runId: string) => {
       if (!watched.has(runId))
         watched.set(
@@ -269,7 +286,7 @@ export const makeDaemonCapability = (options: {
           Effect.gen(function* () {
             // The live set is read while the reconcile holds every place, so no grant sent after
             // the read can be revoked by it.
-            const live = yield* grants(null)
+            const live = yield* grants(null, (effect) => effect)
             for (const grant of live) watch(grant.runId)
             yield* control.reconcile(live)
             for (const runId of watched.keys())

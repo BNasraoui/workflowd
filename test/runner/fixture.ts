@@ -557,7 +557,8 @@ export async function withRunnerDaemon<A>(
     readonly record: () => Promise<string>
   }) => Promise<A>,
 ): Promise<A> {
-  const f = await fixture({ gitRead: true })
+  // A provider id other than `anthropic`: each grant of the run must name the gateway's own.
+  const f = await fixture({ gitRead: true, providerId: "fixture-provider" })
   const remote = await gitRemote(join(f.root, "git"))
   const lease = { id: "none" }
   let jobStart: Promise<void> | undefined

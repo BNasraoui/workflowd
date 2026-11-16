@@ -490,3 +490,7 @@ test("workflowd's grant of a launch whose prompt passes the bound is refused at 
   expect(Exit.isFailure(refused)).toBe(true)
   expect(String(refused)).toContain(`Expected at most ${maxLaunchPromptBytes} bytes`)
 })
+
+test("the gateway's control answers the provider id of its own configuration, which a runner run's grant names", async () => {
+  expect(await Effect.runPromise(gateway.control.provider)).toBe("anthropic")
+})

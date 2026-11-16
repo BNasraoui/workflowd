@@ -848,6 +848,7 @@ export const makeCapabilityGateway = (
           ),
           Effect.asVoid,
         ),
+      provider: Effect.succeed(config.providerId),
       sessionBound: store.sessionBound,
       readEvents: store.readEvents,
       readResult: store.readResult,

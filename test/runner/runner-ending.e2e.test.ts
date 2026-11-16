@@ -657,6 +657,7 @@ test("a job that holds no session within 30 minutes of its lease ends the start 
             liveGrants(null, Date.now(), defaultRunBudget, {
               aliases: ["runner"],
               identity: runnerIdentity,
+              providerId: "anthropic",
             }),
           ),
         ).toEqual([])
