@@ -2610,7 +2610,19 @@ for (const item of sealedTextCases)
     30_000,
   )
 
-test("the seal's ranges of default-ignorable code points are the property class of the daemon's engine", async () => {
+/** The ranges of the code points from 0 to U+10FFFF for which `has` holds. */
+const rangesOf = (has: (code: number) => boolean) => {
+  const ranges: Array<readonly [number, number]> = []
+  for (let code = 0; code <= 0x10ffff; code++) {
+    if (!has(code)) continue
+    const last = ranges.at(-1)
+    if (last !== undefined && last[1] === code - 1) ranges[ranges.length - 1] = [last[0], code]
+    else ranges.push([code, code])
+  }
+  return ranges
+}
+
+test("the seal's invisible code points are the property classes Cf and Default_Ignorable_Code_Point of the daemon's engine", async () => {
   const child = Bun.spawn(
     [
       "python3",
@@ -2618,11 +2630,13 @@ test("the seal's ranges of default-ignorable code points are the property class 
       "-B",
       "-c",
       `
-import importlib.util, json, sys
+import importlib.util, json, sys, unicodedata
 spec = importlib.util.spec_from_file_location('result', sys.argv[1])
 m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
-print(json.dumps(m.DEFAULT_IGNORABLE))
+format = [c for c in range(0x110000) if unicodedata.category(chr(c)) == 'Cf']
+print(json.dumps({'ignorable': m.DEFAULT_IGNORABLE, 'format': format,
+                  'invisible': [c for c in range(0x110000) if m.invisible(chr(c))]}))
 `,
       script,
     ],
@@ -2634,18 +2648,24 @@ print(json.dumps(m.DEFAULT_IGNORABLE))
     new Response(child.stderr).text(),
   ])
   expect({ status, stderr }).toEqual({ status: 0, stderr: "" })
-  const seal = Schema.decodeUnknownSync(Schema.Array(Schema.Tuple([Schema.Number, Schema.Number])))(
-    JSON.parse(stdout),
+  const seal = Schema.decodeUnknownSync(
+    Schema.Struct({
+      ignorable: Schema.Array(Schema.Tuple([Schema.Number, Schema.Number])),
+      format: Schema.Array(Schema.Number),
+      invisible: Schema.Array(Schema.Number),
+    }),
+  )(JSON.parse(stdout))
+  const has = (property: RegExp) => (code: number) => property.test(String.fromCodePoint(code))
+  // The ranges written in result.py, each against the class of the engine.
+  expect(seal.ignorable).toEqual(rangesOf(has(/\p{Default_Ignorable_Code_Point}/u)))
+  // Python's Unicode data of Cf against the class of the engine.
+  const inSeal = new Set(seal.format)
+  expect(rangesOf((code) => inSeal.has(code))).toEqual(rangesOf(has(/\p{Cf}/u)))
+  // The one rule of the seal is the union of the two.
+  const invisible = new Set(seal.invisible)
+  expect(rangesOf((code) => invisible.has(code))).toEqual(
+    rangesOf(has(/[\p{Cf}\p{Default_Ignorable_Code_Point}]/u)),
   )
-  const property = /\p{Default_Ignorable_Code_Point}/u
-  const engine: Array<readonly [number, number]> = []
-  for (let code = 0; code <= 0x10ffff; code++) {
-    if (!property.test(String.fromCodePoint(code))) continue
-    const last = engine.at(-1)
-    if (last !== undefined && last[1] === code - 1) engine[engine.length - 1] = [last[0], code]
-    else engine.push([code, code])
-  }
-  expect(seal).toEqual(engine)
 })
 
 // A long path with characters that the path rule accepts and a refusal escapes.
