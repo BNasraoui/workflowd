@@ -732,3 +732,23 @@ test("a runner run that is live at a restart of the daemon, over the gateway tha
     expect((await runtime.runPromise(mailbox(id))).length).toBe(1)
   })
 }, 90000)
+
+test("a runner whose posts stop while GitHub cannot be read ends runner_lost, and does not hold its lease to its deadline", async () => {
+  const end = await scriptedEnd((github) => {
+    let first = true
+    return () => {
+      if (first) {
+        first = false
+        // The run is quiet for two minutes, and GitHub's API does not answer.
+        github.unreadable()
+        setSystemTime(new Date(Date.now() + 120000))
+      }
+      return Promise.resolve()
+    }
+  })
+  expect(end.run.diagnostic).toBe(
+    "runner_lost: no post of the run for 120000ms while its Actions run is unread",
+  )
+  expect(end.messages.length).toBe(1)
+  expect(end.revokes).toContain(runId)
+}, 30000)

@@ -209,6 +209,8 @@ export async function githubStub(
   const created = new Set<string>()
   /** The Actions runs whose cancel the daemon asked for. */
   const cancels: Array<number> = []
+  /** Whether a read of the Actions run fails, as when GitHub's API does not answer. */
+  let unreadable = false
   const repository = "/repos/fixture/repo"
   const runOf = (leaseId: string) => ({
     id: actionsRunId,
@@ -266,6 +268,7 @@ export async function githubStub(
     if (path === `${repository}/actions/runs`)
       return Response.json({ total_count: runs().length, workflow_runs: runs() })
     if (path === `${repository}/actions/runs/${actionsRunId}`) {
+      if (unreadable) return new Response(null, { status: 503 })
       // The Actions run stays readable once its lease ref is deleted, as on GitHub.
       const [first] = [...created].map(runOf)
       return first === undefined ? new Response(null, { status: 404 }) : Response.json(first)
@@ -282,6 +285,10 @@ export async function githubStub(
     /** Ends the Actions run of `leaseId` with `conclusion`, as GitHub reports a job's end. */
     endRun: (leaseId: string, conclusion = "success") => {
       ended.set(leaseId, conclusion)
+    },
+    /** From now on, each read of the Actions run fails, as when GitHub's API does not answer. */
+    unreadable: () => {
+      unreadable = true
     },
     /** The lease refs that exist now. */
     leaseRefs: (): ReadonlyArray<string> => [...leases],

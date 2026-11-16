@@ -16,8 +16,9 @@ import { decodeSealedResult, type SealedResult, type SealedResultRefused } from 
 /**
  * Why a runner run ended without a result that the daemon can check. The ends of a live run are
  * `cancelled` (its stop), `runner_deadline`, `runner_lost` (no post for `lostAfterMs` while its
- * Actions run goes on), `runner_cancelled` and `runner_failed` (its Actions run ended with no
- * result, by its conclusion), and `gateway_ended`.
+ * Actions run goes on or cannot be read), `runner_cancelled` and `runner_failed` (its Actions run
+ * ended with no result, by its conclusion), `runner_start` (its first line is not its box's ready
+ * line), and `gateway_ended`.
  */
 export type RunnerFailure =
   | "runner_capacity"
@@ -227,10 +228,12 @@ export const makeRunnerExecutor = (options: {
                 `the run's Actions run ended ${job.conclusion ?? "with no conclusion"} before its result`,
               )
         }
-        if (quiet && job !== undefined && job !== null)
+        // No post for `lostAfterMs` while the gateway answers: the run client, which posts at
+        // least each 10 s, is gone, whether GitHub can be read or not.
+        if (quiet)
           return yield* ending(
             "runner_lost",
-            `no post of the run for ${lostAfterMs}ms while its Actions run is ${job.status}`,
+            `no post of the run for ${lostAfterMs}ms while its Actions run is ${job?.status ?? "unread"}`,
           )
         yield* Effect.sleep(pollMs)
         return [[], Option.some(after)] as const
