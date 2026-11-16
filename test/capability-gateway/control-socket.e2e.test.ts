@@ -155,12 +155,12 @@ test("the gateway refuses to start on a control directory or socket path that is
 
 const reconcileFrame = framed(JSON.stringify({ verb: "reconcile", body: { live: [] } }))
 
-test("the gateway answers a refused caller that sends nothing and ends its side, then reads the caller's request until the caller ends", async () => {
+test("the gateway answers a refused caller that sends nothing, then reads the caller's request before it ends the connection", async () => {
   const f = await fixture()
   const gateway = await startGateway(f, gatewayConfig(f, process.getuid!() + 1))
   try {
     const caller = halfOpenConnection(socketOf(f))
-    // The caller has sent nothing when the answer and the end of the gateway's side come.
+    // The caller has sent nothing when the answer comes.
     expect(JSON.parse(await caller.answer)).toEqual({ ok: false, error: "caller" })
     caller.connection.end(reconcileFrame)
     await caller.closed
@@ -196,11 +196,12 @@ test("the gateway closes a refused caller that sends more than one frame's bytes
   try {
     const caller = halfOpenConnection(socketOf(f))
     expect(JSON.parse(await caller.answer)).toEqual({ ok: false, error: "caller" })
-    // Twice the bound, more than the socket's buffers hold: the write completes only if the
-    // gateway reads it all, and fails if the gateway closes the connection past the bound.
-    caller.connection.end(Buffer.alloc(2 * maxControlFrame))
-    await caller.closed
-    expect(["EPIPE", "ECONNRESET"]).toContain(String(caller.errors[0]))
+    // A frame that declares twice the bound, of which the caller sends one byte past the bound
+    // and keeps its side open: the gateway ends the connection at the bound, not at the frame's
+    // end.
+    const request = framed(Buffer.alloc(maxControlFrame + 1), 2 * maxControlFrame)
+    caller.connection.write(request)
+    await caller.ended
   } finally {
     await gateway.stop()
     await f.close()

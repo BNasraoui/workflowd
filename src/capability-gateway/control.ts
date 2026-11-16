@@ -124,19 +124,27 @@ export const serveControl = (options: {
           refused.delete(socket)
         })
         socket.on("error", () => socket.destroy())
-        // A refused caller gets its answer, and the end of the gateway's side, as the gateway
-        // accepts the connection. The gateway then reads and drops the caller's bytes, up to one
-        // frame, until the caller ends its side: the caller's request never meets a closed socket.
-        // At most `maxControlConnections` refused connections are open at once.
+        // A refused caller gets its answer as the gateway accepts the connection, before it
+        // sends a byte. The gateway then reads and drops the caller's bytes until the caller has
+        // sent one whole frame or ended its side, and then ends the connection: the caller's
+        // request never meets a closed socket. (Bun's node:net closes both sides of a server's
+        // socket at `end`, so the gateway cannot end its own side first.) A caller that passes the
+        // bound of one frame is closed. At most `maxControlConnections` refused connections are
+        // open at once.
         const refuse = (error: ControlError) => {
           if (refused.size >= maxControlConnections) return socket.destroy()
           refused.add(socket)
-          let dropped = 0
+          let header = Buffer.alloc(0)
+          let read = 0
           socket.on("data", (chunk) => {
-            dropped += chunk.length
-            if (dropped > maxControlFrame + 4) socket.destroy()
+            read += chunk.length
+            if (header.length < 4)
+              header = Buffer.concat([header, Buffer.from(chunk).subarray(0, 4 - header.length)])
+            if (read > maxControlFrame + 4) return socket.destroy()
+            if (header.length === 4 && read >= 4 + header.readUInt32BE(0)) socket.end()
           })
-          socket.end(controlFrame({ ok: false, error }))
+          socket.on("end", () => socket.end())
+          socket.write(controlFrame({ ok: false, error }))
         }
         if (peerCredentials(socket)?.uid !== options.daemon.uid) return refuse("caller")
         if (sockets.size >= maxControlConnections) return refuse("unavailable")

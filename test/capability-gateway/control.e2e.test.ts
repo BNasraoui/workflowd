@@ -413,11 +413,15 @@ test("neither process can name the other's database", async () => {
       bytes: new Bun.CryptoHasher("sha256").update(await Bun.file(path).bytes()).digest("hex"),
       names: (await readdir(dirname(path))).filter((name) => name.startsWith(basename(path))),
     })
-    const daemonFile = await snapshot(daemonDatabase(f))
-    await expect(startGateway(f, { ...config, storePath: daemonDatabase(f) })).rejects.toThrow(
+    // The daemon's file as a killed daemon process left it, so no connection of this process
+    // closes it during the check.
+    const daemonPath = join(f.root, "daemon-made.db")
+    await (await startDaemon(daemonPath, socketOf(f))).stop()
+    const daemonFile = await snapshot(daemonPath)
+    await expect(startGateway(f, { ...config, storePath: daemonPath })).rejects.toThrow(
       "the gateway's store holds tables of another store",
     )
-    expect(await snapshot(daemonDatabase(f))).toEqual(daemonFile)
+    expect(await snapshot(daemonPath)).toEqual(daemonFile)
     const gateway = await startGateway(f)
     try {
       const gatewayFile = await snapshot(config.storePath)
@@ -428,8 +432,12 @@ test("neither process can name the other's database", async () => {
     } finally {
       await gateway.stop()
     }
-    // With the gateway stopped, no process has its file open.
+    // A gateway that stopped on SIGTERM closed its file: no process has it open, and SQLite
+    // left no file beside it.
+    const stopped = await startGateway(f)
+    await stopped.terminate!()
     const stoppedFile = await snapshot(config.storePath)
+    expect(stoppedFile.names).toEqual([basename(config.storePath)])
     const daemon = await startDaemon(config.storePath, socketOf(f))
     expect(daemon.refusal).toContain("is the capability gateway's store")
     expect(await snapshot(config.storePath)).toEqual(stoppedFile)

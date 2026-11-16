@@ -524,3 +524,73 @@ test("in this process, the custody command refuses what its grammar does not hol
     expect(oauth.requests()).toHaveLength(0)
   })
 })
+
+test("in this process, custody stores the renewal value of a 200 whose other fields it does not take, keeps the stored one when a 200 has none, and does not renew within the lead before the first wait", async () => {
+  await withLogin(async (root, oauth, env) => {
+    const directory = join(root, "login")
+    const statePath = join(directory, "claude.state")
+    const loginPath = join(directory, "claude.json")
+    const expired = () =>
+      claudeLogin(syntheticValue("access"), syntheticValue("refresh"), Date.now() - 1000)
+    const load = async (login: object) =>
+      expect((await importLoginCommand(env, ["claude"], input(JSON.stringify(login)))).code).toBe(0)
+    const command = () =>
+      custodyCommand(["access", directory, "--token-url", oauth.url, "claude", "60"])
+    const Login = Schema.fromJsonString(
+      Schema.Struct({
+        claudeAiOauth: Schema.Struct({ refreshToken: Schema.String, expiresAt: Schema.Number }),
+      }),
+    )
+    const login = async () =>
+      Schema.decodeUnknownSync(Login)(await readFile(loginPath, "utf8")).claudeAiOauth
+    const state = async (value: object) =>
+      writeFile(statePath, JSON.stringify(value), { mode: 0o600 })
+
+    // A 200 with expires_in 0: its renewal value is stored, and the try after the wait sends it.
+    await load(expired())
+    oauth.mode("expired")
+    const replaced = oauth.next().refresh
+    await expect(command()).rejects.toThrow("a renewal value, which custody stored")
+    expect((await login()).refreshToken).toBe(replaced)
+    await expect(command()).rejects.toThrow("the claude login waits to renew until")
+    await state({ state: "renewing", failures: 1, retryAt: 0 })
+    oauth.mode("renew")
+    oauth.renewWith({ access: syntheticValue("access"), refresh: syntheticValue("refresh") })
+    expect((await command()).token).toBe(oauth.next().access)
+    expect(sentRefresh(oauth.requests().at(-1))).toBe(replaced)
+
+    // A 200 with no renewal value keeps the stored one.
+    const kept = expired()
+    await load(kept)
+    oauth.mode("norotate")
+    expect((await command()).token).toBe(oauth.next().access)
+    expect((await login()).refreshToken).toBe(kept.claudeAiOauth.refreshToken)
+    expect(await readdir(directory)).not.toContain("claude.state")
+
+    // An access value within the lead serves calls, with no request, until the first wait ends.
+    await load(expired())
+    oauth.mode("short")
+    const before = oauth.requests().length
+    expect((await command()).token).toBe(oauth.next().access)
+    expect((await command()).token).toBe(oauth.next().access)
+    expect(oauth.requests()).toHaveLength(before + 1)
+    // Once that access value ends, a call within the wait gets none.
+    const ended = Schema.decodeUnknownSync(
+      Schema.fromJsonString(
+        Schema.Struct({ claudeAiOauth: Schema.Record(Schema.String, Schema.Unknown) }),
+      ),
+    )(await readFile(loginPath, "utf8"))
+    await writeFile(
+      loginPath,
+      JSON.stringify({ claudeAiOauth: { ...ended.claudeAiOauth, expiresAt: 0 } }),
+    )
+    await expect(command()).rejects.toThrow("the claude login waits to renew until")
+    expect(oauth.requests()).toHaveLength(before + 1)
+    // After the wait, the next call renews.
+    await state({ state: "renewed", renewAfter: 0 })
+    oauth.mode("renew")
+    expect((await command()).token).toBe(oauth.next().access)
+    expect(oauth.requests()).toHaveLength(before + 2)
+    expect(await readdir(directory)).not.toContain("claude.state")
+  })
+}, 30000)

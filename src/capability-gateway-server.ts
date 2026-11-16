@@ -188,9 +188,18 @@ function readStandardInput(limit: number) {
 if (import.meta.main) {
   const [command, ...args] = process.argv.slice(2)
   if (command === "import-login") {
-    const result = await importLoginCommand(process.env, args, (limit) =>
-      Promise.resolve(readStandardInput(limit)),
-    )
+    // import-login holds the login in memory: before it reads it, it writes no core file.
+    let forbidden = true
+    try {
+      forbidCoreFiles()
+    } catch {
+      forbidden = false
+    }
+    const result = forbidden
+      ? await importLoginCommand(process.env, args, (limit) =>
+          Promise.resolve(readStandardInput(limit)),
+        )
+      : { code: 1, output: "", error: "import-login refused: the core file limit was not set\n" }
     if (result.output) process.stdout.write(result.output)
     if (result.error) process.stderr.write(result.error)
     process.exitCode = result.code
