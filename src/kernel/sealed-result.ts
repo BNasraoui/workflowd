@@ -999,18 +999,21 @@ export const makeSealedResultGit = (
     yield* scratchRootReady(settings.scratchRoot)
     yield* removeEarlierScratch(settings.scratchRoot)
     const permits = yield* Semaphore.make(sealedResultLimits.concurrentChecks)
-    let waiting = 0
-    const wait = permits.take(1).pipe(
-      Effect.timeoutOrElse({
-        duration: settings.waitLimitMs,
-        orElse: () =>
-          Effect.fail(refused("wait_limit", `no slot was free within ${settings.waitLimitMs} ms`)),
-      }),
-      Effect.ensuring(Effect.sync(() => (waiting -= 1))),
+    // A permit is a resource of the scope of the check, held until the scratch
+    // directory is gone. The acquire cannot be interrupted except in the wait for a free
+    // permit, which takes none: the take and the finalizer that gives the permit back
+    // are one step.
+    const takePermit: Effect.Effect<void> = Effect.flatMap(permits.takeIfAvailable(1), (taken) =>
+      taken
+        ? Effect.void
+        : Effect.andThen(Effect.interruptible(permits.withPermits(1)(Effect.void)), takePermit),
     )
-    // The slot is held until the scratch directory is gone. A check over the bound of
-    // waiting checks is refused at once.
-    const slot = Effect.uninterruptibleMask((restore) =>
+    const permit = Effect.acquireRelease(takePermit, () => permits.release(1))
+    // A place among the waiting checks is held while the check waits for a permit, and
+    // given back when the wait ends: by a permit, the wait limit, a failure or an
+    // interrupt. A check over the bound of waiting checks is refused at once.
+    let waiting = 0
+    const slot = Effect.acquireUseRelease(
       Effect.suspend(() => {
         if (waiting >= sealedResultLimits.waitingChecks)
           return Effect.fail(
@@ -1020,8 +1023,19 @@ export const makeSealedResultGit = (
             ),
           )
         waiting += 1
-        return restore(wait).pipe(Effect.andThen(Effect.addFinalizer(() => permits.release(1))))
+        return Effect.void
       }),
+      () =>
+        permit.pipe(
+          Effect.timeoutOrElse({
+            duration: settings.waitLimitMs,
+            orElse: () =>
+              Effect.fail(
+                refused("wait_limit", `no slot was free within ${settings.waitLimitMs} ms`),
+              ),
+          }),
+        ),
+      () => Effect.sync(() => (waiting -= 1)),
     )
     const check = <E>(
       result: SealedResult,

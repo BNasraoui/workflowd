@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test"
-import { Cause, Effect, Exit, Fiber, Layer, Logger, Redacted, Schema } from "effect"
+import { Cause, Effect, Exit, Fiber, Layer, Logger, Redacted, Scheduler, Schema } from "effect"
 import {
   chmod,
   lstat,
@@ -1382,51 +1382,77 @@ test(
   30_000,
 )
 
+/**
+ * A runner whose checks stay in their first git child until the gate opens, with a
+ * token maker that counts the tokens it makes and revokes, and a latch for a count.
+ */
+async function gatedRunner(f: Fixture, sealed: SealedResult, waitLimitMs: number) {
+  const gate = join(f.root, "gate")
+  const gated = join(f.root, "gated-git")
+  await writeFile(
+    gated,
+    `#!/bin/sh\nwhile [ ! -e ${gate} ]; do sleep 0.02; done\nexec /usr/bin/git "$@"\n`,
+  )
+  await chmod(gated, 0o755)
+  const tokens = { minted: 0, revoked: 0 }
+  const latches: Array<{ readonly count: number; readonly open: () => void }> = []
+  const opts = options(f, {
+    binary: gated,
+    waitLimitMs,
+    token: Effect.acquireRelease(
+      Effect.sync(() => {
+        tokens.minted += 1
+        for (const latch of latches) if (tokens.minted >= latch.count) latch.open()
+        return Redacted.make(token)
+      }),
+      () => Effect.sync(() => (tokens.revoked += 1)),
+    ),
+  })
+  const runner = await Effect.runPromise(makeSealedResultGit(opts.git))
+  const targetOf = (index: number) => ({
+    ref: `refs/heads/agent-run/run-${index}`,
+    expectedHead: null,
+  })
+  return {
+    tokens,
+    opts,
+    runner,
+    targetOf,
+    /** A check and its push; the call returns when the check waits for a slot or holds one. */
+    check: (index: number) => publish(sealed, opts, undefined, targetOf(index), runner),
+    /** Resolves once the token maker has made `count` tokens. */
+    minted: (count: number) =>
+      new Promise<void>((open) => {
+        if (tokens.minted >= count) open()
+        else latches.push({ count, open })
+      }),
+    open: () => writeFile(gate, ""),
+  }
+}
+
+/** A result sealed by result.py with one new file. */
+const sealedResult = async (f: Fixture) => {
+  const sealed = await sealWithResultPy(f, async (workspace) => {
+    await writeFile(join(workspace, "result.txt"), "content\n")
+  })
+  return decode(sealed.json, sealed.bundle)
+}
+
 test(
   "a check over the bound of waiting checks is refused at once, a check that waits past its limit is refused, and neither makes a token",
   withFixture(async (f) => {
-    // A git that waits until the gate opens: each check that holds a slot stays in init.
-    const gate = join(f.root, "gate")
-    const gated = join(f.root, "gated-git")
-    await writeFile(
-      gated,
-      `#!/bin/sh\nwhile [ ! -e ${gate} ]; do sleep 0.02; done\nexec /usr/bin/git "$@"\n`,
-    )
-    await chmod(gated, 0o755)
-    const sealed = await sealWithResultPy(f, async (workspace) => {
-      await writeFile(join(workspace, "result.txt"), "content\n")
-    })
-    const result = await decode(sealed.json, sealed.bundle)
-    let minted = 0
-    let revoked = 0
-    const counted = options(f, {
-      binary: gated,
-      waitLimitMs: 3_000,
-      token: Effect.acquireRelease(
-        Effect.sync(() => {
-          minted += 1
-          return Redacted.make(token)
-        }),
-        () => Effect.sync(() => (revoked += 1)),
-      ),
-    })
-    const runner = await Effect.runPromise(makeSealedResultGit(counted.git))
-    const check = (index: number) =>
-      publish(
-        result,
-        counted,
-        undefined,
-        { ref: `refs/heads/agent-run/run-${index}`, expectedHead: null },
-        runner,
-      )
+    const gated = await gatedRunner(f, await sealedResult(f), 3_000)
     const { concurrentChecks, waitingChecks } = sealedResultLimits
-    const holding = Array.from({ length: concurrentChecks }, (_, index) => check(index))
-    while (minted < concurrentChecks) await Bun.sleep(10)
+    const holding = Array.from({ length: concurrentChecks }, (_, index) => gated.check(index))
+    // A check makes its token once it holds a slot.
+    await gated.minted(concurrentChecks)
+    // A check runs from its call to the wait for a slot with no pause, so each of these
+    // holds its place among the waiting checks when its call returns. A waiting check
+    // makes no token and starts no git child, so no fake can tell it.
     const waiting = Array.from({ length: waitingChecks }, (_, index) =>
-      check(concurrentChecks + index),
+      gated.check(concurrentChecks + index),
     )
-    await Bun.sleep(100)
-    const over = refusal(await check(concurrentChecks + waitingChecks))
+    const over = refusal(await gated.check(concurrentChecks + waitingChecks))
     expect(over.check).toBe("checks_waiting")
     expect(over.detail).toBe(
       `${waitingChecks} checks wait for a slot; the bound is ${waitingChecks}`,
@@ -1437,17 +1463,98 @@ test(
     )
     expect(refusal(waited[0]!).detail).toBe("no slot was free within 3000 ms")
     // Only the checks that got a slot made a token.
-    expect(minted).toBe(concurrentChecks)
-    await writeFile(gate, "")
+    expect(gated.tokens.minted).toBe(concurrentChecks)
+    await gated.open()
     for (const exit of await Promise.all(holding)) expect(Exit.isSuccess(exit)).toBe(true)
-    expect({ minted, revoked }).toEqual({ minted: concurrentChecks, revoked: concurrentChecks })
+    expect(gated.tokens).toEqual({ minted: concurrentChecks, revoked: concurrentChecks })
     // The slots are free again, and the waiting count is back to zero.
     const exits = await Promise.all(
-      Array.from({ length: concurrentChecks + waitingChecks }, (_, index) => check(100 + index)),
+      Array.from({ length: concurrentChecks + waitingChecks }, (_, index) =>
+        gated.check(100 + index),
+      ),
     )
     for (const exit of exits) expect(Exit.isSuccess(exit)).toBe(true)
   }),
   30_000,
+)
+
+/**
+ * Runs a check on a scheduler that makes its fiber yield once, before its operation
+ * `at`, and interrupts the fiber at that yield. Returns false when the check suspended
+ * by itself (in its wait for a slot, or on its first file operation) before it got to
+ * operation `at`; it is then interrupted there.
+ */
+const interruptedAt = async (
+  gated: Awaited<ReturnType<typeof gatedRunner>>,
+  result: SealedResult,
+  index: number,
+  at: number,
+) => {
+  const base = new Scheduler.MixedScheduler()
+  let ops = 0
+  let yielded = false
+  const once: Scheduler.Scheduler = {
+    executionMode: base.executionMode,
+    shouldYield: () => {
+      ops += 1
+      if (ops !== at) return false
+      yielded = true
+      return true
+    },
+    makeDispatcher: () => base.makeDispatcher(),
+  }
+  await Effect.runPromise(
+    Effect.gen(function* () {
+      const fiber = yield* Effect.forkChild(
+        Effect.scoped(gated.runner.check(result, gated.targetOf(index), gated.opts)).pipe(
+          Effect.provideService(Scheduler.Scheduler, once),
+        ),
+        { startImmediately: true },
+      )
+      yield* Fiber.interrupt(fiber)
+    }),
+  )
+  return yielded
+}
+
+test(
+  "a check that is interrupted at any operation before or in its wait for a slot gives its slot and its place among the waiting checks back",
+  withFixture(async (f) => {
+    const result = await sealedResult(f)
+    const gated = await gatedRunner(f, result, 10_000)
+    const { concurrentChecks, waitingChecks } = sealedResultLimits
+    // A slot is free: the checks are interrupted at each operation up to the first file
+    // operation after the slot is taken.
+    let taking = 1
+    while (await interruptedAt(gated, result, taking, taking)) taking += 1
+    // Every slot is held: the checks are interrupted at each operation up to the wait,
+    // and in it.
+    const minted = gated.tokens.minted
+    const holding = Array.from({ length: concurrentChecks }, (_, index) => gated.check(index))
+    // A slot that an interrupted check kept leaves a holding check to wait until its
+    // wait limit, and its refusal ends the race first.
+    await Promise.race([
+      gated.minted(minted + concurrentChecks),
+      Promise.race(holding).then((exit) => {
+        throw new Error(`a holding check ended before each slot was taken: ${refusedCheck(exit)}`)
+      }),
+    ])
+    let waited = 1
+    while (await interruptedAt(gated, result, 10_000 + waited, waited)) waited += 1
+    // A check runs from its call to its wait with no pause, so each of these holds its
+    // place among the waiting checks when its call returns.
+    const waiting = Array.from({ length: waitingChecks }, (_, index) =>
+      gated.check(concurrentChecks + index),
+    )
+    expect(refusedCheck(await gated.check(concurrentChecks + waitingChecks))).toBe("checks_waiting")
+    await gated.open()
+    for (const exit of await Promise.all([...holding, ...waiting]))
+      expect(Exit.isSuccess(exit)).toBe(true)
+    expect(gated.tokens.revoked).toBe(gated.tokens.minted)
+    // Each sweep reached its check's own suspension.
+    expect({ taking: taking > 10, waited: waited > 10 }).toEqual({ taking: true, waited: true })
+  }),
+  60_000,
 )
 
 test(
