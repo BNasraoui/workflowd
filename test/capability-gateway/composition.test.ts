@@ -269,3 +269,39 @@ test("the gateway's listener is a Unix socket: a listen section with a host or a
     "gateway.example.ts.net:8443",
   )
 })
+
+test("the gateway's login directory is an absolute path of letters, digits, '.', '_', '-' and '/' only, as the provider file's command takes it", () => {
+  const gateway = {
+    noscope: { binary: "/fixture/noscope", configHome: "/fixture" },
+    providerId: "anthropic",
+    credentialRole: "claude",
+    maxStreams: 2,
+    maxStreamsPerRun: 2,
+    storePath: "/fixture/gateway.db",
+    controlSocket: "/fixture/control/gateway.sock",
+    daemon: { uid: 1000, gid: 1000 },
+    listen: {
+      socket: "/fixture/front/gateway.sock",
+      front: { uid: 1001, gid: 1001 },
+      service: "gateway.example.ts.net",
+    },
+  }
+  const load = (directory: string) =>
+    loadCapabilityGatewayConfig({
+      WORKFLOWD_CAPABILITY_GATEWAY: JSON.stringify({ ...gateway, login: { directory } }),
+    }).login?.directory
+  expect(load("/var/lib/gateway-1/login_dir.d")).toBe("/var/lib/gateway-1/login_dir.d")
+  for (const directory of [
+    "login",
+    "/var/lib/gateway login",
+    "/var/lib/$HOME",
+    '/var/lib/"login"',
+    "/var/lib/'login'",
+    "/var/lib/login\\n",
+    "/var/lib/login\nmint = x",
+    "/var/lib/login;id",
+    "/var/lib/`id`",
+    "/",
+  ])
+    expect(() => load(directory)).toThrow('at ["login"]["directory"]')
+})
