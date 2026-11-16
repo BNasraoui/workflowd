@@ -1,78 +1,16 @@
 import { expect, test } from "bun:test"
-import type { RunBudget } from "../../src/capability-control/protocol"
-import { maxReportedTokens } from "../../src/capability-gateway/claude"
 import { defaultRunBudget } from "../../src/sandbox/config"
+import { client, gateways, processGateway, usageStream } from "./gateway-process"
 import {
-  client,
-  fixture,
-  gateways,
-  processGateway,
-  proof,
-  streamEnd,
-  usageStream,
-  type Fixture,
-  type Gateway,
-  type Origin,
-} from "./gateway-process"
-
-/** The body of a model call that the run's budget refuses. */
-const spentBody = {
-  type: "error",
-  error: { type: "permission_error", message: "workflowd run budget spent" },
-}
-
-/** Opens the seeded run's session and gives its run token. */
-async function runToken(at: Origin, jti = "jti-budget") {
-  const runner = client(at)
-  const { audience } = await runner.audience()
-  const opened = await runner.session(proof(audience, jti))
-  expect(opened.status).toBe(200)
-  return (await runner.grant(opened)).token
-}
-
-/** What the daemon reads of the seeded run on the control socket. */
-const usage = (f: Fixture) => f.daemon((capability) => capability.usage("run"))
-
-/** The open reservations in the gateway's store. */
-const openReservations = (f: Fixture) =>
-  f.gatewaySql(
-    (sql) => sql<{ readonly n: number }>`SELECT count(*) AS n FROM capability_reservations`,
-  )
-
-/** Polls `check` until it holds, for at most five seconds. */
-async function eventually(check: () => Promise<boolean>) {
-  for (let poll = 0; poll < 100; poll++) {
-    if (await check()) return
-    await Bun.sleep(50)
-  }
-  throw new Error("the condition did not hold within five seconds")
-}
-
-/** Reads an answer to its end, and gives its status and its text. */
-async function answered(response: Promise<Response>) {
-  const answer = await response
-  return { status: answer.status, text: await answer.text() }
-}
-
-/** A gateway from `start` on a fixture whose daemon side gives a new run `budget`. */
-async function withBudget(
-  start: (f: Fixture) => Promise<Gateway>,
-  budget: RunBudget,
-  body: (f: Fixture, gateway: Gateway) => Promise<void>,
-  keys: { readonly maxStreamsPerRun?: number; readonly streamIdleMs?: number } = {},
-) {
-  const f = await fixture(keys, undefined, budget)
-  let gateway: Gateway | undefined
-  try {
-    gateway = await start(f)
-    await body(f, gateway)
-  } finally {
-    await gateway?.stop()
-    await f.close()
-  }
-}
-
-const small = { calls: 100, outputTokens: 1000, maxTokens: 400 }
+  answered,
+  eventually,
+  openReservations,
+  runToken,
+  small,
+  spentBody,
+  usage,
+  withBudget,
+} from "./budget-fixture"
 
 for (const [mode, start] of gateways) {
   test(`[${mode}] a model call whose max_tokens is above the cap, absent or not a positive integer gets the empty 403, and the upstream sees nothing`, async () => {
@@ -188,11 +126,14 @@ for (const [mode, start] of gateways) {
       async (f, gateway) => {
         const token = await runToken(gateway)
         const runner = client(gateway)
-        f.setStall(true)
+        // The upstream's answer ends after 3 s. A gateway that its HTTP server tells that the client
+        // went away releases the stream then; one that it does not tell (Bun 1.3.14) releases it at
+        // the end of the answer. Either way the stream's reservation is settled once.
+        f.setTrickle(60, 50)
         const answers = await Promise.all(Array.from({ length: 4 }, () => runner.call(token, 300)))
         expect(answers.map((answer) => answer.status).sort()).toEqual([200, 200, 200, 403])
         expect(f.upstreamRequests().length).toBe(3)
-        // The three open streams hold their reservations until they end; a stall reports no usage.
+        // The three open streams hold their reservations until they end; a ping reports no usage.
         for (const answer of answers) await answer.body?.cancel()
         await eventually(async () => (await openReservations(f))[0]?.n === 0)
         expect(await usage(f)).toMatchObject({ calls: 3, outputTokens: 900, spent: true })
@@ -200,203 +141,7 @@ for (const [mode, start] of gateways) {
       { maxStreamsPerRun: 4 },
     )
   }, 30000)
-
-  test(`[${mode}] a client that goes away in the middle of a stream is charged the max_tokens of its call`, async () => {
-    await withBudget(start, small, async (f, gateway) => {
-      const token = await runToken(gateway)
-      f.setStall(true)
-      const answer = await client(gateway).call(token, 300)
-      expect(answer.status).toBe(200)
-      const reader = answer.body!.getReader()
-      expect((await reader.read()).done).toBe(false)
-      expect((await openReservations(f))[0]?.n).toBe(1)
-      await reader.cancel()
-      await eventually(async () => (await openReservations(f))[0]?.n === 0)
-      expect(await usage(f)).toMatchObject({ calls: 1, outputTokens: 300, spent: false })
-    })
-  }, 30000)
-
-  test(`[${mode}] a stream that the idle limit ends is charged the max_tokens of its call`, async () => {
-    await withBudget(
-      start,
-      small,
-      async (f, gateway) => {
-        const token = await runToken(gateway)
-        f.setStall(true)
-        const answer = await client(gateway).call(token, 300)
-        expect(answer.status).toBe(200)
-        expect(await streamEnd(answer.body!.getReader(), 5000)).toBe("ended")
-        await eventually(async () => (await openReservations(f))[0]?.n === 0)
-        expect(await usage(f)).toMatchObject({ calls: 1, outputTokens: 300 })
-      },
-      { streamIdleMs: 300 },
-    )
-  }, 30000)
-
-  test(`[${mode}] a stream that ends with no message_delta is charged its max_tokens and records the input of its message_start`, async () => {
-    await withBudget(start, small, async (f, gateway) => {
-      const token = await runToken(gateway)
-      const stream = usageStream({ input_tokens: 11, output_tokens: 1 }, null)
-      f.setAnswerText(stream)
-      expect(await answered(client(gateway).call(token, 300))).toEqual({
-        status: 200,
-        text: stream,
-      })
-      await eventually(async () => (await openReservations(f))[0]?.n === 0)
-      expect(await usage(f)).toMatchObject({ calls: 1, inputTokens: 11, outputTokens: 300 })
-    })
-  }, 30000)
-
-  test(`[${mode}] a usage count that is negative, not an integer or above the bound charges the call its max_tokens and records no input`, async () => {
-    await withBudget(start, { ...small, outputTokens: 100000 }, async (f, gateway) => {
-      const token = await runToken(gateway)
-      const runner = client(gateway)
-      const bad: ReadonlyArray<Record<string, unknown>> = [
-        { output_tokens: -1 },
-        { output_tokens: 1.5 },
-        { output_tokens: "250" },
-        { output_tokens: null },
-        { output_tokens: maxReportedTokens + 1 },
-        { output_tokens: 5, input_tokens: -3 },
-        { output_tokens: 5, cache_read_input_tokens: 2.5 },
-        { output_tokens: 5, cache_creation_input_tokens: maxReportedTokens + 1 },
-      ]
-      for (const end of bad) {
-        f.setAnswerText(usageStream({ output_tokens: 1 }, { input_tokens: 4, ...end }))
-        expect((await answered(runner.call(token, 300))).status).toBe(200)
-      }
-      await eventually(async () => (await openReservations(f))[0]?.n === 0)
-      expect(await usage(f)).toEqual({
-        calls: bad.length,
-        inputTokens: 0,
-        outputTokens: 300 * bad.length,
-        cacheCreationInputTokens: 0,
-        cacheReadInputTokens: 0,
-        spent: false,
-      })
-      // The bound itself is a count; a null input count is no count.
-      f.setAnswerText(
-        usageStream(
-          { input_tokens: 9, cache_creation_input_tokens: null },
-          { output_tokens: 7, cache_read_input_tokens: maxReportedTokens, input_tokens: null },
-        ),
-      )
-      expect((await answered(runner.call(token, 300))).status).toBe(200)
-      await eventually(async () => (await openReservations(f))[0]?.n === 0)
-      expect(await usage(f)).toMatchObject({
-        inputTokens: 9,
-        outputTokens: 300 * bad.length + 7,
-        cacheReadInputTokens: maxReportedTokens,
-      })
-    })
-  }, 30000)
-
-  test(`[${mode}] an answer that is not a stream is read for its usage, and the client gets its bytes`, async () => {
-    await withBudget(start, small, async (f, gateway) => {
-      const token = await runToken(gateway)
-      const runner = client(gateway)
-      const json = JSON.stringify({
-        id: "msg_fixture",
-        type: "message",
-        role: "assistant",
-        content: [{ type: "text", text: "ok" }],
-        usage: {
-          input_tokens: 7,
-          output_tokens: 42,
-          cache_creation_input_tokens: 3,
-          cache_read_input_tokens: 5,
-        },
-      })
-      f.setAnswerJson(json)
-      expect(await answered(runner.call(token, 300))).toEqual({ status: 200, text: json })
-      // An answer that does not parse reports no usage.
-      f.setAnswerJson(`${json.slice(0, -1)},`)
-      expect((await answered(runner.call(token, 300))).status).toBe(200)
-      // An error answer of the provider made no output: it is a call and charges nothing.
-      const error = JSON.stringify({
-        type: "error",
-        error: { type: "overloaded_error", message: "Overloaded" },
-      })
-      f.setAnswerJson(error, 529)
-      expect(await answered(runner.call(token, 300))).toEqual({ status: 529, text: error })
-      await eventually(async () => (await openReservations(f))[0]?.n === 0)
-      expect(await usage(f)).toEqual({
-        calls: 3,
-        inputTokens: 7,
-        outputTokens: 42 + 300,
-        cacheCreationInputTokens: 3,
-        cacheReadInputTokens: 5,
-        spent: false,
-      })
-    })
-  }, 30000)
-
-  test(`[${mode}] a stop of the gateway settles each open reservation in full`, async () => {
-    const f = await fixture({}, undefined, small)
-    let gateway: Gateway | undefined = await start(f)
-    try {
-      const token = await runToken(gateway)
-      f.setStall(true)
-      const answer = await client(gateway).call(token, 300)
-      expect(answer.status).toBe(200)
-      expect((await openReservations(f))[0]?.n).toBe(1)
-      await (gateway.terminate ?? gateway.stop)()
-      gateway = undefined
-      expect((await openReservations(f))[0]?.n).toBe(0)
-      gateway = await start(f)
-      expect(await usage(f)).toMatchObject({ calls: 1, outputTokens: 300 })
-    } finally {
-      await gateway?.stop()
-      await f.close()
-    }
-  }, 30000)
-
-  test(`[${mode}] the counts survive a restart, and a reservation left open in the store is charged in full at the start`, async () => {
-    const f = await fixture({}, undefined, small)
-    let gateway: Gateway | undefined = await start(f)
-    try {
-      const token = await runToken(gateway)
-      expect((await answered(client(gateway).call(token, 300))).status).toBe(200)
-      await gateway.stop()
-      gateway = undefined
-      // A reservation that no stop settled, as a gateway that was killed leaves it.
-      await f.gatewaySql(
-        (sql) =>
-          sql`INSERT INTO capability_reservations(id,run_id,tokens) VALUES(${"e".repeat(32)},'run',200)`,
-      )
-      gateway = await start(f)
-      expect((await openReservations(f))[0]?.n).toBe(0)
-      expect(await usage(f)).toMatchObject({ calls: 1, outputTokens: 201 })
-      expect((await answered(client(gateway).call(token, 300))).status).toBe(200)
-      expect(await usage(f)).toMatchObject({ calls: 2 })
-    } finally {
-      await gateway?.stop()
-      await f.close()
-    }
-  }, 30000)
 }
-
-test("[process] a gateway killed with an open stream charges its reservation in full when it starts again", async () => {
-  const f = await fixture({}, undefined, small)
-  let gateway: Gateway | undefined = await processGateway(f)
-  try {
-    const token = await runToken(gateway)
-    f.setStall(true)
-    const answer = await client(gateway).call(token, 300)
-    expect(answer.status).toBe(200)
-    expect((await openReservations(f))[0]?.n).toBe(1)
-    // SIGKILL: no finalizer of the gateway runs.
-    await gateway.stop()
-    gateway = undefined
-    expect((await openReservations(f))[0]?.n).toBe(1)
-    gateway = await processGateway(f)
-    expect((await openReservations(f))[0]?.n).toBe(0)
-    expect(await usage(f)).toMatchObject({ calls: 1, outputTokens: 300 })
-  } finally {
-    await gateway?.stop()
-    await f.close()
-  }
-}, 30000)
 
 test("[process] a change of the config's budget changes no run that workflowd has authorized", async () => {
   await withBudget(processGateway, { ...small, calls: 1 }, async (f, gateway) => {
