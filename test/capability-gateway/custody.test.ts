@@ -390,13 +390,14 @@ async function childrenOf(parent: number) {
 
 /**
  * A process's core limit, soft and hard, and whether it is dumpable: the kernel gives the /proc
- * entries of a process that is not dumpable to root.
+ * entries of a process that is not dumpable to root, which a user namespace that does not map it
+ * shows as the overflow uid, so they are not the process's uid.
  */
 async function coreState(pid: number) {
   const limits = await readFile(`/proc/${pid}/limits`, "utf8")
   return {
     limit: /^Max core file size\s+(\S+)\s+(\S+)/m.exec(limits)?.slice(1),
-    dumpable: (await stat(`/proc/${pid}/status`)).uid !== 0,
+    dumpable: (await stat(`/proc/${pid}/status`)).uid === process.getuid!(),
   }
 }
 

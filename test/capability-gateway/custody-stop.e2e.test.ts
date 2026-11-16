@@ -2,13 +2,7 @@ import { expect, test } from "bun:test"
 import { randomUUID } from "node:crypto"
 import { readFile, readdir, writeFile } from "node:fs/promises"
 import { join } from "node:path"
-import {
-  claudeLogin,
-  client,
-  sse,
-  storedAccess,
-  syntheticValue,
-} from "./gateway-process"
+import { claudeLogin, client, sse, storedAccess, syntheticValue } from "./gateway-process"
 import {
   imported,
   loginDirectory,
