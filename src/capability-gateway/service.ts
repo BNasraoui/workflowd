@@ -3,7 +3,14 @@ import { SqlClient } from "effect/unstable/sql"
 import { randomInt } from "node:crypto"
 import { mintCapability } from "./noscope"
 import { custodyProvider, loginFault, renewalWriteBoundMs } from "./custody"
-import { claudeRequest, readRequestBody, type ClaudeUpstream } from "./claude"
+import {
+  budgetSpent,
+  claudeRequest,
+  readRequestBody,
+  RunBudgetSpent,
+  type ClaudeUpstream,
+  type ReportedUsage,
+} from "./claude"
 import { CapabilityRefused, capabilityDigest, makeCapabilityStore } from "./store"
 import { githubJobKeys, verifyJobProof } from "../sandbox/bootstrap"
 import { runLifetime } from "../store/run-lifetime"
@@ -142,6 +149,8 @@ export const makeCapabilityGateway = (
   Effect.gen(function* () {
     const streamIdleMs = config.streamIdleMs ?? defaultStreamIdleMs
     const store = yield* makeCapabilityStore
+    // A reservation that an earlier process left open is charged in full before any call starts.
+    yield* store.chargeOpenReservations()
     const sql = yield* SqlClient.SqlClient
     const authority = runLifetime(sql)
     // The gateway's lifetime: a renewal of the provider login ends with the gateway, never with
@@ -208,6 +217,18 @@ export const makeCapabilityGateway = (
       Map<AbortController, { readonly session: number; readonly digest: string }>
     >()
     let count = 0
+    // The release of each admitted stream that has not ended, and each settlement not yet stored.
+    const releases = new Set<() => void>()
+    const settling = new Set<Promise<unknown>>()
+    const settleReservation = (reservation: string, usage: ReportedUsage | undefined) => {
+      const stored = Effect.runPromiseExit(
+        store
+          .settle(reservation, usage)
+          .pipe(Effect.catch(logFailure("Capability settlement failed"))),
+      )
+      settling.add(stored)
+      void stored.then(() => settling.delete(stored))
+    }
     const abortRun = (runId: string) => {
       for (const controller of active.get(runId)?.keys() ?? []) controller.abort()
     }
@@ -247,6 +268,22 @@ export const makeCapabilityGateway = (
       Effect.sync(() => {
         for (const runId of active.keys()) abortRun(runId)
       }),
+    )
+    // A stop releases each open stream, which settles its reservation, before the store closes.
+    yield* Effect.addFinalizer(() =>
+      Effect.sync(() => {
+        for (const release of [...releases]) release()
+      }).pipe(
+        // Each settlement is an exit: it does not reject.
+        Effect.andThen(
+          Effect.promise(() =>
+            Promise.all(settling).then(
+              () => undefined,
+              () => undefined,
+            ),
+          ),
+        ),
+      ),
     )
     const jobKeys = cachedJobKeys(keys)
     const mints = yield* Semaphore.make(maxMints)
@@ -414,9 +451,17 @@ export const makeCapabilityGateway = (
           let idleTimer = setTimeout(() => controller.abort(), streamIdleMs)
           let providerTimer: ReturnType<typeof setTimeout> | undefined
           let released = false
+          // The reservation of the stream's model call, settled once, at the stream's release.
+          let reservation: string | undefined
+          let usage: (() => ReportedUsage | undefined) | undefined
+          const settle = () => {
+            if (reservation !== undefined) settleReservation(reservation, usage?.())
+          }
           const release = () => {
             if (released) return
             released = true
+            releases.delete(release)
+            settle()
             unlisten()
             clearTimeout(timer)
             clearTimeout(idleTimer)
@@ -426,10 +471,18 @@ export const makeCapabilityGateway = (
             count--
             controller.abort()
           }
+          releases.add(release)
           return {
             controller,
             release,
             transferred: false,
+            reserved: (id: string) => {
+              reservation = id
+              if (released) settle()
+            },
+            measured: (read: () => ReportedUsage | undefined) => {
+              usage = read
+            },
             touch: () => {
               if (released) return
               clearTimeout(idleTimer)
@@ -527,20 +580,33 @@ export const makeCapabilityGateway = (
     ) =>
       ownedPromise(async (interruption) => {
         const signal = AbortSignal.any([ownership.controller.signal, request.signal, interruption])
-        const send = async (start: () => Promise<Response>) => {
+        /**
+         * Launches an upstream request. A model call also counts against the run's budget and
+         * reserves `tokens` of its output tokens, in the same step as its launch.
+         */
+        const send = async (start: () => Promise<Response>, tokens?: number) => {
           // Admission and launch share the run-lifetime fence; network waiting does not.
           const started = await Effect.runPromise(
             authority.withPermit(
               Effect.gen(function* () {
                 yield* store.authorize(binding, digest, Date.now())
+                if (tokens !== undefined) {
+                  const reservation = yield* store.reserve(binding.runId, tokens, Date.now())
+                  if (reservation === null) return { spent: true as const }
+                  // The stream holds the reservation before the commit, so its release settles it
+                  // whenever it comes; the settlement waits for the commit, and a reservation that
+                  // is rolled back is no row: its settlement changes nothing.
+                  ownership.reserved(reservation)
+                }
                 return yield* Effect.try(() => {
                   signal.throwIfAborted()
-                  return { response: start() }
+                  return { spent: false as const, response: start() }
                 })
               }),
             ),
             { signal },
           )
+          if (started.spent) throw new RunBudgetSpent()
           return await started.response
         }
         const selected = route.git
@@ -557,8 +623,12 @@ export const makeCapabilityGateway = (
                 return snapshot.token
               },
               signal,
-              (url, input) => send(() => upstream(url, input)),
-            )
+              (url, input, tokens) => send(() => upstream(url, input), tokens),
+              grant.budget.maxTokens,
+            ).then((call) => {
+              ownership.measured(call.usage)
+              return call
+            })
         if (signal.aborted) {
           await selected.response.body?.cancel()
           signal.throwIfAborted()
@@ -568,9 +638,11 @@ export const makeCapabilityGateway = (
         Effect.catch((error) =>
           error instanceof RequestRefused
             ? Effect.fail("refused" as const)
-            : logFailure("Capability route failed")(error).pipe(
-                Effect.andThen(Effect.fail("unavailable" as const)),
-              ),
+            : error instanceof RunBudgetSpent
+              ? Effect.fail("spent" as const)
+              : logFailure("Capability route failed")(error).pipe(
+                  Effect.andThen(Effect.fail("unavailable" as const)),
+                ),
         ),
       )
     /**
@@ -614,6 +686,7 @@ export const makeCapabilityGateway = (
                 return result.success
               }
               ownership.release()
+              if (result.failure === "spent") return budgetSpent()
               return result.failure === "refused" ? denied() : unavailable()
             }),
           (ownership) =>
@@ -651,6 +724,7 @@ export const makeCapabilityGateway = (
           Effect.asVoid,
         ),
       sessionBound: store.sessionBound,
+      usage: store.usage,
     }
     return { sessionChallenge, session, revoke, control, handle }
   })

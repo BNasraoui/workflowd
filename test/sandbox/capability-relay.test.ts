@@ -2,7 +2,13 @@ import { expect, test } from "bun:test"
 import { mkdtemp, readFile, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
-import { client, processGateway, proof, withGateway } from "../capability-gateway/gateway-process"
+import {
+  client,
+  processGateway,
+  proof,
+  sse,
+  withGateway,
+} from "../capability-gateway/gateway-process"
 import { renewalRequests } from "../../deploy/sandbox/renewal.mjs"
 import { fixtureExecutable } from "../helpers/fixture-executable.mjs"
 import { loopbackCertificate } from "../helpers/loopback-tls"
@@ -341,7 +347,12 @@ test("a renewal that the gateway refuses ends the relay at once: it sends no fur
             "anthropic-version": "2023-06-01",
             "anthropic-beta": "oauth-2025-04-20",
           },
-          body: JSON.stringify({ model: "fixture-model", stream: true, messages: [] }),
+          body: JSON.stringify({
+            model: "fixture-model",
+            stream: true,
+            messages: [],
+            max_tokens: 1000,
+          }),
         })
         expect(stream.status).toBe(200)
         const reader = stream.body!.getReader()
@@ -371,4 +382,95 @@ test("a renewal that the gateway refuses ends the relay at once: it sends no fur
       await rm(root, { recursive: true, force: true })
     }
   })
+}, 40000)
+
+test("through the relay, a model call of a run whose budget is spent gets the budget body; the daemon reads the budget spent, and the run token still renews", async () => {
+  await withGateway(
+    processGateway,
+    async (f, gateway) => {
+      const root = await mkdtemp(join(tmpdir(), "relay-budget-"))
+      const renewals: Array<number | undefined> = []
+      const spent = Promise.withResolvers<void>()
+      const runner = client(gateway)
+      try {
+        // A token that lives 180 seconds is due for renewal at once.
+        await f.tokenSeconds(180)
+        const { audience } = await runner.audience()
+        const answer = await runner.session(proof(audience, "jti-relay"))
+        expect(answer.status).toBe(200)
+        const grant = await runner.grant(answer)
+        await f.tokenSeconds(300)
+        // The relay's renewal reaches the gateway only once the run's budget is spent.
+        f.front.hook({
+          lost: (path, status) => {
+            if (path === "/capabilities/v1/renew") renewals.push(status)
+            return false
+          },
+          held: (path) => (path === "/capabilities/v1/renew" ? spent.promise : undefined),
+        })
+        const child = Bun.spawn(
+          [
+            fixtureExecutable("node"),
+            resolve("test/sandbox/fixtures/capability-job.mjs"),
+            "runner",
+            root,
+          ],
+          {
+            env: { PATH: "/usr/bin:/bin", HOME: root, NODE_EXTRA_CA_CERTS: f.tls.cert },
+            stdin: new Blob([JSON.stringify({ ...grant, gateway: f.front.origin })]),
+            stdout: "pipe",
+            stderr: "pipe",
+          },
+        )
+        try {
+          const output = child.stdout.getReader()
+          expect(Buffer.from((await output.read()).value ?? []).toString()).toBe("ready\n")
+          output.releaseLock()
+          const call = () =>
+            fetch("http://relay/v1/messages", {
+              unix: join(root, "gateway.sock"),
+              method: "POST",
+              headers: {
+                authorization: "Bearer workflowd-local",
+                "content-type": "application/json",
+                "anthropic-version": "2023-06-01",
+                "anthropic-beta": "oauth-2025-04-20",
+              },
+              body: JSON.stringify({
+                model: "fixture-model",
+                stream: true,
+                messages: [],
+                max_tokens: 100,
+              }),
+            })
+          const served = await call()
+          expect([served.status, await served.text()]).toEqual([200, sse])
+          const refused = await call()
+          expect(refused.status).toBe(403)
+          expect(await refused.json()).toEqual({
+            type: "error",
+            error: { type: "permission_error", message: "workflowd run budget spent" },
+          })
+          expect(await f.daemon((capability) => capability.usage("run"))).toEqual({
+            calls: 1,
+            inputTokens: 1,
+            outputTokens: 1,
+            cacheCreationInputTokens: 0,
+            cacheReadInputTokens: 0,
+            spent: true,
+          })
+          spent.resolve()
+          for (let poll = 0; poll < 100 && renewals.length === 0; poll++) await Bun.sleep(50)
+          expect(renewals[0]).toBe(200)
+          expect(f.upstreamRequests().length).toBe(1)
+        } finally {
+          child.kill("SIGKILL")
+        }
+      } finally {
+        await rm(root, { recursive: true, force: true })
+      }
+    },
+    {},
+    { calls: 1, outputTokens: 1000, maxTokens: 400 },
+  )
 }, 40000)

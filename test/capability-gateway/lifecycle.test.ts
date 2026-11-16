@@ -130,7 +130,7 @@ for (const [ending, phase] of [
                     },
                     { highWaterMark: 0 },
                   )
-                : JSON.stringify({ model: "fixture-model" })
+                : JSON.stringify({ model: "fixture-model", max_tokens: 1000 })
             firstRequest = false
             return new Request(
               "http://capability.invalid/capabilities/v1/providers/anthropic/v1/messages",

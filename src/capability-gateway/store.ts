@@ -4,6 +4,7 @@ import { Effect, Schema } from "effect"
 import { SqlClient } from "effect/unstable/sql"
 import { renewalReplacements, renewalWindowMs } from "../../deploy/sandbox/renewal.mjs"
 import { CapabilityGrant, SessionPolicy } from "../capability-control/protocol"
+import type { ReportedUsage } from "./claude"
 
 export class CapabilityRefused extends Schema.TaggedError<CapabilityRefused>()(
   "CapabilityRefused",
@@ -94,6 +95,7 @@ export const makeCapabilityStore = Effect.gen(function* () {
       if (rows.length === 0) {
         yield* sql`INSERT INTO capability_grants(run_id,lease_id,grant_json)
           VALUES(${grant.runId},${grant.leaseId},${encoded})`
+        yield* sql`INSERT INTO capability_usage(run_id) VALUES(${grant.runId})`
         return "held" as const
       }
       const row = rows[0]
@@ -175,10 +177,10 @@ export const makeCapabilityStore = Effect.gen(function* () {
     binding: CapabilityBinding,
     now: number,
   ) {
-    const { row } = yield* read(binding, now)
+    const { row, value } = yield* read(binding, now)
     // Only a runner's session opens a binding; the lease must still be live (read() checks it).
     return row.session > 0
-      ? { ...row.authority, session: row.session }
+      ? { ...row.authority, session: row.session, budget: value.budget }
       : yield* Effect.fail(new CapabilityRefused())
   })
   const authorize = Effect.fn("CapabilityStore.authorize")(function* (
@@ -428,6 +430,120 @@ export const makeCapabilityStore = Effect.gen(function* () {
       )
     })
   })
+  /**
+   * Counts a call of a live run that asks `tokens` output tokens, and reserves them against the
+   * output tokens that are left, in one step: calls that start at once cannot pass the budget.
+   * Gives the reservation, or null when the budget cannot hold the call: the budget is then spent,
+   * and each later call of the run is refused.
+   */
+  const reserve = Effect.fn("CapabilityStore.reserve")(function* (
+    runId: string,
+    tokens: number,
+    now: number,
+  ) {
+    return yield* sql.withTransaction(
+      Effect.gen(function* () {
+        const { budget } = yield* current(runId, now)
+        const rows = yield* sql`SELECT u.calls,u.output_tokens AS outputTokens,u.spent,
+          (SELECT coalesce(sum(r.tokens),0) FROM capability_reservations r
+            WHERE r.run_id=u.run_id) AS reserved
+          FROM capability_usage u WHERE u.run_id=${runId}`
+        if (rows.length !== 1) return yield* Effect.fail(new CapabilityRefused())
+        const held = yield* Schema.decodeUnknownEffect(
+          Schema.Struct({
+            calls: Schema.Int,
+            outputTokens: Schema.Int,
+            spent: Schema.Int,
+            reserved: Schema.Int,
+          }),
+        )(rows[0])
+        if (
+          held.spent !== 0 ||
+          held.calls >= budget.calls ||
+          held.outputTokens + held.reserved + tokens > budget.outputTokens
+        ) {
+          yield* sql`UPDATE capability_usage SET spent=1 WHERE run_id=${runId}`
+          return null
+        }
+        const reservation = randomBytes(16).toString("hex")
+        yield* sql`UPDATE capability_usage SET calls=calls+1 WHERE run_id=${runId}`
+        yield* sql`INSERT INTO capability_reservations(id,run_id,tokens)
+          VALUES(${reservation},${runId},${tokens})`
+        return reservation
+      }),
+    )
+  })
+  /**
+   * Settles a reservation: the run is charged the output tokens that the provider reported, or the
+   * whole reservation when it reported none, and the input counts it reported are recorded. A
+   * reservation that is settled already changes nothing.
+   */
+  const settle = Effect.fn("CapabilityStore.settle")(function* (
+    reservation: string,
+    usage: ReportedUsage | undefined,
+  ) {
+    yield* sql.withTransaction(
+      Effect.gen(function* () {
+        const rows =
+          yield* sql`SELECT run_id AS runId,tokens FROM capability_reservations WHERE id=${reservation}`
+        if (rows.length !== 1) return
+        const held = yield* Schema.decodeUnknownEffect(
+          Schema.Struct({ runId: Schema.String, tokens: Schema.Int }),
+        )(rows[0])
+        yield* sql`UPDATE capability_usage SET
+          output_tokens=output_tokens+${usage?.outputTokens ?? held.tokens},
+          input_tokens=input_tokens+${usage?.inputTokens ?? 0},
+          cache_creation_input_tokens=cache_creation_input_tokens+${usage?.cacheCreationInputTokens ?? 0},
+          cache_read_input_tokens=cache_read_input_tokens+${usage?.cacheReadInputTokens ?? 0}
+          WHERE run_id=${held.runId}`
+        yield* sql`DELETE FROM capability_reservations WHERE id=${reservation}`
+      }),
+    )
+  })
+  /**
+   * Charges in full each reservation that is open: one that an earlier process of the gateway
+   * made and did not settle. The gateway runs it once, as it starts, before it serves a call.
+   */
+  const chargeOpenReservations = Effect.fn("CapabilityStore.chargeOpenReservations")(() =>
+    sql.withTransaction(
+      Effect.gen(function* () {
+        yield* sql`UPDATE capability_usage SET output_tokens=output_tokens+
+          (SELECT sum(r.tokens) FROM capability_reservations r WHERE r.run_id=capability_usage.run_id)
+          WHERE run_id IN (SELECT run_id FROM capability_reservations)`
+        yield* sql`DELETE FROM capability_reservations`
+      }),
+    ),
+  )
+  /**
+   * What a run that the gateway holds spent: its calls and the token counts it was charged, and
+   * whether its budget is spent: the budget refused a call, or the calls or the output tokens
+   * reached their limit.
+   */
+  const usage = Effect.fn("CapabilityStore.usage")(function* (runId: string) {
+    const rows = yield* sql`SELECT u.calls,u.input_tokens AS inputTokens,
+      u.output_tokens AS outputTokens,u.cache_creation_input_tokens AS cacheCreationInputTokens,
+      u.cache_read_input_tokens AS cacheReadInputTokens,u.spent,g.grant_json AS grant
+      FROM capability_usage u JOIN capability_grants g ON g.run_id=u.run_id WHERE u.run_id=${runId}`
+    if (rows.length !== 1) return yield* Effect.fail(new CapabilityRefused())
+    const { spent, grant, ...counts } = yield* Schema.decodeUnknownEffect(
+      Schema.Struct({
+        calls: Schema.Int,
+        inputTokens: Schema.Int,
+        outputTokens: Schema.Int,
+        cacheCreationInputTokens: Schema.Int,
+        cacheReadInputTokens: Schema.Int,
+        spent: Schema.Int,
+        grant: StoredGrant,
+      }),
+    )(rows[0])
+    return {
+      ...counts,
+      spent:
+        spent !== 0 ||
+        counts.calls >= grant.budget.calls ||
+        counts.outputTokens >= grant.budget.outputTokens,
+    }
+  })
   return {
     leaseChallenge,
     sessionContext,
@@ -445,5 +561,9 @@ export const makeCapabilityStore = Effect.gen(function* () {
     revoke: Effect.fn("CapabilityStore.revoke")((runId: string) =>
       sql.withTransaction(revokeRun(runId)),
     ),
+    reserve,
+    settle,
+    chargeOpenReservations,
+    usage,
   }
 })

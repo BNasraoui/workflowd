@@ -52,14 +52,19 @@ for (const [mode, start] of gateways) {
       const token = await runToken(gateway)
       const answer = await client(gateway).provider(
         token,
-        '{"model":"claude-other","stream":true,"messages":[],"model":"fixture-model"}',
+        '{"model":"claude-other","stream":true,"messages":[],"max_tokens":1000,"model":"fixture-model"}',
       )
       expect(answer.status).toBe(200)
       expect(await answer.text()).toBe(sse)
       expect(sent(f)).toHaveLength(1)
       const body = sent(f)[0]!.body
       expect(members(body, "model")).toBe(1)
-      expect(JSON.parse(body)).toEqual({ model: "fixture-model", stream: true, messages: [] })
+      expect(JSON.parse(body)).toEqual({
+        model: "fixture-model",
+        stream: true,
+        messages: [],
+        max_tokens: 1000,
+      })
     })
   }, 60000)
 
@@ -71,18 +76,18 @@ for (const [mode, start] of gateways) {
           (
             await client(gateway).provider(
               token,
-              `{"model":"fixture-model","stream":true,"messages":[],"max_tokens":${number}}`,
+              `{"model":"fixture-model","stream":true,"messages":[],"max_tokens":1000,"seed":${number}}`,
             )
           ).status,
         ).toBe(403)
       expect(sent(f)).toEqual([])
       const answer = await client(gateway).provider(
         token,
-        '{"model":"fixture-model","stream":true,"messages":[],"temperature":1.0,"top_k":1e3,"top_p":-0.5E0,"max_tokens":9007199254740992}',
+        '{"model":"fixture-model","stream":true,"messages":[],"temperature":1.0,"top_k":1e3,"top_p":-0.5E0,"seed":9007199254740992,"max_tokens":64E3}',
       )
       expect(answer.status).toBe(200)
       expect(sent(f).map((request) => request.body)).toEqual([
-        '{"model":"fixture-model","stream":true,"messages":[],"temperature":1,"top_k":1000,"top_p":-0.5,"max_tokens":9007199254740992}',
+        '{"model":"fixture-model","stream":true,"messages":[],"temperature":1,"top_k":1000,"top_p":-0.5,"seed":9007199254740992,"max_tokens":64000}',
       ])
     })
   }, 60000)
@@ -91,8 +96,8 @@ for (const [mode, start] of gateways) {
     await withGateway(start, async (f, gateway) => {
       const token = await runToken(gateway)
       for (const body of [
-        '{"model":"fixture-model","stream":true,"messages":[],"model":"claude-other"}',
-        '{"stream":true,"messages":[]}',
+        '{"model":"fixture-model","stream":true,"messages":[],"max_tokens":1000,"model":"claude-other"}',
+        '{"stream":true,"messages":[],"max_tokens":1000}',
         '[{"model":"fixture-model"}]',
         '{"model":"fixture-model"',
       ])
@@ -104,7 +109,12 @@ for (const [mode, start] of gateways) {
   test(`[${mode}] an anthropic-beta value outside the recorded list is refused, and the listed values pass`, async () => {
     await withGateway(start, async (f, gateway) => {
       const token = await runToken(gateway)
-      const body = JSON.stringify({ model: "fixture-model", stream: true, messages: [] })
+      const body = JSON.stringify({
+        model: "fixture-model",
+        stream: true,
+        messages: [],
+        max_tokens: 1000,
+      })
       for (const beta of [
         "oauth-2025-04-20,files-api-2025-04-14",
         "oauth-2025-04-20, ",
@@ -149,7 +159,8 @@ for (const [mode, start] of gateways) {
 
 /** A valid messages body of exactly `bytes` bytes: one user message padded with `a`. */
 const bodyOfSize = (bytes: number) => {
-  const head = '{"model":"fixture-model","stream":true,"messages":[{"role":"user","content":"'
+  const head =
+    '{"model":"fixture-model","stream":true,"max_tokens":1000,"messages":[{"role":"user","content":"'
   const tail = '"}]}'
   return head + "a".repeat(bytes - head.length - tail.length) + tail
 }

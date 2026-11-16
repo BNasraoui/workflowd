@@ -4,6 +4,7 @@ import { tmpdir } from "node:os"
 import { readFileSync } from "node:fs"
 import { join } from "node:path"
 import { claudeBetas } from "../../src/capability-gateway/claude"
+import { defaultRunBudget } from "../../src/sandbox/config"
 import { fixtureExecutable } from "../helpers/fixture-executable.mjs"
 import { client, processGateway, proof, sse, withGateway } from "./gateway-process"
 
@@ -29,8 +30,9 @@ function requireLoopbackOnly() {
 const pinned = `${readFileSync("test/resources/claude-code-version", "utf8").trim()} (Claude Code)`
 const claude = fixtureExecutable("claude")
 
-/** A request that the pinned client sent: its anthropic-beta values and its body text. */
+/** A request that the pinned client sent: its path, its anthropic-beta values and its body text. */
 interface Sent {
+  readonly path: string
   readonly betas: ReadonlyArray<string>
   readonly body: string
 }
@@ -54,6 +56,7 @@ async function runPinned(
     async fetch(request) {
       const body = await request.text()
       sent.push({
+        path: new URL(request.url).pathname,
         betas: (request.headers.get("anthropic-beta") ?? "").split(",").map((v) => v.trim()),
         body,
       })
@@ -117,6 +120,21 @@ for (const model of [
     // The record of this run: the values that the pinned client sent for this model.
     console.log(`${pinned} ${model} anthropic-beta: ${values.join(",")}`)
     expect(values.filter((value) => !claudeBetas.has(value))).toEqual([])
+    // Each messages call asks a max_tokens that the gateway's default cap admits.
+    const asked = run.sent
+      .filter((request) => request.path === "/v1/messages")
+      .map((request): unknown => Reflect.get(Object(JSON.parse(request.body)), "max_tokens"))
+    console.log(`${pinned} ${model} max_tokens: ${asked.join(",")}`)
+    expect(asked.length).toBeGreaterThan(0)
+    expect(
+      asked.filter(
+        (value) =>
+          typeof value !== "number" ||
+          !Number.isSafeInteger(value) ||
+          value < 1 ||
+          value > defaultRunBudget.maxTokens,
+      ),
+    ).toEqual([])
   }, 90000)
 
 test("the pinned Claude Code completes a call through the gateway process, and its body keeps its meaning", async () => {

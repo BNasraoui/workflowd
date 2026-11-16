@@ -239,6 +239,7 @@ describe("strict initial store schema", () => {
       { migration_id: 42, name: "capability_renewal" },
       { migration_id: 43, name: "capability_replacements" },
       { migration_id: 44, name: "capability_store_split" },
+      { migration_id: 45, name: "capability_run_budget" },
     ])
     expect(result.tables).toHaveLength(36)
     expect(result.tables.every((table) => table.strict === 1)).toBe(true)
@@ -1067,10 +1068,11 @@ test("migration 44 takes the gateway's tables and triggers out of a store that h
       yield* sql`INSERT INTO capability_proofs(jti_digest,run_id,expires_at) VALUES(${"e".repeat(64)},'run',${Date.now() + 600000})`
       const before = yield* sql`SELECT * FROM sandbox_leases`
       yield* runStoreMigrations
-      // The gateway's tables, their rows and both triggers are gone; workflowd's rows stay.
+      // The gateway's tables, their rows and both triggers are gone; workflowd's rows stay. The one
+      // table left is workflowd's own budget of each run, which migration 45 adds.
       expect(
         yield* sql`SELECT type,name FROM sqlite_master WHERE name LIKE 'capability_%' ORDER BY name`,
-      ).toEqual([])
+      ).toEqual([{ type: "table", name: "capability_run_budgets" }])
       expect(yield* sql`SELECT * FROM sandbox_leases`).toEqual(before)
       expect((yield* runs.read("run"))?.state).toBe("spawning")
       // A run that ends, and a lease that is released, write no gateway table.

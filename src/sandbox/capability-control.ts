@@ -1,9 +1,10 @@
 import { createConnection } from "node:net"
-import { Effect, Queue, Schema, Semaphore } from "effect"
+import { Effect, Queue, Schema, Semaphore, Struct } from "effect"
 import { SqlClient } from "effect/unstable/sql"
 import {
   CapabilityGrant,
   ControlAnswer,
+  RunBudget,
   controlFrame,
   controlProtocol,
   maxControlFrame,
@@ -12,6 +13,7 @@ import {
 } from "../capability-control/protocol"
 import { runLifetime } from "../store/run-lifetime"
 import { authorizeWorker } from "../worker-identity/access"
+import { defaultRunBudget } from "./config"
 
 /** The gateway did not answer: its socket is missing, refused the connection, or timed out. */
 export class CapabilityGatewayUnavailable extends Schema.TaggedError<CapabilityGatewayUnavailable>()(
@@ -100,7 +102,11 @@ export const controlClient = (socket: string) => ({
       actionsRunId,
       actionsAttempt,
     }),
+  usage: (runId: string) => send(socket, "usage", controlProtocol.usage, { runId }),
 })
+
+/** A grant as workflowd's store holds it before its budget is fixed. */
+const UnbudgetedGrant = Schema.Struct(Struct.omit(CapabilityGrant.fields, ["budget"]))
 
 /** workflowd's worker authorization ends a run's authority this long after the run was made. */
 const workerLifetimeMs = 86400000
@@ -108,11 +114,13 @@ const workerLifetimeMs = 86400000
 /**
  * The grant of each live native run in workflowd's store, or of `runId` alone: a run that
  * workflowd's worker authorization admits, whose lease is starting or ready with its Actions run
- * recorded and before its deadline.
+ * recorded and before its deadline. A run's budget is `budget` the first time the run is granted,
+ * and the budget stored then each later time.
  */
 export const liveGrants = Effect.fn("DaemonCapability.liveGrants")(function* (
   runId: string | null,
   now: number,
+  budget: RunBudget,
 ) {
   const sql = yield* SqlClient.SqlClient
   const rows = yield* sql<Record<string, unknown>>`SELECT a.run_id AS runId,l.lease_id AS leaseId,
@@ -133,14 +141,29 @@ export const liveGrants = Effect.fn("DaemonCapability.liveGrants")(function* (
     const created = new Date(String(createdAt))
     if (!authorizeWorker({ state: String(state), createdAt: created }, now)) continue
     const parsed: unknown = JSON.parse(String(policy))
-    const grant = yield* Schema.decodeUnknownEffect(CapabilityGrant)({
+    const grant = yield* Schema.decodeUnknownEffect(UnbudgetedGrant)({
       ...row,
       policy: parsed,
       notAfter: created.getTime() + workerLifetimeMs,
     })
-    if (grant.deadline > now) live.push(grant)
+    if (grant.deadline > now)
+      live.push({ ...grant, budget: yield* fixedBudget(grant.runId, budget) })
   }
   return live
+})
+
+/** The budget stored for `runId`; `budget` is stored first when the run has none. */
+const fixedBudget = Effect.fn("DaemonCapability.fixedBudget")(function* (
+  runId: string,
+  budget: RunBudget,
+) {
+  const sql = yield* SqlClient.SqlClient
+  yield* sql`INSERT INTO capability_run_budgets(run_id,calls,output_tokens,max_tokens)
+    VALUES(${runId},${budget.calls},${budget.outputTokens},${budget.maxTokens})
+    ON CONFLICT(run_id) DO NOTHING`
+  const rows = yield* sql`SELECT calls,output_tokens AS outputTokens,max_tokens AS maxTokens
+    FROM capability_run_budgets WHERE run_id=${runId}`
+  return yield* Schema.decodeUnknownEffect(RunBudget)(rows[0])
 })
 
 /**
@@ -156,6 +179,8 @@ export const liveGrants = Effect.fn("DaemonCapability.liveGrants")(function* (
 export const makeDaemonCapability = (options: {
   readonly socket: string
   readonly reconcileEveryMs?: number
+  /** The budget of a run that workflowd authorizes for the first time. */
+  readonly budget?: RunBudget
 }) =>
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient
@@ -170,7 +195,9 @@ export const makeDaemonCapability = (options: {
     const watched = new Map<string, () => void>()
     const changed = yield* Queue.unbounded<string>()
     const grants = (runId: string | null) =>
-      liveGrants(runId, Date.now()).pipe(Effect.provideService(SqlClient.SqlClient, sql))
+      liveGrants(runId, Date.now(), options.budget ?? defaultRunBudget).pipe(
+        Effect.provideService(SqlClient.SqlClient, sql),
+      )
     const watch = (runId: string) => {
       if (!watched.has(runId))
         watched.set(
@@ -242,6 +269,7 @@ export const makeDaemonCapability = (options: {
       Effect.forever,
       Effect.forkScoped,
     )
-    return { authorize, revoke, reconcile, sessionBound, startRevoke }
+    const usage = Effect.fn("DaemonCapability.usage")((runId: string) => control.usage(runId))
+    return { authorize, revoke, reconcile, sessionBound, startRevoke, usage }
   })
 export type DaemonCapability = Effect.Success<ReturnType<typeof makeDaemonCapability>>
