@@ -42,8 +42,8 @@ export const sealedResultLimits = {
   concurrentChecks: 4,
   /**
    * Checks that wait for a slot at one time; a further check is refused. Each runner
-   * run sends one result, and the daemon runs at most WORKFLOWD_RUNNER_MAX_RUNS (4 by
-   * default) runner runs at one time, so no more results than that can be waiting.
+   * run sends one result, and 4 is the count of runner runs at one time in the plan,
+   * so no more results than that wait when each runner run sends its result.
    */
   waitingChecks: 4,
   /**
