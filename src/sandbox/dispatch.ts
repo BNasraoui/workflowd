@@ -399,14 +399,15 @@ export const makeSandboxDispatch = (options: {
     /**
      * The runner placement. A runner run's lease ref starts its job; the run is the job's, and the
      * daemon reads its events and its one result from the gateway, checks the result and pushes
-     * `agent-run/<id>`. What ended the run, other than a completion, is kept for its settlement.
+     * `agent-run/<id>`. What ended the run is kept for its settlement: the final message of a run
+     * that completed is its sealed result's, which the check read; its events are its progress.
      */
     const runnerOptions = options.runner
     const runnerEnds = new Map<
       string,
       | { readonly kind: "ended"; readonly diagnostic: string; readonly ended: GatewayEnd | null }
       | { readonly kind: "cancelled" }
-      | { readonly kind: "unchanged" }
+      | { readonly kind: "sealed"; readonly finalMessage: string; readonly unchanged: boolean }
     >()
     const runnerPolicy = (alias: string) =>
       runnerOptions?.aliases.includes(alias) === true
@@ -504,7 +505,11 @@ export const makeSandboxDispatch = (options: {
                   message: "result_refused: source",
                 }),
               )
-            runnerEnds.set(run.runId, { kind: "unchanged" })
+            runnerEnds.set(run.runId, {
+              kind: "sealed",
+              finalMessage: result.finalMessage,
+              unchanged: true,
+            })
             return { exitCode: 0, stderr: "" }
           }
           const checked = yield* runnerOptions.sealed.check(
@@ -521,6 +526,11 @@ export const makeSandboxDispatch = (options: {
             },
           )
           yield* checked.push()
+          runnerEnds.set(run.runId, {
+            kind: "sealed",
+            finalMessage: result.finalMessage,
+            unchanged: false,
+          })
           return { exitCode: 0, stderr: "" }
         }),
       ).pipe(
@@ -610,6 +620,8 @@ export const makeSandboxDispatch = (options: {
     /**
      * Settles a runner run: its lease is released (the gateway's run revoked, the lease ref
      * removed), then the run ends as a host run does, with the gateway's own end when there is one.
+     * Only a run whose sealed result was checked completes, with that result's final message; a
+     * run that ends otherwise has no final message, as its event lines are the agent's own.
      */
     const finishRunner = (
       run: AgentRunRecord,
@@ -624,19 +636,19 @@ export const makeSandboxDispatch = (options: {
         const now = new Date()
         if (end?.kind === "cancelled")
           yield* runs.cancel({ runId: run.runId, now, diagnostic: "cancelled" })
-        else if (terminal.state === "completed" && end?.kind !== "ended")
+        else if (terminal.state === "completed" && end?.kind === "sealed")
           yield* runs.complete({
             runId: run.runId,
             now,
-            finalMessage: terminal.finalMessage,
-            ...(end?.kind === "unchanged" ? { endReason: "unchanged" } : {}),
+            finalMessage: end.finalMessage,
+            ...(end.unchanged ? { endReason: "unchanged" } : {}),
           })
         else
           yield* runs.operatorRequired({
             runId: run.runId,
             now,
             diagnostic: end?.kind === "ended" ? end.diagnostic : terminal.diagnostic,
-            finalMessage: terminal.finalMessage,
+            finalMessage: null,
             ended: end?.kind === "ended" ? end.ended : null,
           })
       }).pipe(
