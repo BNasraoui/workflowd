@@ -24,7 +24,16 @@ export class CapabilityControlRefused extends Schema.TaggedError<CapabilityContr
   { reason: Schema.String },
 ) {}
 
-/** One request on the control socket and its answer, in at most 10 seconds. */
+/** The time limit of one call on the control socket, with its wait for a permit where it takes one. */
+const withinCallLimit = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+  effect.pipe(
+    Effect.timeout("15 seconds"),
+    Effect.catchTag("TimeoutError", () =>
+      Effect.fail(new CapabilityGatewayUnavailable({ reason: "timed out" })),
+    ),
+  )
+
+/** One request on the control socket and its answer, within the time limit of a call. */
 const send = <A, I, B, O>(
   socket: string,
   verb: ControlVerb,
@@ -65,12 +74,7 @@ const send = <A, I, B, O>(
         new CapabilityGatewayUnavailable({
           reason: cause instanceof Error ? cause.message : String(cause),
         }),
-    }).pipe(
-      Effect.timeout("15 seconds"),
-      Effect.catchTag("TimeoutError", () =>
-        Effect.fail(new CapabilityGatewayUnavailable({ reason: "timed out" })),
-      ),
-    )
+    }).pipe(withinCallLimit)
     const answer = yield* Schema.decodeUnknownEffect(ControlAnswer)(text).pipe(
       Effect.mapError(() => new CapabilityGatewayUnavailable({ reason: "unreadable answer" })),
     )
@@ -157,7 +161,12 @@ export const makeDaemonCapability = (options: {
     const sql = yield* SqlClient.SqlClient
     const lifetime = runLifetime(sql)
     const control = controlClient(options.socket)
+    const scope = yield* Effect.scope
     const calls = yield* Semaphore.make(1)
+    // `authorize`, `revoke` and `reconcile` take one permit each; the wait for it counts toward
+    // the time limit of the call.
+    const permitted = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+      withinCallLimit(calls.withPermits(1)(effect))
     const watched = new Map<string, () => void>()
     const changed = yield* Queue.unbounded<string>()
     const grants = (runId: string | null) =>
@@ -174,7 +183,7 @@ export const makeDaemonCapability = (options: {
       watched.delete(runId)
     }
     const revoke = Effect.fn("DaemonCapability.revoke")(function* (runId: string) {
-      yield* calls.withPermits(1)(control.revoke(runId))
+      yield* permitted(control.revoke(runId))
       unwatch(runId)
     })
     const authorize = Effect.fn("DaemonCapability.authorize")(function* (runId: string) {
@@ -182,10 +191,10 @@ export const makeDaemonCapability = (options: {
       if (grant === undefined)
         return yield* Effect.fail(new CapabilityControlRefused({ reason: "run is not live" }))
       watch(runId)
-      yield* calls.withPermits(1)(control.authorize(grant))
+      yield* permitted(control.authorize(grant))
     })
     const reconcile = Effect.fn("DaemonCapability.reconcile")(function* () {
-      yield* calls.withPermits(1)(
+      yield* permitted(
         Effect.gen(function* () {
           // The live set is read under the same permit as each grant, so no grant sent after it
           // can be revoked by it.
@@ -201,6 +210,21 @@ export const makeDaemonCapability = (options: {
       (runId: string, actionsRunId: number, actionsAttempt: number) =>
         control.sessionBound(runId, actionsRunId, actionsAttempt),
     )
+    /**
+     * Starts the revoke of `runId` and returns at once. The revoke ends in this client's scope,
+     * within the time limit of a call; a failure is logged, and the next reconcile, which names
+     * only live runs, revokes the run.
+     */
+    const startRevoke = Effect.fn("DaemonCapability.startRevoke")(function* (runId: string) {
+      yield* revoke(runId).pipe(
+        Effect.catch((error) =>
+          Effect.logWarning(
+            `Capability gateway revoke unconfirmed for ${runId}; the next reconcile revokes it: ${error.reason}`,
+          ),
+        ),
+        Effect.forkIn(scope),
+      )
+    })
     // A change notifies inside its transaction; this read waits for it to commit or roll back.
     yield* Queue.take(changed).pipe(
       Effect.flatMap((runId) =>
@@ -218,6 +242,6 @@ export const makeDaemonCapability = (options: {
       Effect.forever,
       Effect.forkScoped,
     )
-    return { authorize, revoke, reconcile, sessionBound }
+    return { authorize, revoke, reconcile, sessionBound, startRevoke }
   })
 export type DaemonCapability = Effect.Success<ReturnType<typeof makeDaemonCapability>>
