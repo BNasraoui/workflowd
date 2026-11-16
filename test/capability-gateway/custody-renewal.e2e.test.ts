@@ -38,7 +38,8 @@ const stateOf = async (f: Fixture) =>
 /**
  * After a failed try: calls on `token` each get 503 and ask the OAuth server nothing, until the
  * one that renews with `old`, which works. Its request comes no sooner than the `retryAt` that
- * custody wrote, on the clock that custody reads: no margin of time decides the case.
+ * custody wrote, on the clock that custody reads: no margin of time decides the case. A slow
+ * runner whose first call comes after `retryAt` makes no quiet call, and the case still holds.
  */
 async function renewsAfterWait(
   f: Fixture,
@@ -49,7 +50,6 @@ async function renewsAfterWait(
 ) {
   const { retryAt } = await stateOf(f)
   const before = oauth.requests().length
-  let quiet = 0
   for (;;) {
     const call = await client(gateway).call(token)
     const text = await call.text()
@@ -58,12 +58,13 @@ async function renewsAfterWait(
       break
     }
     expect(call.status).toBe(503)
-    quiet++
     await Bun.sleep(250)
   }
-  expect(quiet).toBeGreaterThan(0)
   expect(oauth.requests()).toHaveLength(before + 1)
-  expect(oauth.requests()[before]!.time).toBeGreaterThanOrEqual(retryAt)
+  expect(
+    oauth.requests()[before]!.time,
+    "no request goes out before the wait that custody wrote",
+  ).toBeGreaterThanOrEqual(retryAt)
   expect(sentRefresh(oauth.requests()[before])).toBe(old)
 }
 

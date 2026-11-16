@@ -5,6 +5,8 @@ import { join } from "node:path"
 import { Schema } from "effect"
 import { claudeLogin, client, sse, storedAccess, syntheticValue } from "./gateway-process"
 import {
+  descendants,
+  ended,
   imported,
   loginDirectory,
   loginFile,
@@ -160,12 +162,56 @@ test("a stop of the gateway while the OAuth server holds the renewal waits for i
     // The gateway's stop waits for the renewal in flight; then the OAuth server answers.
     await until(() => gateway.output!().includes("the gateway waits for a renewal in flight"))
     oauth.release()
+    const released = performance.now()
     await stopped
     await first
+    expect(
+      released - oauth.requests()[0]!.at,
+      "the OAuth server answered within custody's request limit",
+    ).toBeLessThan(5000)
     expect(storedAccess(await readFile(loginFile(f), "utf8"))).toBe(oauth.next().access)
     expect(await readdir(loginDirectory(f))).not.toContain("claude.state")
     const restarted = await start()
     const call = await client(restarted).call(await runToken(restarted, "jti-after-stop"))
+    expect(call.status).toBe(200)
+    expect(await call.text()).toBe(sse)
+    expect(oauth.requests()).toHaveLength(1)
+  })
+}, 40000)
+
+test("a stop of the gateway's control group, SIGTERM to the gateway, noscope and custody at one moment, while the OAuth server holds the renewal: custody stores the answer, and the next start sends no request", async () => {
+  await withCustody(async (f, oauth, start) => {
+    const old = claudeLogin(syntheticValue("access"), syntheticValue("refresh"), Date.now() - 1000)
+    await imported(f, old)
+    oauth.mode("hold")
+    const gateway = await start()
+    const token = await runToken(gateway, "jti-stop-group")
+    const first = client(gateway)
+      .call(token)
+      .catch(() => "gone")
+    await until(() => oauth.requests().length === 1)
+    // What a service manager's default stop sends: SIGTERM to each process of the unit.
+    const below = descendants(gateway.pid!)
+    const custody = below.find(({ command }) => command.includes("custody-process.ts"))
+    expect(below.map(({ command }) => command.split(" ")[0])).toContain(f.config.noscope.binary)
+    expect(custody, "custody runs below the gateway while its request is held").toBeDefined()
+    for (const pid of [gateway.pid!, ...below.map((process) => process.pid)])
+      process.kill(pid, "SIGTERM")
+    await gateway.exited
+    await first
+    // The OAuth server answers after the stop of each process; custody's request limit has not
+    // passed.
+    oauth.release()
+    const released = performance.now()
+    await until(() => ended(custody!.pid))
+    expect(
+      released - oauth.requests()[0]!.at,
+      "the OAuth server answered within custody's request limit",
+    ).toBeLessThan(5000)
+    expect(storedAccess(await readFile(loginFile(f), "utf8"))).toBe(oauth.next().access)
+    expect(await readdir(loginDirectory(f))).not.toContain("claude.state")
+    const restarted = await start()
+    const call = await client(restarted).call(await runToken(restarted, "jti-after-group"))
     expect(call.status).toBe(200)
     expect(await call.text()).toBe(sse)
     expect(oauth.requests()).toHaveLength(1)

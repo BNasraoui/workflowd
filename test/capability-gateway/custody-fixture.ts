@@ -1,4 +1,5 @@
 import { expect } from "bun:test"
+import { readFileSync } from "node:fs"
 import { readFile, readdir, stat } from "node:fs/promises"
 import { join } from "node:path"
 import {
@@ -110,4 +111,31 @@ export async function works(gateway: Gateway, token: string, oauth: OAuthFixture
   expect(await call.text()).toBe(sse)
   expect(oauth.requests()).toHaveLength(before + 1)
   expect(sentRefresh(oauth.requests().at(-1))).toBe(old)
+}
+
+/** The text of a file of /proc, or undefined once the process is gone. */
+const procText = (path: string) => {
+  try {
+    return readFileSync(path, "utf8")
+  } catch {
+    return undefined
+  }
+}
+
+/** Each process below `pid`, depth first, with its command line. */
+export function descendants(pid: number): ReadonlyArray<{ pid: number; command: string }> {
+  const children = (procText(`/proc/${pid}/task/${pid}/children`) ?? "")
+    .split(" ")
+    .filter((part) => part !== "")
+    .map(Number)
+  return children.flatMap((child) => [
+    { pid: child, command: (procText(`/proc/${child}/cmdline`) ?? "").replaceAll("\0", " ") },
+    ...descendants(child),
+  ])
+}
+
+/** Whether the process `pid` has ended: it is gone, or a zombie that no parent has reaped yet. */
+export const ended = (pid: number) => {
+  const stat = procText(`/proc/${pid}/stat`)
+  return stat === undefined || stat.slice(stat.lastIndexOf(")") + 2).startsWith("Z")
 }

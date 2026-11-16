@@ -238,16 +238,18 @@ export const makeDaemonCapability = (options: {
     )
     /**
      * Starts the revoke of `runId` and returns at once. The revoke ends in this client's scope,
-     * within the time limit of a call; a failure is logged, and the next reconcile, which names
-     * only live runs, revokes the run.
+     * within the time limit of a call. A revoke that fails, or that the end of the scope (a stop
+     * of the daemon) interrupts, is logged with its cause, and the next reconcile, which names
+     * only live runs, revokes the run: after a stop, the reconcile at the next start.
      */
     const startRevoke = Effect.fn("DaemonCapability.startRevoke")(function* (runId: string) {
+      const unconfirmed = (cause: string) =>
+        Effect.logWarning(
+          `Capability gateway revoke unconfirmed for ${runId}; the next reconcile revokes it: ${cause}`,
+        )
       yield* revoke(runId).pipe(
-        Effect.catch((error) =>
-          Effect.logWarning(
-            `Capability gateway revoke unconfirmed for ${runId}; the next reconcile revokes it: ${error.reason}`,
-          ),
-        ),
+        Effect.catch((error) => unconfirmed(error.reason)),
+        Effect.onInterrupt(() => unconfirmed("interrupted")),
         Effect.forkIn(scope),
       )
     })

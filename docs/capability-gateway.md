@@ -111,8 +111,15 @@ that value in its answer, so an answer that is lost (a kill of the gateway durin
 or a failed write of the answer) can leave a stored value that the server no longer takes, and
 the login then needs a new import.
 
-On SIGTERM, the gateway waits for a renewal in flight, up to 6 seconds (custody's limit of 5
-seconds on the request, then the write of the answer), before it stops the custody process.
-The stop timeout of the gateway's container or unit, from SIGTERM to SIGKILL, must be at least
-15 seconds: `docker stop --time 15` or `--stop-timeout 15`, or `TimeoutStopSec=15` in a systemd
-unit, which covers that wait and the stop of the listener and the store.
+A stop never cuts off a renewal whose request has gone out. Custody ends on SIGTERM, and on the
+end of noscope, its parent, which signals it SIGTERM: at once, or, with a renewal in flight,
+once the answer has come or custody's limit of 5 seconds on the request has passed and the
+result is stored, within 6 seconds. On SIGTERM the gateway waits for a renewal in flight up to
+the same 6 seconds before it ends noscope. This holds for each way to stop the gateway: `docker
+stop`, which signals only the gateway, the image's first process; and a systemd unit with any
+`KillMode`, also the default `control-group`, which signals the gateway, noscope and custody at
+one moment. Noscope ends at once on SIGTERM; custody then finishes alone, and systemd waits for
+it as a process of the unit. The stop timeout of the gateway's container or unit, from SIGTERM
+to SIGKILL, must be at least 15 seconds: `docker stop --time 15` or `--stop-timeout 15`, or
+`TimeoutStopSec=15` in a systemd unit, which covers that wait and the stop of the listener and
+the store. A SIGKILL during a renewal, or a timeout shorter than that, can lose the answer.

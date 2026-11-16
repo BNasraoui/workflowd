@@ -3,6 +3,7 @@ import { chmod, mkdir, rm, symlink, writeFile } from "node:fs/promises"
 import { createServer } from "node:net"
 import { join } from "node:path"
 import { maxControlFrame } from "../../src/capability-control/protocol"
+import { controlConnectionMs } from "../../src/capability-gateway/control"
 import { fixture } from "./gateway-process"
 import {
   framed,
@@ -190,23 +191,32 @@ test("a refused caller's request of more than one chunk meets no write error, an
   }
 })
 
-test("the gateway closes a refused caller that sends more than one frame's bytes", async () => {
-  const f = await fixture()
-  const gateway = await startGateway(f, gatewayConfig(f, process.getuid!() + 1))
-  try {
-    const caller = halfOpenConnection(socketOf(f))
-    expect(JSON.parse(await caller.answer)).toEqual({ ok: false, error: "caller" })
-    // A frame that declares twice the bound, of which the caller sends one byte past the bound
-    // and keeps its side open: the gateway ends the connection at the bound, not at the frame's
-    // end.
-    const request = framed(Buffer.alloc(maxControlFrame + 1), 2 * maxControlFrame)
-    caller.connection.write(request)
-    await caller.ended
-  } finally {
-    await gateway.stop()
-    await f.close()
-  }
-})
+test(
+  "the gateway closes a refused caller that sends more than one frame's bytes",
+  async () => {
+    const f = await fixture()
+    const gateway = await startGateway(f, gatewayConfig(f, process.getuid!() + 1))
+    try {
+      const caller = halfOpenConnection(socketOf(f))
+      expect(JSON.parse(await caller.answer)).toEqual({ ok: false, error: "caller" })
+      const accepted = performance.now()
+      // A frame that declares twice the bound, of which the caller sends one byte past the bound
+      // and keeps its side open: the gateway ends the connection at the bound, not at the frame's
+      // end, and not at its deadline for a connection.
+      const request = framed(Buffer.alloc(maxControlFrame + 1), 2 * maxControlFrame)
+      await new Promise<void>((sent) => caller.connection.write(request, () => sent()))
+      await caller.ended
+      expect(
+        performance.now() - accepted,
+        "the gateway ended the connection at the bound, before its deadline for a connection",
+      ).toBeLessThan(controlConnectionMs)
+    } finally {
+      await gateway.stop()
+      await f.close()
+    }
+  },
+  2 * controlConnectionMs,
+)
 
 test("the gateway holds 16 refused connections at once; the next one is closed with no answer until one ends", async () => {
   const f = await fixture()

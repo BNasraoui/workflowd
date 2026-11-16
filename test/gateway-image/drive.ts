@@ -716,7 +716,7 @@ process.stdout.write(JSON.stringify({ gateway, front: await connect(${JSON.strin
     // Custody reaches the fixture OAuth server on the gateway's loopback, through the forwarder.
     `http://127.0.0.1:${oauth.port}/v1/oauth/token`,
     "/bin/bun",
-    "/app/src/capability-gateway/custody.ts",
+    "/app/src/capability-gateway/custody-process.ts",
   )
   await chmod(join(f.root, "noscope/providers/provider-access.toml"), 0o640)
 
