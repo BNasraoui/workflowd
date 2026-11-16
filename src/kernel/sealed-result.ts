@@ -191,13 +191,16 @@ const commitId = /^[0-9a-f]{40}$/
  */
 const invisible = String.raw`\p{Cf}\p{Default_Ignorable_Code_Point}`
 /**
- * The text with each U+FE0F (emoji presentation) that directly follows a visible code point
- * left out: a commit message, a final message or a path may hold one there, and nowhere else,
- * so U+FE0F alone, after another invisible code point, after a control or after a space stays
- * refused. The seal has the same rule (result.py without_presentation).
+ * The text with each U+FE0F that selects the emoji form left out: one directly after a code
+ * point with the Emoji property that is not ASCII (so not after a digit, `#` or `*`). A commit
+ * message and a final message may hold one there and nowhere else, so U+FE0F after a letter,
+ * after another U+FE0F or at the start stays refused as each invisible code point is. A path
+ * holds no U+FE0F. The seal has the same rule (result.py without_presentation, EMOJI).
  */
-const presentationAfterVisible = new RegExp(String.raw`(?<=[^\p{Cc}${invisible}\s])\uFE0F`, "gu")
-const withoutPresentation = (value: string) => value.replace(presentationAfterVisible, "")
+// A capture and not a lookbehind: the engine of Bun 1.3 does not match a code point above
+// U+FFFF with a property class in a lookbehind.
+const emojiPresentation = new RegExp(String.raw`([\p{Emoji}--\p{ASCII}])\uFE0F`, "gv")
+const withoutPresentation = (value: string) => value.replace(emojiPresentation, "$1")
 // A title is one line; a body or a commit message may hold newlines and no other
 // control; a final message may hold newlines and tabs and no other control. None
 // holds an invisible code point.
@@ -861,9 +864,10 @@ const parseDiff = (raw: Uint8Array): ReadonlyArray<DiffEntry> => {
 /**
  * What a path may not hold: a control character (C0, DEL and C1, so also no newline or
  * tab), a backslash in any component, and the characters that change what a reviewer
- * of the pushed result sees: each invisible code point (`invisible`), U+2028 and
- * U+2029, but U+FE0F directly after a visible code point (`withoutPresentation`). So a
- * file name with an emoji sequence that needs a joiner is refused. The seal has the same rule (result.py safe_path).
+ * of the pushed result sees: each invisible code point (`invisible`, U+FE0F among them, so
+ * `src/a\uFE0Fb.txt` is not a second `src/ab.txt`), U+2028 and U+2029. So a file name with
+ * an emoji sequence that needs a joiner or a variation selector is refused. The seal has the
+ * same rule (result.py safe_path).
  */
 const unsafePathCharacter = new RegExp(String.raw`[\p{Cc}\\${invisible}\u2028\u2029]`, "u")
 
@@ -889,10 +893,7 @@ const isGithubName = (component: string) => {
 }
 
 const checkEntry = (entry: DiffEntry): SealedResultRefused | undefined => {
-  if (
-    !entry.utf8 ||
-    entry.path.split("/").some((part) => unsafePathCharacter.test(withoutPresentation(part)))
-  )
+  if (!entry.utf8 || unsafePathCharacter.test(entry.path))
     return refused("path_name", quoted(entry.path))
   if (!regularModes.has(entry.oldMode) || !regularModes.has(entry.newMode))
     return refused("file_mode", quoted(entry.path))

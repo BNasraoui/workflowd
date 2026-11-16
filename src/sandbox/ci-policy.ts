@@ -12,13 +12,14 @@ const setupBun = "oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6"
 const setupNode = "actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020"
 // Reviewed in full: anonymous checkout, credential-free pinned Nix installation,
 // tokenless pinned Bun setup, locked build/determinism/E2E, and artifact upload
-// restricted to main pushes.
+// restricted to main pushes, directly after the build and before any test code runs, with
+// the archive's SHA-256 as the workflow's output for the publish job to check.
 // Any dependency, permission, input or script edit requires a fresh review.
 // gateway-image.yml: the same checkout, Nix, Bun and main-only upload, plus a job that finds
 // whether a pull request changes an input of the image, a second build of the commit and a job
 // that requires equal digests and the recorded noscope output hash.
 const imageWorkflowSha256 = new Map([
-  ["agent-image.yml", "d9cf0f93b8955cac103f251284c1e285ac99ddcf3f0735fd030dc9957bc29958"],
+  ["agent-image.yml", "961aca0273512625017cd483913e369bd750714083f26250d8746ec0ad77115f"],
   ["gateway-image.yml", "b5f6d7ce48d94f53ddf94ff2932d6df93118db25d622e0d794af11f16024dc57"],
 ])
 const head = "${{ github.event.pull_request.head.sha || github.sha }}"

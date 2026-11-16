@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, expect, test } from "bun:test"
+import { afterEach, beforeEach, expect, setSystemTime, test } from "bun:test"
 import { createHash } from "node:crypto"
 import { mkdtemp, rm } from "node:fs/promises"
 import { connect } from "node:net"
@@ -10,7 +10,9 @@ import { SqlClient } from "effect/unstable/sql"
 import { fixtureExecutable } from "../helpers/fixture-executable.mjs"
 import {
   maxEventBatchBytes,
+  maxResultBody,
   maxResultManifestBytes,
+  maxRunUploads,
 } from "../../deploy/sandbox/capability-limits.mjs"
 import { runSignatureHeader, signRenewal, signRunBody } from "../../deploy/sandbox/renewal.mjs"
 import { AgentRunStoreLive } from "../../src/kernel/agent-run-store"
@@ -19,7 +21,11 @@ import { makeCapabilityStore } from "../../src/capability-gateway/store"
 import { runGatewayMigrations } from "../../src/capability-gateway/migrations"
 import { serveCapabilityListener } from "../../src/capability-gateway/http"
 import { liveGrants } from "../../src/sandbox/capability-control"
-import { maxLaunchPromptBytes, RunLaunch } from "../../src/capability-control/protocol"
+import {
+  maxLaunchPromptBytes,
+  maxRunEventBytes,
+  RunLaunch,
+} from "../../src/capability-control/protocol"
 import { defaultRunBudget } from "../../src/sandbox/config"
 import {
   bindRunSession,
@@ -35,29 +41,33 @@ const launch = { prompt: "fixture prompt", image, identity }
 
 type Gateway = Effect.Success<ReturnType<typeof makeCapabilityGateway>>
 type Store = Effect.Success<typeof makeCapabilityStore>
+// Each case has its own database, gateway and bound run: no case reads what another left.
 let root: string
 let scope: Scope.Closeable
+let services: Effect.Success<ReturnType<typeof buildServices>>
 let gateway: Gateway
 let store: Store
 let sql: SqlClient.SqlClient
 let token: string
 let channel: string
 
-/** Runs `effect` in the test's one database. */
+/** The daemon's store and the gateway's store in one database in memory. */
+const buildServices = (scope: Scope.Scope) =>
+  Layer.buildWithScope(
+    Layer.provideMerge(AgentRunStoreLive, SqliteClient.layer({ filename: ":memory:" })),
+    scope,
+  )
+
+/** Runs `effect` in the case's one database. */
 const inStore = <A, E>(effect: Effect.Effect<A, E, SqlClient.SqlClient>) =>
   Effect.runPromise(Effect.provideService(effect, SqlClient.SqlClient, sql))
 
-beforeAll(async () => {
+beforeEach(async () => {
   root = await mkdtemp(join(tmpdir(), "run-routes-"))
   await writeNoscopeProviders(root, 120000)
   scope = Effect.runSync(Scope.make())
-  // The database lives as long as the test's scope, as the gateway's own store does.
-  const services = await Effect.runPromise(
-    Layer.buildWithScope(
-      Layer.provideMerge(AgentRunStoreLive, SqliteClient.layer({ filename: ":memory:" })),
-      scope,
-    ),
-  )
+  // The database lives as long as the case's scope, as the gateway's own store does.
+  services = await Effect.runPromise(buildServices(scope))
   const built = await Effect.runPromise(
     Effect.gen(function* () {
       // The run is a runner run: its grant carries its launch from the first grant on.
@@ -85,7 +95,8 @@ beforeAll(async () => {
   channel = built.session.binding.channel
 })
 
-afterAll(async () => {
+afterEach(async () => {
+  setSystemTime()
   await Effect.runPromise(Scope.close(scope, Exit.void))
   await rm(root, { recursive: true, force: true })
 })
@@ -187,11 +198,15 @@ test("an event batch is held only with the session key's signature over its exac
   expect((await readEvents()).batches).toEqual([{ sequence: 1, lines: ['{"type":"started"}'] }])
 })
 
+/** Posts event batch `sequence` of `lines` with its signature, and gives the answer's status. */
+const postEvents = async (sequence: number, lines: ReadonlyArray<string>) => {
+  const body = events(sequence, lines)
+  return (await call("events", { body, signature: signed("events", body) })).status
+}
+
 test("event batches are numbered with no gap, and the last one sent again changes nothing", async () => {
-  const again = events(1, ['{"type":"started"}'])
-  expect((await call("events", { body: again, signature: signed("events", again) })).status).toBe(
-    204,
-  )
+  expect(await postEvents(1, ['{"type":"started"}'])).toBe(204)
+  expect(await postEvents(1, ['{"type":"started"}'])).toBe(204)
   const changed = events(1, ["changed"])
   expect(
     (await call("events", { body: changed, signature: signed("events", changed) })).status,
@@ -303,7 +318,108 @@ test("the one result is held once, as its exact bytes, and read back in parts", 
   ).toBe(true)
 })
 
+test("at most maxRunUploads results are read at once: one more answers 429 and is not held", async () => {
+  const reading: Array<Promise<void>> = []
+  const bodies: Array<ReadableStreamDefaultController<Uint8Array>> = []
+  const answers: Array<Promise<Response>> = []
+  for (let index = 0; index < maxRunUploads; index++) {
+    const pulled = Promise.withResolvers<void>()
+    reading.push(pulled.promise)
+    const body = new ReadableStream<Uint8Array>(
+      { start: (controller) => void bodies.push(controller), pull: () => pulled.resolve() },
+      { highWaterMark: 0 },
+    )
+    answers.push(
+      Effect.runPromise(
+        gateway.handle(
+          new Request(`${origin}/capabilities/v1/run/result`, {
+            method: "POST",
+            headers: {
+              authorization: `Bearer ${token}`,
+              [runSignatureHeader]: "A".repeat(86),
+              "content-length": String(maxResultBody),
+            },
+            body,
+            duplex: "half",
+          }),
+        ),
+      ),
+    )
+  }
+  // Each upload holds its permit while the gateway reads its body.
+  await Promise.all(reading)
+  const result = framed('{"sourceSha":"d"}', Buffer.alloc(16, 7))
+  const over = await call("result", { body: result, signature: signed("result", result) })
+  expect(over.status).toBe(429)
+  expect(over.headers.get("retry-after")).toBe("1")
+  expect((await readEvents()).result).toBe(false)
+  // The bodies end short of their declared length: each is refused and gives its permit back.
+  for (const body of bodies) body.close()
+  expect((await Promise.all(answers)).map((answer) => answer.status)).toEqual(
+    Array.from({ length: maxRunUploads }, () => 403),
+  )
+  expect((await readEvents()).result).toBe(false)
+  expect((await call("result", { body: result, signature: signed("result", result) })).status).toBe(
+    204,
+  )
+  expect((await readEvents()).result).toBe(true)
+})
+
+test("a run's event lines are held up to maxRunEventBytes in all, and a batch past that is refused", async () => {
+  // The gateway counts a batch's lines as JSON: ["x…x"] is its x's and four bytes.
+  const batchBytes = 65000
+  const full = Math.floor(maxRunEventBytes / batchBytes)
+  const statuses: Array<number> = []
+  for (let sequence = 1; sequence <= full; sequence++)
+    statuses.push(await postEvents(sequence, ["x".repeat(batchBytes - 4)]))
+  expect(statuses).toEqual(Array.from({ length: full }, () => 204))
+  const rest = maxRunEventBytes - full * batchBytes
+  expect(await postEvents(full + 1, ["x".repeat(rest - 4)])).toBe(204)
+  // The smallest batch, no line ("[]", two bytes), passes the bound.
+  expect(await postEvents(full + 2, [])).toBe(403)
+  expect(
+    await inStore(sql`SELECT count(*) AS batches,sum(bytes) AS bytes,max(sequence) AS last
+      FROM capability_run_events WHERE run_id='run'`),
+  ).toEqual([{ batches: full + 1, bytes: maxRunEventBytes, last: full + 1 }])
+})
+
+test("no run route takes a request at or after the run's deadline, where its run token ends", async () => {
+  const { deadline } = Schema.decodeUnknownSync(Schema.Struct({ deadline: Schema.Number }))(
+    await (await call("launch")).json(),
+  )
+  const bind = (jti: string, expiresAt: number) =>
+    bindRunSession(Date.now(), { jti, expiresAt }).pipe(
+      Effect.provide(services),
+      Scope.provide(scope),
+    )
+  // A run token is never bound past the run's deadline.
+  expect(Exit.isFailure(await Effect.runPromiseExit(bind("past-deadline", deadline + 1)))).toBe(
+    true,
+  )
+  token = (await Effect.runPromise(bind("at-deadline", deadline))).token
+  setSystemTime(deadline - 1)
+  expect((await call("launch")).status).toBe(200)
+  expect(await postEvents(1, ["before"])).toBe(204)
+  setSystemTime(deadline)
+  expect((await call("launch")).status).toBe(403)
+  expect(await postEvents(2, ["at the deadline"])).toBe(403)
+  const result = framed('{"sourceSha":"d"}', Buffer.alloc(16, 7))
+  expect((await call("result", { body: result, signature: signed("result", result) })).status).toBe(
+    403,
+  )
+  expect(await readEvents()).toMatchObject({
+    batches: [{ sequence: 1, lines: ["before"] }],
+    result: false,
+  })
+})
+
 test("the run routes cost the run no call", async () => {
+  expect((await call("launch")).status).toBe(200)
+  expect(await postEvents(1, ['{"type":"started"}'])).toBe(204)
+  const body = framed('{"sourceSha":"d"}', Buffer.alloc(16, 7))
+  expect((await call("result", { body, signature: signed("result", body) })).status).toBe(204)
+  expect((await readEvents()).batches.length).toBe(1)
+  expect((await readEvents()).result).toBe(true)
   expect(await usedCalls()).toBe(0)
 })
 
@@ -318,11 +434,11 @@ test("the gateway's own end of a run is read with the counts it used", async () 
 })
 
 test("a revoked run's token reaches no run route, and the daemon still reads its records", async () => {
-  // The run was revoked by the case before.
+  expect(await postEvents(1, ["first"])).toBe(204)
+  await inStore(store.revokeTwoHolders("run"))
   expect((await call("launch")).status).toBe(403)
-  const late = events(3, ["late"])
-  expect((await call("events", { body: late, signature: signed("events", late) })).status).toBe(403)
-  expect((await readEvents()).batches.length).toBe(2)
+  expect(await postEvents(2, ["late"])).toBe(403)
+  expect((await readEvents()).batches).toEqual([{ sequence: 1, lines: ["first"] }])
 })
 
 test("the listener refuses a run route reached by a path that a URL parser changes", async () => {
