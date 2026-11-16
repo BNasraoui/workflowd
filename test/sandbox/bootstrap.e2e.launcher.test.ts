@@ -2,7 +2,7 @@ import { expect, test } from "bun:test"
 import { fixtureExecutable } from "../helpers/fixture-executable.mjs"
 import { loopbackCertificate, tlsFront } from "../helpers/loopback-tls"
 import { sign } from "node:crypto"
-import { mkdtemp, mkdir, writeFile, rm, readFile } from "node:fs/promises"
+import { mkdtemp, mkdir, writeFile, rm, readFile, readdir, readlink, stat } from "node:fs/promises"
 import {
   gatewaySource,
   jwks,
@@ -23,6 +23,7 @@ import { makeSandboxLeaseService } from "../../src/sandbox/lease"
 import { makeSandboxStore } from "../../src/sandbox/store"
 import { AgentRunStore, AgentRunStoreLive } from "../../src/kernel/agent-run-store"
 import { runStoreMigrations } from "../../src/store/migrations"
+import { sessionKeyPair } from "../../deploy/sandbox/renewal.mjs"
 
 const hostileClaims: Record<string, Record<string, unknown>> = {
   fork: { repository: "fork/repo", repository_id: "99" },
@@ -40,6 +41,49 @@ const hostileClaims: Record<string, Record<string, unknown>> = {
   attempt: { run_attempt: "2" },
 }
 
+/** The forms in which a session's private key could be written: its PKCS #8 bytes and its seed. */
+const keyForms = (privateKey: string) => {
+  const der = Buffer.from(privateKey, "base64url")
+  const seed = der.subarray(-32)
+  return [der, seed].flatMap((bytes) => [
+    bytes.toString("base64url"),
+    bytes.toString("base64").replace(/=+$/, ""),
+    bytes.toString("hex"),
+  ])
+}
+
+/**
+ * The outputs of the bootstrap and of its running relay: the bootstrap's standard output and
+ * error, each file in the sandbox directory, and the relay's environment, arguments and the
+ * targets of its standard output and error; with the gateway's output.
+ */
+async function runnerOutputs(
+  sandbox: string,
+  relay: number,
+  bootstrap: { readonly stdout: string; readonly stderr: string },
+  gateway: string,
+) {
+  const outputs: Record<string, string> = {
+    "bootstrap standard output": bootstrap.stdout,
+    "bootstrap standard error": bootstrap.stderr,
+    "relay environment": await readFile(`/proc/${relay}/environ`, "latin1"),
+    "relay arguments": await readFile(`/proc/${relay}/cmdline`, "latin1"),
+    "relay standard output": await readlink(`/proc/${relay}/fd/1`),
+    "relay standard error": await readlink(`/proc/${relay}/fd/2`),
+    "gateway output": gateway,
+  }
+  for (const name of await readdir(sandbox))
+    if ((await stat(join(sandbox, name))).isFile())
+      outputs[`file ${name}`] = await readFile(join(sandbox, name), "latin1")
+  return outputs
+}
+
+/** Each output of `outputs` that holds a form of `privateKey`. */
+const holding = (outputs: Record<string, string>, privateKey: string) =>
+  Object.entries(outputs)
+    .filter(([, text]) => keyForms(privateKey).some((form) => text.includes(form)))
+    .map(([name]) => name)
+
 // One key pair serves every case: the job keys, and the GitHub App key of the fixture.
 for (const race of [
   false,
@@ -48,9 +92,13 @@ for (const race of [
   "release-failure",
   ...Object.keys(hostileClaims),
   "key",
+  // The bootstrap's environment carries the private key, which the relay then holds: the search
+  // of the outputs finds it there.
+  "planted",
 ])
   test(`private HTTPS session bootstrap through the gateway process; bind race=${race}`, async () => {
     const node = fixtureExecutable("node")
+    const sessionKey = sessionKeyPair()
     const root = await mkdtemp(join(tmpdir(), "wfd-private-job-"))
     const sandbox = join(root, "sandbox")
     const database = join(root, "store.sqlite")
@@ -310,6 +358,7 @@ await prepare({
   identity: (url, init) => fetch(${JSON.stringify(issuer.url.origin + "/token")} + url.search, init),
   // The fixture's gateway answers at once: a new proof after a lost or refused one need not wait.
   backoff: () => 0,
+  sessionKey: ${JSON.stringify(sessionKey)},
 })`,
             ],
             {
@@ -323,15 +372,20 @@ await prepare({
                   "https://fixture.actions.githubusercontent.com/token?api-version=2",
                 ACTIONS_ID_TOKEN_REQUEST_TOKEN: "fixture-request",
                 NODE_EXTRA_CA_CERTS: tls.cert,
+                ...(race === "planted" ? { RUNNER_TRACKING_ID: sessionKey.privateKey } : {}),
               },
-              stdout: "ignore",
+              stdout: "pipe",
               stderr: "pipe",
             },
           )
-          const [code, diagnostic] = yield* Effect.promise(() =>
-            Promise.all([bootstrap.exited, new Response(bootstrap.stderr).text()]),
+          const [code, printed, diagnostic] = yield* Effect.promise(() =>
+            Promise.all([
+              bootstrap.exited,
+              new Response(bootstrap.stdout).text(),
+              new Response(bootstrap.stderr).text(),
+            ]),
           )
-          expect({ code, diagnostic }).toEqual({ code: 0, diagnostic: "" })
+          expect({ code, printed, diagnostic }).toEqual({ code: 0, printed: "", diagnostic: "" })
           // The gateway sent the first session and the runner lost it; a hostile first proof
           // opened nothing. Two proofs opened sessions; the runner holds the second.
           expect(dropped).toBe(1)
@@ -341,6 +395,10 @@ await prepare({
               (SELECT session FROM capability_bindings) AS session`,
             ),
           ).toEqual([{ proofs: 2, session: 2 }])
+          // The session holds the public key of the runner's session key.
+          expect(
+            yield* gatewayStore((gateway) => gateway`SELECT session_key FROM capability_bindings`),
+          ).toEqual([{ session_key: sessionKey.publicKey }])
           const hostileFirst = typeof race === "string" && (race in hostileClaims || race === "key")
           expect(proofs).toBe(hostileFirst ? 3 : 2)
           expect(
@@ -396,6 +454,22 @@ await prepare({
           expect(accepted.status).toBe(200)
           expect(yield* Effect.promise(() => accepted.text())).toBe(response)
           expect(upstreamEffects).toBe(1)
+          // No output of the bootstrap or of the relay holds the private key.
+          const outputs = yield* Effect.promise(async () =>
+            runnerOutputs(
+              sandbox,
+              (await relayPid()) ?? 0,
+              { stdout: printed, stderr: diagnostic },
+              gateway?.output?.() ?? "",
+            ),
+          )
+          expect(Object.keys(outputs)).toEqual(
+            expect.arrayContaining(["relay environment", "file relay.pid", "gateway output"]),
+          )
+          expect(outputs["relay standard error"]).toBe("/dev/null")
+          expect(holding(outputs, sessionKey.privateKey)).toEqual(
+            race === "planted" ? ["relay environment"] : [],
+          )
           expect(publicArtifacts).toBe(0)
           // workflowd revokes; the gateway process refuses the relay's next call.
           yield* local.revoke("run")

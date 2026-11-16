@@ -7,6 +7,8 @@ import { openSession, takeJobIdentity } from "./bootstrap-helper.mjs"
 /**
  * The runner's first contact: it opens its gateway session with its own OIDC proof, then starts
  * the relay that holds the run token. The request authority is cleared before the relay starts.
+ * The session's private key goes to the relay on its standard input with the grant, and to no
+ * file, environment, argument or output.
  */
 export async function prepare({
   directory = "/run/workflowd-sandbox",
@@ -15,6 +17,8 @@ export async function prepare({
   tooling = dirname(fileURLToPath(import.meta.url)),
   /** The pause between proofs; the helper's own when not named. */
   backoff,
+  /** The session key; a new one unless named. */
+  sessionKey,
 } = {}) {
   const ref = environment.GITHUB_REF ?? ""
   if (!/^[a-f0-9]{40}$/.test(environment.GITHUB_SHA ?? "") || !ref.startsWith("refs/heads/workflowd/leases/"))
@@ -24,7 +28,7 @@ export async function prepare({
   const issue = takeJobIdentity(environment, identity)
   let grant
   try {
-    grant = await openSession({ gateway, leaseId, issue, backoff })
+    grant = await openSession({ gateway, leaseId, issue, backoff, sessionKey })
   } finally {
     issue.clear()
   }
