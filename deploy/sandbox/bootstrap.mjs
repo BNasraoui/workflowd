@@ -3,6 +3,7 @@ import { spawn } from "node:child_process"
 import { dirname } from "node:path"
 import { fileURLToPath, pathToFileURL } from "node:url"
 import { openSession, takeJobIdentity } from "./bootstrap-helper.mjs"
+import { sessionKeyPair } from "./renewal.mjs"
 
 /**
  * The runner's first contact: it opens its gateway session with its own OIDC proof, then starts
@@ -17,8 +18,12 @@ export async function prepare({
   tooling = dirname(fileURLToPath(import.meta.url)),
   /** The pause between proofs; the helper's own when not named. */
   backoff,
-  /** The session key; a new one unless named. */
-  sessionKey,
+  /**
+   * The session key, a new one unless named. Only the test of the key's secrecy names one: it
+   * must know the private key to search each output for it, and the key, by design, is
+   * otherwise only in this process's memory and on the relay's standard input.
+   */
+  sessionKey = sessionKeyPair(),
 } = {}) {
   const ref = environment.GITHUB_REF ?? ""
   if (!/^[a-f0-9]{40}$/.test(environment.GITHUB_SHA ?? "") || !ref.startsWith("refs/heads/workflowd/leases/"))

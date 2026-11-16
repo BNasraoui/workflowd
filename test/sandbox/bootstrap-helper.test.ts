@@ -88,6 +88,7 @@ test("a refused challenge ends the exchange, and refused sessions end it after f
   const refused = scriptedGateway([403])
   await expect(
     openSession({
+      sessionKey,
       gateway: "https://gateway.fixture.invalid",
       leaseId: "lease",
       issue,
@@ -102,6 +103,7 @@ test("a refused challenge ends the exchange, and refused sessions end it after f
   )
   await expect(
     openSession({
+      sessionKey,
       gateway: "https://gateway.fixture.invalid",
       leaseId: "lease",
       issue,
@@ -112,10 +114,10 @@ test("a refused challenge ends the exchange, and refused sessions end it after f
   expect(proofs).toBe(5)
   for (const gateway of ["http://gateway.fixture.invalid", "https://u@gateway.fixture.invalid"])
     await expect(
-      openSession({ gateway, leaseId: "lease", issue, send: refused.send }),
+      openSession({ sessionKey, gateway, leaseId: "lease", issue, send: refused.send }),
     ).rejects.toThrow("gateway refused")
   await expect(
-    openSession({ gateway: "https://gateway.fixture.invalid", leaseId: "../x", issue }),
+    openSession({ sessionKey, gateway: "https://gateway.fixture.invalid", leaseId: "../x", issue }),
   ).rejects.toThrow("lease refused")
 })
 
@@ -128,6 +130,7 @@ test("a session grant whose provider id is missing or not of the form costs a pr
         : Response.json({ ...grant, providerId })
     await expect(
       openSession({
+        sessionKey,
         gateway: "https://gateway.fixture.invalid",
         leaseId: "lease",
         issue: async () => `proof-${++proofs}`,
@@ -416,12 +419,14 @@ test("OIDC authority issues at most its limit of proofs, and none after clear", 
 const sessionAt = (
   gateway: string,
 ) => `import { openSession } from ${JSON.stringify(resolve("deploy/sandbox/bootstrap-helper.mjs"))}
+import { sessionKeyPair } from ${JSON.stringify(resolve("deploy/sandbox/renewal.mjs"))}
 const waits = []
 let proofs = 0
 const outcome = await openSession({
   gateway: ${JSON.stringify(gateway)},
   leaseId: "lease",
   issue: async () => \`proof-\${++proofs}\`,
+  sessionKey: sessionKeyPair(),
   wait: 1000,
   clock: () => waits.reduce((sum, wait) => sum + wait, 0),
   sleep: async (milliseconds) => { waits.push(milliseconds) },

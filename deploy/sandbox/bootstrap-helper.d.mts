@@ -27,8 +27,8 @@ export function openSession(options: {
   clock?: () => number
   sleep?: (milliseconds: number, signal?: AbortSignal) => Promise<void>
   signal?: AbortSignal
-  /** The session key that each proof binds; a new one unless named. */
-  sessionKey?: { publicKey: string; privateKey: string }
+  /** The session key that each proof binds, made for this session. */
+  sessionKey: { publicKey: string; privateKey: string }
 }): Promise<SessionGrant>
 export function takeJobIdentity(
   environment: Record<string, string | undefined>,

@@ -1,5 +1,5 @@
 import { maxProofLength, providerIdPattern } from "./capability-limits.mjs"
-import { sessionBinder, sessionKeyPair } from "./renewal.mjs"
+import { sessionBinder } from "./renewal.mjs"
 /** The gateway's origin: HTTPS only, with no credentials, path, query or fragment. */
 export function gatewayOrigin(value) {
   const url = new URL(value)
@@ -80,9 +80,10 @@ const passes = (error) =>
  * that is not well formed), another status, and a certificate that the runner does not trust,
  * which no wait can clear. An answer can be lost after the gateway sent it, so a lost or refused
  * session costs a new proof, at most `attempts` times.
- * Each proof binds the session key `sessionKey`, a new one unless named: its audience is
- * `workflowd:<channel>:<binder>`, and the session post carries the public key. The grant comes
- * back with the run's channel and the private key, which the relay alone holds after this.
+ * Each proof binds the session key `sessionKey`, which the caller makes for this session: its
+ * audience is `workflowd:<channel>:<binder>`, and the session post carries the public key. The
+ * grant comes back with the run's channel and the private key, which the relay alone holds after
+ * this.
  */
 export async function openSession({
   gateway,
@@ -96,7 +97,7 @@ export async function openSession({
   clock = Date.now,
   sleep = pause,
   signal,
-  sessionKey = sessionKeyPair(),
+  sessionKey,
 }) {
   const origin = gatewayOrigin(gateway)
   if (!/^[a-zA-Z0-9-]{1,80}$/.test(leaseId ?? "")) throw new Error("lease refused")
