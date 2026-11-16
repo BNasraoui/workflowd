@@ -463,9 +463,8 @@ await prepare({
               gateway?.output?.() ?? "",
             ),
           )
-          expect(Object.keys(outputs)).toEqual(
-            expect.arrayContaining(["relay environment", "file relay.pid", "gateway output"]),
-          )
+          for (const name of ["relay environment", "file relay.pid", "gateway output"])
+            expect(outputs).toHaveProperty([name])
           expect(outputs["relay standard error"]).toBe("/dev/null")
           expect(holding(outputs, sessionKey.privateKey)).toEqual(
             race === "planted" ? ["relay environment"] : [],
