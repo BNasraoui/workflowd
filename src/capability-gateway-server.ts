@@ -4,7 +4,7 @@ import { Effect, Layer } from "effect"
 import { SqlClient } from "effect/unstable/sql"
 import { loadCapabilityGatewayConfig } from "./config"
 import { makeCapabilityGateway } from "./capability-gateway/service"
-import { capabilityApi, capabilityHttpServer } from "./capability-gateway/http"
+import { capabilityApi, serveCapabilityListener } from "./capability-gateway/http"
 import type { ClaudeUpstream } from "./capability-gateway/claude"
 import type { githubJobKeys } from "./sandbox/bootstrap"
 import { gatewayMigrationsTable } from "./capability-control/protocol"
@@ -98,21 +98,15 @@ export const serveCapabilityGateway = (
         daemon: config.daemon,
         target: gateway.control,
       })
-      const { server, close } = capabilityHttpServer(capabilityApi(gateway))
       yield* Effect.acquireRelease(
-        Effect.tryPromise(
-          () =>
-            new Promise<void>((resolve, reject) => {
-              server.once("error", reject)
-              server.listen(config.listen.port, config.listen.host, () => resolve())
-            }),
-        ),
-        () => Effect.tryPromise(close).pipe(Effect.orDie),
+        Effect.tryPromise({
+          try: () => serveCapabilityListener(config.listen, capabilityApi(gateway)),
+          catch: (error) =>
+            error instanceof Error ? error : new Error("capability listener unavailable"),
+        }),
+        (close) => Effect.tryPromise(close).pipe(Effect.orDie),
       )
-      const address = server.address()
-      if (address === null || typeof address === "string")
-        return yield* Effect.fail(new Error("capability gateway listener unavailable"))
-      return { host: config.listen.host, port: address.port }
+      return { socket: config.listen.socket }
     }).pipe(Effect.provide(context))
   })
 
@@ -134,10 +128,10 @@ async function providerAccessDirectory(configHome: string) {
   return at < 0 ? undefined : mint[at + 1]
 }
 
-/** Process entry: serve until stopped, and name the bound port on standard output. */
+/** Process entry: serve until stopped, and name the listener's socket on standard output. */
 const runCapabilityGatewayServer = (env: Record<string, string | undefined>) =>
   serveCapabilityGateway(env).pipe(
-    Effect.tap(({ port }) => Effect.sync(() => process.stdout.write(`listening ${port}\n`))),
+    Effect.tap(({ socket }) => Effect.sync(() => process.stdout.write(`listening ${socket}\n`))),
     Effect.andThen(Effect.never),
     Effect.scoped,
   )

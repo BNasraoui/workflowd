@@ -1,5 +1,6 @@
-import { lstat, rm } from "node:fs/promises"
+import { chmod, chown, lstat, mkdir, readFile, realpath, rm } from "node:fs/promises"
 import { createConnection, type Socket } from "node:net"
+import { dirname } from "node:path"
 import { dlopen, FFIType, ptr } from "bun:ffi"
 import { tryFileLock } from "./file-lock"
 
@@ -78,4 +79,113 @@ export async function claimSocketPath(path: string) {
     await release()
     throw error
   }
+}
+
+/** How a socket's directory names itself in its errors: the socket and the group that reaches it. */
+export interface SocketRole {
+  readonly socket: string
+  readonly group: string
+}
+
+/**
+ * Refuses a socket directory that a user other than root and this process's uid could replace.
+ * Its parent is named by its real path (no symbolic link above the directory), and each directory
+ * from the parent up to `/` is owned by root (uid 0) or this uid, and either lets neither its
+ * group nor others write to it (mode & 0o022 is 0) or has the sticky bit (mode & 0o1000). The
+ * sticky bit lets only an entry's owner, the directory's owner and root rename or remove the
+ * entry, and each entry on the path is owned by root or this uid. `/` may also show the kernel's
+ * overflow uid: a user namespace shows it for an owner that it does not map, as the host's root,
+ * and `/` itself cannot be renamed or replaced.
+ */
+async function checkAncestors(directory: string, uid: number, role: SocketRole) {
+  const parent = dirname(directory)
+  if ((await realpath(parent)) !== parent)
+    throw new Error(`${role.socket} directory must be named by its real path`)
+  const overflow = Number(
+    (await readFile("/proc/sys/kernel/overflowuid", "utf8").catch(() => "")).trim() || -1,
+  )
+  for (let above = parent; ; above = dirname(above)) {
+    const info = await lstat(above)
+    const owners = above === "/" ? [0, uid, overflow] : [0, uid]
+    if (
+      !info.isDirectory() ||
+      !owners.includes(info.uid) ||
+      ((info.mode & 0o022) !== 0 && (info.mode & 0o1000) === 0)
+    )
+      throw new Error(`${above} lets another user replace the ${role.socket} directory`)
+    if (above === "/") return
+  }
+}
+
+/**
+ * The directory of a socket is this process's own: owned by its uid, with the group `gid`, mode
+ * `mode`, under directories that pass `checkAncestors`. It is made when it is missing; anything
+ * else is refused.
+ */
+async function claimSocketDirectory(
+  directory: string,
+  uid: number,
+  gid: number,
+  mode: number,
+  role: SocketRole,
+) {
+  await checkAncestors(directory, uid, role)
+  const existing = await lstat(directory).catch(() => null)
+  if (existing === null) {
+    await mkdir(directory, { mode: 0o700 })
+    await chown(directory, uid, gid)
+    await chmod(directory, mode)
+  }
+  const info = await lstat(directory)
+  if (!info.isDirectory() || info.uid !== uid || info.gid !== gid || (info.mode & 0o7777) !== mode)
+    throw new Error(
+      `${role.socket} directory must be the gateway's, mode ${mode.toString(8).padStart(4, "0")}, ${role.group}`,
+    )
+}
+
+/** A server that listens on a Unix socket path: node:net's or node:http's. */
+interface SocketServer {
+  listen(path: string, listening: () => void): unknown
+  once(event: "error", listener: (error: Error) => void): unknown
+  removeListener(event: "error", listener: (error: Error) => void): unknown
+  close(closed?: () => void): unknown
+}
+
+/**
+ * Serves `server` on the Unix socket `path`: the directory of the path is claimed for this uid
+ * and `gid` with `mode` (`claimSocketDirectory`), the path itself with `claimSocketPath`, and the
+ * socket gets this uid, `gid` and mode 0660. So only this uid, `gid` and root reach it. Resolves to
+ * its close, which stops the server, removes the socket and releases the path.
+ */
+export async function serveSocket(
+  server: SocketServer,
+  path: string,
+  gid: number,
+  mode: number,
+  role: SocketRole,
+) {
+  if (process.platform !== "linux") throw new Error(`the ${role.socket} needs SO_PEERCRED`)
+  const uid = process.getuid!()
+  await claimSocketDirectory(dirname(path), uid, gid, mode, role)
+  const release = await claimSocketPath(path)
+  try {
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject)
+      server.listen(path, () => {
+        server.removeListener("error", reject)
+        resolve()
+      })
+    })
+    await chown(path, uid, gid)
+    await chmod(path, 0o660)
+  } catch (error) {
+    server.close()
+    await release()
+    throw error
+  }
+  return () =>
+    new Promise<void>((resolve) => server.close(() => resolve()))
+      .then(() => rm(path, { force: true }))
+      .then(release)
+      .catch(() => undefined)
 }

@@ -14,10 +14,9 @@ import {
   writeNoscopeProvider,
 } from "./fixture"
 import { fixtureExecutable } from "../helpers/fixture-executable.mjs"
-import { loopbackCertificate, portOf } from "../helpers/loopback-tls"
-import { capabilityApi, capabilityHttpServer } from "../../src/capability-gateway/http"
+import { loopbackCertificate, portOf, tlsFront } from "../helpers/loopback-tls"
+import { capabilityApi, serveCapabilityListener } from "../../src/capability-gateway/http"
 import { connect, createServer } from "node:net"
-import { createServer as tlsServer } from "node:tls"
 import { once } from "node:events"
 
 /** The bound port of a listening TCP server. */
@@ -69,8 +68,9 @@ test("real Git clone/fetch, repository and write fences", async () => {
   })
   const tls = await loopbackCertificate(root)
   let relay: ReturnType<typeof Bun.spawn> | undefined
-  let listener: ReturnType<typeof capabilityHttpServer> | undefined
-  let front: ReturnType<typeof tlsServer> | undefined
+  const listenSocket = join(root, "front", "gateway.sock")
+  const front = await tlsFront(tls, listenSocket)
+  let stopListener: (() => Promise<void>) | undefined
   try {
     await Effect.runPromise(
       Effect.gen(function* () {
@@ -93,27 +93,17 @@ test("real Git clone/fetch, repository and write fences", async () => {
           return fetch(`${backend.url.href}repo.git/${url.split("repo.git/")[1]}`, input)
         })
         const grant = yield* bindRunSession(Date.now(), { jti: "git-jti" })
-        // The gateway's network listener, behind TLS on loopback.
-        const served = capabilityHttpServer(capabilityApi(gateway))
-        listener = served
-        served.server.listen(0, "127.0.0.1")
-        yield* Effect.promise(() => once(served.server, "listening"))
-        const backendPort = portOf(served.server)
-        const terminator = tlsServer(
-          {
-            key: yield* Effect.promise(() => readFile(tls.key)),
-            cert: yield* Effect.promise(() => readFile(tls.cert)),
-          },
-          (socket) => {
-            const plain = connect(backendPort, "127.0.0.1")
-            socket.pipe(plain).pipe(socket)
-            socket.on("error", () => plain.destroy())
-            plain.on("error", () => socket.destroy())
-          },
+        // The gateway's listener, behind its front.
+        stopListener = yield* Effect.promise(() =>
+          serveCapabilityListener(
+            {
+              socket: listenSocket,
+              front: { uid: process.getuid!(), gid: process.getgid!() },
+              service: front.service,
+            },
+            capabilityApi(gateway),
+          ),
         )
-        front = terminator
-        terminator.listen(0, "127.0.0.1")
-        yield* Effect.promise(() => once(terminator, "listening"))
         relay = Bun.spawn(
           [
             fixtureExecutable("node"),
@@ -130,7 +120,7 @@ test("real Git clone/fetch, repository and write fences", async () => {
                 renewAt: grant.renewAt,
                 deadline: Date.now() + 3600000,
                 providerId: "anthropic",
-                gateway: `https://127.0.0.1:${portOf(terminator)}`,
+                gateway: front.origin,
               }),
             ]),
             stdout: "pipe",
@@ -198,8 +188,8 @@ test("real Git clone/fetch, repository and write fences", async () => {
   } finally {
     relay?.kill("SIGKILL")
     await relay?.exited
-    front?.close()
-    await listener?.close()
+    front.close()
+    await stopListener?.()
     await backend.stop(true)
     await rm(root, { recursive: true, force: true })
   }

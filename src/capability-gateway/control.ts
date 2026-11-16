@@ -1,6 +1,4 @@
-import { chmod, chown, lstat, mkdir, readFile, realpath, rm } from "node:fs/promises"
 import { createServer, type Socket } from "node:net"
-import { dirname } from "node:path"
 import { Cause, Effect, Exit, Schema } from "effect"
 import {
   type CapabilityGrant,
@@ -12,7 +10,7 @@ import {
   type ControlVerbSchemas,
   maxControlFrame,
 } from "../capability-control/protocol"
-import { claimSocketPath, peerCredentials } from "../peer-socket"
+import { peerCredentials, serveSocket } from "../peer-socket"
 import { CapabilityRefused } from "./store"
 
 /** The daemon's connections that the gateway holds open at once; another one gets `unavailable`. */
@@ -102,54 +100,6 @@ const answer = (target: ControlTarget, text: string) =>
   })
 
 /**
- * Refuses a control directory that a user other than root and the gateway could replace. Its
- * parent is named by its real path (no symbolic link above the directory), and each directory from
- * the parent up to `/` is owned by root (uid 0) or the gateway's uid, and either lets neither its
- * group nor others write to it (mode & 0o022 is 0) or has the sticky bit (mode & 0o1000). The
- * sticky bit lets only an entry's owner, the directory's owner and root rename or remove the
- * entry, and each entry on the path is owned by root or the gateway. `/` may also show the
- * kernel's overflow uid: a user namespace shows it for an owner that it does not map, as the
- * host's root, and `/` itself cannot be renamed or replaced.
- */
-const checkAncestors = async (directory: string, uid: number) => {
-  const parent = dirname(directory)
-  if ((await realpath(parent)) !== parent)
-    throw new Error("control socket directory must be named by its real path")
-  const overflow = Number(
-    (await readFile("/proc/sys/kernel/overflowuid", "utf8").catch(() => "")).trim() || -1,
-  )
-  for (let above = parent; ; above = dirname(above)) {
-    const info = await lstat(above)
-    const owners = above === "/" ? [0, uid, overflow] : [0, uid]
-    if (
-      !info.isDirectory() ||
-      !owners.includes(info.uid) ||
-      ((info.mode & 0o022) !== 0 && (info.mode & 0o1000) === 0)
-    )
-      throw new Error(`${above} lets another user replace the control socket directory`)
-    if (above === "/") return
-  }
-}
-
-/**
- * The directory of the socket is the gateway's own: owned by its uid, with the daemon's group,
- * mode 0710, so only that group reaches the socket. The gateway makes it when it is missing and
- * refuses to start when it is anything else.
- */
-const claimDirectory = async (directory: string, uid: number, gid: number) => {
-  await checkAncestors(directory, uid)
-  const existing = await lstat(directory).catch(() => null)
-  if (existing === null) {
-    await mkdir(directory, { mode: 0o700 })
-    await chown(directory, uid, gid)
-    await chmod(directory, 0o710)
-  }
-  const info = await lstat(directory)
-  if (!info.isDirectory() || info.uid !== uid || info.gid !== gid || (info.mode & 0o7777) !== 0o710)
-    throw new Error("control socket directory must be the gateway's, mode 0710, the daemon's group")
-}
-
-/**
  * Serves the control socket. The gateway reads each caller's uid from the kernel (SO_PEERCRED)
  * as it accepts the connection, before it reads a byte: a caller whose uid is not the daemon's
  * gets `caller`, and the connection ends. It holds at most `maxControlConnections` of the
@@ -162,10 +112,6 @@ export const serveControl = (options: {
 }) =>
   Effect.acquireRelease(
     Effect.tryPromise(async () => {
-      if (process.platform !== "linux") throw new Error("the control socket needs SO_PEERCRED")
-      const uid = process.getuid!()
-      await claimDirectory(dirname(options.socket), uid, options.daemon.gid)
-      const release = await claimSocketPath(options.socket)
       const sockets = new Set<Socket>()
       const refused = new Set<Socket>()
       const server = createServer((socket) => {
@@ -211,27 +157,16 @@ export const serveControl = (options: {
           )
         })
       })
-      try {
-        await new Promise<void>((resolve, reject) => {
-          server.once("error", reject)
-          server.listen(options.socket, resolve)
-        })
-        await chown(options.socket, uid, options.daemon.gid)
-        await chmod(options.socket, 0o660)
-      } catch (error) {
-        server.close()
-        await release()
-        throw error
-      }
-      return { server, sockets, refused, release }
+      // The directory is the gateway's, mode 0710 with the daemon's group: only that group reaches
+      // the socket.
+      const close = await serveSocket(server, options.socket, options.daemon.gid, 0o710, {
+        socket: "control socket",
+        group: "the daemon's group",
+      })
+      return { sockets, refused, close }
     }),
-    ({ server, sockets, refused, release }) => {
+    ({ sockets, refused, close }) => {
       for (const socket of [...sockets, ...refused]) socket.destroy()
-      return Effect.promise(() =>
-        new Promise<void>((resolve) => server.close(() => resolve()))
-          .then(() => rm(options.socket, { force: true }))
-          .then(release)
-          .catch(() => undefined),
-      )
+      return Effect.tryPromise(close).pipe(Effect.orDie)
     },
   )

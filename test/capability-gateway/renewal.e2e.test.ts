@@ -19,7 +19,7 @@ const opened = async (
   seconds: number | null,
   lease = { lease: "lease", run: "78" },
 ) => {
-  const runner = client(gateway.port)
+  const runner = client(gateway)
   await f.tokenSeconds(seconds)
   const { audience } = await runner.audience(lease.lease)
   const answer = await runner.session(
@@ -34,7 +34,7 @@ const opened = async (
 for (const [mode, start] of gateways) {
   test(`[${mode}] a run token with more than 330 seconds left is not renewed, and the refusal is final`, async () => {
     await withGateway(start, async (f, gateway) => {
-      const relay = client(gateway.port)
+      const relay = client(gateway)
       const grant = await opened(f, gateway, null)
       expect(grant.expiresAt - Date.now()).toBeGreaterThan(330000)
       const mints = await f.mints()
@@ -47,7 +47,7 @@ for (const [mode, start] of gateways) {
 
   test(`[${mode}] the relay renews at its renewAt three to five minutes before the token expires`, async () => {
     await withGateway(start, async (f, gateway) => {
-      const relay = client(gateway.port)
+      const relay = client(gateway)
       const grant = await opened(f, gateway, 300)
       // The relay is told to renew three to five minutes before the token expires.
       expect(grant.renewAt).toBeLessThanOrEqual(grant.expiresAt - 180000)
@@ -68,7 +68,7 @@ for (const [mode, start] of gateways) {
       // Near the run's deadline a successor cannot outlive its predecessor.
       await f.store(seedLease("run-n", "lease-n", 79, true, Date.now() - 285 * 60000 + 250000))
       await f.reconcile()
-      const relay = client(gateway.port)
+      const relay = client(gateway)
       const grant = await opened(f, gateway, null, { lease: "lease-n", run: "79" })
       expect(grant.expiresAt - Date.now()).toBeLessThan(250000)
       const mints = await f.mints()
@@ -80,7 +80,7 @@ for (const [mode, start] of gateways) {
 
   test(`[${mode}] a renewal whose answer was lost is asked again and gives a working token, and the one it replaces stops`, async () => {
     await withGateway(start, async (f, gateway) => {
-      const relay = client(gateway.port)
+      const relay = client(gateway)
       const grant = await opened(f, gateway, 200)
       await f.tokenSeconds(300)
       const lost = await relay.grant(await relay.renew(grant.token))
@@ -108,7 +108,7 @@ for (const [mode, start] of gateways) {
   }, 60000)
   test(`[${mode}] the successor of one run token is replaced at most three times; a later renewal is refused without a mint`, async () => {
     await withGateway(start, async (f, gateway) => {
-      const relay = client(gateway.port)
+      const relay = client(gateway)
       const grant = await opened(f, gateway, 200)
       await f.tokenSeconds(300)
       const first = await relay.renew(grant.token)
@@ -131,11 +131,11 @@ for (const [mode, start] of gateways) {
 test("a renewal asked again after a gateway restart gives a working token, and the one it replaces stops", async () => {
   await withGateway(processGateway, async (f, first) => {
     const grant = await opened(f, first, 300)
-    const lost = await client(first.port).grant(await client(first.port).renew(grant.token))
+    const lost = await client(first).grant(await client(first).renew(grant.token))
     await first.stop()
     const second = await processGateway(f)
     try {
-      const relay = client(second.port)
+      const relay = client(second)
       const again = await relay.renew(grant.token)
       expect(again.status).toBe(200)
       const next = await relay.grant(again)
@@ -179,7 +179,7 @@ test("the gateway deletes the rows of expired run tokens and of expired used pro
       }
       // The session's token and the following token stay; the used proof of the session stays.
       expect(await rows()).toEqual([{ tokens: 2, proofs: 1, linked: 0 }])
-      expect(await (await client(second.port).call(grant.token)).text()).toBe(sse)
+      expect(await (await client(second).call(grant.token)).text()).toBe(sse)
     } finally {
       await second.stop()
     }

@@ -9,11 +9,12 @@ import {
   sse,
   withGateway,
   type Fixture,
+  type Origin,
 } from "./gateway-process"
 
 /** Opens the seeded run's session and gives its run token. */
-async function runToken(port: number) {
-  const runner = client(port)
+async function runToken(at: Origin) {
+  const runner = client(at)
   const { audience } = await runner.audience()
   return (await runner.grant(await runner.session(proof(audience, "jti-body")))).token
 }
@@ -48,8 +49,8 @@ const sent = (f: Fixture) => f.upstreamRequests()
 for (const [mode, start] of gateways) {
   test(`[${mode}] a body with a key twice reaches the provider once, with the value the gateway checked`, async () => {
     await withGateway(start, async (f, gateway) => {
-      const token = await runToken(gateway.port)
-      const answer = await client(gateway.port).provider(
+      const token = await runToken(gateway)
+      const answer = await client(gateway).provider(
         token,
         '{"model":"claude-other","stream":true,"messages":[],"model":"fixture-model"}',
       )
@@ -64,18 +65,18 @@ for (const [mode, start] of gateways) {
 
   test(`[${mode}] a number that its JSON text would change is refused; one that keeps its value is sent`, async () => {
     await withGateway(start, async (f, gateway) => {
-      const token = await runToken(gateway.port)
+      const token = await runToken(gateway)
       for (const number of ["9007199254740993", "1e400", "1e-400", "0.10000000000000000000001"])
         expect(
           (
-            await client(gateway.port).provider(
+            await client(gateway).provider(
               token,
               `{"model":"fixture-model","stream":true,"messages":[],"max_tokens":${number}}`,
             )
           ).status,
         ).toBe(403)
       expect(sent(f)).toEqual([])
-      const answer = await client(gateway.port).provider(
+      const answer = await client(gateway).provider(
         token,
         '{"model":"fixture-model","stream":true,"messages":[],"temperature":1.0,"top_k":1e3,"top_p":-0.5E0,"max_tokens":9007199254740992}',
       )
@@ -88,21 +89,21 @@ for (const [mode, start] of gateways) {
 
   test(`[${mode}] a body that the gateway refuses reaches no provider`, async () => {
     await withGateway(start, async (f, gateway) => {
-      const token = await runToken(gateway.port)
+      const token = await runToken(gateway)
       for (const body of [
         '{"model":"fixture-model","stream":true,"messages":[],"model":"claude-other"}',
         '{"stream":true,"messages":[]}',
         '[{"model":"fixture-model"}]',
         '{"model":"fixture-model"',
       ])
-        expect((await client(gateway.port).provider(token, body)).status).toBe(403)
+        expect((await client(gateway).provider(token, body)).status).toBe(403)
       expect(sent(f)).toEqual([])
     })
   }, 60000)
 
   test(`[${mode}] an anthropic-beta value outside the recorded list is refused, and the listed values pass`, async () => {
     await withGateway(start, async (f, gateway) => {
-      const token = await runToken(gateway.port)
+      const token = await runToken(gateway)
       const body = JSON.stringify({ model: "fixture-model", stream: true, messages: [] })
       for (const beta of [
         "oauth-2025-04-20,files-api-2025-04-14",
@@ -110,11 +111,11 @@ for (const [mode, start] of gateways) {
         "oauth-2025-04-20,OAUTH-2025-04-20",
       ])
         expect(
-          (await client(gateway.port).provider(token, body, { "anthropic-beta": beta })).status,
+          (await client(gateway).provider(token, body, { "anthropic-beta": beta })).status,
         ).toBe(403)
       expect(sent(f)).toEqual([])
       const listed = [...claudeBetas].join(", ")
-      const answer = await client(gateway.port).provider(token, body, { "anthropic-beta": listed })
+      const answer = await client(gateway).provider(token, body, { "anthropic-beta": listed })
       expect(answer.status).toBe(200)
       expect(sent(f).map((request) => request.headers["anthropic-beta"])).toEqual([listed])
     })
@@ -122,8 +123,8 @@ for (const [mode, start] of gateways) {
 
   test(`[${mode}] a request of the pinned Claude Code reaches the provider with the same meaning and exactly the listed headers`, async () => {
     await withGateway(start, async (f, gateway) => {
-      const token = await runToken(gateway.port)
-      const answer = await client(gateway.port).provider(token, pinnedBody, pinnedHeaders)
+      const token = await runToken(gateway)
+      const answer = await client(gateway).provider(token, pinnedBody, pinnedHeaders)
       expect(answer.status).toBe(200)
       expect(await answer.text()).toBe(sse)
       expect(sent(f)).toHaveLength(1)
@@ -159,14 +160,14 @@ const modelBodyLimit = 1048576
 for (const [mode, start] of gateways)
   test(`[${mode}] a model call body one byte over 1 MiB is refused before the provider; one of 1 MiB is sent`, async () => {
     await withGateway(start, async (f, gateway) => {
-      const token = await runToken(gateway.port)
+      const token = await runToken(gateway)
       const over = bodyOfSize(modelBodyLimit + 1)
       expect(Buffer.byteLength(over)).toBe(modelBodyLimit + 1)
       expect(JSON.parse(over).model).toBe("fixture-model")
-      expect((await client(gateway.port).provider(token, over)).status).toBe(403)
+      expect((await client(gateway).provider(token, over)).status).toBe(403)
       expect(sent(f)).toEqual([])
       const at = bodyOfSize(modelBodyLimit)
-      const answer = await client(gateway.port).provider(token, at)
+      const answer = await client(gateway).provider(token, at)
       expect(answer.status).toBe(200)
       expect(await answer.text()).toBe(sse)
       expect(sent(f).map((request) => request.body)).toEqual([at])
@@ -178,16 +179,16 @@ for (const [mode, start] of gateways)
  * connection. Gives each status, or "late" for a request with no answer by `bound` milliseconds
  * from the first send.
  */
-async function answersWithin(port: number, token: string, body: string, bound: number) {
+async function answersWithin(at: Origin, token: string, body: string, bound: number) {
   const signal = AbortSignal.timeout(bound)
   const status = (response: Promise<Response>) =>
     response.then(
       (answer) => answer.status,
       () => "late" as const,
     )
-  const runner = client(port)
+  const runner = client(at)
   const call = status(
-    fetch(runner.url("/capabilities/v1/providers/anthropic/v1/messages"), {
+    runner.request("/capabilities/v1/providers/anthropic/v1/messages", {
       method: "POST",
       headers: {
         authorization: `Bearer ${token}`,
@@ -200,18 +201,18 @@ async function answersWithin(port: number, token: string, body: string, bound: n
     }),
   )
   await Bun.sleep(200)
-  const other = status(fetch(runner.url("/capabilities/v1/challenge?lease=lease"), { signal }))
+  const other = status(runner.request("/capabilities/v1/challenge?lease=lease", { signal }))
   return Promise.all([call, other])
 }
 
 test("[process] a 1 MiB model body whose one number is a 1, zeros and a 1 is answered within 2 s, as is a request on another connection", async () => {
   await withGateway(processGateway, async (f, gateway) => {
-    const token = await runToken(gateway.port)
+    const token = await runToken(gateway)
     const head = '{"model":"fixture-model","stream":true,"messages":[],"max_tokens":1'
     const tail = "1}"
     const body = head + "0".repeat(modelBodyLimit - head.length - tail.length) + tail
     expect(Buffer.byteLength(body)).toBe(modelBodyLimit)
-    expect(await answersWithin(gateway.port, token, body, 2000)).toEqual([403, 200])
+    expect(await answersWithin(gateway, token, body, 2000)).toEqual([403, 200])
     expect(sent(f)).toEqual([])
   })
 }, 60000)

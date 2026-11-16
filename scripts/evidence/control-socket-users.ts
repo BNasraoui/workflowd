@@ -43,16 +43,20 @@ try {
   const home = join(f.root, "gateway-home")
   await owned(home, gatewayUid, 0o700)
   const start = (controlSocket: string) =>
-    startGatewayProcess([...as(gatewayUid, groupGid), process.execPath, "-e", gatewaySource(f)], {
-      ...f.env,
-      HOME: home,
-      WORKFLOWD_CAPABILITY_GATEWAY: JSON.stringify({
-        ...f.config,
-        storePath: join(home, "gateway.db"),
-        controlSocket,
-        daemon: { uid: daemonUid, gid: groupGid },
-      }),
-    })
+    startGatewayProcess(
+      [...as(gatewayUid, groupGid), process.execPath, "-e", gatewaySource(f)],
+      {
+        ...f.env,
+        HOME: home,
+        WORKFLOWD_CAPABILITY_GATEWAY: JSON.stringify({
+          ...f.config,
+          storePath: join(home, "gateway.db"),
+          controlSocket,
+          daemon: { uid: daemonUid, gid: groupGid },
+        }),
+      },
+      f.front,
+    )
 
   // A reconcile on the control socket from `uid` and `gid`, by Python from `/`: the answer, or
   // the name of the connect error.

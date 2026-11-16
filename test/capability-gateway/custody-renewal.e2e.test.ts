@@ -33,7 +33,7 @@ async function quietUntil(gateway: Gateway, token: string, oauth: OAuthFixture, 
   const before = oauth.requests().length
   let calls = 0
   while (Date.now() < at - 400) {
-    const call = await client(gateway.port).call(token)
+    const call = await client(gateway).call(token)
     expect(call.status).toBe(503)
     await call.text()
     calls++
@@ -68,7 +68,7 @@ const silent = async () => {
     const gateway = await start()
     const token = await runToken(gateway, "jti-silent")
     const began = performance.now()
-    const call = await client(gateway.port).call(token)
+    const call = await client(gateway).call(token)
     const failedAt = Date.now()
     const took = performance.now() - began
     expect(call.status).toBe(503)
@@ -99,7 +99,7 @@ const limited = async () => {
     const token = await runToken(gateway, "jti-limited")
     // 429 with Retry-After 7: longer than the first wait of 5 seconds.
     oauth.mode("limited", { retryAfter: 7 })
-    expect((await client(gateway.port).call(token)).status).toBe(503)
+    expect((await client(gateway).call(token)).status).toBe(503)
     const limitedAt = Date.now()
     oauth.mode("renew")
     await quietUntil(gateway, token, oauth, limitedAt + 7000)
@@ -119,7 +119,7 @@ const busy = async () => {
     const gateway = await start()
     const token = await runToken(gateway, "jti-busy")
     oauth.mode("busy")
-    expect((await client(gateway.port).call(token)).status).toBe(503)
+    expect((await client(gateway).call(token)).status).toBe(503)
     const busyAt = Date.now()
     oauth.mode("renew")
     await quietUntil(gateway, token, oauth, busyAt + 5000)
@@ -141,7 +141,7 @@ const invalid = async () => {
     oauth.mode("invalid")
     const gateway = await start()
     const token = await runToken(gateway, "jti-invalid")
-    expect((await client(gateway.port).call(token)).status).toBe(503)
+    expect((await client(gateway).call(token)).status).toBe(503)
     const failedAt = Date.now()
     oauth.mode("renew")
     await quietUntil(gateway, token, oauth, failedAt + 5000)
@@ -162,7 +162,7 @@ const timer = async () => {
     let released = false
     try {
       const began = performance.now()
-      const call = await client(gateway.port).call(token)
+      const call = await client(gateway).call(token)
       expect(call.status).toBe(503)
       expect(performance.now() - began).toBeLessThan(12000)
       expect(oauth.requests()).toHaveLength(0)
@@ -172,7 +172,7 @@ const timer = async () => {
     } finally {
       if (!released) release()
     }
-    const next = await client(gateway.port).call(token)
+    const next = await client(gateway).call(token)
     expect(next.status).toBe(200)
     expect(await next.text()).toBe(sse)
     expect(oauth.requests()).toHaveLength(1)

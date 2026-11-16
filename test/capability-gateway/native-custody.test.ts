@@ -59,7 +59,11 @@ async function withLogin(
       credentialRole: "claude",
       maxStreams: 1,
       maxStreamsPerRun: 1,
-      listen: { host: "127.0.0.1", port: 0 },
+      listen: {
+        socket: join(root, "front/gateway.sock"),
+        front: { uid: process.getuid!(), gid: process.getgid!() },
+        service: "gateway.example.ts.net",
+      },
       login: { directory: join(root, "login") },
     }),
   }

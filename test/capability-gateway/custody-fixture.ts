@@ -64,6 +64,7 @@ export async function withCustody(
       const gateway = await startGatewayProcess(
         [process.execPath, "-e", gatewaySource(f)],
         custodyEnv(f, loginDirectory(f)),
+        f.front,
       )
       gateways.push(gateway)
       await f.reconcile()
@@ -79,7 +80,7 @@ export async function withCustody(
 
 /** A session of the fixture run on `gateway`, and its run token. */
 export async function runToken(gateway: Gateway, jti: string) {
-  const at = client(gateway.port)
+  const at = client(gateway)
   const challenge = await at.audience()
   const opened = await at.session(proof(challenge.audience, jti))
   expect(opened.status).toBe(200)
@@ -104,7 +105,7 @@ export async function until(ready: () => boolean) {
 /** The call works with the fixture's next access value; the OAuth server got one more request. */
 export async function works(gateway: Gateway, token: string, oauth: OAuthFixture, old: string) {
   const before = oauth.requests().length
-  const call = await client(gateway.port).call(token)
+  const call = await client(gateway).call(token)
   expect(call.status).toBe(200)
   expect(await call.text()).toBe(sse)
   expect(oauth.requests()).toHaveLength(before + 1)

@@ -121,16 +121,21 @@ for (const model of [
 
 test("the pinned Claude Code completes a call through the gateway process, and its body keeps its meaning", async () => {
   await withGateway(processGateway, async (f, gateway) => {
-    const runner = client(gateway.port)
+    const runner = client(gateway)
     const { audience } = await runner.audience()
     const { token } = await runner.grant(await runner.session(proof(audience, "jti-pinned")))
-    const run = await runPinned("fixture-model", token, (request, body) =>
-      fetch(
-        runner.url(`/capabilities/v1/providers/anthropic${new URL(request.url).pathname}`) +
-          new URL(request.url).search,
-        { method: request.method, headers: request.headers, body },
-      ),
-    )
+    const run = await runPinned("fixture-model", token, (request, body) => {
+      const { pathname, search } = new URL(request.url)
+      // The runner names the front's host, as a runner names the Service; the client's Host
+      // names this local server.
+      const headers = new Headers(request.headers)
+      headers.delete("host")
+      return runner.request(`/capabilities/v1/providers/anthropic${pathname}${search}`, {
+        method: request.method,
+        headers,
+        body,
+      })
+    })
     expect({ code: run.code, output: run.output.trim() }).toEqual({ code: 0, output: "ok" })
     const received = f.upstreamRequests()
     const parsed = (body: string): unknown => JSON.parse(body)

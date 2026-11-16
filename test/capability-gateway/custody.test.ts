@@ -196,7 +196,7 @@ test("the gateway refuses a login whose directory or file has a wider mode, and 
     const gateway = await start()
     const token = await runToken(gateway, "jti-mode")
     await chmod(loginFile(f), 0o644)
-    const call = await client(gateway.port).call(token)
+    const call = await client(gateway).call(token)
     expect(call.status).toBe(503)
     expect(await call.text()).toBe("")
     expect(gateway.output?.()).toContain(
@@ -227,10 +227,7 @@ test("two calls at one time renew once, the new login is on disk before the upst
     const gateway = await start()
     const token = await runToken(gateway, "jti-renew")
 
-    const calls = await Promise.all([
-      client(gateway.port).call(token),
-      client(gateway.port).call(token),
-    ])
+    const calls = await Promise.all([client(gateway).call(token), client(gateway).call(token)])
     const answers: string[] = []
     for (const call of calls) {
       expect(call.status).toBe(200)
@@ -263,18 +260,18 @@ test("two calls at one time renew once, the new login is on disk before the upst
     expect((await readdir(loginDirectory(f))).sort()).toEqual(["claude.json", "claude.lock"])
 
     // A call on a fresh login does not renew it.
-    const later = await client(gateway.port).call(token)
+    const later = await client(gateway).call(token)
     answers.push(await later.text())
     expect(oauth.requests()).toHaveLength(1)
 
     // No value in the answers of the routes, the output of the processes or the stores.
-    const at = client(gateway.port)
+    const at = client(gateway)
     const challenge = await at.challenge("lease")
     answers.push(await challenge.text())
     const opened = await at.session(proof((await at.audience()).audience, "jti-values"))
     answers.push(await opened.text())
     for (const path of ["/capabilities/v1/login", "/capabilities/v1/import-login"]) {
-      const route = await fetch(at.url(path), { method: "POST", body: JSON.stringify(old) })
+      const route = await at.request(path, { method: "POST", body: JSON.stringify(old) })
       expect([403, 404]).toContain(route.status)
       answers.push(await route.text())
     }
@@ -287,15 +284,19 @@ test("two calls at one time renew once, the new login is on disk before the upst
 test("a call that fails for a cause of the configuration logs the cause, once for calls that repeat it", async () => {
   await withCustody(async (f, oauth, start) => {
     // No login key: the gateway starts, and each provider call names the missing key.
-    const keyless = await startGatewayProcess([process.execPath, "-e", gatewaySource(f)], {
-      ...f.env,
-      WORKFLOWD_CAPABILITY_GATEWAY: JSON.stringify({ ...f.config, credentialRole: "claude" }),
-    })
+    const keyless = await startGatewayProcess(
+      [process.execPath, "-e", gatewaySource(f)],
+      {
+        ...f.env,
+        WORKFLOWD_CAPABILITY_GATEWAY: JSON.stringify({ ...f.config, credentialRole: "claude" }),
+      },
+      f.front,
+    )
     try {
       await f.reconcile()
       const token = await runToken(keyless, "jti-keyless")
       for (let attempt = 0; attempt < 3; attempt++) {
-        const call = await client(keyless.port).call(token)
+        const call = await client(keyless).call(token)
         expect(call.status).toBe(503)
         await call.text()
       }
@@ -309,7 +310,7 @@ test("a call that fails for a cause of the configuration logs the cause, once fo
     const gateway = await start()
     const token = await runToken(gateway, "jti-nologin")
     for (let attempt = 0; attempt < 3; attempt++) {
-      const call = await client(gateway.port).call(token)
+      const call = await client(gateway).call(token)
       expect(call.status).toBe(503)
       await call.text()
     }
@@ -328,11 +329,12 @@ test("each search for a value finds one put on purpose in its output: the gatewa
     const gateway = await startGatewayProcess(
       [process.execPath, "-e", gatewaySource(f)],
       custodyEnv(f, directory),
+      f.front,
     )
     try {
       await f.reconcile()
       const token = await runToken(gateway, "jti-planted")
-      expect((await client(gateway.port).call(token)).status).toBe(503)
+      expect((await client(gateway).call(token)).status).toBe(503)
       expect(leaked(gateway.output?.() ?? "", [inLog])).toEqual([inLog])
 
       // A route answer: the upstream's answer, which the gateway passes on.
@@ -344,7 +346,7 @@ test("each search for a value finds one put on purpose in its output: the gatewa
         Date.now() + 3600000,
       )
       expect((await importLogin(custodyEnv(f, directory), JSON.stringify(login))).code).toBe(0)
-      const call = await client(gateway.port).call(token)
+      const call = await client(gateway).call(token)
       expect(leaked(await call.text(), [inAnswer])).toContain(
         Buffer.from(inAnswer).toString("base64"),
       )
@@ -405,7 +407,7 @@ test("only a refusal of the renewal value (400 invalid_grant) asks for a new imp
     const gateway = await start()
     const token = await runToken(gateway, "jti-refused")
     for (let attempt = 0; attempt < 3; attempt++) {
-      const call = await client(gateway.port).call(token)
+      const call = await client(gateway).call(token)
       expect(call.status).toBe(503)
       expect(await call.text()).toBe("")
     }
@@ -424,7 +426,7 @@ test("only a refusal of the renewal value (400 invalid_grant) asks for a new imp
       Date.now() + 3600000,
     )
     await imported(f, fresh)
-    const call = await client(gateway.port).call(token)
+    const call = await client(gateway).call(token)
     expect(await call.text()).toBe(sse)
     expect(oauth.requests()).toHaveLength(1)
     expect(f.upstreamRequests().map((request) => request.headers.authorization)).toEqual([
@@ -469,7 +471,7 @@ test("in this process, the gateway refuses a login it cannot hold and logs a log
     const serve = (with_: Record<string, string | undefined>) =>
       Effect.gen(function* () {
         const scope = yield* Scope.make()
-        const served = yield* serveCapabilityGateway(with_, {
+        yield* serveCapabilityGateway(with_, {
           keys: async (signal) => (await fetch(f.keysUrl, { signal })).json(),
           upstream: (url, init) =>
             fetch(url.replace("https://api.anthropic.com", f.upstreamUrl), init),
@@ -477,7 +479,11 @@ test("in this process, the gateway refuses a login it cannot hold and logs a log
           Scope.provide(scope),
           Effect.onError(() => Scope.close(scope, Exit.void)),
         )
-        return { port: served.port, stop: () => Effect.runPromise(Scope.close(scope, Exit.void)) }
+        return {
+          origin: f.front.origin,
+          ca: f.front.ca,
+          stop: () => Effect.runPromise(Scope.close(scope, Exit.void)),
+        }
       })
     const role = await Effect.runPromise(
       Effect.flip(
@@ -511,7 +517,7 @@ test("in this process, the gateway refuses a login it cannot hold and logs a log
     try {
       await f.reconcile()
       const token = await runToken({ ...gateway }, "jti-in-process")
-      const call = await client(gateway.port).call(token)
+      const call = await client(gateway).call(token)
       expect(call.status).toBe(503)
       expect(oauth.requests()).toHaveLength(1)
       expect(f.upstreamRequests()).toHaveLength(0)

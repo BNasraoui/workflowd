@@ -74,11 +74,21 @@ export const CapabilityGatewayConfig = Schema.Struct({
   staleSweepMs: Schema.optionalKey(
     Schema.Int.check(Schema.isBetween({ minimum: 100, maximum: 60000 })),
   ),
-  /** Where the gateway's process listens. The listener is clear text, so it takes a loopback address only. */
+  /**
+   * The gateway's one listener: the Unix socket `socket`, which only its front, Tailscale Serve,
+   * reaches; the gateway has no TCP listener. The gateway owns the socket's directory, mode 0710
+   * with the front's group `front.gid`, and serves only the uid `front.uid`. `service` is the
+   * Service as its clients name it, which Serve sends on as `X-Forwarded-Host`: its MagicDNS name,
+   * with `:<port>` when Serve serves it on a port other than 443.
+   */
   listen: Schema.Struct({
-    host: Schema.Literals(["127.0.0.1", "::1"]),
-    // Port 0 asks the kernel for a free port; the process prints the port it bound.
-    port: Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 65535 })),
+    socket: AbsolutePath,
+    front: Schema.Struct({ uid: Id, gid: Id }),
+    service: Schema.String.check(
+      Schema.isPattern(
+        /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*(?::[1-9][0-9]{0,4})?$/,
+      ),
+    ),
   }),
 }).check(
   Schema.makeFilter((config) =>

@@ -1,17 +1,17 @@
 import { expect, test } from "bun:test"
-import { capabilityApi, capabilityHttpServer } from "../../src/capability-gateway/http"
+import { capabilityApi, serveCapabilityListener } from "../../src/capability-gateway/http"
 import { fixtureExecutable } from "../helpers/fixture-executable.mjs"
 import { Effect, Schema } from "effect"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
 import { mkdtemp, readFile, rm } from "node:fs/promises"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
-import { connect } from "node:net"
-import { once } from "node:events"
+import { connect } from "node:tls"
 import { AgentRunStoreLive } from "../../src/kernel/agent-run-store"
 import { makeCapabilityGateway } from "../../src/capability-gateway/service"
 import { bindRunSession, seedCapabilityRun, writeNoscopeProviders } from "./fixture"
-import { portOf } from "../helpers/loopback-tls"
+import { loopbackCertificate, tlsFront } from "../helpers/loopback-tls"
+import { client } from "./gateway-process"
 
 test("bound streaming preserves native bytes, renews with noscope, and denies cross-run or proxy authority", async () => {
   const root = await mkdtemp(join(tmpdir(), "wfd-gateway-"))
@@ -199,17 +199,24 @@ test("bound streaming preserves native bytes, renews with noscope, and denies cr
         }
         const beforeRevocation = sent.length
         stalled = true
-        const http = capabilityHttpServer(capabilityApi(gateway))
-        yield* Effect.promise(
-          () => new Promise<void>((resolve) => http.server.listen(0, "127.0.0.1", resolve)),
+        const socket = join(root, "front", "gateway.sock")
+        const front = yield* Effect.promise(async () =>
+          tlsFront(await loopbackCertificate(root), socket),
+        )
+        const close = yield* Effect.promise(() =>
+          serveCapabilityListener(
+            {
+              socket,
+              front: { uid: process.getuid!(), gid: process.getgid!() },
+              service: front.service,
+            },
+            capabilityApi(gateway),
+          ),
         )
         try {
-          const address = http.server.address()
-          if (!address || typeof address === "string")
-            throw new Error("Fixture listener unavailable")
           const sentRequest = request()
           const response = yield* Effect.promise(() =>
-            fetch(`http://127.0.0.1:${address.port}${new URL(sentRequest.url).pathname}`, {
+            client(front).request(new URL(sentRequest.url).pathname, {
               method: "POST",
               headers: sentRequest.headers,
               body: native,
@@ -227,7 +234,8 @@ test("bound streaming preserves native bytes, renews with noscope, and denies cr
           yield* gateway.revoke("run")
           expect(yield* Effect.promise(() => ending)).toBe("reset")
         } finally {
-          yield* Effect.promise(http.close)
+          yield* Effect.promise(close)
+          front.close()
         }
         expect((yield* gateway.handle(request(undefined, successor.token))).status).toBe(403)
         expect(
@@ -250,21 +258,29 @@ for (const attack of ["resets", "preface", "h2-preface", "truncated"] as const)
     let served = 0
     let partial = 0
     let entered = Promise.withResolvers<void>()
-    const listener = capabilityHttpServer(async (request) => {
-      if (new URL(request.url).pathname !== "/valid") {
-        partial++
-        entered.resolve()
-        await request.arrayBuffer()
-      }
-      served++
-      return new Response("fixture-valid")
-    })
-    listener.server.listen(0, "127.0.0.1")
-    await once(listener.server, "listening")
-    const port = portOf(listener.server)
+    const root = await mkdtemp(join(tmpdir(), "wfd-listener-"))
+    const listenSocket = join(root, "front", "gateway.sock")
+    const front = await tlsFront(await loopbackCertificate(root), listenSocket)
+    let close: (() => Promise<void>) | undefined = await serveCapabilityListener(
+      {
+        socket: listenSocket,
+        front: { uid: process.getuid!(), gid: process.getgid!() },
+        service: front.service,
+      },
+      async (request) => {
+        if (new URL(request.url).pathname !== "/valid") {
+          partial++
+          entered.resolve()
+          await request.arrayBuffer()
+        }
+        served++
+        return new Response("fixture-valid")
+      },
+    )
+    const open = () => connect({ host: "127.0.0.1", port: front.port, ca: front.ca })
     const raw = (bytes: string, cut: boolean) =>
       new Promise<string>((resolve) => {
-        const socket = connect(port, "127.0.0.1")
+        const socket = open()
         let answer = ""
         socket.on("data", (chunk) => (answer += chunk.toString()))
         socket.on("error", () => {})
@@ -278,15 +294,14 @@ for (const attack of ["resets", "preface", "h2-preface", "truncated"] as const)
         })
       })
     const valid = () =>
-      fetch(`http://127.0.0.1:${port}/valid`, { method: "POST", body: "{}" }).then((response) =>
-        response.text(),
-      )
+      client(front)
+        .request("/valid", { method: "POST", body: "{}" })
+        .then((response) => response.text())
     const input = {
-      resets:
-        "POST /capabilities/v1/renew HTTP/1.1\r\nhost: foreign.invalid\r\ncontent-length: 100\r\n\r\n{}",
+      resets: `POST /capabilities/v1/renew HTTP/1.1\r\nhost: ${front.service}\r\ncontent-length: 100\r\n\r\n{}`,
       preface: "invalid-http2-preface\r\n\r\n",
       "h2-preface": `PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n${String.fromCharCode(0, 0, 6, 4, 0)}`,
-      truncated: "POST /valid HTTP/1.1\r\nhost: 127.0.0.1\r\ncontent-le",
+      truncated: `POST /valid HTTP/1.1\r\nhost: ${front.service}\r\ncontent-le`,
     }[attack]
     let hanging: ReturnType<typeof connect> | undefined
     try {
@@ -299,18 +314,19 @@ for (const attack of ["resets", "preface", "h2-preface", "truncated"] as const)
       // A peer error in the body never reaches an answer; framing errors never reach the handler.
       expect({ served, partial }).toEqual({ served: 8, partial: attack === "resets" ? 8 : 0 })
       // Shutdown is bounded with a client still holding a half-sent request.
-      hanging = connect(port, "127.0.0.1")
+      hanging = open()
       hanging.on("error", () => {})
-      hanging.write("POST /valid HTTP/1.1\r\nhost: 127.0.0.1\r\ncontent-length: 10\r\n\r\n{")
+      hanging.write(`POST /valid HTTP/1.1\r\nhost: ${front.service}\r\ncontent-length: 10\r\n\r\n{`)
       await Bun.sleep(50)
+      const closing = close
+      close = undefined
       expect(
-        await Promise.race([
-          listener.close().then(() => "closed"),
-          Bun.sleep(10000).then(() => "held"),
-        ]),
+        await Promise.race([closing().then(() => "closed"), Bun.sleep(10000).then(() => "held")]),
       ).toBe("closed")
     } finally {
       hanging?.destroy()
-      await listener.close()
+      await close?.()
+      front.close()
+      await rm(root, { recursive: true, force: true })
     }
   })

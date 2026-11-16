@@ -14,25 +14,27 @@ import {
 
 test("a gateway process is ready at its full listening line, and one that ends first is refused", async () => {
   const env = { PATH: process.env.PATH }
+  const front = { origin: "https://127.0.0.1:1", ca: "" }
   const partial = await startGatewayProcess(
     [
       process.execPath,
       "-e",
-      `process.stdout.write("starting\\nlistening 4"); await Bun.sleep(200); process.stdout.write("31\\n"); await Bun.sleep(60000)`,
+      `process.stdout.write("starting\\nlistening /fixture/fr"); await Bun.sleep(200); process.stdout.write("ont/gateway.sock\\n"); await Bun.sleep(60000)`,
     ],
     env,
+    front,
   )
-  expect(partial.port).toBe(431)
+  expect(partial.socket).toBe("/fixture/front/gateway.sock")
   await partial.stop()
   await expect(
-    startGatewayProcess([process.execPath, "-e", `console.log("starting")`], env),
+    startGatewayProcess([process.execPath, "-e", `console.log("starting")`], env, front),
   ).rejects.toThrow("gateway process exited before listening")
 })
 
 for (const [mode, start] of gateways) {
   test(`[${mode}] many challenge requests without a proof do not stop a run from opening its eight sessions`, async () => {
     await withGateway(start, async (f, gateway) => {
-      const runner = client(gateway.port)
+      const runner = client(gateway)
       for (let session = 1; session <= 8; session++) {
         const first = await runner.audience()
         // Anyone may ask for the lease's challenge as often as it likes: the answer stays the same.
@@ -48,7 +50,7 @@ for (const [mode, start] of gateways) {
 
   test(`[${mode}] a run opens at most eight sessions, and a proof that is not verified uses none of them`, async () => {
     await withGateway(start, async (f, gateway) => {
-      const runner = client(gateway.port)
+      const runner = client(gateway)
       const { audience } = await runner.audience()
       for (const claims of [{ run_id: "79" }, { repository_owner_id: "2" }, { exp: 1 }])
         expect((await runner.session(proof(audience, "jti-refused", { claims }))).status).toBe(403)
@@ -67,7 +69,7 @@ test("a lease that does not exist and a lease whose Actions run is not recorded 
   await withGateway(gateways[0][1], async (f, gateway) => {
     await f.store(seedLease("run-u", "lease-u", null))
     await f.store(seedLease("run-s", "lease-s", 82, false))
-    const runner = client(gateway.port)
+    const runner = client(gateway)
     const answers = await Promise.all(
       ["lease-none", "lease-u", "lease-s"].map(async (lease) => {
         const answer = await runner.challenge(lease)
@@ -90,7 +92,7 @@ test("a lease that does not exist and a lease whose Actions run is not recorded 
 
 test("a lease that is unknown, of an ended run, or of a revoked binding gets the same not-ready answer, and a malformed lease id is refused", async () => {
   await withGateway(gateways[0][1], async (f, gateway) => {
-    const runner = client(gateway.port)
+    const runner = client(gateway)
     await f.store(seedLease("run-ended", "lease-ended", 83))
     await f.store(
       Effect.gen(function* () {
@@ -117,7 +119,7 @@ test("a lease that is unknown, of an ended run, or of a revoked binding gets the
 for (const [mode, start] of gateways)
   test(`[${mode}] a proof for a nonce that is not the live one, or for a used proof, fetches no key and mints nothing`, async () => {
     await withGateway(start, async (f, gateway) => {
-      const runner = client(gateway.port)
+      const runner = client(gateway)
       const live = await runner.audience()
       const other = `workflowd:${live.channel}:${randomBytes(32).toString("hex")}`
       expect((await runner.session(proof(other, "jti-other"))).status).toBe(403)
@@ -137,7 +139,7 @@ for (const [mode, start] of gateways)
       const restarted = await start(f)
       try {
         const fetched = f.keyFetches()
-        const fresh = client(restarted.port)
+        const fresh = client(restarted)
         const again = await fresh.audience()
         expect((await fresh.session(proof(again.audience, "jti-used"))).status).toBe(403)
         expect(f.keyFetches()).toBe(fetched)

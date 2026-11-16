@@ -4,7 +4,7 @@ import { client, gateways, proof, seedLease, withGateway } from "./gateway-proce
 for (const [mode, start] of gateways) {
   test(`[${mode}] the gateway fetches the job keys once in ten minutes, and once more a minute for a new key id`, async () => {
     await withGateway(start, async (f, gateway) => {
-      const runner = client(gateway.port)
+      const runner = client(gateway)
       const { audience } = await runner.audience()
       // Proofs for the live challenge that do not verify: a foreign run, a broken signature.
       for (const jti of ["a", "b", "c"])
@@ -40,7 +40,7 @@ for (const [mode, start] of gateways) {
       for (const { lease, run } of runs.slice(1))
         await f.store(seedLease(`run-${run}`, lease, Number(run)))
       await f.reconcile()
-      const runner = client(gateway.port)
+      const runner = client(gateway)
       const proofs = await Promise.all(
         runs.map(async ({ lease, run }) =>
           proof((await runner.audience(lease)).audience, `jti-${run}`, {

@@ -7,7 +7,7 @@ import { client, gateways, proof, seedLease, withGateway } from "./gateway-proce
 for (const [mode, start] of gateways) {
   test(`[${mode}] a proof whose header names an x5t opens a session; the x5t is not checked`, async () => {
     await withGateway(start, async (_f, gateway) => {
-      const runner = client(gateway.port)
+      const runner = client(gateway)
       const { audience } = await runner.audience()
       const answer = await runner.session(
         proof(audience, "jti-x5t", { header: { x5t: "not-a-thumbprint" } }),
@@ -18,7 +18,7 @@ for (const [mode, start] of gateways) {
 
   test(`[${mode}] a proof issued up to ten seconds ahead of the gateway's clock is accepted, and an expired one is not`, async () => {
     await withGateway(start, async (_f, gateway) => {
-      const runner = client(gateway.port)
+      const runner = client(gateway)
       const live = await runner.audience()
       // Issued 15 seconds ahead: refused, however long the gateway takes to check it. The exact
       // leeway is pinned with a set clock in test/sandbox/bootstrap.test.ts.
@@ -52,10 +52,7 @@ test("the runner's helper waits while the gateway answers 503 for its first minu
     let recorded = false
     const statuses: number[] = []
     const send = async (url: URL, init: RequestInit) => {
-      const answer = await fetch(
-        url.href.replace("https://gateway.fixture.invalid", `http://127.0.0.1:${gateway.port}`),
-        init,
-      )
+      const answer = await client(gateway).request(url.pathname + url.search, init)
       if (url.pathname === "/capabilities/v1/challenge") statuses.push(answer.status)
       return answer
     }
@@ -100,10 +97,7 @@ test("the runner's helper gives up after 180 seconds of 503 without using a proo
         leaseId: "lease-w",
         issue: async () => `proof-${++proofs}`,
         send: (url: URL, init: RequestInit) =>
-          fetch(
-            url.href.replace("https://gateway.fixture.invalid", `http://127.0.0.1:${gateway.port}`),
-            init,
-          ),
+          client(gateway).request(url.pathname + url.search, init),
         clock: () => clock,
         sleep: async (milliseconds: number) => {
           clock += milliseconds

@@ -8,7 +8,15 @@ import { AgentRunStore } from "../../src/kernel/agent-run-store"
 import { Schema } from "effect"
 import { loadCapabilityGatewayConfig } from "../../src/config"
 import { CapabilityControlConfig } from "../../src/sandbox/config"
-import { client, fixture, proof, seedLease, sse, type Fixture } from "./gateway-process"
+import {
+  client,
+  fixture,
+  proof,
+  seedLease,
+  sse,
+  type Fixture,
+  type Origin,
+} from "./gateway-process"
 import { framed, gatewayConfig, rawFrame, socketOf, startGateway } from "./control-socket"
 
 /**
@@ -136,8 +144,8 @@ async function startDaemon(
 const daemonDatabase = (f: Fixture) => join(f.root, "workflowd.db")
 
 /** Opens a session for the fixture lease and returns its run token. */
-async function sessionToken(port: number, lease = "lease", jti = "jti-1") {
-  const at = client(port)
+async function sessionToken(gateway: Origin, lease = "lease", jti = "jti-1") {
+  const at = client(gateway)
   const { audience } = await at.audience(lease)
   const opened = await at.session(proof(audience, jti, { lease }))
   expect(opened.status).toBe(200)
@@ -190,10 +198,10 @@ test("a run that settles in the daemon's store ends its open stream in the gatew
     async (f, { gateway, daemon }) => {
       expect(await daemon.send("authorize run")).toEqual({ ok: true, value: null })
       expect(await daemon.send("bound run 78")).toEqual({ ok: true, value: false })
-      const token = await sessionToken(gateway.port)
+      const token = await sessionToken(gateway)
       expect(await daemon.send("bound run 78")).toEqual({ ok: true, value: true })
       f.setStall(true)
-      const stream = await client(gateway.port).call(token)
+      const stream = await client(gateway).call(token)
       expect(stream.status).toBe(200)
       const reader = stream.body!.getReader()
       expect((await reader.read()).done).toBe(false)
@@ -208,7 +216,7 @@ test("a run that settles in the daemon's store ends its open stream in the gatew
       const elapsed = performance.now() - settled
       console.log(`settled run to the end of its stream: ${Math.round(elapsed)} ms`)
       expect(elapsed).toBeLessThan(streamEndBoundMs)
-      expect((await client(gateway.port).call(token)).status).toBe(403)
+      expect((await client(gateway).call(token)).status).toBe(403)
     },
     { reconcileEveryMs: 3600000, staleSweepMs: 60000 },
   )
@@ -218,10 +226,10 @@ test("the daemon reads a changed run only once the change commits, so the revoke
   await withProcesses(
     async (f, { gateway, daemon }) => {
       expect(await daemon.send("authorize run")).toEqual({ ok: true, value: null })
-      const token = await sessionToken(gateway.port)
+      const token = await sessionToken(gateway)
       expect(await daemon.send("bound run 78")).toEqual({ ok: true, value: true })
       f.setStall(true)
-      const stream = await client(gateway.port).call(token)
+      const stream = await client(gateway).call(token)
       const reader = stream.body!.getReader()
       expect((await reader.read()).done).toBe(false)
       // The change notifies the daemon's control client 300 ms before it writes. A read that did
@@ -238,7 +246,7 @@ test("the daemon reads a changed run only once the change commits, so the revoke
       console.log(
         `commit to the end of the stream: ${Math.round(performance.now() - committed)} ms`,
       )
-      expect((await client(gateway.port).call(token)).status).toBe(403)
+      expect((await client(gateway).call(token)).status).toBe(403)
     },
     { reconcileEveryMs: 3600000 },
   )
@@ -247,26 +255,26 @@ test("the daemon reads a changed run only once the change commits, so the revoke
 test("a lease that the daemon did not authorize gets no challenge, and the daemon refuses to authorize a settled run", async () => {
   await withProcesses(async (_f, { gateway, daemon }) => {
     expect((await daemon.send("seed run-b lease-b 79")).ok).toBe(true)
-    expect((await client(gateway.port).challenge("lease-b")).status).not.toBe(200)
+    expect((await client(gateway).challenge("lease-b")).status).not.toBe(200)
     expect((await daemon.send("settle run-b")).ok).toBe(true)
     expect(await daemon.send("authorize run-b")).toEqual({
       ok: false,
       tag: "CapabilityControlRefused",
     })
-    expect((await client(gateway.port).challenge("lease-b")).status).not.toBe(200)
+    expect((await client(gateway).challenge("lease-b")).status).not.toBe(200)
   })
 })
 
 test("a restart of the daemon reconciles a run that settled while it was down", async () => {
   await withProcesses(async (f, { gateway, daemon }) => {
     await daemon.send("authorize run")
-    const token = await sessionToken(gateway.port)
-    expect(await (await client(gateway.port).call(token)).text()).toBe(sse)
+    const token = await sessionToken(gateway)
+    expect(await (await client(gateway).call(token)).text()).toBe(sse)
     await daemon.stop()
     // Without the daemon the gateway serves the runs it holds and accepts no new run.
-    expect(await (await client(gateway.port).call(token)).text()).toBe(sse)
+    expect(await (await client(gateway).call(token)).text()).toBe(sse)
     await f.store(seedLease("run-n", "lease-n", 90))
-    expect((await client(gateway.port).challenge("lease-n")).status).not.toBe(200)
+    expect((await client(gateway).challenge("lease-n")).status).not.toBe(200)
     await f.store(
       Effect.gen(function* () {
         yield* (yield* AgentRunStore).cancel({ runId: "run", now: new Date() })
@@ -275,7 +283,7 @@ test("a restart of the daemon reconciles a run that settled while it was down", 
     const again = await startDaemon(daemonDatabase(f), socketOf(f))
     try {
       expect(again.ready).toBe(true)
-      await within(2000, async () => (await client(gateway.port).call(token)).status === 403)
+      await within(2000, async () => (await client(gateway).call(token)).status === 403)
     } finally {
       await again.stop()
     }
@@ -285,7 +293,7 @@ test("a restart of the daemon reconciles a run that settled while it was down", 
 test("a run that settled while the gateway was down is revoked when the gateway is back", async () => {
   await withProcesses(async (f, { gateway, daemon }) => {
     await daemon.send("authorize run")
-    const token = await sessionToken(gateway.port)
+    const token = await sessionToken(gateway)
     await gateway.stop()
     // The gateway is down: a native run is refused with a typed reason; another kind of run is not.
     expect(await daemon.send("seed run-x lease-x 91")).toEqual({ ok: true, value: null })
@@ -298,7 +306,7 @@ test("a run that settled while the gateway was down is revoked when the gateway 
     expect((await daemon.send("settle run")).ok).toBe(true)
     const back = await startGateway(f)
     try {
-      await within(3000, async () => (await client(back.port).call(token)).status === 403)
+      await within(3000, async () => (await client(back).call(token)).status === 403)
     } finally {
       await back.stop()
     }

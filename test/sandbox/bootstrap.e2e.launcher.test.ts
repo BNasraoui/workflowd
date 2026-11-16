@@ -178,6 +178,16 @@ for (const race of [
         return new Response(null, { status: 404 })
       },
     })
+    // The front drops the first session answer that the gateway grants: the gateway sends it, the
+    // runner never gets it.
+    let dropped = 0
+    const front = await tlsFront(tls, join(root, "front", "gateway.sock"), {
+      lost: (path, status) => {
+        if (path !== "/capabilities/v1/session" || status !== 200 || dropped > 0) return false
+        dropped++
+        return true
+      },
+    })
     const config = {
       noscope: { binary: fixtureExecutable("noscope"), configHome: root },
       providerId: "anthropic",
@@ -187,7 +197,11 @@ for (const race of [
       storePath: join(root, "gateway.db"),
       controlSocket: join(root, "control", "gateway.sock"),
       daemon: { uid: process.getuid!(), gid: process.getgid!() },
-      listen: { host: "127.0.0.1" as const, port: 0 },
+      listen: {
+        socket: join(root, "front", "gateway.sock"),
+        front: { uid: process.getuid!(), gid: process.getgid!() },
+        service: front.service,
+      },
     }
     /** A query on the gateway's own store, which the gateway process holds. */
     const gatewayStore = <A>(query: (sql: SqlClient.SqlClient) => Effect.Effect<A, unknown>) =>
@@ -203,7 +217,6 @@ for (const race of [
         ),
       )
     let gateway: Gateway | undefined
-    let front: Awaited<ReturnType<typeof tlsFront>> | undefined
     const relayPid = () =>
       readFile(join(sandbox, "relay.pid"), "utf8").then(Number, () => undefined)
     try {
@@ -277,25 +290,15 @@ for (const race of [
               {
                 PATH: process.env.PATH,
                 HOME: root,
+                TMPDIR: root,
                 WORKFLOWD_CAPABILITY_GATEWAY: JSON.stringify(config),
               },
+              front,
             ),
           )
-          const listening = gateway.port
           // The run is recorded and granted before the runner asks; with no session the lease
           // stays starting.
           expect((yield* leases.acquire("run")).state).toBe("starting")
-          // The front drops the first session answer that the gateway grants: the gateway
-          // sends it, the runner never gets it.
-          let dropped = 0
-          const tlsGateway = yield* Effect.promise(() =>
-            tlsFront(tls, listening, (path, status) => {
-              if (path !== "/capabilities/v1/session" || status !== 200 || dropped > 0) return false
-              dropped++
-              return true
-            }),
-          )
-          front = tlsGateway
           const bootstrap = Bun.spawn(
             [
               node,
@@ -315,7 +318,7 @@ await prepare({
                 GITHUB_SHA: policy.workflowSha,
                 GITHUB_REF: "refs/heads/workflowd/leases/lease",
                 GITHUB_REPOSITORY: policy.repository,
-                SANDBOX_GATEWAY_URL: `https://127.0.0.1:${tlsGateway.port}`,
+                SANDBOX_GATEWAY_URL: front.origin,
                 ACTIONS_ID_TOKEN_REQUEST_URL:
                   "https://fixture.actions.githubusercontent.com/token?api-version=2",
                 ACTIONS_ID_TOKEN_REQUEST_TOKEN: "fixture-request",
@@ -413,7 +416,7 @@ await prepare({
           // The relay already stopped.
         }
       }
-      front?.close()
+      front.close()
       await gateway?.stop()
       await issuer.stop(true)
       await github.stop(true)

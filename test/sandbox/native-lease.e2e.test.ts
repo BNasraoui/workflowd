@@ -16,6 +16,7 @@ import {
   startGatewayProcess,
   type Fixture,
   type Gateway,
+  type Origin,
 } from "../capability-gateway/gateway-process"
 import { sandboxGithubFixture } from "./harness"
 
@@ -34,7 +35,7 @@ const policy = {
 
 /** The gateway process alone: no control call is made for the test, the lease service makes each. */
 const startGateway = (f: Fixture) =>
-  startGatewayProcess([process.execPath, "-e", gatewaySource(f)], f.env)
+  startGatewayProcess([process.execPath, "-e", gatewaySource(f)], f.env, f.front)
 
 /** Polls `check` until it holds or `ms` milliseconds pass; returns the time it took. */
 async function within(ms: number, check: () => Promise<boolean>) {
@@ -63,8 +64,8 @@ const leaseService = (
   })
 
 /** The runner of the fixture's Actions run 41 opens a session for `lease`; its run token. */
-async function runnerSession(port: number, lease: string, actionsRunId = "41") {
-  const at = client(port)
+async function runnerSession(gateway: Origin, lease: string, actionsRunId = "41") {
+  const at = client(gateway)
   const { audience } = await at.audience(lease)
   const opened = await at.session(
     proof(audience, `jti-${lease}-${actionsRunId}`, { lease, claims: { run_id: actionsRunId } }),
@@ -125,17 +126,17 @@ test("an actions-native lease becomes ready on its runner's gateway session, and
         })
         const leases = yield* leaseService(f, github, capability)
         // Before the first acquisition the gateway holds no grant: no challenge.
-        const challenge = () => Effect.promise(() => client(gateway.port).challenge("lease-a"))
+        const challenge = () => Effect.promise(() => client(gateway).challenge("lease-a"))
         expect((yield* challenge()).status).not.toBe(200)
         // The acquisition records Actions run 41 and grants it; without a session it stays starting.
         expect((yield* leases.acquire("run-a")).state).toBe("starting")
         expect((yield* challenge()).status).toBe(200)
         // A runner of another Actions run opens no session, and the lease stays starting.
-        const other = yield* Effect.promise(() => runnerSession(gateway.port, "lease-a", "79"))
+        const other = yield* Effect.promise(() => runnerSession(gateway, "lease-a", "79"))
         expect(other.status).not.toBe(200)
         expect((yield* leases.acquire("run-a")).state).toBe("starting")
         // The runner of run 41 opens its session: the next acquisition makes the lease ready.
-        const opened = yield* Effect.promise(() => runnerSession(gateway.port, "lease-a"))
+        const opened = yield* Effect.promise(() => runnerSession(gateway, "lease-a"))
         expect(opened.status).toBe(200)
         const ready = yield* leases.acquire("run-a")
         expect([ready.state, ready.peer_id, ready.transport]).toEqual(["ready", null, null])
@@ -162,7 +163,7 @@ test("a revoked run's session does not make its lease ready: its acquisition is 
         })
         const leases = yield* leaseService(f, github, capability)
         expect((yield* leases.acquire("run-r")).state).toBe("starting")
-        const opened = yield* Effect.promise(() => runnerSession(gateway.port, "lease-r"))
+        const opened = yield* Effect.promise(() => runnerSession(gateway, "lease-r"))
         expect(opened.status).toBe(200)
         yield* capability.revoke("run-r")
         // The gateway refuses to grant the revoked run again, so the acquisition fails.
@@ -216,14 +217,12 @@ test("a native lease is released when the gateway is down or refuses the revoke,
           [refusingLeases, "run-x", "lease-x", "42"],
         ] as const) {
           yield* leases.acquire(runId)
-          const opened = yield* Effect.promise(() =>
-            runnerSession(gateway!.port, lease, actionsRunId),
-          )
+          const opened = yield* Effect.promise(() => runnerSession(gateway!, lease, actionsRunId))
           expect((yield* leases.acquire(runId)).state).toBe("ready")
           tokens.push(opened.token)
         }
         const works = (token: string) =>
-          Effect.promise(async () => (await client(gateway!.port).call(token)).status === 200)
+          Effect.promise(async () => (await client(gateway!).call(token)).status === 200)
         for (const token of tokens) expect(yield* works(token)).toBe(true)
         const read = (runId: string) =>
           Effect.flatMap(makeSandboxStore, (store) => store.read(runId))
@@ -243,7 +242,7 @@ test("a native lease is released when the gateway is down or refuses the revoke,
         // The gateway is back, with the grants it held. workflowd's next reconcile, within its
         // period of 10 seconds, revokes both runs.
         gateway = yield* Effect.promise(() => startGateway(f))
-        const back = gateway.port
+        const back = gateway
         const elapsed = yield* Effect.promise(() =>
           within(12000, async () => {
             const statuses = await Promise.all(

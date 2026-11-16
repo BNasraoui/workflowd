@@ -2,7 +2,14 @@ import { expect, test } from "bun:test"
 import { randomUUID } from "node:crypto"
 import { readFile, readdir, writeFile } from "node:fs/promises"
 import { join } from "node:path"
-import { claudeLogin, client, sse, storedAccess, syntheticValue } from "./gateway-process"
+import {
+  claudeLogin,
+  client,
+  sse,
+  storedAccess,
+  syntheticValue,
+  type Origin,
+} from "./gateway-process"
 import {
   imported,
   loginDirectory,
@@ -19,9 +26,9 @@ import {
  * rename of the renewed login; and the scope of a renewal answer.
  */
 
-/** A Claude call on `port` that the client gives up when `signal` aborts. */
-const callUntil = (port: number, token: string, signal: AbortSignal) =>
-  fetch(client(port).url("/capabilities/v1/providers/anthropic/v1/messages"), {
+/** A Claude call through the front at `at` that the client gives up when `signal` aborts. */
+const callUntil = (at: Origin, token: string, signal: AbortSignal) =>
+  client(at).request("/capabilities/v1/providers/anthropic/v1/messages", {
     method: "POST",
     signal,
     headers: {
@@ -41,13 +48,13 @@ test("a client that goes away while the OAuth server holds the renewal ends its 
     const gateway = await start()
     const token = await runToken(gateway, "jti-away")
     const away = new AbortController()
-    const first = callUntil(gateway.port, token, away.signal).catch(() => "gone")
+    const first = callUntil(gateway, token, away.signal).catch(() => "gone")
     await until(() => oauth.requests().length === 1)
     away.abort()
     expect(await first).toBe("gone")
     await Bun.sleep(300)
     oauth.release()
-    const second = await client(gateway.port).call(token)
+    const second = await client(gateway).call(token)
     expect(second.status).toBe(200)
     expect(await second.text()).toBe(sse)
     expect(oauth.requests()).toHaveLength(1)
@@ -67,7 +74,7 @@ test("a stop of the gateway while the OAuth server holds the renewal: after a st
     oauth.mode("hold")
     const gateway = await start()
     const token = await runToken(gateway, "jti-stop")
-    const first = client(gateway.port)
+    const first = client(gateway)
       .call(token)
       .catch(() => "gone")
     await until(() => oauth.requests().length === 1)
@@ -129,7 +136,7 @@ test("a stop after the renewed login is complete and before its rename: the next
     )
     const gateway = await start()
     const token = await runToken(gateway, "jti-tmp")
-    const call = await client(gateway.port).call(token)
+    const call = await client(gateway).call(token)
     expect(call.status).toBe(200)
     expect(await call.text()).toBe(sse)
     expect(oauth.requests()).toHaveLength(0)
@@ -148,7 +155,7 @@ test("a renewal answer with no scope keeps the scope; one without user:inference
     oauth.mode("unscoped")
     const gateway = await start()
     const token = await runToken(gateway, "jti-scope")
-    const call = await client(gateway.port).call(token)
+    const call = await client(gateway).call(token)
     expect(call.status).toBe(200)
     expect(await call.text()).toBe(sse)
     const kept = JSON.parse(await readFile(loginFile(f), "utf8")).claudeAiOauth
@@ -167,7 +174,7 @@ test("a renewal answer with no scope keeps the scope; one without user:inference
     oauth.renewWith(narrow)
     oauth.mode("narrow")
     for (let attempt = 0; attempt < 2; attempt++) {
-      const refused = await client(gateway.port).call(token)
+      const refused = await client(gateway).call(token)
       expect(refused.status).toBe(503)
       await refused.text()
     }

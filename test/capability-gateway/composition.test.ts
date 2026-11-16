@@ -12,7 +12,9 @@ import { SandboxDispatch } from "../../src/sandbox/dispatch"
 import { seedCapabilityRun } from "./fixture"
 import { makeDaemonCapability } from "../../src/sandbox/capability-control"
 import { serveCapabilityGateway } from "../../src/capability-gateway-server"
-import { capabilityHttpServer } from "../../src/capability-gateway/http"
+import { serveCapabilityListener } from "../../src/capability-gateway/http"
+import { loopbackCertificate, tlsFront } from "../helpers/loopback-tls"
+import { client } from "./gateway-process"
 import { requiredEnvironment } from "../helpers/config"
 import { AgentRunStoreLive } from "../../src/kernel/agent-run-store"
 import { fixtureExecutable } from "../helpers/fixture-executable.mjs"
@@ -20,6 +22,8 @@ import { fixtureExecutable } from "../helpers/fixture-executable.mjs"
 test("configured live composition settles prior leases, which revokes their grants on the control socket, and refuses an actions-native launch before external effects", async () => {
   const root = await mkdtemp(join(tmpdir(), "gateway-composition-"))
   const socket = join(root, "control", "gateway.sock")
+  const listenSocket = join(root, "front", "gateway.sock")
+  const front = await tlsFront(await loopbackCertificate(root), listenSocket)
   const gateway = {
     noscope: { binary: fixtureExecutable("noscope"), configHome: root },
     providerId: "anthropic",
@@ -29,7 +33,11 @@ test("configured live composition settles prior leases, which revokes their gran
     storePath: join(root, "gateway.db"),
     controlSocket: socket,
     daemon: { uid: process.getuid!(), gid: process.getgid!() },
-    listen: { host: "127.0.0.1" as const, port: 0 },
+    listen: {
+      socket: listenSocket,
+      front: { uid: process.getuid!(), gid: process.getgid!() },
+      service: front.service,
+    },
   }
   const policy = {
     alias: "fixture",
@@ -94,21 +102,24 @@ test("configured live composition settles prior leases, which revokes their gran
     const { listen: _listen, ...unlistened } = gateway
     for (const bad of [
       unlistened,
-      { ...gateway, listen: { host: "gateway.example", port: 1 } },
-      { ...gateway, listen: { host: "127.0.0.1", port: 65536 } },
+      { ...gateway, listen: { host: "127.0.0.1", port: 1 } },
+      { ...gateway, listen: { ...gateway.listen, socket: "front/gateway.sock" } },
+      { ...gateway, listen: { ...gateway.listen, front: { uid: -1, gid: 0 } } },
+      { ...gateway, listen: { ...gateway.listen, service: "Gateway.example" } },
+      { ...gateway, listen: { ...gateway.listen, service: "gateway.example:0" } },
       { ...gateway, storePath: "gateway.db" },
       { ...gateway, daemon: { uid: -1, gid: 0 } },
     ])
       expect(() =>
         loadCapabilityGatewayConfig({ WORKFLOWD_CAPABILITY_GATEWAY: JSON.stringify(bad) }),
       ).toThrow()
-    const served = await Effect.runPromise(
+    await Effect.runPromise(
       serveCapabilityGateway({ WORKFLOWD_CAPABILITY_GATEWAY: JSON.stringify(gateway) }).pipe(
         Scope.provide(scope),
       ),
     )
     const challenge = async () =>
-      (await fetch(`http://127.0.0.1:${served.port}/capabilities/v1/challenge?lease=lease`)).status
+      (await client(front).request("/capabilities/v1/challenge?lease=lease")).status
     // Discovery is optional in the composition API; this boundary fixture does
     // not ask for a provider catalog, preflight, or an executor launch.
     const { executionCapabilities: _discovery, ...config } = loaded
@@ -155,11 +166,12 @@ test("configured live composition settles prior leases, which revokes their gran
     )
   } finally {
     await Effect.runPromise(Scope.close(scope, Exit.void))
+    front.close()
     await rm(root, { recursive: true, force: true })
   }
 })
 
-test("the gateway config bounds its streams: an idle limit of 1 ms to the listener's socket timeout of two minutes, a stale sweep every 100 ms to a minute, and at most maxStreams for a run", () => {
+test("the gateway config bounds its streams: an idle limit of 1 ms to the listener's socket timeout of two minutes, a stale sweep every 100 ms to a minute, and at most maxStreams for a run", async () => {
   const gateway = {
     noscope: { binary: "/fixture/noscope", configHome: "/fixture" },
     providerId: "anthropic",
@@ -169,7 +181,11 @@ test("the gateway config bounds its streams: an idle limit of 1 ms to the listen
     storePath: "/fixture/gateway.db",
     controlSocket: "/fixture/control/gateway.sock",
     daemon: { uid: 1000, gid: 1000 },
-    listen: { host: "127.0.0.1", port: 0 },
+    listen: {
+      socket: "/fixture/front/gateway.sock",
+      front: { uid: 1001, gid: 1001 },
+      service: "gateway.example.ts.net",
+    },
   }
   const load = (keys: Record<string, unknown>) =>
     loadCapabilityGatewayConfig({
@@ -194,13 +210,26 @@ test("the gateway config bounds its streams: an idle limit of 1 ms to the listen
   expect(load({ streamIdleMs: 1 }).streamIdleMs).toBe(1)
   expect(load({ streamIdleMs: 120000 }).streamIdleMs).toBe(120000)
   // A socket idle this long is destroyed under a silent stream, so the bound is this timeout.
+  const root = await mkdtemp(join(tmpdir(), "gateway-timeout-"))
   const socketTimeout = spyOn(Server.prototype, "setTimeout")
   try {
-    capabilityHttpServer(async () => new Response(null))
-    expect(socketTimeout).toHaveBeenCalledTimes(1)
-    expect(socketTimeout).toHaveBeenCalledWith(120000, expect.any(Function))
+    const close = await serveCapabilityListener(
+      {
+        socket: join(root, "front", "gateway.sock"),
+        front: { uid: process.getuid!(), gid: process.getgid!() },
+        service: "gateway.example.ts.net",
+      },
+      async () => new Response(null),
+    )
+    await close()
+    // Bun's HTTP server applies its socket timeout again as it starts to listen: each call is the
+    // listener's one timeout.
+    expect(socketTimeout.mock.calls.length).toBeGreaterThan(0)
+    for (const call of socketTimeout.mock.calls)
+      expect(call).toEqual([120000, expect.any(Function)])
   } finally {
     socketTimeout.mockRestore()
+    await rm(root, { recursive: true, force: true })
   }
   expect(load({}).streamIdleMs).toBeUndefined()
   expect(load({ staleSweepMs: 100 }).staleSweepMs).toBe(100)
@@ -208,7 +237,7 @@ test("the gateway config bounds its streams: an idle limit of 1 ms to the listen
   expect(load({}).staleSweepMs).toBeUndefined()
 })
 
-test("the gateway listens only on a loopback address: 127.0.0.1 or ::1", () => {
+test("the gateway's listener is a Unix socket: a listen section with a host or a port is refused", () => {
   const gateway = {
     noscope: { binary: "/fixture/noscope", configHome: "/fixture" },
     providerId: "anthropic",
@@ -219,21 +248,23 @@ test("the gateway listens only on a loopback address: 127.0.0.1 or ::1", () => {
     controlSocket: "/fixture/control/gateway.sock",
     daemon: { uid: 1000, gid: 1000 },
   }
-  const load = (host: string) =>
+  const listen = {
+    socket: "/fixture/front/gateway.sock",
+    front: { uid: 1001, gid: 1001 },
+    service: "gateway.example.ts.net",
+  }
+  const load = (section: Record<string, unknown>) =>
     loadCapabilityGatewayConfig({
-      WORKFLOWD_CAPABILITY_GATEWAY: JSON.stringify({ ...gateway, listen: { host, port: 0 } }),
+      WORKFLOWD_CAPABILITY_GATEWAY: JSON.stringify({ ...gateway, listen: section }),
     }).listen
-  for (const host of [
-    "10.0.0.1",
-    "0.0.0.0",
-    "gateway.example",
-    "::",
-    "localhost",
-    "127.0.0.2",
-    "::ffff:127.0.0.1",
-    "::1%lo",
-  ])
-    expect(() => load(host)).toThrow('Expected "127.0.0.1" | "::1"\n  at ["listen"]["host"]')
-  expect(load("127.0.0.1")).toEqual({ host: "127.0.0.1", port: 0 })
-  expect(load("::1")).toEqual({ host: "::1", port: 0 })
+  for (const [section, key] of [
+    [{ ...listen, host: "127.0.0.1" }, "host"],
+    [{ ...listen, port: 8443 }, "port"],
+    [{ host: "127.0.0.1", port: 0 }, "host"],
+  ] as const)
+    expect(() => load(section)).toThrow(`Expected no excess property\n  at ["listen"]["${key}"]`)
+  expect(load(listen)).toEqual(listen)
+  expect(load({ ...listen, service: "gateway.example.ts.net:8443" }).service).toBe(
+    "gateway.example.ts.net:8443",
+  )
 })

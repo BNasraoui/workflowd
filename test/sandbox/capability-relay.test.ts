@@ -5,7 +5,7 @@ import { join, resolve } from "node:path"
 import { client, processGateway, proof, withGateway } from "../capability-gateway/gateway-process"
 import { renewalRequests } from "../../deploy/sandbox/renewal.mjs"
 import { fixtureExecutable } from "../helpers/fixture-executable.mjs"
-import { loopbackCertificate, tlsFront } from "../helpers/loopback-tls"
+import { loopbackCertificate } from "../helpers/loopback-tls"
 
 for (const scenario of ["headers", "renewal", "git-refs", "git-upload"] as const) {
   test(`the relay survives ${scenario} failure and serves the next valid request`, async () => {
@@ -240,16 +240,17 @@ test("the relay refuses a gateway that is not an HTTPS origin", async () => {
 test("the relay asks one renewal no more often than the gateway permits, and its last failure ends the session with a logged reason", async () => {
   await withGateway(processGateway, async (f, gateway) => {
     const root = await mkdtemp(join(tmpdir(), "relay-renewals-"))
-    const tls = await loopbackCertificate(root)
     // Each renewal that the gateway grants is lost on the way back: the gateway has replaced the
     // successor, the relay never gets it.
     const renewals: Array<number | undefined> = []
-    const front = await tlsFront(tls, gateway.port, (path, status) => {
-      if (path !== "/capabilities/v1/renew") return false
-      renewals.push(status)
-      return status === 200
+    f.front.hook({
+      lost: (path, status) => {
+        if (path !== "/capabilities/v1/renew") return false
+        renewals.push(status)
+        return status === 200
+      },
     })
-    const runner = client(gateway.port)
+    const runner = client(gateway)
     try {
       // A token that lives 180 seconds is due for renewal at once: renewAt is 180 to 300 seconds
       // before its expiry, and never later.
@@ -268,10 +269,8 @@ test("the relay asks one renewal no more often than the gateway permits, and its
           root,
         ],
         {
-          env: { PATH: "/usr/bin:/bin", HOME: root, NODE_EXTRA_CA_CERTS: tls.cert },
-          stdin: new Blob([
-            JSON.stringify({ ...grant, gateway: `https://127.0.0.1:${front.port}` }),
-          ]),
+          env: { PATH: "/usr/bin:/bin", HOME: root, NODE_EXTRA_CA_CERTS: f.tls.cert },
+          stdin: new Blob([JSON.stringify({ ...grant, gateway: f.front.origin })]),
           stdout: "pipe",
           stderr: "pipe",
         },
@@ -285,7 +284,6 @@ test("the relay asks one renewal no more often than the gateway permits, and its
       expect(renewals).toEqual(Array.from({ length: renewalRequests }, () => 200))
       expect(await readFile(join(root, "relay-ended"), "utf8")).toBe("renewal\n")
     } finally {
-      front.close()
       await rm(root, { recursive: true, force: true })
     }
   })
@@ -294,24 +292,22 @@ test("the relay asks one renewal no more often than the gateway permits, and its
 test("a renewal that the gateway refuses ends the relay at once: it sends no further request and its open stream ends", async () => {
   await withGateway(processGateway, async (f, gateway) => {
     const root = await mkdtemp(join(tmpdir(), "relay-refused-"))
-    const tls = await loopbackCertificate(root)
     const answers: Array<[string | undefined, number | undefined]> = []
     const streamOpen = Promise.withResolvers<void>()
-    const front = await tlsFront(
-      tls,
-      gateway.port,
-      (path, status) => {
-        answers.push([path, status])
-        return false
-      },
-      // The renewal reaches the gateway only once a client's stream is open through the relay.
-      (path) => (path === "/capabilities/v1/renew" ? streamOpen.promise : undefined),
-    )
-    const runner = client(gateway.port)
+    const runner = client(gateway)
     try {
       const { audience } = await runner.audience()
       const answer = await runner.session(proof(audience, "jti-relay"))
       expect(answer.status).toBe(200)
+      // From here, the front records each answer to the relay.
+      f.front.hook({
+        lost: (path, status) => {
+          answers.push([path, status])
+          return false
+        },
+        // The renewal reaches the gateway only once a client's stream is open through the relay.
+        held: (path) => (path === "/capabilities/v1/renew" ? streamOpen.promise : undefined),
+      })
       // The token lives 15 minutes, more than the renewal window of 330 s: the gateway refuses to renew it.
       const grant = await runner.grant(answer)
       expect(grant.expiresAt - Date.now()).toBeGreaterThan(330000)
@@ -324,13 +320,9 @@ test("a renewal that the gateway refuses ends the relay at once: it sends no fur
           root,
         ],
         {
-          env: { PATH: "/usr/bin:/bin", HOME: root, NODE_EXTRA_CA_CERTS: tls.cert },
+          env: { PATH: "/usr/bin:/bin", HOME: root, NODE_EXTRA_CA_CERTS: f.tls.cert },
           stdin: new Blob([
-            JSON.stringify({
-              ...grant,
-              renewAt: Date.now(),
-              gateway: `https://127.0.0.1:${front.port}`,
-            }),
+            JSON.stringify({ ...grant, renewAt: Date.now(), gateway: f.front.origin }),
           ]),
           stdout: "pipe",
           stderr: "pipe",
@@ -376,7 +368,6 @@ test("a renewal that the gateway refuses ends the relay at once: it sends no fur
       expect(await readFile(join(root, "relay-ended"), "utf8")).toBe("renewal\n")
       expect(await f.mints()).toBe(1)
     } finally {
-      front.close()
       await rm(root, { recursive: true, force: true })
     }
   })

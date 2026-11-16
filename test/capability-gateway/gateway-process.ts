@@ -9,6 +9,7 @@ import { AgentRunStore, AgentRunStoreLive } from "../../src/kernel/agent-run-sto
 import { makeSandboxStore } from "../../src/sandbox/store"
 import { serveCapabilityGateway } from "../../src/capability-gateway-server"
 import { fixtureExecutable } from "../helpers/fixture-executable.mjs"
+import { loopbackCertificate, tlsFront } from "../helpers/loopback-tls"
 import { seedCapabilityRun, writeNoscopeProvider } from "./fixture"
 import { makeDaemonCapability, type DaemonCapability } from "../../src/sandbox/capability-control"
 
@@ -211,6 +212,9 @@ try {
   })
   const database = join(root, "workflowd.db")
   const controlSocket = join(root, "control", "gateway.sock")
+  const listenSocket = join(root, "front", "gateway.sock")
+  const tls = await loopbackCertificate(root)
+  const front = await tlsFront(tls, listenSocket)
   const config = {
     noscope: { binary: fixtureExecutable("noscope"), configHome: root },
     providerId: "anthropic",
@@ -220,12 +224,18 @@ try {
     storePath: join(root, "gateway.db"),
     controlSocket,
     daemon: { uid: process.getuid!(), gid: process.getgid!() },
-    listen: { host: "127.0.0.1" as const, port: 0 },
+    listen: {
+      socket: listenSocket,
+      front: { uid: process.getuid!(), gid: process.getgid!() },
+      service: front.service,
+    },
     ...keys,
   }
+  // A gateway process makes its private directory below TMPDIR: here, in the fixture.
   const env = {
     PATH: process.env.PATH,
     HOME: root,
+    TMPDIR: root,
     WORKFLOWD_CAPABILITY_GATEWAY: JSON.stringify(config),
   }
   const store = <A, E>(
@@ -255,6 +265,9 @@ try {
     root,
     env,
     config,
+    /** The gateway's front, through which each runner reaches it, and the front's certificate. */
+    front,
+    tls,
     store,
     database,
     daemon,
@@ -310,6 +323,7 @@ try {
         }),
       ),
     close: async () => {
+      front.close()
       await upstream.stop(true)
       await keyServer.stop(true)
       await rm(root, { recursive: true, force: true })
@@ -317,11 +331,17 @@ try {
   }
 }
 export type Fixture = Awaited<ReturnType<typeof fixture>>
-export interface Gateway {
-  readonly port: number
+/** Where a runner reaches a gateway: the origin of its front, and the front's certificate. */
+export interface Origin {
+  readonly origin: string
+  readonly ca: string
+}
+export interface Gateway extends Origin {
   stop(): Promise<void>
   /** Sends SIGTERM, the stop of a service manager, and waits for the end of the process. */
   readonly terminate?: () => Promise<void>
+  /** The listener's socket, as the process named it. */
+  readonly socket?: string
   /** The id of the process. */
   readonly pid?: number
   /** Each byte the process wrote to standard output and standard error so far. */
@@ -332,8 +352,8 @@ export interface Gateway {
  * The `bun -e` source of a gateway process: the server of `src/capability-gateway-server.ts`
  * (or `entry`, its path in an image), which reads its configuration from the environment, with
  * the job keys of the fixture key server at `keysUrl` and the model upstream at `upstreamUrl` in
- * place of api.anthropic.com. It prints the bound port and ends on SIGTERM as the process entry
- * does.
+ * place of api.anthropic.com. It prints its listener's socket and ends on SIGTERM as the process
+ * entry does.
  */
 export const gatewaySource = (
   servers: { readonly keysUrl: string; readonly upstreamUrl: string },
@@ -346,7 +366,7 @@ BunRuntime.runMain(serveCapabilityGateway(process.env, {
   keys: async (signal) => (await fetch(${JSON.stringify(servers.keysUrl)}, { signal })).json(),
   upstream: (url, init) => fetch(url.replace("https://api.anthropic.com", ${JSON.stringify(servers.upstreamUrl)}), init),
 }).pipe(
-  Effect.tap(({ port }) => Effect.sync(() => process.stdout.write(\`listening \${port}\\n\`))),
+  Effect.tap(({ socket }) => Effect.sync(() => process.stdout.write(\`listening \${socket}\\n\`))),
   Effect.andThen(Effect.never),
   Effect.scoped,
   Effect.tapCause((cause) => Effect.sync(() => process.stderr.write(Cause.pretty(cause) + "\\n"))),
@@ -354,12 +374,14 @@ BunRuntime.runMain(serveCapabilityGateway(process.env, {
 
 /**
  * Starts a gateway process from `argv` and `env`, in the repository root, and returns once its
- * standard output has given the line `listening <port>`. It fails, and leaves no process, when
- * the process ends first. `stop` kills the process and waits for its end.
+ * standard output has given the line `listening <socket>`; a runner reaches it through `front`.
+ * It fails, and leaves no process, when the process ends first. `stop` kills the process and
+ * waits for its end.
  */
 export async function startGatewayProcess(
   argv: ReadonlyArray<string>,
   env: Readonly<Record<string, string | undefined>>,
+  front: Origin,
 ): Promise<Gateway> {
   const child = Bun.spawn([...argv], {
     cwd: resolve("."),
@@ -381,17 +403,16 @@ export async function startGatewayProcess(
   }
   const reader = child.stdout.getReader()
   let text = ""
-  let port: number | undefined
+  let socket: string | undefined
   try {
-    while (port === undefined) {
+    while (socket === undefined) {
       const part = await reader.read()
       if (part.done) {
         await forwarded
         throw new Error(`gateway process exited before listening: ${text}${errors}`)
       }
       text += Buffer.from(part.value).toString()
-      const listening = /^listening (\d+)\n/m.exec(text)?.[1]
-      if (listening !== undefined) port = Number(listening)
+      socket = /^listening (\/\S+)\n/m.exec(text)?.[1]
     }
   } catch (error) {
     await stop()
@@ -407,7 +428,15 @@ export async function startGatewayProcess(
     await child.exited
     await forwarded
   }
-  return { port, stop, terminate, pid: child.pid, output: () => text + errors }
+  return {
+    origin: front.origin,
+    ca: front.ca,
+    socket,
+    stop,
+    terminate,
+    pid: child.pid,
+    output: () => text + errors,
+  }
 }
 
 /**
@@ -415,7 +444,11 @@ export async function startGatewayProcess(
  * Once it listens, workflowd's side grants its live runs on the control socket.
  */
 export async function processGateway(f: Fixture): Promise<Gateway> {
-  const gateway = await startGatewayProcess([process.execPath, "-e", gatewaySource(f)], f.env)
+  const gateway = await startGatewayProcess(
+    [process.execPath, "-e", gatewaySource(f)],
+    f.env,
+    f.front,
+  )
   await f.reconcile().catch(async (error: unknown) => {
     await gateway.stop()
     throw error
@@ -426,7 +459,7 @@ export async function processGateway(f: Fixture): Promise<Gateway> {
 /** The same server and listener in this process, so its routes count toward coverage. */
 export async function inProcessGateway(f: Fixture): Promise<Gateway> {
   const scope = Effect.runSync(Scope.make())
-  const served = await Effect.runPromise(
+  await Effect.runPromise(
     serveCapabilityGateway(f.env, {
       keys: async (signal) => (await fetch(f.keysUrl, { signal })).json(),
       upstream: (url, init) => fetch(url.replace("https://api.anthropic.com", f.upstreamUrl), init),
@@ -437,7 +470,7 @@ export async function inProcessGateway(f: Fixture): Promise<Gateway> {
     await stop()
     throw error
   })
-  return { port: served.port, stop }
+  return { origin: f.front.origin, ca: f.front.ca, stop }
 }
 
 export const gateways = [
@@ -501,10 +534,13 @@ export const seedLease = (
     if (actionsRunId !== null) yield* leases.recordRun(runId, actionsRunId, 1)
   })
 
-/** The runner's and the relay's requests to a gateway on `port`. */
-export const client = (port: number) => {
-  const url = (path: string) => `http://127.0.0.1:${port}${path}`
-  const challenge = (lease = "lease") => fetch(url(`/capabilities/v1/challenge?lease=${lease}`))
+/** The runner's and the relay's requests to a gateway, through its front at `at`. */
+export const client = (at: Origin) => {
+  const url = (path: string) => `${at.origin}${path}`
+  /** A request to `path` of the gateway, through its front. */
+  const request = (path: string, init: RequestInit = {}) =>
+    fetch(url(path), { ...init, tls: { ca: at.ca } })
+  const challenge = (lease = "lease") => request(`/capabilities/v1/challenge?lease=${lease}`)
   const audience = async (lease = "lease") => {
     const issued = await challenge(lease)
     if (issued.status !== 200) throw new Error(`challenge answered ${issued.status}`)
@@ -514,7 +550,7 @@ export const client = (port: number) => {
     return { ...value, audience: `workflowd:${value.channel}:${value.nonce}` }
   }
   const session = (token: string) =>
-    fetch(url("/capabilities/v1/session"), {
+    request("/capabilities/v1/session", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ token }),
@@ -531,7 +567,7 @@ export const client = (port: number) => {
     )(await response.json())
   /** A Claude messages call with `body` as its exact text; `headers` add to or replace the usual. */
   const provider = (token: string, body: string, headers: Record<string, string> = {}) =>
-    fetch(url("/capabilities/v1/providers/anthropic/v1/messages"), {
+    request("/capabilities/v1/providers/anthropic/v1/messages", {
       method: "POST",
       headers: {
         authorization: `Bearer ${token}`,
@@ -545,12 +581,12 @@ export const client = (port: number) => {
   const call = (token: string) =>
     provider(token, JSON.stringify({ model: "fixture-model", stream: true, messages: [] }))
   const renew = (token: string) =>
-    fetch(url("/capabilities/v1/renew"), {
+    request("/capabilities/v1/renew", {
       method: "POST",
       headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
       body: "{}",
     })
-  return { url, challenge, audience, session, grant, provider, call, renew }
+  return { url, request, challenge, audience, session, grant, provider, call, renew }
 }
 
 /** Starts a gateway with `start` and the config `keys`, runs `body` against it, and always stops both. */
