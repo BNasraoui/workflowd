@@ -18,6 +18,7 @@ import {
   type SealedResultGitPort,
 } from "../../src/kernel/sealed-result"
 import { KernelSessionStoreLive } from "../../src/kernel/session-store"
+import { KernelJobStoreLive } from "../../src/kernel/job-store"
 import { makeOpenCodeSdkClient, SdkOpenCodeAdapter } from "../../src/opencode/adapter"
 import {
   controlClient,
@@ -29,7 +30,15 @@ import { makeSandboxDispatch, SandboxDispatch } from "../../src/sandbox/dispatch
 import { RepositoryVisibility } from "../../src/sandbox/github"
 import { makeSandboxLeaseService } from "../../src/sandbox/lease"
 import { WorkflowStoreLive } from "../../src/store"
-import { WorkSignal } from "../../src/work-signal"
+import { WorkSignal, WorkSignalLive } from "../../src/work-signal"
+import { loadConfig } from "../../src/config"
+import { startHookService } from "../../src/runtime"
+import { AgentRunProvider } from "../../src/kernel/agent-run-ingress"
+import { AgentRunWatchdogLive } from "../../src/kernel/agent-run-watchdog"
+import {
+  AGENT_RUN_WORKTREE_BATCH_SIZE,
+  AgentRunWorktreeJanitorLive,
+} from "../../src/kernel/agent-run-worktree-janitor"
 import {
   fixture,
   gatewaySource,
@@ -134,18 +143,25 @@ export function run(step: string, argv: ReadonlyArray<string>, cwd?: string, inp
  * a public repository: upload-pack only. Its one commit is the run's source; the daemon pushes
  * the run's branch into the same bare repository.
  */
-export async function gitRemote(root: string) {
-  const work = join(root, "work")
+export async function gitRemote(
+  root: string,
+  /** A repository whose HEAD is the run's source, as `main`; a new one of one file when not named. */
+  source?: string,
+) {
+  const work = source ?? join(root, "work")
   const projects = join(root, "remote")
   const bare = join(projects, "fixture", "repo.git")
-  await mkdir(work, { recursive: true })
-  run("source", ["git", "init", "--quiet", "-b", "main"], work)
-  await writeFile(join(work, "README.md"), "fixture\n")
-  run("source", ["git", "add", "README.md"], work)
-  run("source", ["git", "commit", "--quiet", "-m", "Source"], work)
+  if (source === undefined) {
+    await mkdir(work, { recursive: true })
+    run("source", ["git", "init", "--quiet", "-b", "main"], work)
+    await writeFile(join(work, "README.md"), "fixture\n")
+    run("source", ["git", "add", "README.md"], work)
+    run("source", ["git", "commit", "--quiet", "-m", "Source"], work)
+  }
   const sourceSha = run("source", ["git", "rev-parse", "HEAD"], work)
   await mkdir(join(projects, "fixture"), { recursive: true })
-  run("source", ["git", "clone", "--quiet", "--bare", work, bare])
+  run("source", ["git", "init", "--quiet", "--bare", "-b", "main", bare])
+  run("source", ["git", "-C", bare, "fetch", "--quiet", "--no-tags", work, "HEAD:refs/heads/main"])
   // GitHub serves any commit of a public repository by its id.
   run("source", ["git", "-C", bare, "config", "uploadpack.allowAnySHA1InWant", "true"])
   const server = Bun.serve({
@@ -346,6 +362,20 @@ export interface RunnerJob {
   readonly harness?: (bare: string) => Promise<ReadonlyArray<string>>
   /** The job's agent image. */
   readonly image: string
+  /** A repository whose HEAD is the run's source; a new one of one file when not named. */
+  readonly source?: string
+  /**
+   * The job that the lease push starts, in place of the fixture's start of bootstrap.mjs: it
+   * resolves once the job's last step ended. It gets the lease, the fixture OIDC issuer's token
+   * URL and the gateway fixture.
+   */
+  readonly start?: (lease: {
+    readonly leaseId: string
+    readonly issuer: string
+    readonly f: Fixture
+  }) => Promise<void>
+  /** Whether the daemon runs the background workers of a production start (`startHookService`). */
+  readonly productionWorkers?: boolean
 }
 
 /**
@@ -435,9 +465,15 @@ export function daemonRuntime(
     readonly beforePush?: () => Promise<void>
     /** The git of the check and the push; /usr/bin/git unless named. */
     readonly gitBinary?: string
+    /**
+     * Whether the daemon runs the background workers of a production start: `startHookService`
+     * of an execution host, with the agent-run watchdog, the worktree janitor and the sandbox
+     * heartbeat and reconcile at their production pace, on the daemon's own work signal.
+     */
+    readonly productionWorkers?: boolean
   } = {},
 ) {
-  const stores = Layer.mergeAll(KernelSessionStoreLive, AgentRunStoreLive).pipe(
+  const stores = Layer.mergeAll(KernelSessionStoreLive, AgentRunStoreLive, KernelJobStoreLive).pipe(
     Layer.provideMerge(
       KernelEventStoreLive.pipe(
         Layer.provideMerge(
@@ -510,7 +546,7 @@ export function daemonRuntime(
   ).pipe(Layer.provide(sealed), Layer.provide(stores))
   // The daemon's sandbox workers, as runtime.ts runs them: the reconcile and the heartbeat, each
   // pass after the one before it, for the life of the runtime.
-  const workers = Layer.effectDiscard(
+  const sandboxWorkers = Layer.effectDiscard(
     Effect.gen(function* () {
       const dispatch = yield* SandboxDispatch
       for (const [name, operation] of [
@@ -528,6 +564,11 @@ export function daemonRuntime(
           ),
         )
     }),
+  )
+  const production = options.productionWorkers === true
+  const workers = Layer.mergeAll(
+    production ? Layer.empty : sandboxWorkers,
+    production ? productionWorkers(f.root) : Layer.empty,
   )
   // Each line that the daemon logs, for a test that reads what its workers did.
   const logs: Array<string> = []
@@ -563,7 +604,12 @@ export function daemonRuntime(
     Layer.provideMerge(sandbox),
     Layer.provideMerge(stores),
     Layer.provideMerge(
-      Layer.succeed(WorkSignal, { wake: () => Effect.void, subscribe: () => Effect.die("unused") }),
+      options.productionWorkers === true
+        ? WorkSignalLive
+        : Layer.succeed(WorkSignal, {
+            wake: () => Effect.void,
+            subscribe: () => Effect.die("unused"),
+          }),
     ),
     Layer.provideMerge(
       Layer.succeed(RepositoryVisibility, { read: github.github.repositoryVisibility }),
@@ -591,6 +637,57 @@ export function daemonRuntime(
       cleanup: (runId: string) =>
         leaseService === undefined ? Effect.void : Effect.ignore(leaseService.release(runId)),
     },
+  )
+}
+
+/**
+ * The background workers of a production start of the daemon: `startHookService` of an execution
+ * host, which starts each worker whose service the layer holds, at its production pace. It holds
+ * the agent-run watchdog (with the options of `src/layers.ts`), the worktree janitor and the
+ * sandbox dispatch's heartbeat and reconcile. The watchdog's provider of OpenCode sessions fails
+ * the run's test at any use: a runner run has no OpenCode session.
+ */
+function productionWorkers(root: string) {
+  const verifyTimeoutMs = 120000
+  const noSession = Effect.die("a runner run has no OpenCode session")
+  return Layer.effectDiscard(
+    Effect.gen(function* () {
+      const loaded = yield* Effect.promise(() =>
+        loadConfig({ WORKFLOWD_MODE: "execution" }, { home: root }),
+      )
+      yield* startHookService({ ...loaded, http: { ...loaded.http, host: "127.0.0.1", port: 0 } })
+    }),
+  ).pipe(
+    Layer.provide(
+      Layer.mergeAll(
+        AgentRunWatchdogLive({
+          progressWindowMs: 900000,
+          staleAfterMs: verifyTimeoutMs * 10,
+          directoryLeaseMs: 90000,
+          unsupervisedExecutorKinds: ["codex", "claude"],
+          now: () => new Date(),
+        }),
+        AgentRunWorktreeJanitorLive({
+          owningHostId: "mint",
+          worktreeRoot: join(root, "worktrees"),
+          repositories: [],
+          retentionMs: 7 * 24 * 3600000,
+          batchSize: AGENT_RUN_WORKTREE_BATCH_SIZE,
+          now: () => new Date(),
+        }),
+      ).pipe(
+        Layer.provide(
+          Layer.succeed(AgentRunProvider, {
+            createSession: () => noSession,
+            promptSession: () => noSession,
+            abortSession: () => noSession,
+            listProviders: () => noSession,
+            listModels: () => noSession,
+            sessionTelemetry: () => noSession,
+          }),
+        ),
+      ),
+    ),
   )
 }
 
@@ -629,7 +726,7 @@ export async function withRunnerDaemon<A>(
 ): Promise<A> {
   // A provider id other than `anthropic`: each grant of the run must name the gateway's own.
   const f = await fixture({ gitRead: true, providerId: "fixture-provider" })
-  const remote = await gitRemote(join(f.root, "git"))
+  const remote = await gitRemote(join(f.root, "git"), job.source)
   const lease = { id: "none" }
   let jobStart: Promise<void> | undefined
   const issuer = Bun.serve({
@@ -647,7 +744,10 @@ export async function withRunnerDaemon<A>(
   const harness = await job.harness?.(remote.bare)
   const github = await githubStub(remote.sourceSha, (leaseId) => {
     lease.id = leaseId
-    jobStart = startJob(f, job, harness, leaseId, `${issuer.url.origin}/token`)
+    jobStart =
+      job.start === undefined
+        ? startJob(f, job, harness, leaseId, `${issuer.url.origin}/token`)
+        : job.start({ leaseId, issuer: `${issuer.url.origin}/token`, f })
     // A failed start is read by `jobEnded`; the daemon's wait for the lease ends on its own.
     jobStart.catch(() => undefined)
   })
@@ -670,6 +770,7 @@ export async function withRunnerDaemon<A>(
           budget: defaultRunBudget,
           runner: { aliases: ["runner"], identity: runnerIdentity },
         }),
+        { productionWorkers: job.productionWorkers === true },
       )
     runtime = daemon()
     // The daemon's host in its directory, as its start binds it: each run is then its own.

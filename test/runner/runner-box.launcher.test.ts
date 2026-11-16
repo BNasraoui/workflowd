@@ -1,5 +1,10 @@
 import { expect, test } from "bun:test"
 import { readFileSync } from "node:fs"
+import { mkdtemp, rm, writeFile } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { dirname, join, resolve } from "node:path"
+import type { Fixture } from "../capability-gateway/gateway-process"
+import { grantsJobIdentity, runnerJob, runSteps, type JobStep } from "./workflow-job"
 import { Effect } from "effect"
 import { AgentRunIngress } from "../../src/kernel/agent-run-ingress"
 import { AgentRunStore } from "../../src/kernel/agent-run-store"
@@ -87,6 +92,43 @@ async function withBoxJob(use: Parameters<typeof withRunnerDaemon>[1]) {
       stderr: "ignore",
     })
     Bun.spawnSync(["sudo", "rm", "-rf", directory])
+  }
+}
+
+/**
+ * Runs `use` with the daemon, its production workers, and a runner job of this repository's
+ * source that `start` runs; then the job's release step (`runner.sh stop`), the run directory and
+ * the tooling that the job's private first contact installed.
+ */
+async function withTrialJob(
+  start: NonNullable<Parameters<typeof withRunnerDaemon>[0]["start"]>,
+  use: Parameters<typeof withRunnerDaemon>[1],
+) {
+  try {
+    await withRunnerDaemon(
+      {
+        directory,
+        image,
+        source: resolve(import.meta.dir, "../.."),
+        start,
+        productionWorkers: true,
+      },
+      use,
+    )
+  } finally {
+    Bun.spawnSync(["bash", "deploy/sandbox/runner.sh", "stop"], {
+      stdout: "ignore",
+      stderr: "ignore",
+    })
+    Bun.spawnSync([
+      "sudo",
+      "rm",
+      "-rf",
+      directory,
+      "/usr/local/lib/workflowd-sandbox",
+      "/usr/local/bin/runner-control",
+      "/usr/local/bin/container-use",
+    ])
   }
 }
 
@@ -289,4 +331,205 @@ test("a stop of a runner run while Claude Code's model stream is open in the box
     expect(pid === undefined ? false : alive(pid)).toBe(false)
     expect(endedAt - stoppedAt).toBeLessThan(120000)
   })
+}, 900000)
+
+/** The variables of the repository that the caller workflow reads, as the owner sets them. */
+const trialVars = (gateway: string, agentImage = image): Readonly<Record<string, string>> => ({
+  SANDBOX_AGENT_IMAGE: agentImage,
+  SANDBOX_BOOTSTRAP_MODE: "private",
+  SANDBOX_GATEWAY_URL: gateway,
+  TS_AGENT_CLIENT_ID: "fixture-client",
+  TS_AGENT_AUDIENCE: "fixture-audience",
+})
+/** The lease push of the trial: the fixture's workflow commit, on the fixture repository. */
+const trialPush = (leaseId: string) => ({
+  leaseId,
+  sha: "a".repeat(40),
+  repository: "fixture/repo",
+})
+const repositoryRoot = resolve(import.meta.dir, "../..")
+
+/**
+ * The parts of the job that cannot run in a test, each with its reason. The test checks the
+ * values that the workflow gives each one, and covers what is on each side of it.
+ */
+const handOver = {
+  // The Actions runtime's checkout. The tooling is this checkout's deploy/sandbox, at its head.
+  "Check out pinned tooling": (job: JobStep) => {
+    expect(job.with.ref).toBe(trialPush("").sha)
+    expect(job.with["sparse-checkout"]).toBe("deploy/sandbox")
+  },
+  // tailscale.sh joins the tailnet with the federation of Tailscale and the runner's tag; the
+  // test host has no tailnet and no Tailscale Service. workflow.test.ts runs its enrollment with
+  // these values; here the runner reaches the gateway's front on loopback, as through the Service.
+  "Join the restricted tailnet": (job: JobStep) => {
+    expect(job.env).toEqual({
+      SANDBOX_TAILSCALE_CLIENT_ID: "fixture-client",
+      SANDBOX_AUDIENCE: "fixture-audience",
+      SANDBOX_BOOTSTRAP_MODE: "private",
+    })
+  },
+  // It logs out of the tailnet and stops the tailscaled unit, which the test host does not have.
+  // Its first command, runner.sh stop, runs in the test's own cleanup.
+  "Release disposable containers": (job: JobStep) => {
+    expect(job.run).toContain("bash deploy/sandbox/runner.sh stop")
+  },
+}
+
+test("a trial run: a lease push of this repository's source runs the private-mode steps that the caller workflow gives, and the daemon with its production workers checks the sealed result of a one-line change and pushes agent-run/<id>", async () => {
+  // The workflow first, with no gateway yet: the caller selects private mode, gives each input
+  // that a step that runs reads, and no step uploads an artifact.
+  const planned = await step("workflow", () =>
+    runnerJob(
+      trialPush("trial"),
+      // The image is the job's own; a placeholder of its form until the image step reads it.
+      trialVars(
+        "https://gateway.example.invalid",
+        `ghcr.io/bnasraoui/workflowd-agent-base@sha256:${"0".repeat(64)}`,
+      ),
+    ),
+  )
+  expect(planned.inputs["bootstrap-mode"]).toBe("private")
+  // Each variable that the private first contact reads, other than those that the runner gives
+  // (GITHUB_*, ACTIONS_*, RUNNER_*) and the optional trust root, comes from the step's own values.
+  const reads = new Set(
+    [
+      ...(await Bun.file(`${repositoryRoot}/deploy/sandbox/bootstrap.mjs`).text()).matchAll(
+        /environment\.([A-Z][A-Z0-9_]*)/g,
+      ),
+    ]
+      .map((match) => match[1] ?? "")
+      .filter(
+        (name) => !/^(?:GITHUB|ACTIONS|RUNNER)_/.test(name) && name !== "NODE_EXTRA_CA_CERTS",
+      ),
+  )
+  const firstContact = planned.steps.find((entry) => entry.run?.includes("prepare-private"))
+  expect([...reads].filter((name) => firstContact?.env[name] === undefined)).toEqual([])
+  expect(
+    planned.steps.filter((entry) => entry.uses?.startsWith("actions/upload-artifact@")),
+  ).toEqual([])
+  await step("image", async () => {
+    if (!/^ghcr\.io\/bnasraoui\/workflowd-agent-base@sha256:[a-f0-9]{64}$/.test(image))
+      throw new Error("WORKFLOWD_RUNNER_IMAGE names no image by its digest")
+  })
+  const scripts = await mkdtemp(join(tmpdir(), "wfd-trial-steps-"))
+  // Test only: the runner's OIDC endpoint is GitHub's; here, the fixture issuer of the gateway.
+  const identity = join(scripts, "oidc-endpoint.mjs")
+  const ran: Array<string> = []
+  const start = async ({ leaseId, issuer, f }: { leaseId: string; issuer: string; f: Fixture }) => {
+    await writeFile(
+      identity,
+      `const real = globalThis.fetch
+globalThis.fetch = (url, init) => {
+  const target = new URL(String(url))
+  return target.hostname.endsWith(".actions.githubusercontent.com")
+    ? real(${JSON.stringify(issuer)} + target.search, init)
+    : real(url, init)
+}
+`,
+    )
+    const job = await runnerJob(trialPush(leaseId), trialVars(f.front.origin))
+    const push = trialPush(leaseId)
+    const base: Record<string, string> = {
+      PATH: `${dirname(fixtureExecutable("node"))}:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`,
+      HOME: process.env.HOME ?? "/home/runner",
+      GITHUB_REF: `refs/heads/workflowd/leases/${leaseId}`,
+      GITHUB_SHA: push.sha,
+      GITHUB_REPOSITORY: push.repository,
+      GITHUB_RUN_ID: "79",
+      GITHUB_RUN_ATTEMPT: "1",
+      // The runner gives a step the OIDC request authority only when the job grants it.
+      ...((await grantsJobIdentity())
+        ? {
+            ACTIONS_ID_TOKEN_REQUEST_URL:
+              "https://fixture.actions.githubusercontent.com/token?api-version=2",
+            ACTIONS_ID_TOKEN_REQUEST_TOKEN: "fixture-request",
+          }
+        : {}),
+      // Test only: the gateway's front has the fixture's certificate, and the OIDC endpoint is
+      // the fixture's. On a runner the Service has a public certificate.
+      NODE_EXTRA_CA_CERTS: f.tls.cert,
+      NODE_OPTIONS: `--import=${identity}`,
+    }
+    ran.push(...(await runSteps(job.steps, { cwd: repositoryRoot, base, scripts, handOver })))
+  }
+  try {
+    await withTrialJob(start, async ({ f, runtime, remote, jobEnded, github, leaseId, record }) => {
+      f.onUpstream(async (request) => {
+        const path = new URL(request.url).pathname
+        const body = await request.clone().text()
+        if (path.endsWith("/count_tokens")) f.setAnswerJson('{"input_tokens":10}')
+        else if (body.includes('"tool_result"')) f.setAnswerText(text("Runner run done."))
+        else if (body.includes('"name":"Write"')) f.setAnswerText(write)
+        else f.setAnswerText(text("ok"))
+      })
+      void jobEnded().then(
+        () => github.endRun(leaseId()),
+        () => github.endRun(leaseId(), "failure"),
+      )
+      const receipt = await step(
+        "dispatch",
+        () =>
+          runtime.runPromise(
+            Effect.flatMap(AgentRunIngress, (ingress) =>
+              ingress.register(
+                { route: "claude", repository: "runner", prompt: "Write the proof file." },
+                new Date(),
+              ),
+            ),
+          ),
+        record,
+        360000,
+      )
+      await step("job", jobEnded, record, 300000)
+      // The job ran each step of private mode that a test can run, the hold to its good end.
+      expect(ran).toEqual(
+        planned.steps.map((entry) => entry.name).filter((name) => !Object.hasOwn(handOver, name)),
+      )
+      expect(ran.at(-1)).toBe("Hold the lease")
+      const runs = await runtime.runPromise(AgentRunStore)
+      const ended = await step(
+        "run end",
+        async () => {
+          for (let tries = 0; tries < 1200; tries++) {
+            const current = await runtime.runPromise(runs.read(receipt.runId))
+            if (current !== null && !["spawning", "spawned", "verified"].includes(current.state))
+              return current
+            await Bun.sleep(100)
+          }
+          throw new Error("the run did not end")
+        },
+        record,
+      )
+      expect({ state: ended.state, diagnostic: ended.diagnostic }).toEqual({
+        state: "completed",
+        diagnostic: null,
+      })
+      // The source is this repository's head; the branch is one commit on it, of one line.
+      expect(remote.sourceSha).toBe(run("head", ["git", "-C", repositoryRoot, "rev-parse", "HEAD"]))
+      const branch = `refs/heads/agent-run/${receipt.runId.replace(/^agent-run-/, "").slice(0, 16)}`
+      const pushed = await step("branch", async () => {
+        const sha = remote.ref(branch)
+        if (sha === null) throw new Error(`${branch} is not in the remote`)
+        return sha
+      })
+      expect(run("branch", ["git", "-C", remote.bare, "rev-parse", `${pushed}^`])).toBe(
+        remote.sourceSha,
+      )
+      expect(
+        run("branch", ["git", "-C", remote.bare, "diff", "--numstat", remote.sourceSha, pushed]),
+      ).toBe("1\t0\trunner-proof.txt")
+      const messages = await runtime.runPromise(mailbox(receipt.runId))
+      expect(messages[0]?.message).toMatchObject({
+        run_id: receipt.runId,
+        status: "completed",
+        end_reason: "completed",
+        placement: "runner",
+      })
+      // No worker of the production start failed on the runner run.
+      expect(runtime.logs().filter((line) => line.startsWith("Error"))).toEqual([])
+    })
+  } finally {
+    await rm(scripts, { recursive: true, force: true })
+  }
 }, 900000)
