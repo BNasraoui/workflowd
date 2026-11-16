@@ -338,10 +338,17 @@ test("the release of a native lease, and the release of a plain lease after it, 
         expect(["releasing", "released"]).toContain(String((yield* read("run-q"))?.state))
         // The gateway holds the revoke of the native run, and no failure of it is recorded.
         yield* Effect.promise(() => silent.held)
+        const heldAt = performance.now()
         expect(logs.filter((line) => line.includes("revoke unconfirmed"))).toEqual([])
         // The revoke ends when the gateway answers it, after both releases.
         silent.answer()
+        const answeredAt = performance.now()
         yield* Effect.promise(() => silent.closed)
+        // The client ends a connection that is idle for 10 seconds (`controlClient`).
+        expect(
+          answeredAt - heldAt,
+          "the gateway answered within the idle limit of the client's connection",
+        ).toBeLessThan(10000)
         expect(logs.filter((line) => line.includes("revoke unconfirmed"))).toEqual([])
       }).pipe(
         Effect.provide(Logger.layer([Logger.make(({ message }) => logs.push(String(message)))])),

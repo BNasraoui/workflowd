@@ -107,18 +107,30 @@ const short = async () => {
     const gateway = await start()
     const token = await runToken(gateway, "jti-short")
     oauth.mode("short")
-    for (let index = 0; index < 3; index++) {
+    const works = async () => {
       const call = await client(gateway).call(token)
       expect(call.status).toBe(200)
       expect(await call.text()).toBe(sse)
     }
+    await works()
     expect(oauth.requests()).toHaveLength(1)
+    const first = await stateOf(f)
+    if (first.state !== "renewed") throw new Error(`state ${first.state}`)
+    // The calls within the wait after the renewal send no request; a call that a slow runner
+    // makes after it may renew, as it should.
+    await works()
+    await works()
+    expect(
+      oauth.requests().filter(({ time }) => time < first.renewAfter),
+      "a call within the wait after a renewal sends no request",
+    ).toHaveLength(1)
     const state = await stateOf(f)
     if (state.state !== "renewed") throw new Error(`state ${state.state}`)
+    const before = oauth.requests().length
     await past(state.renewAfter)
-    expect((await client(gateway).call(token)).status).toBe(200)
-    expect(oauth.requests()).toHaveLength(2)
-    expect(oauth.requests()[1]!.time).toBeGreaterThanOrEqual(state.renewAfter)
+    await works()
+    expect(oauth.requests()).toHaveLength(before + 1)
+    expect(oauth.requests().at(-1)!.time).toBeGreaterThanOrEqual(state.renewAfter)
   })
 }
 

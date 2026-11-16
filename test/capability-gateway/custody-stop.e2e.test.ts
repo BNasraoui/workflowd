@@ -162,8 +162,13 @@ test("a stop of the gateway while the OAuth server holds the renewal waits for i
     // The gateway's stop waits for the renewal in flight; then the OAuth server answers.
     await until(() => gateway.output!().includes("the gateway waits for a renewal in flight"))
     oauth.release()
+    const released = performance.now()
     await stopped
     await first
+    expect(
+      released - oauth.requests()[0]!.at,
+      "the OAuth server answered within custody's request limit",
+    ).toBeLessThan(5000)
     expect(storedAccess(await readFile(loginFile(f), "utf8"))).toBe(oauth.next().access)
     expect(await readdir(loginDirectory(f))).not.toContain("claude.state")
     const restarted = await start()
