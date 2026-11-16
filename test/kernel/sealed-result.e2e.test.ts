@@ -1199,11 +1199,20 @@ test(
 )
 
 /**
- * A pack of 100 commits whose root trees are links of one chain of tree deltas, as long
- * as the object bound permits: each `diff-tree` of the check resolves its two root trees
- * from the start of the chain. Each tree has the same 64 names, each on one of two
- * blobs by a bit of the index of the tree, so the trees differ and the changed paths
- * stay under their bound; the inflated sizes stay inside the bound of object bytes.
+ * A pack of 100 commits whose root trees are links of one chain of 9 898 tree deltas,
+ * as long as the object bound permits: each `diff-tree` of the check, one process per
+ * commit, resolves its root tree from the start of the chain. Each tree has the same 64
+ * names, each on one of two blobs by a bit of the index of the tree, so the trees
+ * differ and the changed paths stay under their bound; the 9 898 trees of 6 592 bytes
+ * (62 MiB) stay inside the bound of object bytes, so a longer chain or larger trees do
+ * not fit.
+ *
+ * What it measures: the roots are spread evenly along the chain, so the 100 processes
+ * resolve 499 800 links in all (the sum of the depths of the roots). The worst case the
+ * bounds permit puts every root on the last 100 links: 984 850 links, 1.97 times as
+ * many, each process resolving about 62 MiB. At the CI time of this test (7.2 s), that
+ * is about 14 s against the time limit of 120 s (the time scaled by the links). The
+ * bound of memory is that of the daemon's process, which resolves no delta of the chain.
  */
 function treeChainBundle(f: Fixture) {
   const commits = sealedResultLimits.commits
@@ -1257,7 +1266,7 @@ function treeChainBundle(f: Fixture) {
 }
 
 test(
-  "100 commits whose root trees are links of one chain of tree deltas as long as the object bound permits are checked inside the time and memory bounds",
+  "100 commits whose root trees are spread along one chain of tree deltas as long as the object bound permits, half the delta work of the worst case, are checked inside the time and memory bounds",
   withFixture(async (f) => {
     const bundle = treeChainBundle(f)
     expect(bundle.byteLength).toBeLessThan(sealedResultLimits.bundleBytes)
