@@ -25,7 +25,8 @@ import {
  * the noscope providers, key server and model upstream, with the image's own Bun, modules and
  * noscope. Each gateway container runs as the image's own user, on a bridge network of its own
  * for its calls to the fixture servers, which listen on the bridge's address of this host; it
- * publishes no port. Its listener is a Unix socket in a volume that it shares with the front
+ * publishes no port. Its listener is a Unix socket in a volume, a directory of this host, that it
+ * shares with the front
  * container and with no other: the front runs the test front of test/helpers/loopback-tls.ts as
  * the front's user and publishes one port, through which each client of this test reaches the
  * gateway. This process is workflowd: it grants the fixture run on the gateway's control socket,
@@ -43,7 +44,8 @@ const listenSocket = `${volumeMount}/front/gateway.sock`
 /** The port of the front in its container, which it publishes on this host's loopback. */
 const frontPort = 8443
 const network = `workflowd-gateway-image-${process.pid}`
-const volume = `workflowd-gateway-front-${process.pid}`
+/** The listener's volume: a directory of this host, which Docker does not copy anything into. */
+const volume = join(tmpdir(), `workflowd-gateway-listener-${process.pid}`)
 let started = 0
 
 /** A docker command; its output, or a failure that names the command. */
@@ -231,13 +233,13 @@ async function fixtureForImageUser(f: Fixture) {
   // coreutils' chmod sets the sticky bit, and a change of owner keeps it.
   await Bun.$`chmod 1770 ${f.root}`
   await asRoot(
-    f,
+    f.root,
     `require("node:fs").chownSync(${JSON.stringify(f.root)}, ${imageUser}, ${runnerGroup()})`,
   )
 }
 
-/** A container of the image as root, which may change the owner of a fixture path. */
-async function asRoot(f: Fixture, source: string) {
+/** A container of the image as root, which may change the owner of a path below `root`. */
+async function asRoot(root: string, source: string) {
   const child = Bun.spawn(
     [
       "docker",
@@ -251,7 +253,7 @@ async function asRoot(f: Fixture, source: string) {
       "--user",
       "0:0",
       "--volume",
-      `${f.root}:${f.root}`,
+      `${root}:${root}`,
       "--entrypoint",
       "/bin/bun",
       image,
@@ -260,7 +262,7 @@ async function asRoot(f: Fixture, source: string) {
     ],
     { stdout: "ignore", stderr: "inherit" },
   )
-  if ((await child.exited) !== 0) throw new Error("a container as root failed on the fixture")
+  if ((await child.exited) !== 0) throw new Error(`a container as root failed on ${root}`)
 }
 
 /** The ids of the container's first process, the gateway, as /proc shows them inside. */
@@ -513,7 +515,7 @@ async function imageCommand(
  */
 async function returnFixtureRoot(f: Fixture) {
   await asRoot(
-    f,
+    f.root,
     `const fs = require("node:fs"); const walk = (path) => { fs.lchownSync(path, ${process.getuid!()}, ${runnerGroup()}); if (fs.lstatSync(path).isDirectory()) for (const name of fs.readdirSync(path)) walk(path + "/" + name) }
 walk(${JSON.stringify(f.root)}); fs.chmodSync(${JSON.stringify(f.root)}, 0o700)`,
   )
@@ -530,7 +532,7 @@ const bridge = await docker([
   "{{(index .IPAM.Config 0).Gateway}}",
   network,
 ])
-await docker(["volume", "create", volume])
+await mkdir(volume, { mode: 0o755 })
 const f = await fixture({}, bridge)
 const oauth = oauthFixture(bridge)
 const tlsDirectory = await mkdtemp(join(tmpdir(), "wfd-front-tls-"))
@@ -540,11 +542,10 @@ try {
   await fixtureForImageUser(f)
   // The volume's root is the gateway's user's, as a deployment gives it: the gateway makes the
   // listener's directory in it, with the front's group.
-  const owned = await probe(
-    `require("node:fs").chownSync(${JSON.stringify(volumeMount)}, ${imageUser}, ${imageUser})`,
-    { user: "0:0", volume: true },
+  await asRoot(
+    volume,
+    `require("node:fs").chownSync(${JSON.stringify(volume)}, ${imageUser}, ${imageUser})`,
   )
-  assert.equal(owned.code, 0, owned.stderr)
   // The front's certificate, which its user reads.
   await chmod(tlsDirectory, 0o755)
   const tls = await loopbackCertificate(tlsDirectory)
@@ -858,7 +859,13 @@ process.stdout.write(Buffer.concat(fs.readdirSync(root).filter((n) => /[.]db(-wa
   await returnFixtureRoot(f)
   await oauth.stop()
   await f.close()
-  await docker(["volume", "rm", volume])
+  // What the image's users made in the volume goes, and the volume goes back to the runner.
+  await asRoot(
+    volume,
+    `const fs = require("node:fs"); for (const name of fs.readdirSync(${JSON.stringify(volume)})) fs.rmSync(${JSON.stringify(volume)} + "/" + name, { recursive: true, force: true })
+fs.chownSync(${JSON.stringify(volume)}, ${process.getuid!()}, ${process.getgid!()})`,
+  )
+  await rm(volume, { recursive: true, force: true })
   await docker(["network", "rm", network])
   await rm(tlsDirectory, { recursive: true, force: true })
 }
