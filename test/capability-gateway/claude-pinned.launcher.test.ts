@@ -46,6 +46,7 @@ async function runPinned(
   model: string,
   token: string,
   forward: (request: Request, body: string) => Promise<Response>,
+  mode: ReadonlyArray<string> = [],
 ) {
   requireLoopbackOnly()
   const home = await mkdtemp(join(tmpdir(), "wfd-pinned-claude-"))
@@ -64,7 +65,7 @@ async function runPinned(
     },
   })
   try {
-    const child = Bun.spawn([claude, "-p", "say ok", "--model", model], {
+    const child = Bun.spawn([claude, "-p", "say ok", ...mode, "--model", model], {
       cwd: home,
       env: {
         PATH: process.env.PATH,
@@ -101,41 +102,64 @@ test("the pinned Claude Code is the one CI installs", async () => {
   expect((await new Response(version.stdout).text()).trim()).toBe(pinned)
 })
 
+/**
+ * The modes the pinned client runs in: plain print mode, and the stream-json mode with the flags
+ * of a runner's box (deploy/sandbox/native-runner.mjs), which adds anthropic-beta values.
+ */
+const modes = {
+  print: [],
+  "box stream-json": [
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--settings",
+    '{"env":{"CLAUDE_CODE_DISABLE_BACKGROUND_TASKS":"1"}}',
+    "--setting-sources",
+    "user",
+    "--dangerously-skip-permissions",
+    "--strict-mcp-config",
+    "--mcp-config",
+    '{"mcpServers":{}}',
+  ],
+} satisfies Record<string, ReadonlyArray<string>>
+
 // One model of each family the pinned client tells apart: each family adds anthropic-beta values.
-for (const model of [
-  "claude-opus-5-5",
-  "claude-haiku-5-5",
-  "claude-sonnet-4-5",
-  "claude-opus-4-6[1m]",
-])
-  test(`the pinned Claude Code sends only anthropic-beta values of the gateway's list (${model})`, async () => {
-    const run = await runPinned(
-      model,
-      "fixture-oauth",
-      async () => new Response(sse, { headers: { "content-type": "text/event-stream" } }),
-    )
-    expect(run.code).toBe(0)
-    expect(run.sent.length).toBeGreaterThan(0)
-    const values = [...new Set(run.sent.flatMap((request) => request.betas))].sort()
-    // The record of this run: the values that the pinned client sent for this model.
-    console.log(`${pinned} ${model} anthropic-beta: ${values.join(",")}`)
-    expect(values.filter((value) => !claudeBetas.has(value))).toEqual([])
-    // Each messages call asks a max_tokens that the gateway's default cap admits.
-    const asked = run.sent
-      .filter((request) => request.path === "/v1/messages")
-      .map((request): unknown => Reflect.get(Object(JSON.parse(request.body)), "max_tokens"))
-    console.log(`${pinned} ${model} max_tokens: ${asked.join(",")}`)
-    expect(asked.length).toBeGreaterThan(0)
-    expect(
-      asked.filter(
-        (value) =>
-          typeof value !== "number" ||
-          !Number.isSafeInteger(value) ||
-          value < 1 ||
-          value > defaultRunBudget.maxTokens,
-      ),
-    ).toEqual([])
-  }, 90000)
+for (const [name, mode] of Object.entries(modes))
+  for (const model of [
+    "claude-opus-5-5",
+    "claude-haiku-5-5",
+    "claude-sonnet-4-5",
+    "claude-opus-4-6[1m]",
+  ])
+    test(`the pinned Claude Code sends only anthropic-beta values of the gateway's list (${model}, ${name})`, async () => {
+      const run = await runPinned(
+        model,
+        "fixture-oauth",
+        async () => new Response(sse, { headers: { "content-type": "text/event-stream" } }),
+        mode,
+      )
+      expect(run.code).toBe(0)
+      expect(run.sent.length).toBeGreaterThan(0)
+      const values = [...new Set(run.sent.flatMap((request) => request.betas))].sort()
+      // The record of this run: the values that the pinned client sent for this model.
+      console.log(`${pinned} ${model} ${name} anthropic-beta: ${values.join(",")}`)
+      expect(values.filter((value) => !claudeBetas.has(value))).toEqual([])
+      // Each messages call asks a max_tokens that the gateway's default cap admits.
+      const asked = run.sent
+        .filter((request) => request.path === "/v1/messages")
+        .map((request): unknown => Reflect.get(Object(JSON.parse(request.body)), "max_tokens"))
+      console.log(`${pinned} ${model} ${name} max_tokens: ${asked.join(",")}`)
+      expect(asked.length).toBeGreaterThan(0)
+      expect(
+        asked.filter(
+          (value) =>
+            typeof value !== "number" ||
+            !Number.isSafeInteger(value) ||
+            value < 1 ||
+            value > defaultRunBudget.maxTokens,
+        ),
+      ).toEqual([])
+    }, 90000)
 
 test("the pinned Claude Code waits the retry-after of the gateway's 429 for a call that open calls hold back, asks again and completes", async () => {
   const asked: number[] = []
