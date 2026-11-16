@@ -1,5 +1,4 @@
 import { randomUUID } from "node:crypto"
-import { dlopen, FFIType } from "bun:ffi"
 import {
   CustodyRefused,
   custodyFailure,
@@ -7,6 +6,7 @@ import {
   forbidCoreFiles,
   loginAccess,
 } from "./custody"
+import { attachedToParent } from "./parent-death"
 
 /**
  * The noscope provider command of custody: `access <directory> [--token-url <url>] <provider>
@@ -37,6 +37,18 @@ export async function custodyCommand(args: ReadonlyArray<string>, stop: AbortSig
   }
 }
 
+/**
+ * Custody's command as its process gives it: the access value on standard output, or a line of
+ * standard error that names no value, and the exit status.
+ */
+export async function custodyRun(args: ReadonlyArray<string>, stop: AbortSignal) {
+  try {
+    return { code: 0, output: JSON.stringify(await custodyCommand(args, stop)), error: "" }
+  } catch (error) {
+    return { code: 1, output: "", error: custodyFailure(error) }
+  }
+}
+
 // Noscope starts the command in its own process group, and custody refuses to run when its parent
 // is gone. SIGTERM stops custody, at once or once a renewal in flight is stored: it is the
 // parent-death signal, so the end of noscope stops custody, and it is what a service manager
@@ -44,24 +56,19 @@ export async function custodyCommand(args: ReadonlyArray<string>, stop: AbortSig
 // without this a stop of the control group would cut off a renewal and lose its answer.
 if (import.meta.main) {
   const stop = new AbortController()
-  // The handler comes before the parent-death signal: no SIGTERM finds the default action.
+  // The handler comes before the parent-death signal, SIGTERM: none finds the default action.
   process.on("SIGTERM", () => stop.abort())
-  const parent = process.ppid
-  const libc = dlopen("libc.so.6", {
-    prctl: {
-      args: [FFIType.i32, FFIType.u64, FFIType.u64, FFIType.u64, FFIType.u64],
-      returns: FFIType.i32,
-    },
-  })
-  // PR_SET_PDEATHSIG, SIGTERM
-  const attached = parent > 1 && libc.symbols.prctl(1, 15, 0, 0, 0) === 0 && process.ppid === parent
-  libc.close()
+  let ready = attachedToParent(15)
+  // Custody holds login values in memory: before it reads one, it writes no core file.
   try {
-    if (!attached) throw new CustodyRefused("refused")
-    forbidCoreFiles()
-    process.stdout.write(JSON.stringify(await custodyCommand(process.argv.slice(2), stop.signal)))
-  } catch (error) {
-    process.stderr.write(custodyFailure(error))
-    process.exitCode = 1
+    if (ready) forbidCoreFiles()
+  } catch {
+    ready = false
   }
+  const result = ready
+    ? await custodyRun(process.argv.slice(2), stop.signal)
+    : { code: 1, output: "", error: custodyFailure(new CustodyRefused("refused")) }
+  process.stdout.write(result.output)
+  process.stderr.write(result.error)
+  process.exitCode = result.code
 }
