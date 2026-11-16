@@ -1,8 +1,9 @@
 import { expect, test } from "bun:test"
-import { rm } from "node:fs/promises"
-import { createServer } from "node:net"
-import { Effect, Exit, Logger } from "effect"
-import { controlFrame } from "../../src/capability-control/protocol"
+import { mkdir, rm } from "node:fs/promises"
+import { dirname } from "node:path"
+import { createServer, type Socket } from "node:net"
+import { Effect, Exit, Logger, Schema } from "effect"
+import { ControlRequest, controlFrame } from "../../src/capability-control/protocol"
 import { makeDaemonCapability } from "../../src/sandbox/capability-control"
 import { makeSandboxGithub } from "../../src/sandbox/github"
 import { makeSandboxLeaseService } from "../../src/sandbox/lease"
@@ -237,8 +238,15 @@ test("a native lease is released when the gateway is down or refuses the revoke,
         refusing.mutateRun({ status: "completed", conclusion: "cancelled" })
         yield* Effect.exit(refusingLeases.release("run-x"))
         expect(["releasing", "released"]).toContain(String((yield* read("run-x"))?.state))
+        // Each release started its revoke; each revoke fails and is logged.
+        yield* Effect.promise(() =>
+          within(15000, async () =>
+            Promise.resolve(
+              logs.filter((line) => line.includes("revoke unconfirmed")).length === 2,
+            ),
+          ),
+        )
         yield* Effect.promise(stopRefusing)
-        expect(logs.filter((line) => line.includes("revoke unconfirmed"))).toHaveLength(2)
         // The gateway is back, with the grants it held. workflowd's next reconcile, within its
         // period of 10 seconds, revokes both runs.
         gateway = yield* Effect.promise(() => startGateway(f))
@@ -260,6 +268,89 @@ test("a native lease is released when the gateway is down or refuses the revoke,
     await gateway?.stop()
     await down.close()
     await refusing.close()
+    await f.close()
+  }
+}, 40000)
+
+/**
+ * A gateway that someone took over, on the control socket: it answers a reconcile at once and
+ * holds each revoke unanswered until `answer`. `held` resolves once it holds a whole revoke;
+ * `closed` resolves when the caller closes a revoke's connection.
+ */
+async function silentGateway(socket: string) {
+  const held = Promise.withResolvers<void>()
+  const closed = Promise.withResolvers<void>()
+  const revokes: Socket[] = []
+  const server = createServer((connection) => {
+    let request = Buffer.alloc(0)
+    connection.on("data", (chunk) => {
+      request = Buffer.concat([request, Buffer.from(chunk)])
+      if (request.length < 4 || request.readUInt32BE(0) !== request.length - 4) return
+      const { verb } = Schema.decodeUnknownSync(ControlRequest)(
+        request.subarray(4).toString("utf8"),
+      )
+      if (verb !== "revoke") return connection.end(controlFrame({ ok: true, value: null }))
+      revokes.push(connection)
+      connection.on("close", () => closed.resolve())
+      held.resolve()
+    })
+    connection.on("error", () => connection.destroy())
+  })
+  await mkdir(dirname(socket), { recursive: true, mode: 0o700 })
+  await new Promise<void>((resolve) => server.listen(socket, resolve))
+  return {
+    held: held.promise,
+    closed: closed.promise,
+    answer: () => {
+      for (const connection of revokes) connection.end(controlFrame({ ok: true, value: null }))
+    },
+    stop: () => new Promise<void>((resolve) => server.close(() => resolve())),
+  }
+}
+
+test("the release of a native lease, and the release of a plain lease after it, end while the gateway holds the revoke unanswered", async () => {
+  const f = await fixture()
+  const native = await sandboxGithubFixture(policy, "lease-h")
+  const plain = await sandboxGithubFixture(policy, "lease-q")
+  plain.mutateRun({ id: 42 })
+  const silent = await silentGateway(f.config.controlSocket)
+  const logs: string[] = []
+  try {
+    await f.store(
+      Effect.gen(function* () {
+        yield* seedLease("run-h", "lease-h", null)
+        yield* seedLease("run-q", "lease-q", null, false)
+        const capability = yield* makeDaemonCapability({
+          socket: f.config.controlSocket,
+          reconcileEveryMs: 3600000,
+        })
+        const nativeLeases = yield* leaseService(f, native, capability)
+        const plainLeases = yield* leaseService(f, plain, capability)
+        yield* plainLeases.acquire("run-q")
+        native.mutateRun({ status: "completed", conclusion: "cancelled" })
+        plain.mutateRun({ status: "completed", conclusion: "cancelled" })
+        const read = (runId: string) =>
+          Effect.flatMap(makeSandboxStore, (store) => store.read(runId))
+        // The two releases one after the other, as one pass of the dispatch loop makes them.
+        yield* Effect.exit(nativeLeases.release("run-h"))
+        yield* Effect.exit(plainLeases.release("run-q"))
+        expect(["releasing", "released"]).toContain(String((yield* read("run-h"))?.state))
+        expect(["releasing", "released"]).toContain(String((yield* read("run-q"))?.state))
+        // The gateway holds the revoke of the native run, and no failure of it is recorded.
+        yield* Effect.promise(() => silent.held)
+        expect(logs.filter((line) => line.includes("revoke unconfirmed"))).toEqual([])
+        // The revoke ends when the gateway answers it, after both releases.
+        silent.answer()
+        yield* Effect.promise(() => silent.closed)
+        expect(logs.filter((line) => line.includes("revoke unconfirmed"))).toEqual([])
+      }).pipe(
+        Effect.provide(Logger.layer([Logger.make(({ message }) => logs.push(String(message)))])),
+      ),
+    )
+  } finally {
+    await silent.stop()
+    await native.close()
+    await plain.close()
     await f.close()
   }
 }, 40000)

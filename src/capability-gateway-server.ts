@@ -8,6 +8,7 @@ import { capabilityApi, serveCapabilityListener } from "./capability-gateway/htt
 import type { ClaudeUpstream } from "./capability-gateway/claude"
 import type { githubJobKeys } from "./sandbox/bootstrap"
 import { gatewayMigrationsTable } from "./capability-control/protocol"
+import { storeTables } from "./capability-control/store-tables"
 import { runGatewayMigrations } from "./capability-gateway/migrations"
 import { serveControl } from "./capability-gateway/control"
 import { readSync } from "node:fs"
@@ -69,23 +70,26 @@ export const serveCapabilityGateway = (
         catch: (error) => (error instanceof CustodyRefused ? error : new Error("custody refused")),
       })
     }
+    // A file with a table that is not the gateway's is another store: it is read read only and
+    // refused before the gateway opens it for writing.
+    const tables = yield* Effect.tryPromise({
+      try: () => storeTables(config.storePath),
+      catch: (cause) => new Error(`the gateway cannot read its store: ${String(cause)}`),
+    })
+    const own = new Set([
+      gatewayMigrationsTable,
+      "capability_grants",
+      "capability_bindings",
+      "capability_tokens",
+      "capability_proofs",
+      "capability_usage",
+      "capability_reservations",
+    ])
+    if (tables?.some((name) => !own.has(name)))
+      return yield* Effect.fail(new Error("the gateway's store holds tables of another store"))
     const context = yield* Layer.build(SqliteClient.layer({ filename: config.storePath }))
     return yield* Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient
-      const tables = yield* sql<{
-        readonly name: string
-      }>`SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'`
-      const own = new Set([
-        gatewayMigrationsTable,
-        "capability_grants",
-        "capability_bindings",
-        "capability_tokens",
-        "capability_proofs",
-        "capability_usage",
-        "capability_reservations",
-      ])
-      if (tables.some(({ name }) => !own.has(name)))
-        return yield* Effect.fail(new Error("the gateway's store holds tables of another store"))
       yield* sql`PRAGMA foreign_keys = ON`
       yield* sql`PRAGMA busy_timeout = 5000`
       yield* runGatewayMigrations

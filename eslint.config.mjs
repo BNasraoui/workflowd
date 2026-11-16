@@ -59,6 +59,8 @@ export default tseslint.config(
   },
   // workflowd and its capability gateway are two processes with two stores. They share only
   // src/capability-control/ (the control socket's protocol); neither imports the other's store.
+  // This rule checks each module's own imports; test/capability-gateway/process-imports.test.ts
+  // follows each process's imports through other modules.
   ...[
     ["src/capability-gateway/**/*.ts", "^(\\.\\./)+"],
     ["src/capability-gateway-server.ts", "^\\./"],

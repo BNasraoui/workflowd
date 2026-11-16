@@ -1,5 +1,5 @@
 import { strict as assert } from "node:assert"
-import { chown, mkdir } from "node:fs/promises"
+import { chown, lstat, mkdir } from "node:fs/promises"
 import { join } from "node:path"
 import {
   fixture,
@@ -15,8 +15,8 @@ import {
  * the group gets `caller`; a uid outside the group cannot connect. On the listener, the front's
  * uid is answered; another uid of the group, the daemon's and the gateway's own, is ended before
  * any route; a uid outside the group cannot connect. The gateway refuses a control directory of
- * another owner, and one under a directory of another non-root user. This script runs as root,
- * on a disposable CI host, only to take each uid.
+ * another owner, one under a directory of another non-root user, and a socket of another uid at
+ * its socket's path. This script runs as root, on a disposable CI host, only to take each uid.
  */
 const gatewayUid = 61002
 const daemonUid = 61001
@@ -203,6 +203,17 @@ sys.stdout.write(answer.split(b"\\r\\n")[0].decode() if answer else "ended")`,
   console.log(
     "control socket: a control directory of another owner, and one under a directory of another user, are refused",
   )
+  // A socket of another uid at the socket's path, in a control directory that passes: refused,
+  // and it stays.
+  const taken = join(f.root, "taken")
+  await owned(taken, gatewayUid, 0o755)
+  await owned(join(taken, "control"), gatewayUid, 0o710)
+  const takenSocket = join(taken, "control", "gateway.sock")
+  await Bun.$`python3 -c ${"import socket, sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])"} ${takenSocket}`
+  await chown(takenSocket, daemonUid, groupGid)
+  await assert.rejects(start(takenSocket), /is a socket of another user/)
+  assert.equal((await lstat(takenSocket)).uid, daemonUid)
+  console.log("control socket: a socket of another uid at its path is refused, and stays")
 } finally {
   for (const gateway of gateways) await gateway.stop()
   await f.close()

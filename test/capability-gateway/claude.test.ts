@@ -127,7 +127,7 @@ const chunked = (parts: ReadonlyArray<string>) =>
       controller.close()
     },
   })
-const eventStream = (body: BodyInit) =>
+const eventStream = (body: string | ReadableStream<Uint8Array>) =>
   new Response(body, { headers: { "content-type": "text/event-stream" } })
 
 test("the usage of an event stream is read across chunks, with CRLF line ends, and past an event above the bound", async () => {
