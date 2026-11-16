@@ -250,7 +250,14 @@ export async function claudeRequest(
       signal,
     },
     reservation,
-  )
+  ).catch((error: unknown) => {
+    throw madeNoOutput(error) ? new NoProviderOutput() : error
+  })
+  // A redirect of the provider comes before any output.
+  if (response.status >= 300 && response.status < 400) {
+    await response.body?.cancel()
+    throw new NoProviderOutput()
+  }
   // An error answer of the provider comes before any output: it reports none.
   const answered = response.status >= 200 && response.status < 300
   const meter =
@@ -274,10 +281,7 @@ async function safeProviderResponse(
   meter?: UsageMeter,
 ) {
   const patterns = credentialPatterns(secrets)
-  if (
-    (response.status >= 300 && response.status < 400) ||
-    response.headers.has("content-encoding")
-  ) {
+  if (response.headers.has("content-encoding")) {
     await response.body?.cancel()
     throw new Error("upstream unavailable")
   }
@@ -470,6 +474,30 @@ function metered(body: ReadableStream<Uint8Array>, meter: UsageMeter) {
     },
     { highWaterMark: 1 },
   )
+}
+
+/**
+ * Whether a failure of the upstream fetch shows that the provider made no output for the call.
+ * Bun's fetch fails with `ConnectionRefused` when the connection never opened: the connect was
+ * refused, the name did not resolve or the TLS handshake failed, each before a byte of the request
+ * was sent. It fails with `UnexpectedRedirect` on a 3xx answer, which `redirect: "error"` refuses.
+ * Each other failure can come after the request reached the provider: Bun's fetch gives
+ * `ECONNRESET` both for a connection closed before the provider read the request and for one
+ * closed after it, and an abort or a failed certificate check is charged as one that the provider
+ * can have answered.
+ */
+function madeNoOutput(error: unknown) {
+  const code: unknown = error instanceof Error ? Reflect.get(error, "code") : undefined
+  return code === "ConnectionRefused" || code === "UnexpectedRedirect"
+}
+
+/** A model call that ended before the provider could make output; it is charged none. */
+export class NoProviderOutput extends Error {
+  readonly _tag = "NoProviderOutput"
+  readonly usage = noOutput
+  constructor() {
+    super("upstream unavailable")
+  }
 }
 
 /**

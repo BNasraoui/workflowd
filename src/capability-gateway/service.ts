@@ -7,6 +7,7 @@ import {
   budgetHeld,
   budgetSpent,
   claudeRequest,
+  NoProviderOutput,
   readRequestBody,
   RunBudgetHeld,
   RunBudgetSpent,
@@ -643,6 +644,8 @@ export const makeCapabilityGateway = (
           if (error instanceof RequestRefused) return Effect.fail("refused" as const)
           if (error instanceof RunBudgetSpent) return Effect.fail("spent" as const)
           if (error instanceof RunBudgetHeld) return Effect.fail("held" as const)
+          // The release that follows settles the call's reservation with no output.
+          if (error instanceof NoProviderOutput) ownership.measured(() => error.usage)
           return logFailure("Capability route failed")(error).pipe(
             Effect.andThen(Effect.fail("unavailable" as const)),
           )
