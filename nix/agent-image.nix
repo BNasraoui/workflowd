@@ -1,6 +1,18 @@
 { pkgs }:
 let
   skills = import ./agent-skills.nix { inherit pkgs; };
+  # The Claude Code of a runner run: the version of test/resources/claude-code-version, from
+  # which the gateway's anthropic-beta list is recorded. The box runs it in print mode.
+  claudeArchive = pkgs.fetchurl {
+    url = "https://registry.npmjs.org/@anthropic-ai/claude-code-linux-x64/-/claude-code-linux-x64-2.1.296.tgz";
+    hash = "sha512-+m01urgelnI+VJxPaKPEK0wixgq42uZ8PeCaUk5tX/8YoDBvSmC/REVQG2jQfJAr8dxunpjJ600FvLrcj1WWTw==";
+  };
+  claude = pkgs.runCommand "workflowd-claude-2.1.296" {} ''
+    mkdir -p $out/bin $out/opt/workflowd
+    tar -xzOf ${claudeArchive} package/claude > $out/bin/claude
+    chmod 0555 $out/bin/claude
+    cp ${../deploy/sandbox/claude-interactive.py} $out/opt/workflowd/claude-interactive.py
+  '';
   tools = pkgs.buildEnv {
     name = "agent-tools";
     paths = with pkgs; [
@@ -17,7 +29,7 @@ pkgs.dockerTools.streamLayeredImage {
   name = "workflowd-agent-base";
   tag = "local";
   created = "1970-01-01T00:00:01Z";
-  contents = [ tools pkgs.nix-ld skills ];
+  contents = [ tools pkgs.nix-ld skills claude ];
   # Keep native Dagger snapshotters from copying a long chain of tiny layers.
   maxLayers = 20;
   extraCommands = ''
