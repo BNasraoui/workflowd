@@ -1,23 +1,26 @@
 import { expect, test } from "bun:test"
-import { capabilityApi, capabilityHttpServer } from "../../src/capability-gateway/http"
+import { capabilityApi, serveCapabilityListener } from "../../src/capability-gateway/http"
 import { fixtureExecutable } from "../helpers/fixture-executable.mjs"
-import { Effect, Schema } from "effect"
+import { Effect, Fiber, Schema } from "effect"
+import { randomBytes } from "node:crypto"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
 import { mkdtemp, readFile, rm } from "node:fs/promises"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
-import { connect } from "node:net"
-import { once } from "node:events"
+import { connect } from "node:tls"
 import { AgentRunStoreLive } from "../../src/kernel/agent-run-store"
 import { makeCapabilityGateway } from "../../src/capability-gateway/service"
-import { bindRunSession, seedCapabilityRun, writeNoscopeProviders } from "./fixture"
-import { portOf } from "../helpers/loopback-tls"
+import { bindRunSession, seedCapabilityRun, signedRenewal, writeNoscopeProviders } from "./fixture"
+import { capabilityDigest, makeCapabilityStore } from "../../src/capability-gateway/store"
+import { maxRenewalBody } from "../../deploy/sandbox/renewal.mjs"
+import { loopbackCertificate, tlsFront } from "../helpers/loopback-tls"
+import { client } from "./gateway-process"
 
 test("bound streaming preserves native bytes, renews with noscope, and denies cross-run or proxy authority", async () => {
   const root = await mkdtemp(join(tmpdir(), "wfd-gateway-"))
   await writeNoscopeProviders(root, 120000)
   const sent: { url: string; body: string; headers: Headers }[] = []
-  const native = '{ "model" : "fixture-model", "stream": true, "messages": [] }'
+  const native = '{ "model" : "fixture-model", "stream": true, "messages": [], "max_tokens": 1000 }'
   const responseBytes = "event: message_start\ndata: {}\n\nevent: message_stop\ndata: {}\n\n"
   let reflect: string | undefined
   let upstreamFault: string | undefined
@@ -125,7 +128,7 @@ test("bound streaming preserves native bytes, renews with noscope, and denies cr
           body: new ReadableStream<Uint8Array>({
             start(controller) {
               upload = controller
-              controller.enqueue(new TextEncoder().encode("{}x"))
+              controller.enqueue(new TextEncoder().encode(`{${" ".repeat(maxRenewalBody)}`))
             },
             cancel() {
               cancelledUpload = true
@@ -161,10 +164,19 @@ test("bound streaming preserves native bytes, renews with noscope, and denies cr
           expect((yield* gateway.handle(denied)).status).toBe(403)
         expect(sent.length).toBe(1)
         expect(yield* Effect.promise(() => readFile(join(root, "access-mints"), "utf8"))).toBe("x")
-        // A renewal asked again replaces the successor that has not renewed: the last one holds.
+        // A renewal asked again, with a higher attempt number, replaces the successor that has
+        // not renewed: the last one holds.
         const renewals: Array<{ readonly token: string }> = []
-        for (let asked = 0; asked < 3; asked++) {
-          const renew = yield* gateway.handle(request("/capabilities/v1/renew", issued.token, "{}"))
+        for (let asked = 1; asked <= 3; asked++) {
+          const renew = yield* gateway.handle(
+            request(
+              "/capabilities/v1/renew",
+              issued.token,
+              JSON.stringify(
+                signedRenewal(issued.binding, capabilityDigest(issued.token), asked, Date.now()),
+              ),
+            ),
+          )
           expect(renew.status).toBe(200)
           renewals.push(
             yield* Effect.promise(() => renew.json()).pipe(
@@ -178,6 +190,8 @@ test("bound streaming preserves native bytes, renews with noscope, and denies cr
         const next = yield* gateway.handle(request(undefined, successor.token))
         expect(next.status).toBe(200)
         yield* Effect.promise(() => next.text())
+        // The successor has made a call: its predecessor is refused from now on.
+        expect((yield* gateway.handle(request())).status).toBe(403)
         for (const form of [
           "fixture-access",
           Buffer.from("fixture-access").toString("base64"),
@@ -192,24 +206,32 @@ test("bound streaming preserves native bytes, renews with noscope, and denies cr
         reflect = undefined
         for (const fault of ["redirect", "encoding", "header"]) {
           upstreamFault = fault
-          expect((yield* gateway.handle(request())).status).toBe(503)
+          expect((yield* gateway.handle(request(undefined, successor.token))).status).toBe(503)
           upstreamFault = undefined
-          const control = yield* gateway.handle(request())
+          const control = yield* gateway.handle(request(undefined, successor.token))
           expect(yield* Effect.promise(() => control.text())).toBe(responseBytes)
         }
         const beforeRevocation = sent.length
         stalled = true
-        const http = capabilityHttpServer(capabilityApi(gateway))
-        yield* Effect.promise(
-          () => new Promise<void>((resolve) => http.server.listen(0, "127.0.0.1", resolve)),
+        const socket = join(root, "front", "gateway.sock")
+        const front = yield* Effect.promise(async () =>
+          tlsFront(await loopbackCertificate(root), socket),
+        )
+        const close = yield* Effect.promise(() =>
+          serveCapabilityListener(
+            {
+              socket,
+              front: { uid: process.getuid!(), gid: process.getgid!() },
+              service: front.service,
+            },
+            8,
+            capabilityApi(gateway),
+          ),
         )
         try {
-          const address = http.server.address()
-          if (!address || typeof address === "string")
-            throw new Error("Fixture listener unavailable")
-          const sentRequest = request()
+          const sentRequest = request(undefined, successor.token)
           const response = yield* Effect.promise(() =>
-            fetch(`http://127.0.0.1:${address.port}${new URL(sentRequest.url).pathname}`, {
+            client(front).request(new URL(sentRequest.url).pathname, {
               method: "POST",
               headers: sentRequest.headers,
               body: native,
@@ -227,11 +249,20 @@ test("bound streaming preserves native bytes, renews with noscope, and denies cr
           yield* gateway.revoke("run")
           expect(yield* Effect.promise(() => ending)).toBe("reset")
         } finally {
-          yield* Effect.promise(http.close)
+          yield* Effect.promise(close)
+          front.close()
         }
         expect((yield* gateway.handle(request(undefined, successor.token))).status).toBe(403)
         expect(
-          (yield* gateway.handle(request("/capabilities/v1/renew", issued.token, "{}"))).status,
+          (yield* gateway.handle(
+            request(
+              "/capabilities/v1/renew",
+              issued.token,
+              JSON.stringify(
+                signedRenewal(issued.binding, capabilityDigest(issued.token), 4, Date.now()),
+              ),
+            ),
+          )).status,
         ).toBe(403)
         expect(sent.length).toBe(beforeRevocation + 1)
       }).pipe(
@@ -250,21 +281,30 @@ for (const attack of ["resets", "preface", "h2-preface", "truncated"] as const)
     let served = 0
     let partial = 0
     let entered = Promise.withResolvers<void>()
-    const listener = capabilityHttpServer(async (request) => {
-      if (new URL(request.url).pathname !== "/valid") {
-        partial++
-        entered.resolve()
-        await request.arrayBuffer()
-      }
-      served++
-      return new Response("fixture-valid")
-    })
-    listener.server.listen(0, "127.0.0.1")
-    await once(listener.server, "listening")
-    const port = portOf(listener.server)
+    const root = await mkdtemp(join(tmpdir(), "wfd-listener-"))
+    const listenSocket = join(root, "front", "gateway.sock")
+    const front = await tlsFront(await loopbackCertificate(root), listenSocket)
+    let close: (() => Promise<void>) | undefined = await serveCapabilityListener(
+      {
+        socket: listenSocket,
+        front: { uid: process.getuid!(), gid: process.getgid!() },
+        service: front.service,
+      },
+      8,
+      async (request) => {
+        if (new URL(request.url).pathname !== "/valid") {
+          partial++
+          entered.resolve()
+          await request.arrayBuffer()
+        }
+        served++
+        return new Response("fixture-valid")
+      },
+    )
+    const open = () => connect({ host: "127.0.0.1", port: front.port, ca: front.ca })
     const raw = (bytes: string, cut: boolean) =>
       new Promise<string>((resolve) => {
-        const socket = connect(port, "127.0.0.1")
+        const socket = open()
         let answer = ""
         socket.on("data", (chunk) => (answer += chunk.toString()))
         socket.on("error", () => {})
@@ -278,15 +318,14 @@ for (const attack of ["resets", "preface", "h2-preface", "truncated"] as const)
         })
       })
     const valid = () =>
-      fetch(`http://127.0.0.1:${port}/valid`, { method: "POST", body: "{}" }).then((response) =>
-        response.text(),
-      )
+      client(front)
+        .request("/valid", { method: "POST", body: "{}" })
+        .then((response) => response.text())
     const input = {
-      resets:
-        "POST /capabilities/v1/renew HTTP/1.1\r\nhost: foreign.invalid\r\ncontent-length: 100\r\n\r\n{}",
+      resets: `POST /capabilities/v1/renew HTTP/1.1\r\nhost: ${front.service}\r\ncontent-length: 100\r\n\r\n{}`,
       preface: "invalid-http2-preface\r\n\r\n",
       "h2-preface": `PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n${String.fromCharCode(0, 0, 6, 4, 0)}`,
-      truncated: "POST /valid HTTP/1.1\r\nhost: 127.0.0.1\r\ncontent-le",
+      truncated: `POST /valid HTTP/1.1\r\nhost: ${front.service}\r\ncontent-le`,
     }[attack]
     let hanging: ReturnType<typeof connect> | undefined
     try {
@@ -299,18 +338,102 @@ for (const attack of ["resets", "preface", "h2-preface", "truncated"] as const)
       // A peer error in the body never reaches an answer; framing errors never reach the handler.
       expect({ served, partial }).toEqual({ served: 8, partial: attack === "resets" ? 8 : 0 })
       // Shutdown is bounded with a client still holding a half-sent request.
-      hanging = connect(port, "127.0.0.1")
+      hanging = open()
       hanging.on("error", () => {})
-      hanging.write("POST /valid HTTP/1.1\r\nhost: 127.0.0.1\r\ncontent-length: 10\r\n\r\n{")
+      hanging.write(`POST /valid HTTP/1.1\r\nhost: ${front.service}\r\ncontent-length: 10\r\n\r\n{`)
       await Bun.sleep(50)
+      const closing = close
+      close = undefined
       expect(
-        await Promise.race([
-          listener.close().then(() => "closed"),
-          Bun.sleep(10000).then(() => "held"),
-        ]),
+        await Promise.race([closing().then(() => "closed"), Bun.sleep(10000).then(() => "held")]),
       ).toBe("closed")
     } finally {
       hanging?.destroy()
-      await listener.close()
+      await close?.()
+      front.close()
+      await rm(root, { recursive: true, force: true })
     }
   })
+
+test("a call of a run token that was admitted before its successor's first call, and sends its body after it, starts no upstream call", async () => {
+  const root = await mkdtemp(join(tmpdir(), "wfd-gateway-retired-"))
+  await writeNoscopeProviders(root, 120000)
+  const native = '{ "model" : "fixture-model", "stream": true, "messages": [], "max_tokens": 1000 }'
+  const responseBytes = "event: message_start\ndata: {}\n\nevent: message_stop\ndata: {}\n\n"
+  const sent: Array<string> = []
+  try {
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* seedCapabilityRun(Date.now(), true)
+        const gateway = yield* makeCapabilityGateway(
+          {
+            noscope: { binary: fixtureExecutable("noscope"), configHome: root },
+            providerId: "anthropic",
+            credentialRole: "fixture",
+            maxStreams: 8,
+            maxStreamsPerRun: 2,
+          },
+          async (_, init) => {
+            sent.push(Buffer.from(init.body).toString())
+            return new Response(responseBytes, { headers: { "content-type": "text/event-stream" } })
+          },
+        )
+        const issued = yield* bindRunSession(Date.now(), { expiresAt: Date.now() + 300000 })
+        const call = (token: string, body: string | ReadableStream<Uint8Array>) =>
+          new Request("http://capability.invalid/capabilities/v1/providers/anthropic/v1/messages", {
+            method: "POST",
+            headers: {
+              authorization: `Bearer ${token}`,
+              "content-type": "application/json",
+              "anthropic-version": "2023-06-01",
+              "anthropic-beta": "oauth-2025-04-20",
+            },
+            body,
+          })
+        // The gateway reads a call's body only once it has admitted the call's stream; with no
+        // queue, the body is pulled first by that read.
+        const admitted = Promise.withResolvers<void>()
+        const bodySent = Promise.withResolvers<void>()
+        const held = new ReadableStream<Uint8Array>(
+          {
+            async pull(controller) {
+              admitted.resolve()
+              await bodySent.promise
+              controller.enqueue(new TextEncoder().encode(native))
+              controller.close()
+            },
+          },
+          { highWaterMark: 0 },
+        )
+        const predecessor = yield* Effect.forkChild(gateway.handle(call(issued.token, held)))
+        yield* Effect.promise(() => admitted.promise)
+        const successor = randomBytes(32).toString("base64url")
+        const digest = capabilityDigest(issued.token)
+        yield* (yield* makeCapabilityStore).renew(
+          issued.binding,
+          digest,
+          signedRenewal(issued.binding, digest, 1, Date.now()),
+          capabilityDigest(successor),
+          Date.now() + 600000,
+          Date.now(),
+        )
+        const used = yield* gateway.handle(call(successor, native))
+        expect([used.status, yield* Effect.promise(() => used.text())]).toEqual([
+          200,
+          responseBytes,
+        ])
+        expect(sent).toHaveLength(1)
+        bodySent.resolve()
+        const refused = yield* Fiber.join(predecessor)
+        expect([refused.status, yield* Effect.promise(() => refused.text())]).toEqual([403, ""])
+        expect(sent).toHaveLength(1)
+      }).pipe(
+        Effect.scoped,
+        Effect.provide(AgentRunStoreLive),
+        Effect.provide(SqliteClient.layer({ filename: ":memory:" })),
+      ),
+    )
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})

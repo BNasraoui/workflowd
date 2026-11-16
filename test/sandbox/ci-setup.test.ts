@@ -113,9 +113,12 @@ async function ciSteps(job: string) {
     Schema.Struct({
       jobs: Schema.Record(
         Schema.String,
+        // A job that calls a reusable workflow has no steps of its own.
         Schema.Struct({
-          steps: Schema.Array(
-            Schema.Struct({ name: Schema.String, run: Schema.optionalKey(Schema.String) }),
+          steps: Schema.optionalKey(
+            Schema.Array(
+              Schema.Struct({ name: Schema.String, run: Schema.optionalKey(Schema.String) }),
+            ),
           ),
         }),
       ),

@@ -2,26 +2,67 @@ import { Context, Effect, Option, Schema, Semaphore } from "effect"
 import { SqlClient } from "effect/unstable/sql"
 import { randomInt } from "node:crypto"
 import { mintCapability } from "./noscope"
-import { claudeRequest, readRequestBody, type ClaudeUpstream } from "./claude"
-import { CapabilityRefused, capabilityDigest, makeCapabilityStore } from "./store"
+import { custodyProvider, loginFault, renewalWriteBoundMs } from "./custody"
+import {
+  budgetHeld,
+  budgetSpent,
+  claudeRequest,
+  NoProviderOutput,
+  readRequestBody,
+  RunBudgetHeld,
+  RunBudgetSpent,
+  type ClaudeUpstream,
+  type ReportedUsage,
+} from "./claude"
+import {
+  CapabilityRefused,
+  CapabilityRetired,
+  capabilityDigest,
+  makeCapabilityStore,
+  type SignedRenewal,
+  twoHolders,
+} from "./store"
 import { githubJobKeys, verifyJobProof } from "../sandbox/bootstrap"
 import { runLifetime } from "../store/run-lifetime"
 import { ownedPromise } from "./owned"
 import { gitReadRequest, type GitUpstream } from "./git"
-import { renewLeadMaxMs, renewLeadMinMs } from "../../deploy/sandbox/renewal.mjs"
+import type { ControlTarget } from "./control"
+import {
+  isSessionKey,
+  maxRenewalBody,
+  renewLeadMaxMs,
+  renewLeadMinMs,
+  sessionBinder,
+} from "../../deploy/sandbox/renewal.mjs"
 import { capabilityOrigin, RequestRefused } from "./headers"
 import { maxJtiLength, maxProofLength } from "../../deploy/sandbox/capability-limits.mjs"
 import type { CapabilityGatewayConfig } from "../sandbox/config"
 
+/** The gateway's keys that the service reads; the process alone reads the store, socket and listener. */
+type GatewayConfiguration = Omit<
+  CapabilityGatewayConfig,
+  "storePath" | "controlSocket" | "daemon" | "listen"
+>
 /** The idle limit of a stream when the config names none. */
 const defaultStreamIdleMs = 120000
+/** The period of the sweep of stale streams when the config names none. */
+const defaultStaleSweepMs = 1000
 const SessionProof = Schema.Struct({
   token: Schema.String.check(Schema.isMaxLength(maxProofLength)),
+  key: Schema.String.check(Schema.makeFilter(isSessionKey)),
 })
 const SessionAudience = /^workflowd:([a-f0-9]{64}):([a-f0-9]{64})$/
 /**
- * Reads the audience and jti of an unverified proof only to select its challenge and to refuse a
- * used proof early; verification follows.
+ * The body of a renewal: the request's attempt number and the time at which the relay signed it,
+ * each as its exact decimal text, and the relay's signature of the renewal, that number and that
+ * time with the session key.
+ */
+const RenewalBody = Schema.fromJsonString(
+  Schema.Struct({ signature: Schema.String, attempt: Schema.String, time: Schema.String }),
+)
+/**
+ * Reads the audience and jti of an unverified proof only to select its challenge, to check its
+ * binder and to refuse a used proof early; verification follows.
  */
 const proofClaims = (token: string) => {
   try {
@@ -40,7 +81,7 @@ const proofClaims = (token: string) => {
       typeof jti === "string" &&
       jti.length <= maxJtiLength &&
       typeof kid === "string"
-      ? { audience: match[0], channel: match[1], nonce: match[2], jti, kid }
+      ? { audience: match[0], channel: match[1], binder: match[2], jti, kid }
       : null
   } catch {
     return null
@@ -80,7 +121,7 @@ const cachedJobKeys = (keys: typeof githubJobKeys) => {
   }
 }
 /** At most this many run token mints run at once; a request above it is answered 503. */
-const maxMints = 4
+export const maxMints = 4
 class MintsBusy extends Schema.TaggedError<MintsBusy>()("MintsBusy", {}) {}
 /** A run token lives at most 15 minutes. */
 const tokenLifeMs = 900000
@@ -96,27 +137,36 @@ const failureKind = (error: unknown) =>
       : typeof error
 const logFailure = (message: string) => (error: unknown) =>
   Effect.logWarning(message, { kind: failureKind(error) })
+/** A call waits this long for the provider's access value; the renewal it waits on goes on. */
+const accessWaitMs = 10000
+/** Noscope's run of custody ends after this: past custody's lock wait and request limit. */
+const accessLimitMs = 30000
+/** A fault line of one cause is written at most once in this time. */
+const faultLogEveryMs = 60000
+/** `shared`, or the reason of `signal` once it aborts first; `shared` goes on either way. */
+const waitFor = <A>(shared: Promise<A>, signal: AbortSignal) =>
+  new Promise<A>((resolve, reject) => {
+    const abort = () =>
+      reject(signal.reason instanceof Error ? signal.reason : new Error("the call ended"))
+    if (signal.aborted) return abort()
+    signal.addEventListener("abort", abort, { once: true })
+    shared.then(
+      (value) => {
+        signal.removeEventListener("abort", abort)
+        resolve(value)
+      },
+      (error: unknown) => {
+        signal.removeEventListener("abort", abort)
+        reject(error instanceof Error ? error : new Error("no access value"))
+      },
+    )
+  })
 const denied = () => new Response(null, { status: 403 })
 const unavailable = () => new Response(null, { status: 503, headers: { "retry-after": "5" } })
 
-/**
- * Ends the capability authority of a run in the store, inside the run-lifetime fence. It runs no
- * loop; a gateway process aborts its own open streams of that run when it sees the revoke.
- */
-export const makeCapabilityRevoke = Effect.gen(function* () {
-  const store = yield* makeCapabilityStore
-  const authority = runLifetime(yield* SqlClient.SqlClient)
-  return {
-    revoke: Effect.fn("CapabilityRevoke.revoke")((runId: string) =>
-      authority.change(runId, store.revoke(runId)),
-    ),
-  }
-})
-export type CapabilityRevoke = Effect.Success<typeof makeCapabilityRevoke>
-
 /** Owns run authority and stream lifetime. No administrative HTTP listener shares this interface. */
 export const makeCapabilityGateway = (
-  config: CapabilityGatewayConfig,
+  config: GatewayConfiguration,
   upstream: ClaudeUpstream = fetch,
   gitUpstream: GitUpstream = fetch,
   keys: typeof githubJobKeys = githubJobKeys,
@@ -124,14 +174,88 @@ export const makeCapabilityGateway = (
   Effect.gen(function* () {
     const streamIdleMs = config.streamIdleMs ?? defaultStreamIdleMs
     const store = yield* makeCapabilityStore
+    // A reservation that an earlier process left open is charged in full before any call starts.
+    yield* store.chargeOpenReservations()
     const sql = yield* SqlClient.SqlClient
     const authority = runLifetime(sql)
+    // The gateway's lifetime: a renewal of the provider login ends with the gateway, never with
+    // the call that started it.
+    const lifetime = new AbortController()
+    const custody = custodyProvider(config.credentialRole)
+    const logged = new Map<string, number>()
+    const logFault = (line: string) => {
+      const now = Date.now()
+      if (now - (logged.get(line) ?? -Infinity) < faultLogEveryMs) return
+      logged.set(line, now)
+      console.error(line)
+    }
+    /** Why custody gave no access value, as a line without any value; undefined when unknown. */
+    const accessFault = async () => {
+      if (!custody) return undefined
+      if (!config.login)
+        return `custody: the gateway's configuration names no login directory for ${custody}`
+      return await loginFault(config.login.directory, custody)
+    }
+    // One run of the provider-access mint at a time: each call that needs it waits for that one.
+    let inFlight: Promise<{ readonly token: string; readonly expiresAt: number }> | undefined
+    const providerAccess = (signal: AbortSignal) => {
+      inFlight ??= mintCapability(
+        config.noscope,
+        "provider-access",
+        config.credentialRole,
+        3600,
+        lifetime.signal,
+        accessLimitMs,
+      )
+        .catch(async (error: unknown) => {
+          const fault = await accessFault()
+          if (fault) logFault(fault)
+          throw error
+        })
+        .finally(() => {
+          inFlight = undefined
+        })
+      return waitFor(inFlight, AbortSignal.any([signal, AbortSignal.timeout(accessWaitMs)]))
+    }
+    // A stop waits for a renewal of the login in flight (custody's mint), up to the bound of its
+    // request and its write, before it ends the gateway's lifetime: an answer that the stop cut
+    // off would leave the stored refresh value one that the OAuth server has replaced. Custody
+    // finishes such a renewal on SIGTERM itself, but where the end of the gateway kills each
+    // process it leaves (the first process of a container, or a unit's main process with
+    // `KillMode=mixed`), custody would end with it. A mint of another provider renews no login, and ends at once.
+    yield* Effect.addFinalizer(() =>
+      Effect.gen(function* () {
+        const pending = inFlight
+        if (pending && custody && config.login) {
+          console.error("the gateway waits for a renewal in flight before it stops")
+          yield* Effect.promise(() =>
+            pending.then(
+              () => undefined,
+              () => undefined,
+            ),
+          ).pipe(Effect.timeoutOption(renewalWriteBoundMs))
+        }
+        lifetime.abort()
+      }),
+    )
     // Each live stream, by run, with the session and the digest of the token that opened it.
     const active = new Map<
       string,
       Map<AbortController, { readonly session: number; readonly digest: string }>
     >()
     let count = 0
+    // The release of each admitted stream that has not ended, and each settlement not yet stored.
+    const releases = new Set<() => void>()
+    const settling = new Set<Promise<unknown>>()
+    const settleReservation = (reservation: string, usage: ReportedUsage | undefined) => {
+      const stored = Effect.runPromiseExit(
+        store
+          .settle(reservation, usage)
+          .pipe(Effect.catch(logFailure("Capability settlement failed"))),
+      )
+      settling.add(stored)
+      void stored.then(() => settling.delete(stored))
+    }
     const abortRun = (runId: string) => {
       for (const controller of active.get(runId)?.keys() ?? []) controller.abort()
     }
@@ -150,12 +274,13 @@ export const makeCapabilityGateway = (
         for (const [controller, owner] of active.get(runId) ?? [])
           if (owner.session === session && owner.digest === digest) controller.abort()
     }
-    // Bindings outlive this process: a restart revokes nothing. Another process (workflowd, or a
-    // second gateway) revokes or opens a new session through the store, so live streams follow it.
+    // Bindings outlive this process: a restart revokes nothing. A stream whose binding moved to a
+    // later session, or whose run token a renewal replaced, ends within `staleSweepMs`, a second
+    // unless configured.
     yield* Effect.suspend(() => store.staleAmong(streams())).pipe(
       Effect.tap((stale) => Effect.sync(() => abortStale(stale))),
       Effect.catch(logFailure("Capability stream check failed")),
-      Effect.andThen(Effect.sleep("1 second")),
+      Effect.andThen(Effect.sleep(config.staleSweepMs ?? defaultStaleSweepMs)),
       Effect.forever,
       Effect.forkScoped,
     )
@@ -170,6 +295,22 @@ export const makeCapabilityGateway = (
       Effect.sync(() => {
         for (const runId of active.keys()) abortRun(runId)
       }),
+    )
+    // A stop releases each open stream, which settles its reservation, before the store closes.
+    yield* Effect.addFinalizer(() =>
+      Effect.sync(() => {
+        for (const release of [...releases]) release()
+      }).pipe(
+        // Each settlement is an exit: it does not reject.
+        Effect.andThen(
+          Effect.promise(() =>
+            Promise.all(settling).then(
+              () => undefined,
+              () => undefined,
+            ),
+          ),
+        ),
+      ),
     )
     const jobKeys = cachedJobKeys(keys)
     const mints = yield* Semaphore.make(maxMints)
@@ -192,24 +333,68 @@ export const makeCapabilityGateway = (
         ),
       )
     /**
-     * A renewal is checked before its mint and again when its successor is stored. Asked again
-     * for the same predecessor, it replaces the successor that has not renewed itself.
+     * A check of a renewal, under the run-lifetime fence. When it shows that the run has two
+     * holders, the same transaction revokes the run with that reason, and its open streams end;
+     * the renewal is then refused, and the gateway logs the run and the reason.
+     */
+    const decided = <A extends { readonly twoHolders: boolean }, E, R>(
+      runId: string,
+      check: Effect.Effect<A, E, R>,
+    ) =>
+      authority
+        .withPermit(
+          Effect.tap(check, ({ twoHolders: found }) =>
+            found
+              ? authority.change(
+                  runId,
+                  store
+                    .revokeTwoHolders(runId)
+                    .pipe(Effect.ensuring(Effect.sync(() => abortRun(runId)))),
+                )
+              : Effect.void,
+          ),
+        )
+        .pipe(
+          Effect.tap(({ twoHolders: found }) =>
+            found
+              ? Effect.logWarning("Capability run ended", { runId, reason: twoHolders }).pipe(
+                  Effect.andThen(Effect.fail(new CapabilityRefused())),
+                )
+              : Effect.void,
+          ),
+        )
+    /**
+     * A renewal, signed by the session key with an attempt number higher than each taken, is
+     * checked before its mint and again when its successor is stored. Asked again for the same
+     * predecessor, it replaces the successor that has not renewed itself; a successor that has
+     * authorized a call ends the run instead.
      */
     const renewal = Effect.fn("CapabilityGateway.renewal")(function* (
       binding: { readonly runId: string; readonly channel: string },
       predecessor: string,
+      signed: SignedRenewal,
     ) {
-      const previous = yield* authority.withPermit(
+      const previous = yield* decided(
+        binding.runId,
         store.renewable(
           binding,
           predecessor,
+          signed,
           (deadline) => Math.min(Date.now() + tokenLifeMs, deadline),
           Date.now(),
         ),
       )
       const next = yield* issue(previous.deadline)
-      yield* authority.withPermit(
-        store.renew(binding, predecessor, capabilityDigest(next.token), next.expiresAt, Date.now()),
+      yield* decided(
+        binding.runId,
+        store.renew(
+          binding,
+          predecessor,
+          signed,
+          capabilityDigest(next.token),
+          next.expiresAt,
+          Date.now(),
+        ),
       )
       return { token: next.token, expiresAt: next.expiresAt, renewAt: renewAt(next.expiresAt) }
     })
@@ -217,17 +402,22 @@ export const makeCapabilityGateway = (
       store.leaseChallenge(lease, Date.now()),
     )
     /**
-     * The runner's OIDC proof for `workflowd:<channel>:<nonce>` opens the run's next session. The
-     * answer can be lost after it is sent; the runner then proves itself again for a new challenge,
-     * and that session ends every token of this one. Nothing here depends on seeing the client.
+     * The runner's OIDC proof for `workflowd:<channel>:<binder>`, with the session's public key,
+     * opens the run's next session. The binder is that of the nonce that the gateway issued for
+     * the channel and of the key; it is checked before any key is fetched or token minted. The
+     * answer can be lost after it is sent; the runner then proves itself again for a new
+     * challenge, and that session ends every token of this one. Nothing here depends on seeing
+     * the client.
      */
     const session = Effect.fn("CapabilityGateway.session")(function* (proof: unknown) {
-      const { token } = yield* Schema.decodeUnknownEffect(SessionProof)(proof, {
+      const { token, key } = yield* Schema.decodeUnknownEffect(SessionProof)(proof, {
         onExcessProperty: "error",
       }).pipe(Effect.mapError(() => new CapabilityRefused()))
       const claims = proofClaims(token)
       if (!claims) return yield* Effect.fail(new CapabilityRefused())
       const job = yield* store.sessionContext(claims, Date.now())
+      if (sessionBinder(job.nonce, key) !== claims.binder)
+        return yield* Effect.fail(new CapabilityRefused())
       const jwks = yield* Effect.tryPromise(() => jobKeys(claims.kid))
       const policy = job.policy
       const ref = `refs/heads/workflowd/leases/${job.leaseId}`
@@ -263,7 +453,7 @@ export const makeCapabilityGateway = (
           {
             runId: job.runId,
             channel: claims.channel,
-            nonce: claims.nonce,
+            nonce: job.nonce,
             recipientId: job.recipientId,
           },
           verified.jti,
@@ -271,6 +461,7 @@ export const makeCapabilityGateway = (
           issued.expiresAt,
           Date.now(),
           verified.expiresAt,
+          key,
         ),
       )
       const grant = { ...issued, renewAt: renewAt(issued.expiresAt) }
@@ -289,25 +480,49 @@ export const makeCapabilityGateway = (
       ),
     )
     type Binding = { readonly runId: string; readonly channel: string }
-    type Grant = Effect.Success<ReturnType<typeof store.authorize>>
-    /** The renew route: an empty JSON body, and the successor of the presented token. */
+    /**
+     * The check of a run token again, at a later step of its call. A token refused there, revoked
+     * or retired since the first check, is refused as at the first check.
+     */
+    const checkedAgain = (digest: string) =>
+      store.authenticate(digest, Date.now()).pipe(
+        Effect.catchIf(
+          (error) => error instanceof CapabilityRefused || error instanceof CapabilityRetired,
+          () => Effect.fail(new RequestRefused()),
+        ),
+      )
+    type Grant = Effect.Success<ReturnType<typeof store.authenticate>>["grant"]
+    /**
+     * The renew route: a body of the relay's signature, attempt number and time, at most
+     * `maxRenewalBody` bytes, and the successor of the presented token.
+     */
     const renewRoute = Effect.fn("CapabilityGateway.renewRoute")(function* (
       request: Request,
       binding: Binding,
       digest: string,
     ) {
-      if (request.method !== "POST" || Number(request.headers.get("content-length") ?? 0) > 2)
+      if (
+        request.method !== "POST" ||
+        Number(request.headers.get("content-length") ?? 0) > maxRenewalBody
+      )
         return denied()
       const body = yield* ownedPromise((signal) =>
         readRequestBody(
           request,
           AbortSignal.any([signal, request.signal, AbortSignal.timeout(10000)]),
-          2,
+          maxRenewalBody,
         ),
-      ).pipe(Effect.result)
-      if (body._tag === "Failure" || body.success.toString("utf8") !== "{}") return denied()
+      ).pipe(
+        Effect.flatMap((bytes) =>
+          Schema.decodeUnknownEffect(RenewalBody)(bytes.toString("utf8"), {
+            onExcessProperty: "error",
+          }),
+        ),
+        Effect.result,
+      )
+      if (body._tag === "Failure") return denied()
       // A refused renewal is final for this token; only a busy or failed mint or store is 503.
-      const renewed = yield* Effect.result(renewal(binding, digest))
+      const renewed = yield* Effect.result(renewal(binding, digest, body.success))
       if (renewed._tag === "Failure")
         return renewed.failure instanceof CapabilityRefused ? denied() : unavailable()
       return Response.json(renewed.success, { headers: { "cache-control": "no-store" } })
@@ -316,11 +531,14 @@ export const makeCapabilityGateway = (
      * Admits one stream of a run, under the run-lifetime fence: null when the gateway or the run
      * holds its most streams. The stream ends at the token's expiry or the run's deadline, after
      * `streamIdleMs` without a chunk, at the provider credential's expiry, or when the run changes.
+     * A stream that a run token opened before its successor's first call runs on after that call:
+     * at most to the token's expiry, which is at most `renewalWindowMs` (330 s) after its renewal,
+     * as no token is renewed earlier.
      */
     const admit = (binding: Binding, session: number, digest: string, grant: Grant) =>
       authority.withPermit(
         Effect.gen(function* () {
-          yield* store.authorize(binding, digest, Date.now())
+          yield* checkedAgain(digest)
           const owned =
             active.get(binding.runId) ??
             new Map<AbortController, { readonly session: number; readonly digest: string }>()
@@ -337,9 +555,17 @@ export const makeCapabilityGateway = (
           let idleTimer = setTimeout(() => controller.abort(), streamIdleMs)
           let providerTimer: ReturnType<typeof setTimeout> | undefined
           let released = false
+          // The reservation of the stream's model call, settled once, at the stream's release.
+          let reservation: string | undefined
+          let usage: (() => ReportedUsage | undefined) | undefined
+          const settle = () => {
+            if (reservation !== undefined) settleReservation(reservation, usage?.())
+          }
           const release = () => {
             if (released) return
             released = true
+            releases.delete(release)
+            settle()
             unlisten()
             clearTimeout(timer)
             clearTimeout(idleTimer)
@@ -349,10 +575,18 @@ export const makeCapabilityGateway = (
             count--
             controller.abort()
           }
+          releases.add(release)
           return {
             controller,
             release,
             transferred: false,
+            reserved: (id: string) => {
+              reservation = id
+              if (released) settle()
+            },
+            measured: (read: () => ReportedUsage | undefined) => {
+              usage = read
+            },
             touch: () => {
               if (released) return
               clearTimeout(idleTimer)
@@ -450,12 +684,25 @@ export const makeCapabilityGateway = (
     ) =>
       ownedPromise(async (interruption) => {
         const signal = AbortSignal.any([ownership.controller.signal, request.signal, interruption])
-        const send = async (start: () => Promise<Response>) => {
+        /**
+         * Launches an upstream request. A model call also counts against the run's budget and
+         * reserves `tokens` of its output tokens, under the same hold of the run-lifetime permit
+         * as its launch.
+         */
+        const send = async (start: () => Promise<Response>, tokens?: number) => {
           // Admission and launch share the run-lifetime fence; network waiting does not.
           const started = await Effect.runPromise(
             authority.withPermit(
               Effect.gen(function* () {
-                yield* store.authorize(binding, digest, Date.now())
+                yield* checkedAgain(digest)
+                if (tokens !== undefined) {
+                  const reserved = yield* store.reserve(binding.runId, tokens, Date.now())
+                  if (reserved === "spent" || reserved === "held") return reserved
+                  // The stream holds the reservation before the commit, so its release settles it
+                  // whenever it comes; the settlement waits for the commit, and a reservation that
+                  // is rolled back is no row: its settlement changes nothing.
+                  ownership.reserved(reserved.reservation)
+                }
                 return yield* Effect.try(() => {
                   signal.throwIfAborted()
                   return { response: start() }
@@ -464,6 +711,8 @@ export const makeCapabilityGateway = (
             ),
             { signal },
           )
+          if (started === "spent") throw new RunBudgetSpent()
+          if (started === "held") throw new RunBudgetHeld()
           return await started.response
         }
         const selected = route.git
@@ -475,32 +724,33 @@ export const makeCapabilityGateway = (
               route.path,
               grant.modelId,
               async () => {
-                const snapshot = await mintCapability(
-                  config.noscope,
-                  "provider-access",
-                  config.credentialRole,
-                  3600,
-                  signal,
-                )
+                const snapshot = await providerAccess(signal)
                 ownership.providerExpiry(snapshot.expiresAt)
                 return snapshot.token
               },
               signal,
-              (url, input) => send(() => upstream(url, input)),
-            )
+              (url, input, tokens) => send(() => upstream(url, input), tokens),
+              grant.budget.maxTokens,
+            ).then((call) => {
+              ownership.measured(call.usage)
+              return call
+            })
         if (signal.aborted) {
           await selected.response.body?.cancel()
           signal.throwIfAborted()
         }
         return boundedBody(selected, signal, ownership)
       }).pipe(
-        Effect.catch((error) =>
-          error instanceof RequestRefused
-            ? Effect.fail("refused" as const)
-            : logFailure("Capability route failed")(error).pipe(
-                Effect.andThen(Effect.fail("unavailable" as const)),
-              ),
-        ),
+        Effect.catch((error) => {
+          if (error instanceof RequestRefused) return Effect.fail("refused" as const)
+          if (error instanceof RunBudgetSpent) return Effect.fail("spent" as const)
+          if (error instanceof RunBudgetHeld) return Effect.fail("held" as const)
+          // The release that follows settles the call's reservation with no output.
+          if (error instanceof NoProviderOutput) ownership.measured(() => error.usage)
+          return logFailure("Capability route failed")(error).pipe(
+            Effect.andThen(Effect.fail("unavailable" as const)),
+          )
+        }),
       )
     /**
      * A run's call. Its run token selects and authorizes its binding before any body is read; then
@@ -511,17 +761,24 @@ export const makeCapabilityGateway = (
         const auth = /^Bearer ([A-Za-z0-9_-]{43})$/.exec(request.headers.get("authorization") ?? "")
         if (!auth?.[1] || !request.url.startsWith(`${capabilityOrigin}/`)) return denied()
         const digest = capabilityDigest(auth[1])
-        // The run token alone selects its binding; no route reads a body before this check.
-        const found = yield* Effect.result(store.bindingFor(digest, Date.now()))
-        if (found._tag === "Failure") return denied()
-        const { session, ...binding } = found.success
-        const checked = yield* Effect.result(
-          authority.withPermit(store.authorize(binding, digest, Date.now())),
-        )
-        if (checked._tag === "Failure") return denied()
-        const grant = checked.success
-        if (grant.providerId !== config.providerId) return denied()
         const target = request.url.slice(capabilityOrigin.length)
+        // The run token alone selects its binding; no route reads a body before this check.
+        const checked = yield* Effect.result(
+          authority.withPermit(store.authenticate(digest, Date.now())),
+        )
+        // A token whose successor has authorized a call is refused; its signed renewal shows that
+        // the run has two holders, and the renewal ends the run.
+        if (
+          checked._tag === "Failure" &&
+          checked.failure instanceof CapabilityRetired &&
+          target === "/capabilities/v1/renew"
+        ) {
+          const { runId, channel } = checked.failure
+          return yield* renewRoute(request, { runId, channel }, digest)
+        }
+        if (checked._tag === "Failure") return denied()
+        const { session, binding, grant } = checked.success
+        if (grant.providerId !== config.providerId) return denied()
         if (target === "/capabilities/v1/renew") return yield* renewRoute(request, binding, digest)
         const prefix = `/capabilities/v1/providers/${config.providerId}`
         const isGit = config.gitRead === true && target.startsWith("/capabilities/v1/git/")
@@ -543,19 +800,52 @@ export const makeCapabilityGateway = (
                 return result.success
               }
               ownership.release()
+              if (result.failure === "spent") return budgetSpent()
+              if (result.failure === "held") return budgetHeld()
               return result.failure === "refused" ? denied() : unavailable()
             }),
           (ownership) =>
             Effect.sync(() => {
               if (ownership && !ownership.transferred) ownership.release()
             }),
+        ).pipe(
+          Effect.catchIf(
+            (error) => error instanceof RequestRefused,
+            () => Effect.succeed(denied()),
+          ),
         )
       },
       Effect.catch((error) =>
         logFailure("Capability request failed")(error).pipe(Effect.as(unavailable())),
       ),
     )
-    return { sessionChallenge, session, revoke, handle }
+    /** workflowd's calls on the control socket. Each revoked run's open streams end at once. */
+    const control: ControlTarget = {
+      authorize: (grant) =>
+        store
+          .authorizeGrant(grant)
+          .pipe(
+            Effect.flatMap(({ runId, held }) =>
+              held
+                ? Effect.void
+                : Effect.sync(() => abortRun(runId)).pipe(
+                    Effect.andThen(Effect.fail(new CapabilityRefused())),
+                  ),
+            ),
+          ),
+      revoke,
+      reconcile: (live) =>
+        store.reconcileGrants(live).pipe(
+          Effect.tap((revoked) =>
+            Effect.sync(() => {
+              for (const runId of revoked) abortRun(runId)
+            }),
+          ),
+          Effect.asVoid,
+        ),
+      sessionBound: store.sessionBound,
+    }
+    return { sessionChallenge, session, revoke, control, handle }
   })
 
 export const CapabilityGateway = Context.Service<

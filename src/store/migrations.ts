@@ -15,6 +15,8 @@ import { capabilitySession } from "./0040-capability-session"
 import { sessionLeaseReady } from "./0041-session-lease-ready"
 import { capabilityRenewal } from "./0042-capability-renewal"
 import { capabilityReplacements } from "./0043-capability-replacements"
+import { capabilityStoreSplit } from "./0044-capability-store-split"
+import { capabilityRunBudget } from "./0045-capability-run-budget"
 import { MAX_AGENT_LAUNCH_INTENT_BYTES, MAX_AGENT_OUTPUT_BYTES } from "../agent-payload"
 
 const initialSchema = Effect.gen(function* () {
@@ -1484,28 +1486,43 @@ export const runStoreMigrationsThrough0029 = Migrator.make({})({
   loader: Migrator.fromRecord(migrationsThrough0029),
 })
 
+const migrationsThrough0043 = {
+  ...migrationsThrough0029,
+  "0030_sandbox_cleanup_runs": sandboxCleanupMigration,
+  "0031_sandbox_lease_operations": sandboxOperationMigration,
+  "0032_sandbox_ref_creation": sandboxCreationMigration,
+  "0033_sandbox_publications": sandboxPublishMigration,
+  "0034_sandbox_publication_receipts": sandboxPublicationReceiptMigration,
+  "0035_agent_run_idempotency_key": Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient
+    yield* sql`ALTER TABLE kernel_agent_runs ADD COLUMN idempotency_key TEXT`
+  }),
+  "0036_automatic_review_trust": automaticReviewTrustMigration,
+  "0037_resident_inbox_delay": Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient
+    yield* sql`ALTER TABLE resident_inbox ADD COLUMN not_before INTEGER NOT NULL DEFAULT 0`
+  }),
+  "0038_agent_directory": agentDirectory,
+  "0039_capability_gateway": capabilityGateway,
+  "0040_capability_session": capabilitySession,
+  "0041_session_lease_ready": sessionLeaseReady,
+  "0042_capability_renewal": capabilityRenewal,
+  "0043_capability_replacements": capabilityReplacements,
+}
+
+/** The store as the shared gateway left it, before the gateway had its own. */
+export const runStoreMigrationsThrough0043 = Migrator.make({})({
+  loader: Migrator.fromRecord(migrationsThrough0043),
+})
+
+/**
+ * workflowd's migrations. workflowd's database layer (`workflowdDatabase`) refuses the capability
+ * gateway's store before it opens it.
+ */
 export const runStoreMigrations = Migrator.make({})({
   loader: Migrator.fromRecord({
-    ...migrationsThrough0029,
-    "0030_sandbox_cleanup_runs": sandboxCleanupMigration,
-    "0031_sandbox_lease_operations": sandboxOperationMigration,
-    "0032_sandbox_ref_creation": sandboxCreationMigration,
-    "0033_sandbox_publications": sandboxPublishMigration,
-    "0034_sandbox_publication_receipts": sandboxPublicationReceiptMigration,
-    "0035_agent_run_idempotency_key": Effect.gen(function* () {
-      const sql = yield* SqlClient.SqlClient
-      yield* sql`ALTER TABLE kernel_agent_runs ADD COLUMN idempotency_key TEXT`
-    }),
-    "0036_automatic_review_trust": automaticReviewTrustMigration,
-    "0037_resident_inbox_delay": Effect.gen(function* () {
-      const sql = yield* SqlClient.SqlClient
-      yield* sql`ALTER TABLE resident_inbox ADD COLUMN not_before INTEGER NOT NULL DEFAULT 0`
-    }),
-    "0038_agent_directory": agentDirectory,
-    "0039_capability_gateway": capabilityGateway,
-    "0040_capability_session": capabilitySession,
-    "0041_session_lease_ready": sessionLeaseReady,
-    "0042_capability_renewal": capabilityRenewal,
-    "0043_capability_replacements": capabilityReplacements,
+    ...migrationsThrough0043,
+    "0044_capability_store_split": capabilityStoreSplit,
+    "0045_capability_run_budget": capabilityRunBudget,
   }),
 })

@@ -127,7 +127,7 @@ jobs:
   tests:
     name: Tests and changed-line coverage
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 45
     permissions: {}
     steps:
       - name: Anonymous checkout
@@ -284,6 +284,18 @@ jobs:
         run: bash scripts/evidence/credential-host-setup.sh namespaces
       - name: Prepare disposable credential identities and trusted clients
         run: bash scripts/evidence/credential-host-setup.sh identities
+      # The gateway runs as agent-fixture and is configured for ben-fixture as its daemon and for
+      # a third uid of their group as its front; the callers of each socket are its own uid,
+      # another uid of that group and a uid outside it. The script runs as root only to take each
+      # uid. It mints no run token, so noscope is any executable here.
+      - name: Require the control socket and the listener to accept only their own uid across users
+        run: >-
+          sudo systemd-run --wait --pipe --collect
+          -p MemoryMax=2G -p MemorySwapMax=0 --working-directory="$PWD"
+          --setenv=HOME=/tmp
+          --setenv=PATH=/opt/workflowd-credential-fixture/bin:/usr/bin:/bin
+          --setenv=WORKFLOWD_FIXTURE_NOSCOPE=/usr/bin/false
+          /opt/workflowd-credential-fixture/bin/bun scripts/evidence/control-socket-users.ts
       - name: Probe two-UID native supervision prerequisites
         run: >-
           sudo systemd-run --wait --pipe --collect
@@ -396,7 +408,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        suite: [core, gateway, publication-local, final-local]
+        suite: [core, gateway, publication-local, final-local, gateway-budget, gateway-renewal]
     steps:
       - name: Anonymous checkout
         env:
@@ -472,6 +484,41 @@ jobs:
           AISLOP_SKIP_TOOL_DOWNLOAD: "1"
         run: npx --yes aislop@0.13.1 scan --json
 
+  gateway-image:
+    permissions: {}
+    uses: ./.github/workflows/gateway-image.yml
+
+  # On a push to main the image that CI built and tested is the one published: one build.
+  gateway-image-publish:
+    name: Publish gateway image to GHCR by digest
+    needs: gateway-image
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      packages: write
+    steps:
+      - name: Download the tested image
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: gateway-image
+      - name: Publish the tested image
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+          GHCR_USER: ${{ github.actor }}
+          COMMIT_SHA: ${{ github.sha }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          [[ $REPOSITORY == BNasraoui/workflowd ]] || exit 0
+          docker load -i gateway-image.tar.gz
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
+          image=ghcr.io/bnasraoui/workflowd-gateway
+          docker tag workflowd-gateway:local "$image:$COMMIT_SHA"
+          docker push "$image:$COMMIT_SHA"
+          docker logout ghcr.io
+          printf 'Published: %s\n' "$(docker image inspect --format '{{index .RepoDigests 0}}' "$image:$COMMIT_SHA")" | tee -a "$GITHUB_STEP_SUMMARY"
+
   required-checks:
     name: Required checks
     if: always()
@@ -482,6 +529,7 @@ jobs:
       - tests
       - credential-host
       - capability-security
+      - gateway-image
     runs-on: ubuntu-24.04
     timeout-minutes: 1
     permissions: {}
@@ -494,14 +542,19 @@ jobs:
           TESTS_RESULT: ${{ needs.tests.result }}
           CREDENTIAL_HOST_RESULT: ${{ needs.credential-host.result }}
           CAPABILITY_RESULT: ${{ needs.capability-security.result }}
+          # Success with "false" when a pull request changes no input of the image and nothing builds.
+          GATEWAY_IMAGE_RESULT: ${{ needs.gateway-image.result }}
+          GATEWAY_IMAGE_CHANGED: ${{ needs.gateway-image.outputs.changed }}
         run: |
           if [[ "$QUALITY_RESULT" != "success" || \
                 "$REPOSITORY_RESULT" != "success" || \
                 "$DEPLOYMENT_RESULT" != "success" || \
                 "$TESTS_RESULT" != "success" || \
                 "$CREDENTIAL_HOST_RESULT" != "success" || \
-                "$CAPABILITY_RESULT" != "success" ]]; then
-            printf 'Quality: %s\nRepository integrity: %s\nDeployment: %s\nTests: %s\nCredential host: %s\nCapability security: %s\n' \
-              "$QUALITY_RESULT" "$REPOSITORY_RESULT" "$DEPLOYMENT_RESULT" "$TESTS_RESULT" "$CREDENTIAL_HOST_RESULT" "$CAPABILITY_RESULT"
+                "$CAPABILITY_RESULT" != "success" || \
+                "$GATEWAY_IMAGE_RESULT" != "success" || \
+                ! "$GATEWAY_IMAGE_CHANGED" =~ ^(true|false)$ ]]; then
+            printf 'Quality: %s\nRepository integrity: %s\nDeployment: %s\nTests: %s\nCredential host: %s\nCapability security: %s\nGateway image: %s (inputs changed: %s)\n' \
+              "$QUALITY_RESULT" "$REPOSITORY_RESULT" "$DEPLOYMENT_RESULT" "$TESTS_RESULT" "$CREDENTIAL_HOST_RESULT" "$CAPABILITY_RESULT" "$GATEWAY_IMAGE_RESULT" "$GATEWAY_IMAGE_CHANGED"
             exit 1
           fi

@@ -1,7 +1,7 @@
 import { mkdir } from "node:fs/promises"
 import { dirname } from "node:path"
 import { BunRuntime } from "@effect/platform-bun"
-import { SqliteClient } from "@effect/sql-sqlite-bun"
+import { workflowdDatabase } from "./store/database"
 import { Effect, Layer } from "effect"
 import { makeClaudeCli } from "./kernel/claude-session"
 import { ClaudeResumeExecutor, makeClaudeResumeExecutor } from "./remote/claude-resume-executor"
@@ -29,7 +29,7 @@ export const runRemoteRunnerProcess = (options: RemoteRunnerProcessOptions = {})
       try: () => mkdir(dirname(config.databasePath), { recursive: true }),
       catch: (cause) => new Error(`Could not create remote state directory: ${String(cause)}`),
     })
-    const database = SqliteClient.layer({ filename: config.databasePath })
+    const database = workflowdDatabase(config.databasePath)
     const executor = Layer.succeed(
       ClaudeResumeExecutor,
       makeClaudeResumeExecutor({

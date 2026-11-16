@@ -5,7 +5,11 @@ import { AgentRunStore } from "../../src/kernel/agent-run-store"
 import { makeSandboxStore } from "../../src/sandbox/store"
 import { capabilityDigest, makeCapabilityStore } from "../../src/capability-gateway/store"
 import { randomBytes } from "node:crypto"
+import { runGatewayMigrations } from "../../src/capability-gateway/migrations"
+import { liveGrants } from "../../src/sandbox/capability-control"
+import { defaultRunBudget } from "../../src/sandbox/config"
 import { mkdir, writeFile } from "node:fs/promises"
+import { sessionKeyPair, signRenewal } from "../../deploy/sandbox/renewal.mjs"
 import { join, resolve } from "node:path"
 
 /** The mint command of the real run-capability provider. */
@@ -51,13 +55,30 @@ export async function writeNoscopeProviders(
   await writeNoscopeProvider(root, "provider-access", [process.execPath, join(root, "access.mjs")])
 }
 
+/**
+ * workflowd grants each of its live native runs to the gateway store, as its control client does
+ * on the socket. In-process tests keep both stores in one database for brevity; the processes
+ * never do (control.e2e.test.ts).
+ */
+export const grantLiveRuns = (now: number) =>
+  Effect.gen(function* () {
+    const live = yield* liveGrants(null, now, defaultRunBudget)
+    return yield* (yield* makeCapabilityStore).reconcileGrants(live)
+  })
+
+/**
+ * The fixture run and its lease in workflowd's store. With `gatewayStore` (the default) the same
+ * database also gets the gateway's tables, and a native run is granted to them.
+ */
 export const seedCapabilityRun = (
   now: number,
   native = false,
   selection?: { modelId: string; sourceSha: string },
+  { gatewayStore = true } = {},
 ) =>
   Effect.gen(function* () {
     yield* runStoreMigrations
+    if (gatewayStore) yield* runGatewayMigrations
     const sql = yield* SqlClient.SqlClient
     yield* sql`INSERT INTO directory_local_identity(singleton,host_id) VALUES(1,'fixture-controller')`
     const runs = yield* AgentRunStore
@@ -101,8 +122,36 @@ export const seedCapabilityRun = (
     })
     yield* leases.beginStart("run")
     yield* leases.recordRun("run", 78, 1)
+    if (gatewayStore) yield* grantLiveRuns(now)
     return { sql, runs, leases }
   })
+
+/** The session key of each session that `bindRunSession` opens. */
+export const fixtureSessionKey = sessionKeyPair()
+
+/**
+ * The relay's signed renewal request numbered `attempt` of the run token whose digest is
+ * `predecessor`, signed at `at` milliseconds: the time of the store's check that it is meant for.
+ */
+export const signedRenewal = (
+  binding: { readonly channel: string },
+  predecessor: string,
+  attempt: number,
+  at: number,
+) => {
+  const time = String(Math.floor(at / 1000))
+  return {
+    signature: signRenewal(
+      fixtureSessionKey.privateKey,
+      binding.channel,
+      predecessor,
+      String(attempt),
+      time,
+    ),
+    attempt: String(attempt),
+    time,
+  }
+}
 
 /**
  * Binds the run of `seedCapabilityRun(now, true)` as production does: the lease's challenge, the
@@ -125,8 +174,10 @@ export const bindRunSession = (
       expiresAt,
       now,
       now + 610000,
+      fixtureSessionKey.publicKey,
     )
-    yield* (yield* makeSandboxStore).bindSession("run", 78, 1)
+    if (yield* store.sessionBound("run", 78, 1))
+      yield* (yield* makeSandboxStore).bindSession("run", 78, 1)
     // The session answer names when to renew; production picks 10 to 12 minutes in.
     return { binding: { runId, channel }, token, expiresAt, renewAt: now + 600000 }
   })

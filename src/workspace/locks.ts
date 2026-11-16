@@ -8,6 +8,11 @@ type LockEntry = {
 export class ScopedKeyedLock {
   readonly #entries = new Map<string, LockEntry>()
 
+  /** The keys that an acquisition holds or waits for; a key leaves when its last one ends. */
+  get size(): number {
+    return this.#entries.size
+  }
+
   acquire(key: string): Effect.Effect<void, never, Scope.Scope> {
     return Effect.uninterruptibleMask((restore) =>
       Effect.gen({ self: this }, function* () {

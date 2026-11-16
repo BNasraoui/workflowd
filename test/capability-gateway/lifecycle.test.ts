@@ -10,6 +10,7 @@ import { AgentRunStoreLive } from "../../src/kernel/agent-run-store"
 import { makeCapabilityGateway } from "../../src/capability-gateway/service"
 import {
   bindRunSession,
+  grantLiveRuns,
   seedCapabilityRun,
   writeNoscopeProvider,
   writeNoscopeProviders,
@@ -26,7 +27,7 @@ for (const [ending, phase] of [
   ["cancel", "mint"],
   ["release", "mint"],
 ] as const) {
-  test(`${ending} aborts owned ${phase} and releases admission`, async () => {
+  test(`${ending} ${phase === "mint" ? "ends its wait for the mint, which the gateway's end alone ends," : `aborts owned ${phase}`} and releases admission`, async () => {
     const root = await mkdtemp(join(tmpdir(), "gateway-lifetime-"))
     await writeNoscopeProviders(root, 120000)
     const started = Promise.withResolvers<AbortSignal | undefined>()
@@ -37,6 +38,12 @@ for (const [ending, phase] of [
     const closed = Promise.withResolvers<void>()
     const sockets = new Set<Socket>()
     let snapshots = 0
+    let held: Socket | undefined
+    const access = JSON.stringify({
+      admitted: true,
+      token: "fixture-access",
+      expiresAt: Date.now() + 120000,
+    })
     const host = createServer((socket) => {
       sockets.add(socket)
       socket.on("error", () => {})
@@ -46,15 +53,10 @@ for (const [ending, phase] of [
         closed.resolve()
       })
       socket.once("data", () => {
-        if (++snapshots === 1) started.resolve(undefined)
-        else
-          socket.end(
-            JSON.stringify({
-              admitted: true,
-              token: "fixture-access",
-              expiresAt: Date.now() + 120000,
-            }) + "\n",
-          )
+        if (++snapshots === 1) {
+          held = socket
+          started.resolve(undefined)
+        } else socket.end(access + "\n")
       })
     })
     if (phase === "mint") {
@@ -128,7 +130,7 @@ for (const [ending, phase] of [
                     },
                     { highWaterMark: 0 },
                   )
-                : JSON.stringify({ model: "fixture-model" })
+                : JSON.stringify({ model: "fixture-model", max_tokens: 1000 })
             firstRequest = false
             return new Request(
               "http://capability.invalid/capabilities/v1/providers/anthropic/v1/messages",
@@ -168,9 +170,18 @@ for (const [ending, phase] of [
           } else if (ending === "interrupt") yield* Fiber.interrupt(pending)
           else if (ending === "cancel") yield* runs.cancel({ runId: "run", now: new Date() })
           else yield* leases.beginRelease("run")
+          // workflowd follows the change with a reconcile on the control socket.
+          if (ending !== "interrupt") yield* grantLiveRuns(Date.now())
           if (phase === "mint") {
-            yield* Effect.promise(() => closed.promise)
+            // The call's end is not the mint's: the provider still waits for its answer.
             if (ending !== "interrupt") yield* Fiber.join(pending)
+            yield* Effect.sleep("300 millis")
+            expect(aborted).toBe(false)
+            // Once answered, the mint serves the next call; else the gateway's end ends it.
+            if (ending === "interrupt") {
+              held?.end(access + "\n")
+              yield* Effect.promise(() => closed.promise)
+            }
             expect(calls).toBe(0)
           }
           if (signal) expect(signal.aborted).toBe(true)
@@ -178,7 +189,7 @@ for (const [ending, phase] of [
             const reading = body
             expect(yield* Effect.promise(() => reading)).toBe("interrupted")
           }
-          expect(aborted).toBe(true)
+          if (phase !== "mint" || ending === "interrupt") expect(aborted).toBe(true)
           const next = yield* gateway.handle(request())
           expect(next.status).toBe(ending === "interrupt" ? 200 : 403)
           if (ending === "interrupt") expect(yield* Effect.promise(() => next.text())).toBe("valid")
@@ -197,6 +208,11 @@ for (const [ending, phase] of [
           Effect.scoped,
         ),
       )
+      // The gateway's end ends a mint that is still in flight.
+      if (phase === "mint") {
+        await closed.promise
+        expect(aborted).toBe(true)
+      }
     } finally {
       for (const socket of sockets) socket.destroy()
       host.close()
