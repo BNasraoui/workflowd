@@ -93,9 +93,11 @@ jobs:
         if: inputs.bootstrap-mode == 'private'
         # The helper waits up to 180 seconds for the gateway to know the run, then proves itself.
         timeout-minutes: 5
-        # bootstrap.mjs reads only GITHUB_REF, GITHUB_SHA and the gateway URL of this step.
+        # bootstrap.mjs reads GITHUB_REF, GITHUB_SHA, and the gateway URL and the job's image of this
+        # step; the run client refuses a launch of another image.
         env:
           SANDBOX_GATEWAY_URL: ${{ inputs.gateway-url }}
+          SANDBOX_AGENT_IMAGE: ${{ inputs.agent-image }}
         run: node deploy/sandbox/public-output.mjs bootstrap -- bash deploy/sandbox/runner.sh prepare-private
       - name: Hold the lease
         # The runner injects OIDC variables after step env overrides. Strip them

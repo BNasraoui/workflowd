@@ -224,6 +224,7 @@ function assertSandboxResultIsolation(workflows: Record<string, string>) {
   for (const [name, source] of Object.entries(workflows)) {
     if (name === "ben-approval.yml") continue
     const jobs = object(object(Bun.YAML.parse(source)).jobs ?? {})
+    for (const job of Object.values(jobs)) assertRunnerCaller(name, object(job))
     if (jobs["agent-publish"] === undefined) continue
     const publish = object(jobs["agent-publish"])
     if (
@@ -233,6 +234,33 @@ function assertSandboxResultIsolation(workflows: Record<string, string>) {
     )
       throw new Error(`Sealed result isolation: ${name} publishes only after a legacy run`)
   }
+}
+
+/** A value that only the repository's administrator sets: a literal, or a repository variable with a literal fallback. */
+const administratorValue =
+  /^(?:[^$]*|\$\{\{\s*vars\.[A-Z][A-Z0-9_]*(?:\s*\|\|\s*'[A-Za-z0-9-]*')?\s*\}\})$/
+
+/**
+ * A job that calls agent-sandbox.yml gives each input from a literal or a repository variable,
+ * never from the event or another context of the push; and a caller that gives the bootstrap
+ * mode, which can select private mode, also gives the gateway URL and the job's image, which the
+ * private first contact reads.
+ */
+function assertRunnerCaller(name: string, job: ReturnType<typeof object>) {
+  if (job.uses !== "./.github/workflows/agent-sandbox.yml") return
+  const inputs = object(job.with ?? {})
+  for (const [input, value] of Object.entries(inputs))
+    if (typeof value !== "string" || !administratorValue.test(value))
+      throw new Error(
+        `Runner caller: ${name} gives ${input} from a value other than a literal or a repository variable`,
+      )
+  if (
+    inputs["bootstrap-mode"] !== undefined &&
+    (inputs["gateway-url"] === undefined || inputs["agent-image"] === undefined)
+  )
+    throw new Error(
+      `Runner caller: ${name} selects a bootstrap mode without the gateway URL and the image`,
+    )
 }
 
 export function assertUnprivilegedPrWorkflows(workflows: Record<string, string>): void {

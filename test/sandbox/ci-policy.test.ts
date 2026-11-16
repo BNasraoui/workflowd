@@ -359,3 +359,37 @@ test("the sealed result is an artifact only of a legacy run, and the legacy publ
   ])
     expect(() => assertUnprivilegedPrWorkflows({ ...files, ...changed })).toThrow("Sealed result")
 })
+
+test("a caller of agent-sandbox.yml gives each input from a literal or a repository variable, and the private mode with its gateway URL and image", async () => {
+  const files = await workflows()
+  const caller = files["agent-sandbox-caller.yml"]!
+  const mode = "      bootstrap-mode: ${{ vars.SANDBOX_BOOTSTRAP_MODE || 'legacy-artifact' }}\n"
+  const gateway = "      gateway-url: ${{ vars.SANDBOX_GATEWAY_URL }}\n"
+  const image = "      agent-image: ${{ vars.SANDBOX_AGENT_IMAGE }}\n"
+  for (const line of [mode, gateway, image]) expect(caller).toContain(line)
+  expect(() =>
+    assertUnprivilegedPrWorkflows({
+      ...files,
+      "agent-sandbox-caller.yml": caller.replace(mode, "      bootstrap-mode: private\n"),
+    }),
+  ).not.toThrow()
+  for (const [changed, message] of [
+    [
+      caller.replace(mode, "      bootstrap-mode: ${{ github.event.head_commit.message }}\n"),
+      "gives bootstrap-mode from a value",
+    ],
+    [
+      caller.replace(gateway, "      gateway-url: ${{ github.event.ref }}\n"),
+      "gives gateway-url from a value",
+    ],
+    [
+      caller.replace(image, "      agent-image: ${{ vars.X }}-${{ github.sha }}\n"),
+      "gives agent-image from a value",
+    ],
+    [caller.replace(gateway, ""), "selects a bootstrap mode without the gateway URL"],
+    [caller.replace(image, ""), "selects a bootstrap mode without the gateway URL and the image"],
+  ] as const)
+    expect(() =>
+      assertUnprivilegedPrWorkflows({ ...files, "agent-sandbox-caller.yml": changed }),
+    ).toThrow(`Runner caller: agent-sandbox-caller.yml ${message}`)
+})

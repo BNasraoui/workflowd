@@ -18,6 +18,10 @@ jobs:
       id-token: write
     uses: ./.github/workflows/agent-sandbox.yml
     with:
+      # private: the run's result goes to the daemon through the gateway, and no artifact is made.
+      # The mode must be the mode of the daemon's policy of this repository.
+      bootstrap-mode: ${{ vars.SANDBOX_BOOTSTRAP_MODE || 'legacy-artifact' }}
+      gateway-url: ${{ vars.SANDBOX_GATEWAY_URL }}
       agent-image: ${{ vars.SANDBOX_AGENT_IMAGE }}
       repository-id: "1306107007"
       app-actor-id: "306741873"
