@@ -87,9 +87,13 @@ function runClaude(box, launch, log) {
   const timer = setTimeout(() => child.kill("SIGKILL"), Math.max(0, launch.deadline - Date.now()))
   return (async () => {
     let result = ""
+    let lines = 0
+    let last = ""
     try {
       for await (const line of createInterface({ input: child.stdout, crlfDelay: Infinity })) {
         if (line.length === 0) continue
+        lines += 1
+        last = line
         process.stdout.write(`${line}\n`)
         try {
           const value = JSON.parse(line)
@@ -104,6 +108,7 @@ function runClaude(box, launch, log) {
     } finally {
       clearTimeout(timer)
       child.kill("SIGKILL")
+      log(`claude lines: ${lines}; last: ${last.slice(0, 2000)}`)
       log(`claude errors: ${errors.trim()}`)
     }
   })()

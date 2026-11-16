@@ -19,7 +19,11 @@ import {
 } from "../../src/kernel/sealed-result"
 import { KernelSessionStoreLive } from "../../src/kernel/session-store"
 import { makeOpenCodeSdkClient, SdkOpenCodeAdapter } from "../../src/opencode/adapter"
-import { makeDaemonCapability, type DaemonCapability } from "../../src/sandbox/capability-control"
+import {
+  controlClient,
+  makeDaemonCapability,
+  type DaemonCapability,
+} from "../../src/sandbox/capability-control"
 import { defaultRunBudget } from "../../src/sandbox/config"
 import { makeSandboxDispatch, SandboxDispatch } from "../../src/sandbox/dispatch"
 import { RepositoryVisibility } from "../../src/sandbox/github"
@@ -573,6 +577,16 @@ export async function withRunnerDaemon<A>(
             .upstreamRequests()
             .map((call) => call.path)
             .join(" ")}`,
+          `events held: ${await Effect.runPromise(
+            controlClient(f.config.controlSocket)
+              .readEvents(lease.id, 0)
+              .pipe(
+                Effect.map((read) =>
+                  JSON.stringify(read.batches.flatMap((batch) => batch.lines)).slice(-3000),
+                ),
+                Effect.catch((error) => Effect.succeed(`unread: ${error._tag}`)),
+              ),
+          )}`,
           `gateway: ${(gateway?.output?.() ?? "").slice(-3000)}`,
         ].join("\n"),
     })
