@@ -284,11 +284,11 @@ jobs:
         run: bash scripts/evidence/credential-host-setup.sh namespaces
       - name: Prepare disposable credential identities and trusted clients
         run: bash scripts/evidence/credential-host-setup.sh identities
-      # The gateway runs as agent-fixture and is configured for ben-fixture as its daemon, with the
-      # group the two share; the callers are ben-fixture, another uid of that group and a uid
-      # outside it. The script runs as root only to take each uid. It mints no run token, so
-      # noscope is any executable here.
-      - name: Require the control socket to accept only the daemon's uid across two users
+      # The gateway runs as agent-fixture and is configured for ben-fixture as its daemon and for
+      # a third uid of their group as its front; the callers of each socket are its own uid,
+      # another uid of that group and a uid outside it. The script runs as root only to take each
+      # uid. It mints no run token, so noscope is any executable here.
+      - name: Require the control socket and the listener to accept only their own uid across users
         run: >-
           sudo systemd-run --wait --pipe --collect
           -p MemoryMax=2G -p MemorySwapMax=0 --working-directory="$PWD"

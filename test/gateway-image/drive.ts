@@ -1,7 +1,9 @@
 import "../resources/preload"
 import { strict as assert } from "node:assert"
-import { chmod, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises"
-import { join } from "node:path"
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { basename, dirname, join, resolve } from "node:path"
+import { loopbackCertificate } from "../helpers/loopback-tls"
 import {
   claudeLogin,
   client,
@@ -21,13 +23,184 @@ import {
  * The gateway image under Docker, against the session fixtures. The preload holds the run under
  * the test resource guard, as test/resources/run.ts does: workflowd's store and the gateway's,
  * the noscope providers, key server and model upstream, with the image's own Bun, modules and
- * noscope. Each container runs as the image's own user. This process is workflowd: it grants the
- * fixture run on the gateway's control socket, which the container serves for the runner's uid
- * and group.
+ * noscope. Each gateway container runs as the image's own user, on a bridge network of its own
+ * for its calls to the fixture servers, which listen on the bridge's address of this host; it
+ * publishes no port. Its listener is a Unix socket in a volume that it shares with the front
+ * container and with no other: the front runs the test front of test/helpers/loopback-tls.ts as
+ * the front's user and publishes one port, through which each client of this test reaches the
+ * gateway. This process is workflowd: it grants the fixture run on the gateway's control socket,
+ * which the container serves for the runner's uid and group.
  */
 const image = "workflowd-gateway:local"
 const imageUser = "10001"
+/** The front's uid and gid; a uid outside its group; another uid of its group. */
+const frontId = "10002"
+const outsiderId = "10003"
+const groupMemberId = "10004"
+/** Where the volume of the listener's directory is in each container that has it. */
+const volumeMount = "/run/workflowd-gateway"
+const listenSocket = `${volumeMount}/front/gateway.sock`
+/** The port of the front in its container, which it publishes on this host's loopback. */
+const frontPort = 8443
+const network = `workflowd-gateway-image-${process.pid}`
+const volume = `workflowd-gateway-front-${process.pid}`
 let started = 0
+
+/** A docker command; its output, or a failure that names the command. */
+async function docker(args: ReadonlyArray<string>) {
+  const child = Bun.spawn(["docker", ...args], { stdout: "pipe", stderr: "pipe" })
+  const [stdout, stderr, code] = await Promise.all([
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+    child.exited,
+  ])
+  if (code !== 0) throw new Error(`docker ${args[0]} failed: ${stderr}`)
+  return stdout.trim()
+}
+
+/** Waits until the output of the container `name` holds `line`. */
+async function logged(name: string, line: string) {
+  for (let tries = 0; tries < 300; tries++) {
+    const logs = Bun.spawn(["docker", "logs", name], { stdout: "pipe", stderr: "pipe" })
+    const [stdout, stderr] = await Promise.all([
+      new Response(logs.stdout).text(),
+      new Response(logs.stderr).text(),
+    ])
+    await logs.exited
+    if (`${stdout}\n${stderr}`.split("\n").includes(line)) return
+    await Bun.sleep(100)
+  }
+  throw new Error(`${name} did not log ${line}`)
+}
+
+/** The flags that each container of this test has: no new privilege, no capability. */
+const lockedDown = [
+  "--read-only",
+  "--tmpfs",
+  "/tmp",
+  "--cap-drop",
+  "ALL",
+  "--security-opt",
+  "no-new-privileges",
+]
+
+/**
+ * The front's container, on the gateway's bridge: the image's Bun runs the test front as the
+ * front's uid and gid, with the listener's volume, the front's certificate, and the port that it
+ * publishes on this host's loopback. A client reaches the gateway at `origin`, trusting `ca`.
+ */
+async function startFront(tls: { key: string; cert: string }) {
+  const name = `workflowd-gateway-front-${process.pid}`
+  await docker([
+    "run",
+    "--detach",
+    "--rm",
+    "--name",
+    name,
+    "--network",
+    network,
+    ...lockedDown,
+    "--user",
+    `${frontId}:${frontId}`,
+    "--volume",
+    `${volume}:${volumeMount}`,
+    "--volume",
+    `${resolve("test/helpers/loopback-tls.ts")}:/front/loopback-tls.ts:ro`,
+    "--volume",
+    `${dirname(tls.key)}:/front/tls:ro`,
+    "--publish",
+    `127.0.0.1::${frontPort}`,
+    "--entrypoint",
+    "/bin/bun",
+    image,
+    "-e",
+    `import { tlsFront } from "/front/loopback-tls.ts"
+await tlsFront({ key: "/front/tls/${basename(tls.key)}", cert: "/front/tls/${basename(tls.cert)}" }, ${JSON.stringify(listenSocket)}, {}, { host: "0.0.0.0", port: ${frontPort} })
+console.log("listening")`,
+  ])
+  await logged(name, "listening")
+  const port = /:(\d+)$/.exec(await docker(["port", name, `${frontPort}/tcp`]))?.[1]
+  if (port === undefined) throw new Error("the front publishes no port")
+  return {
+    name,
+    origin: `https://127.0.0.1:${port}`,
+    service: `127.0.0.1:${port}`,
+    ca: await readFile(tls.cert, "utf8"),
+    stop: () => docker(["rm", "--force", name]),
+  }
+}
+type FrontContainer = Awaited<ReturnType<typeof startFront>>
+
+/**
+ * A container of the image with `options`: on `network` (none unless named), as `user` (the
+ * image's unless named), with the listener's volume when `volume` holds; the image's Bun runs
+ * `source`. Its standard output, standard error and exit code.
+ */
+async function probe(
+  source: string,
+  options: { readonly network?: string; readonly user?: string; readonly volume?: boolean } = {},
+) {
+  const child = Bun.spawn(
+    [
+      "docker",
+      "run",
+      "--rm",
+      "--network",
+      options.network ?? "none",
+      ...lockedDown,
+      ...(options.user === undefined ? [] : ["--user", options.user]),
+      ...(options.volume ? ["--volume", `${volume}:${volumeMount}`] : []),
+      "--entrypoint",
+      "/bin/bun",
+      image,
+      "-e",
+      source,
+    ],
+    { stdin: "ignore", stdout: "pipe", stderr: "pipe" },
+  )
+  const [stdout, stderr, code] = await Promise.all([
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+    child.exited,
+  ])
+  return { stdout, stderr, code }
+}
+
+/** The TCP listen entries (state 0A) of the network namespace of the container `name`. */
+async function listenEntries(name: string) {
+  return JSON.parse(
+    await docker([
+      "exec",
+      name,
+      "/bin/bun",
+      "-e",
+      `const fs = require("node:fs"); const out = []
+for (const t of ["tcp", "tcp6"]) for (const l of fs.readFileSync("/proc/self/net/" + t, "utf8").split("\\n").slice(1)) { const f = l.trim().split(/\\s+/); if (f[3] === "0A") out.push(t + " " + f[1]) }
+process.stdout.write(JSON.stringify(out))`,
+    ]),
+  ) as unknown
+}
+
+/**
+ * A request for a challenge on the listener's socket, with the headers of the front, from a
+ * container as `user` with the listener's volume: the status line of the answer, `ended` when
+ * the connection ends with no answer, or the error of the connect.
+ */
+async function socketCall(user: string, service: string) {
+  const request = `GET /capabilities/v1/challenge?lease=lease HTTP/1.1\r\nhost: localhost\r\nx-forwarded-for: 100.64.0.7\r\nx-forwarded-proto: https\r\nx-forwarded-host: ${service}\r\nconnection: close\r\n\r\n`
+  const result = await probe(
+    `let answer = "", done = false
+const end = (text) => { if (!done) { done = true; process.stdout.write(text) } }
+const socket = require("node:net").connect(${JSON.stringify(listenSocket)})
+socket.on("connect", () => socket.write(${JSON.stringify(request)}))
+socket.on("data", (bytes) => (answer += bytes))
+socket.on("error", (error) => end("error " + error.code))
+socket.on("close", () => end(answer === "" ? "ended" : answer.split("\\r\\n")[0]))`,
+    { user, volume: true },
+  )
+  if (result.code !== 0) throw new Error(`the call as ${user} failed: ${result.stderr}`)
+  return result.stdout
+}
 
 /** The runner's group; each container adds it to the image's user to reach the fixture. */
 function runnerGroup() {
@@ -117,21 +290,31 @@ async function gatewayIds(name: string) {
 }
 
 /**
- * A container of the image on the host network. `entrypoint` runs the image's own command; else
- * the image's Bun runs the same server with the fixture's key server and upstream, as the gateway
- * process of the session tests does. No `--user` replaces the image's user.
+ * A container of the image on the gateway's bridge, with the listener's volume and the fixture
+ * root, behind `front`. `entrypoint` runs the image's own command; else the image's Bun runs the
+ * same server with the fixture's key server and upstream, as the gateway process of the session
+ * tests does. No `--user` replaces the image's user. With `oauthPort`, a second container in the
+ * gateway's network namespace forwards that port of its loopback to the same port of the bridge's
+ * address of this host, where the fixture OAuth server is: custody takes a plain HTTP token URL
+ * on loopback only.
  */
 async function imageGateway(
   f: Fixture,
+  front: FrontContainer,
   entrypoint: boolean,
   custody: object = {},
-): Promise<Gateway> {
+  oauthPort?: number,
+): Promise<Gateway & { readonly name: string }> {
   const name = `workflowd-gateway-image-${process.pid}-${++started}`
+  const forwarder = `${name}-oauth`
   const group = runnerGroup()
-  const config = imageConfig(f, custody)
+  const config = imageConfig(f, front.service, custody)
   const removed = async () => {
-    await Bun.spawn(["docker", "rm", "--force", name], { stdout: "ignore", stderr: "ignore" })
-      .exited
+    for (const container of [forwarder, name])
+      await Bun.spawn(["docker", "rm", "--force", container], {
+        stdout: "ignore",
+        stderr: "ignore",
+      }).exited
   }
   const container = await startGatewayProcess(
     [
@@ -141,18 +324,17 @@ async function imageGateway(
       "--name",
       name,
       "--network",
-      "host",
-      "--read-only",
-      "--tmpfs",
-      "/tmp",
-      "--cap-drop",
-      "ALL",
-      "--security-opt",
-      "no-new-privileges",
+      network,
+      ...lockedDown,
       "--group-add",
       group,
+      // The gateway gives the listener's directory the front's group.
+      "--group-add",
+      frontId,
       "--volume",
       `${f.root}:${f.root}`,
+      "--volume",
+      `${volume}:${volumeMount}`,
       "--env",
       "WORKFLOWD_CAPABILITY_GATEWAY",
       ...(entrypoint
@@ -166,6 +348,7 @@ async function imageGateway(
           ]),
     ],
     { PATH: process.env.PATH, WORKFLOWD_CAPABILITY_GATEWAY: JSON.stringify(config) },
+    front,
   ).catch(async (error: unknown) => {
     await removed()
     throw error
@@ -185,6 +368,30 @@ async function imageGateway(
     )
     // The gateway writes no core file, nor does a process it starts: they inherit the limit.
     assert.deepEqual(ids.core, ["0", "0"], "the gateway's core file limit is not 0")
+    if (oauthPort !== undefined) {
+      await docker([
+        "run",
+        "--detach",
+        "--rm",
+        "--name",
+        forwarder,
+        "--network",
+        `container:${name}`,
+        ...lockedDown,
+        "--entrypoint",
+        "/bin/bun",
+        image,
+        "-e",
+        `const net = require("node:net")
+net.createServer((client) => {
+  const server = net.connect(${oauthPort}, ${JSON.stringify(bridge)})
+  client.on("error", () => server.destroy())
+  server.on("error", () => client.destroy())
+  client.pipe(server).pipe(client)
+}).listen(${oauthPort}, "127.0.0.1", () => console.log("forwarding"))`,
+      ])
+      await logged(forwarder, "forwarding")
+    }
   } catch (error) {
     await stop()
     throw error
@@ -193,26 +400,31 @@ async function imageGateway(
     await stop()
     throw error
   })
-  return { port: container.port, stop }
+  return { ...container, name, stop }
 }
 
-/** The gateway's configuration in the image; `custody` adds the login that custody holds. */
-const imageConfig = (f: Fixture, custody: object = {}) => ({
+/** The listen section of the gateway in the image, behind the front of the Service `service`. */
+const imageListen = (service: string) => ({
+  socket: listenSocket,
+  front: { uid: Number(frontId), gid: Number(frontId) },
+  service,
+})
+
+/**
+ * The gateway's configuration in the image, behind the front of the Service `service`; `custody`
+ * adds the login that custody holds, or replaces a key.
+ */
+const imageConfig = (f: Fixture, service: string, custody: object = {}) => ({
   ...f.config,
   noscope: { binary: "/bin/noscope", configHome: f.root },
   daemon: { uid: process.getuid!(), gid: Number(runnerGroup()) },
+  listen: imageListen(service),
   ...custody,
 })
 
 /** The flags of each container of the image, as Phase 1 runs it. */
 const containerFlags = (f: Fixture) => [
-  "--read-only",
-  "--tmpfs",
-  "/tmp",
-  "--cap-drop",
-  "ALL",
-  "--security-opt",
-  "no-new-privileges",
+  ...lockedDown,
   "--group-add",
   runnerGroup(),
   "--volume",
@@ -247,10 +459,12 @@ async function asImageUser(f: Fixture, source: string) {
 
 /**
  * The image's own command with `args`, `input` on its standard input and the gateway's
- * configuration with custody: `import-login`, or a start that custody refuses.
+ * configuration with custody, behind the front of the Service `service`: `import-login`, or a
+ * start that the configuration or custody refuses. It has no network, and the listener's volume.
  */
 async function imageCommand(
   f: Fixture,
+  service: string,
   custody: object,
   args: ReadonlyArray<string>,
   input?: string,
@@ -263,8 +477,10 @@ async function imageCommand(
       "--rm",
       "--interactive",
       "--network",
-      "host",
+      "none",
       ...containerFlags(f),
+      "--volume",
+      `${volume}:${volumeMount}`,
       ...(user === undefined ? [] : ["--user", user]),
       "--env",
       "WORKFLOWD_CAPABILITY_GATEWAY",
@@ -274,7 +490,7 @@ async function imageCommand(
     {
       env: {
         PATH: process.env.PATH,
-        WORKFLOWD_CAPABILITY_GATEWAY: JSON.stringify(imageConfig(f, custody)),
+        WORKFLOWD_CAPABILITY_GATEWAY: JSON.stringify(imageConfig(f, service, custody)),
       },
       stdin: "pipe",
       stdout: "pipe",
@@ -305,25 +521,121 @@ walk(${JSON.stringify(f.root)}); fs.chmodSync(${JSON.stringify(f.root)}, 0o700)`
 
 const loginDirectory = (f: Fixture) => join(f.root, "login")
 
-const f = await fixture()
-const oauth = oauthFixture()
+// The gateway's bridge, and the address of this host on it, where the fixture servers listen.
+await docker(["network", "create", network])
+const bridge = await docker([
+  "network",
+  "inspect",
+  "--format",
+  "{{(index .IPAM.Config 0).Gateway}}",
+  network,
+])
+await docker(["volume", "create", volume])
+const f = await fixture({}, bridge)
+const oauth = oauthFixture(bridge)
+const tlsDirectory = await mkdtemp(join(tmpdir(), "wfd-front-tls-"))
 const gateways: Gateway[] = []
-const start = async (entrypoint = false, custody: object = {}) => {
-  const gateway = await imageGateway(f, entrypoint, custody)
-  gateways.push(gateway)
-  return gateway
-}
+let front: FrontContainer | undefined
 try {
   await fixtureForImageUser(f)
+  // The volume's root is the gateway's user's, as a deployment gives it: the gateway makes the
+  // listener's directory in it, with the front's group.
+  const owned = await probe(
+    `require("node:fs").chownSync(${JSON.stringify(volumeMount)}, ${imageUser}, ${imageUser})`,
+    { user: "0:0", volume: true },
+  )
+  assert.equal(owned.code, 0, owned.stderr)
+  // The front's certificate, which its user reads.
+  await chmod(tlsDirectory, 0o755)
+  const tls = await loopbackCertificate(tlsDirectory)
+  for (const path of [tls.key, tls.cert]) await chmod(path, 0o644)
+
+  // The image's own command with a host in its listen section exits with the fixed error, and
+  // makes nothing in the listener's volume.
+  const withHost = await imageCommand(
+    f,
+    "gateway.example.ts.net",
+    {
+      listen: { ...imageListen("gateway.example.ts.net"), host: "127.0.0.1" },
+    },
+    [],
+  )
+  assert.notEqual(withHost.code, 0)
+  assert.match(
+    withHost.stdout + withHost.stderr,
+    /Expected no excess property\s+at \["listen"\]\["host"\]/,
+  )
+  const volumeEntries = await probe(
+    `process.stdout.write(JSON.stringify(require("node:fs").readdirSync(${JSON.stringify(volumeMount)})))`,
+    { volume: true },
+  )
+  assert.deepEqual(JSON.parse(volumeEntries.stdout), [], "the refused start made an entry")
+  console.log("gateway image: a listen section with a host is refused with the fixed error")
+
+  front = await startFront(tls)
+  const frontContainer = front
+  const start = async (entrypoint = false, custody: object = {}, oauthPort?: number) => {
+    const gateway = await imageGateway(f, frontContainer, entrypoint, custody, oauthPort)
+    gateways.push(gateway)
+    return gateway
+  }
 
   // The image's own command migrates the store, listens and issues a challenge.
   const own = await start(true)
-  const ownChallenge = await client(own.port).challenge("lease")
+  const ownChallenge = await client(own).challenge("lease")
   assert.equal(ownChallenge.status, 200)
   await own.stop()
 
   let gateway = await start()
-  const at = () => client(gateway.port)
+  const at = () => client(gateway)
+
+  // The gateway container publishes no port, and its network namespace holds no TCP socket in
+  // the listen state; the same reads of the front's container find its published port.
+  assert.equal(await docker(["port", gateway.name]), "", "the gateway publishes a port")
+  assert.match(await docker(["port", frontContainer.name]), new RegExp(`^${frontPort}/tcp -> `))
+  assert.deepEqual(await listenEntries(gateway.name), [], "the gateway's namespace listens on TCP")
+  assert.deepEqual(await listenEntries(frontContainer.name), [
+    `tcp 00000000:${frontPort.toString(16).toUpperCase()}`,
+  ])
+  // A container on the same bridge, without the volume, reaches no port of the gateway and has
+  // no socket of it; it reaches the front's port.
+  const address = (name: string) =>
+    docker([
+      "inspect",
+      "--format",
+      `{{(index .NetworkSettings.Networks ${JSON.stringify(network)}).IPAddress}}`,
+      name,
+    ])
+  const reach = await probe(
+    `const net = require("node:net")
+const connect = (host, port) => new Promise((done) => {
+  const socket = net.connect(port, host)
+  const timer = setTimeout(() => { socket.destroy(); done("timeout") }, 3000)
+  socket.on("connect", () => { clearTimeout(timer); socket.destroy(); done("open") })
+  socket.on("error", (error) => { clearTimeout(timer); done(error.code) })
+})
+const gateway = {}
+for (const port of [80, 443, 8080, 8443, 8787]) gateway[port] = await connect(${JSON.stringify(await address(gateway.name))}, port)
+process.stdout.write(JSON.stringify({ gateway, front: await connect(${JSON.stringify(await address(frontContainer.name))}, ${frontPort}), socket: require("node:fs").existsSync(${JSON.stringify(listenSocket)}) }))`,
+    { network },
+  )
+  assert.equal(reach.code, 0, reach.stderr)
+  assert.deepEqual(JSON.parse(reach.stdout), {
+    gateway: Object.fromEntries([80, 443, 8080, 8443, 8787].map((port) => [port, "ECONNREFUSED"])),
+    front: "open",
+    socket: false,
+  })
+  // With the volume: a uid outside the front's group cannot connect; a uid of the group that is
+  // not the front's is ended at accept; the front's uid is answered.
+  assert.equal(
+    await socketCall(`${outsiderId}:${outsiderId}`, frontContainer.service),
+    "error EACCES",
+  )
+  assert.equal(await socketCall(`${groupMemberId}:${frontId}`, frontContainer.service), "ended")
+  assert.equal(await socketCall(`${frontId}:${frontId}`, frontContainer.service), "HTTP/1.1 200 OK")
+  console.log(
+    "gateway image: no published port and no TCP listener; a bridge peer without the volume, a uid outside the group and a uid of the group that is not the front's do not reach a route",
+  )
 
   // A first proof opens a session; its token reaches the upstream through the gateway.
   const first = await at().audience()
@@ -383,7 +695,8 @@ try {
   await writeCustodyProvider(
     f.root,
     loginDirectory(f),
-    oauth.url,
+    // Custody reaches the fixture OAuth server on the gateway's loopback, through the forwarder.
+    `http://127.0.0.1:${oauth.port}/v1/oauth/token`,
     "/bin/bun",
     "/app/src/capability-gateway/custody.ts",
   )
@@ -392,6 +705,7 @@ try {
   // import-login as root is refused, and makes no directory.
   const rootImport = await imageCommand(
     f,
+    frontContainer.service,
     custody,
     ["import-login", "claude"],
     JSON.stringify(old),
@@ -410,6 +724,7 @@ try {
   const ownerFault = `custody refused ${loginDirectory(f)}: owner uid ${runnerUid}, custody requires uid ${imageUser}`
   const foreignImport = await imageCommand(
     f,
+    frontContainer.service,
     custody,
     ["import-login", "claude"],
     JSON.stringify(old),
@@ -419,7 +734,7 @@ try {
     stdout: "",
     stderr: `import-login refused: ${ownerFault}\n`,
   })
-  const foreignStart = await imageCommand(f, custody, [])
+  const foreignStart = await imageCommand(f, frontContainer.service, custody, [])
   assert.notEqual(foreignStart.code, 0)
   assert.ok((foreignStart.stdout + foreignStart.stderr).includes(ownerFault), "no owner refusal")
   outputs.push(
@@ -433,6 +748,7 @@ try {
   // the image's user.
   const importedLogin = await imageCommand(
     f,
+    frontContainer.service,
     custody,
     ["import-login", "claude"],
     JSON.stringify(old),
@@ -458,8 +774,8 @@ process.stdout.write(JSON.stringify([of(${JSON.stringify(loginDirectory(f))}), o
 
   // Two starts: the first renews once, before its upstream call; the second uses the stored login.
   for (const [index, jti] of ["jti-custody-1", "jti-custody-2"].entries()) {
-    const custodian = await start(false, custody)
-    const at = client(custodian.port)
+    const custodian = await start(false, custody, oauth.port)
+    const at = client(custodian)
     const challenge = await at.audience()
     const session = await at.session(proof(challenge.audience, jti))
     assert.equal(session.status, 200)
@@ -492,7 +808,7 @@ process.stdout.write(JSON.stringify([of(${JSON.stringify(loginDirectory(f))}), o
     `require("node:fs").chmodSync(${JSON.stringify(loginDirectory(f))}, 0o750)`,
   )
   assert.equal(widened.code, 0, widened.stderr)
-  const wideStart = await imageCommand(f, custody, [])
+  const wideStart = await imageCommand(f, frontContainer.service, custody, [])
   assert.notEqual(wideStart.code, 0)
   assert.ok(
     (wideStart.stdout + wideStart.stderr).includes(
@@ -505,7 +821,13 @@ process.stdout.write(JSON.stringify([of(${JSON.stringify(loginDirectory(f))}), o
   // No value in an output of the image's processes, an answer, or the gateway's store. First,
   // a value put there on purpose: an output of import-login, and a store file.
   const plantedOutput = syntheticValue("planted")
-  const plantedImport = await imageCommand(f, custody, ["import-login", plantedOutput], "")
+  const plantedImport = await imageCommand(
+    f,
+    frontContainer.service,
+    custody,
+    ["import-login", plantedOutput],
+    "",
+  )
   assert.equal(plantedImport.code, 1)
   outputs.push(plantedImport.stdout, plantedImport.stderr)
   const plantedStore = syntheticValue("planted")
@@ -532,7 +854,11 @@ process.stdout.write(Buffer.concat(fs.readdirSync(root).filter((n) => /[.]db(-wa
   )
 } finally {
   for (const gateway of gateways) await gateway.stop()
+  await front?.stop()
   await returnFixtureRoot(f)
   await oauth.stop()
   await f.close()
+  await docker(["volume", "rm", volume])
+  await docker(["network", "rm", network])
+  await rm(tlsDirectory, { recursive: true, force: true })
 }

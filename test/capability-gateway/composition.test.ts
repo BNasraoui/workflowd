@@ -224,9 +224,10 @@ test("the gateway config bounds its streams: an idle limit of 1 ms to the listen
     await close()
     // Bun's HTTP server applies its socket timeout again as it starts to listen: each call is the
     // listener's one timeout.
-    expect(socketTimeout.mock.calls.length).toBeGreaterThan(0)
-    for (const call of socketTimeout.mock.calls)
-      expect(call).toEqual([120000, expect.any(Function)])
+    const calls = socketTimeout.mock.calls.length
+    expect(calls).toBeGreaterThan(0)
+    for (let call = 1; call <= calls; call++)
+      expect(socketTimeout).toHaveBeenNthCalledWith(call, 120000, expect.any(Function))
   } finally {
     socketTimeout.mockRestore()
     await rm(root, { recursive: true, force: true })

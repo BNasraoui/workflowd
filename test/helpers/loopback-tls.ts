@@ -114,12 +114,14 @@ export interface FrontHooks {
  * after its start: when `lost(path, status)` holds for a gateway answer, the gateway has sent it
  * and the client never gets it, as the front closes the connection instead; a request reaches the
  * gateway once `held(path)` settles; `alter` changes the headers that the front sends, as a front
- * other than Serve would.
+ * other than Serve would. The front listens on `listen`: a free loopback port unless named, as a
+ * front in a container listens on the port that it publishes.
  */
 export async function tlsFront(
   tls: { key: string; cert: string },
   socket: string,
   hooks: FrontHooks = {},
+  listen: { readonly host: string; readonly port: number } = { host: "127.0.0.1", port: 0 },
 ) {
   let current = hooks
   const server = httpsServer(
@@ -157,7 +159,7 @@ export async function tlsFront(
     })
     pipeline(incoming, upstream, () => {})
   }
-  server.listen(0, "127.0.0.1")
+  server.listen(listen.port, listen.host)
   await once(server, "listening")
   const port = portOf(server)
   return {

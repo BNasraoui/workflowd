@@ -122,9 +122,10 @@ export interface UpstreamRequest {
  * workflowd's side of the control socket on workflowd's store. The run token provider records each start in `mints`, the
  * most it saw running at once in `peaks`, waits while `slow` exists, and gives a token that
  * lives `ttl` seconds when that file names fewer than asked. The model upstream records each
- * request it receives. `keys` add to or replace keys of the gateway config.
+ * request it receives. `keys` add to or replace keys of the gateway config. The key server and
+ * the upstream listen on `host`: loopback, unless a gateway in a container reaches them there.
  */
-export async function fixture(keys: GatewayKeys = {}) {
+export async function fixture(keys: GatewayKeys = {}, host = "127.0.0.1") {
   const root = await mkdtemp(join(tmpdir(), "wfd-gateway-process-"))
   await mkdir(join(root, "live"))
   await writeFile(
@@ -157,7 +158,7 @@ try {
   let cancelled = 0
   const received: UpstreamRequest[] = []
   const upstream = Bun.serve({
-    hostname: "127.0.0.1",
+    hostname: host,
     port: 0,
     fetch: async (request) => {
       const url = new URL(request.url)
@@ -203,7 +204,7 @@ try {
   })
   let keyFetches = 0
   const keyServer = Bun.serve({
-    hostname: "127.0.0.1",
+    hostname: host,
     port: 0,
     fetch: () => {
       keyFetches++
@@ -273,8 +274,8 @@ try {
     daemon,
     /** workflowd grants each of its live runs to the gateway and has it revoke the others. */
     reconcile: () => daemon((capability) => capability.reconcile()),
-    keysUrl: `http://127.0.0.1:${keyServer.port}/`,
-    upstreamUrl: `http://127.0.0.1:${upstream.port}`,
+    keysUrl: `http://${host}:${keyServer.port}/`,
+    upstreamUrl: `http://${host}:${upstream.port}`,
     keyFetches: () => keyFetches,
     mints: async () => (await lines("mints")).length,
     peakMints: async () => Math.max(0, ...(await lines("peaks")).map(Number)),
@@ -637,7 +638,7 @@ export const sentRefresh = (request: OAuthRequest | undefined) =>
 export const claudeClientId = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 
 /**
- * A fixture OAuth server on loopback, a real HTTP server in this process. It reads the request
+ * A fixture OAuth server on `host`, loopback unless named, a real HTTP server in this process. It reads the request
  * as JSON and answers 401 `invalid_client` to any client id but Claude Code's. Else, in `renew`
  * it answers a refresh with `next` (an access value that lives an hour, and a new refresh value),
  * with no `scope` field in `unscoped` and the scope `user:profile` alone in `narrow`. In `refuse`
@@ -646,7 +647,7 @@ export const claudeClientId = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
  * `silent` it never answers. In `hold` it answers as `renew` once `release` is called. In `cut`
  * it sends the status and part of the body, calls `onCut`, and never sends the rest.
  */
-export function oauthFixture() {
+export function oauthFixture(host = "127.0.0.1") {
   type Mode =
     | "renew"
     | "unscoped"
@@ -666,7 +667,7 @@ export function oauthFixture() {
   let released = Promise.withResolvers<void>()
   const requests: OAuthRequest[] = []
   const server = Bun.serve({
-    hostname: "127.0.0.1",
+    hostname: host,
     port: 0,
     idleTimeout: 0,
     fetch: async (request) => {
@@ -714,7 +715,8 @@ export function oauthFixture() {
     },
   })
   return {
-    url: `http://127.0.0.1:${server.port}/v1/oauth/token`,
+    url: `http://${host}:${server.port}/v1/oauth/token`,
+    port: server.port,
     requests: (): ReadonlyArray<OAuthRequest> => requests,
     mode: (
       value: Mode,

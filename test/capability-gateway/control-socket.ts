@@ -22,6 +22,7 @@ export const startGateway = (f: Fixture, config: object = gatewayConfig(f)) =>
     env: {
       PATH: process.env.PATH,
       HOME: f.root,
+      TMPDIR: f.root,
       WORKFLOWD_CAPABILITY_GATEWAY: JSON.stringify(config),
     },
     reconcile: async () => undefined,
