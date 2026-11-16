@@ -235,8 +235,9 @@ async function withDirectory<A>(path: string, body: (directory: Directory) => Pr
 const loginName = (provider: CustodyProvider) => `${provider}.json`
 const stateName = (provider: CustodyProvider) => `${provider}.state`
 /**
- * The line that custody wrote for the last call that failed, for the gateway's log: it names a
- * cause and a path, never a value. Removed once a call succeeds.
+ * The line that custody wrote for the last call that failed, for the gateway's log: it names the
+ * cause of that call and a path, never a value (`faultLine`). A later failure replaces it, and a
+ * call that succeeds removes it.
  */
 const faultName = (provider: CustodyProvider) => `${provider}.fault`
 
@@ -377,41 +378,39 @@ export async function loginFault(path: string, provider: CustodyProvider) {
 }
 
 /**
- * Runs `body` while this process holds the login of `provider`, in its open directory. The lock
- * is an advisory lock on a file of its own. A wait for it ends once `stop` is aborted.
+ * Runs `body` while this process holds the login of `provider` in `directory`. The lock is an
+ * advisory lock on a file of its own. A wait for it ends once `stop` is aborted.
  */
 async function holding<A>(
-  path: string,
+  directory: Directory,
   provider: CustodyProvider,
-  body: (directory: Directory) => Promise<A>,
+  body: () => Promise<A>,
   stop?: AbortSignal,
 ) {
-  return await withDirectory(path, async (directory) => {
-    const name = `${provider}.lock`
-    const lock = await open(
-      directory.at(name),
-      constants.O_RDWR | constants.O_CREAT | constants.O_NOFOLLOW | constants.O_NONBLOCK,
-      0o600,
-    )
-    const libc = dlopen("libc.so.6", {
-      flock: { args: [FFIType.i32, FFIType.i32], returns: FFIType.i32 },
-    })
-    try {
-      refuse(join(path, name), await lock.stat(), "file")
-      const until = Date.now() + lockWaitMs
-      // LOCK_EX | LOCK_NB, so that a wait never blocks the process past its limit.
-      while (libc.symbols.flock(lock.fd, 2 | 4) !== 0) {
-        if (stop?.aborted)
-          throw new CustodyUnavailable(`custody stopped before it held the ${provider} login`)
-        if (Date.now() > until) throw new CustodyUnavailable(`the ${provider} login is busy`)
-        await Bun.sleep(25)
-      }
-      return await body(directory)
-    } finally {
-      await lock.close()
-      libc.close()
-    }
+  const name = `${provider}.lock`
+  const lock = await open(
+    directory.at(name),
+    constants.O_RDWR | constants.O_CREAT | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+    0o600,
+  )
+  const libc = dlopen("libc.so.6", {
+    flock: { args: [FFIType.i32, FFIType.i32], returns: FFIType.i32 },
   })
+  try {
+    refuse(join(directory.path, name), await lock.stat(), "file")
+    const until = Date.now() + lockWaitMs
+    // LOCK_EX | LOCK_NB, so that a wait never blocks the process past its limit.
+    while (libc.symbols.flock(lock.fd, 2 | 4) !== 0) {
+      if (stop?.aborted)
+        throw new CustodyUnavailable(`custody stopped before it held the ${provider} login`)
+      if (Date.now() > until) throw new CustodyUnavailable(`the ${provider} login is busy`)
+      await Bun.sleep(25)
+    }
+    return await body()
+  } finally {
+    await lock.close()
+    libc.close()
+  }
 }
 
 /** The temporary files of a stopped write of `provider`'s files. */
@@ -494,20 +493,22 @@ export async function importLogin(path: string, provider: CustodyProvider, input
     }
   }
   await checkLogin(path, provider)
-  const outcome = await holding(path, provider, async (directory) => {
-    const existed = await lstat(directory.at(loginName(provider))).then(
-      () => true,
-      (error: unknown) => {
-        if (absent(error)) return false
-        throw error
-      },
-    )
-    await clearTemporaries(directory, provider)
-    await persist(directory, loginName(provider), JSON.stringify(document))
-    await remove(directory, stateName(provider))
-    await remove(directory, faultName(provider))
-    return existed ? ("replaced" as const) : ("imported" as const)
-  })
+  const outcome = await withDirectory(path, (directory) =>
+    holding(directory, provider, async () => {
+      const existed = await lstat(directory.at(loginName(provider))).then(
+        () => true,
+        (error: unknown) => {
+          if (absent(error)) return false
+          throw error
+        },
+      )
+      await clearTemporaries(directory, provider)
+      await persist(directory, loginName(provider), JSON.stringify(document))
+      await remove(directory, stateName(provider))
+      await remove(directory, faultName(provider))
+      return existed ? ("replaced" as const) : ("imported" as const)
+    }),
+  )
   return { outcome, owner }
 }
 
@@ -632,31 +633,43 @@ export async function loginAccess(
   tokenUrlOverride?: string,
 ) {
   const url = tokenUrl(provider, tokenUrlOverride)
-  return await holding(
-    path,
-    provider,
-    async (directory) => {
-      try {
-        const value = await renewedAccess(directory, provider, url, stop)
-        await remove(directory, faultName(provider))
-        return value
-      } catch (error) {
-        // The cause of a failed call, for the gateway's log. A call within a wait keeps the line of
-        // the try that set the wait.
-        const line =
-          error instanceof RenewalFailed
-            ? error.line
-            : error instanceof CustodyRefused
-              ? error.message
-              : error instanceof LoginImportRequired || error instanceof LoginScopeMissing
-                ? `custody: ${error.message}`
-                : undefined
-        if (line !== undefined) await persist(directory, faultName(provider), `${line}\n`)
-        throw error
-      }
-    },
-    stop,
-  )
+  return await withDirectory(path, async (directory) => {
+    try {
+      const value = await holding(
+        directory,
+        provider,
+        () => renewedAccess(directory, provider, url, stop),
+        stop,
+      )
+      await remove(directory, faultName(provider))
+      return value
+    } catch (error) {
+      await persist(directory, faultName(provider), `${faultLine(error)}\n`)
+      throw error
+    }
+  })
+}
+
+/** The longest line of the `.fault` file, in characters. */
+const faultLimit = 512
+/**
+ * The line of the `.fault` file for the failure `error`: custody's own text, which names at most a
+ * path of the configuration, an HTTP status and an OAuth error code. Each character outside a
+ * fixed set (letters, digits, space and `./:;,_()'-`) is written as `?`, and the line is cut at
+ * `faultLimit`: no control character and no long text reaches the gateway's log.
+ */
+function faultLine(error: unknown) {
+  const line =
+    error instanceof RenewalFailed
+      ? error.line
+      : error instanceof CustodyRefused
+        ? error.message
+        : error instanceof LoginImportRequired ||
+            error instanceof LoginScopeMissing ||
+            error instanceof CustodyUnavailable
+          ? `custody: ${error.message}`
+          : "custody: refused"
+  return line.replace(/[^A-Za-z0-9 ./:;,_()'-]/g, "?").slice(0, faultLimit)
 }
 
 /** `loginAccess` while this process holds the login, in its open directory. */

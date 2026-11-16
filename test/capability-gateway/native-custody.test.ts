@@ -13,7 +13,7 @@ import {
   writeFile,
 } from "node:fs/promises"
 import { tmpdir } from "node:os"
-import { join, resolve } from "node:path"
+import { dirname, join, resolve } from "node:path"
 import { Schema } from "effect"
 import { checkLogin, CustodyRefused, loginFault } from "../../src/capability-gateway/custody"
 import { custodyCommand } from "../../src/capability-gateway/custody-process"
@@ -419,9 +419,13 @@ test("in this process, custody renews, refuses only invalid_grant, waits between
       await expect(command()).rejects.toThrow("no request before")
       const state = JSON.parse(await readFile(statePath, "utf8"))
       waits.push(Math.round((state.retryAt - before) / 1000))
-      await expect(command()).rejects.toThrow("the claude login waits to renew until")
       expect(await loginFault(directory, "claude")).toBe(
         `custody: the OAuth server of claude ${causes[mode]}; custody waits before it asks it again`,
+      )
+      // A call within the wait fails for the wait: its line replaces the line of the try.
+      await expect(command()).rejects.toThrow("the claude login waits to renew until")
+      expect(await loginFault(directory, "claude")).toBe(
+        `custody: the claude login waits to renew until ${new Date(state.retryAt).toISOString()}`,
       )
       await waited()
     }
@@ -542,6 +546,49 @@ test("in this process, the custody command refuses what its grammar does not hol
     ])
       await expect(custodyCommand(args, running)).rejects.toThrow(CustodyRefused)
     expect(oauth.requests()).toHaveLength(0)
+  })
+})
+
+test("in this process, the fault line is the cause of the last failed call, of a fixed set of characters and at most 512 long, and a call that succeeds removes it", async () => {
+  await withLogin(async (root, oauth, env) => {
+    const directory = join(root, "login")
+    const command = (stop = running, path = directory) =>
+      custodyCommand(["access", path, "--token-url", oauth.url, "claude", "60"], stop)
+    const old = claudeLogin(syntheticValue("access"), syntheticValue("refresh"), Date.now() - 1000)
+    expect((await importLoginCommand(env, ["claude"], input(JSON.stringify(old)))).code).toBe(0)
+    const faultFile = () => readFile(join(directory, "claude.fault"), "utf8")
+
+    // A server that fails, then a call stopped while another call holds the login.
+    oauth.mode("busy")
+    await expect(command()).rejects.toThrow("answered 503")
+    expect(await faultFile()).toBe(
+      "custody: the OAuth server of claude answered 503; custody waits before it asks it again\n",
+    )
+    await writeFile(
+      join(directory, "claude.state"),
+      JSON.stringify({ state: "renewing", failures: 1, retryAt: 0 }),
+      { mode: 0o600 },
+    )
+    oauth.mode("hold")
+    const holder = command()
+    await until(() => oauth.requests().length === 2)
+    await expect(command(AbortSignal.abort())).rejects.toThrow("custody stopped before it held")
+    expect(await faultFile()).toBe("custody: custody stopped before it held the claude login\n")
+    oauth.release()
+    expect((await holder).token).toBe(oauth.next().access)
+    expect(await readdir(directory)).not.toContain("claude.fault")
+
+    // A path of control characters and of more than 512 characters: the line is cut, and holds
+    // none of them.
+    const long = join(root, `a\u001b[31m\n${"b".repeat(200)}`, "c".repeat(200), "d".repeat(200))
+    await mkdir(long, { recursive: true, mode: 0o700 })
+    for (let path = long; path !== root; path = dirname(path)) await chmod(path, 0o700)
+    await expect(command(running, long)).rejects.toThrow("no login imported")
+    const line = await readFile(join(long, "claude.fault"), "utf8")
+    expect(line).toHaveLength(513)
+    expect(line).toEndWith("\n")
+    expect(line.slice(0, -1)).toMatch(/^custody refused [A-Za-z0-9 .\/:;,_()'?-]+$/)
+    expect(line).toContain("/a??31m?bbb")
   })
 })
 
