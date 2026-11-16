@@ -67,23 +67,33 @@ export const framed = (body: string | Buffer, length?: number) => {
 
 /**
  * A connection to the control socket that keeps its own side open after the gateway ends its
- * side. `answer` resolves to the answer when the gateway ends its side, or "closed" when the
- * connection closes first; `closed` resolves when it closes; `errors` holds each error's code.
+ * side. `answer` resolves to the answer once a whole frame has come, or "closed" when the
+ * gateway ends the connection first; `ended` resolves when the gateway ends the connection or it
+ * closes; `closed` resolves when it closes; `errors` holds each error's code.
  */
 export function halfOpenConnection(socket: string) {
   const connection = createConnection({ path: socket, allowHalfOpen: true })
   const errors: string[] = []
-  let answer = Buffer.alloc(0)
+  const answer = Promise.withResolvers<string>()
+  let received = Buffer.alloc(0)
   connection.on("data", (chunk) => {
-    answer = Buffer.concat([answer, Buffer.from(chunk)])
+    received = Buffer.concat([received, Buffer.from(chunk)])
+    if (received.length >= 4 && received.length >= 4 + received.readUInt32BE(0))
+      answer.resolve(received.subarray(4, 4 + received.readUInt32BE(0)).toString("utf8"))
   })
   connection.on("error", (error: NodeJS.ErrnoException) => errors.push(error.code ?? "error"))
-  const text = () => (answer.length >= 4 ? answer.subarray(4).toString("utf8") : "closed")
-  const closed = new Promise<void>((done) => connection.on("close", () => done()))
-  const ended = new Promise<string>((done) => {
-    connection.on("end", () => done(text()))
-    connection.on("close", () => done(text()))
+  const ended = Promise.withResolvers<void>()
+  connection.on("end", () => {
+    answer.resolve("closed")
+    ended.resolve()
   })
+  const closed = new Promise<void>((done) =>
+    connection.on("close", () => {
+      answer.resolve("closed")
+      ended.resolve()
+      done()
+    }),
+  )
   const opened = new Promise<void>((done) => connection.on("connect", () => done()))
-  return { connection, opened, answer: ended, closed, errors }
+  return { connection, opened, answer: answer.promise, ended: ended.promise, closed, errors }
 }

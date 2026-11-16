@@ -647,6 +647,8 @@ export const syntheticValue = (kind: string) =>
 export interface OAuthRequest {
   readonly body: string
   readonly at: number
+  /** When it came, by `Date.now()`: the clock that custody's waits are on. */
+  readonly time: number
 }
 
 /** The refresh value that a request to the fixture OAuth server sent. */
@@ -681,6 +683,9 @@ export function oauthFixture(host = "127.0.0.1") {
     | "busy"
     | "limited"
     | "garbled"
+    | "expired"
+    | "norotate"
+    | "short"
   let mode: Mode = "renew"
   let retryAfter = 0
   let next = { access: syntheticValue("access"), refresh: syntheticValue("refresh") }
@@ -693,7 +698,7 @@ export function oauthFixture(host = "127.0.0.1") {
     idleTimeout: 0,
     fetch: async (request) => {
       const text = await request.text()
-      requests.push({ body: text, at: performance.now() })
+      requests.push({ body: text, at: performance.now(), time: Date.now() })
       const clientId = (() => {
         try {
           const body: unknown = JSON.parse(text)
@@ -717,8 +722,9 @@ export function oauthFixture(host = "127.0.0.1") {
       const body = JSON.stringify({
         token_type: "Bearer",
         access_token: next.access,
-        refresh_token: next.refresh,
-        expires_in: 3600,
+        // RFC 6749 section 6: a server may keep the refresh value and leave it out.
+        ...(mode === "norotate" ? {} : { refresh_token: next.refresh }),
+        expires_in: mode === "expired" ? 0 : mode === "short" ? 30 : 3600,
         ...(mode === "unscoped"
           ? {}
           : { scope: mode === "narrow" ? "user:profile" : "user:inference user:profile" }),

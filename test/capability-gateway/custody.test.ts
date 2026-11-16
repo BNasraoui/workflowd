@@ -375,13 +375,93 @@ test("each search for a value finds one put on purpose in its output: the gatewa
   })
 }, 30000)
 
-test("the gateway process writes no core file: its core limit is 0, which the processes it starts inherit", async () => {
-  await withCustody(async (_f, _oauth, start) => {
-    const gateway = await start()
-    const limits = await readFile(`/proc/${gateway.pid}/limits`, "utf8")
-    expect(/^Max core file size\s+(\S+)\s+(\S+)/m.exec(limits)?.slice(1)).toEqual(["0", "0"])
+/** The pid of each child of `parent`, from the parent field of each process's stat. */
+async function childrenOf(parent: number) {
+  const children: number[] = []
+  for (const name of await readdir("/proc")) {
+    if (!/^\d+$/.test(name)) continue
+    const fields = await readFile(`/proc/${name}/stat`, "utf8").catch(() => "")
+    // After the command, which is in parentheses: the state, then the parent's pid.
+    if (Number(fields.slice(fields.lastIndexOf(")") + 2).split(" ")[1]) === parent)
+      children.push(Number(name))
+  }
+  return children
+}
+
+/**
+ * A process's core limit, soft and hard, and whether it is dumpable: the kernel gives the /proc
+ * entries of a process that is not dumpable to root, which a user namespace that does not map it
+ * shows as the overflow uid, so they are not the process's uid.
+ */
+async function coreState(pid: number) {
+  const limits = await readFile(`/proc/${pid}/limits`, "utf8")
+  return {
+    limit: /^Max core file size\s+(\S+)\s+(\S+)/m.exec(limits)?.slice(1),
+    dumpable: (await stat(`/proc/${pid}/status`)).uid === process.getuid!(),
+  }
+}
+
+test("no process that holds a login writes a core file: the gateway, custody and import-login set a core limit of 0 and are not dumpable, and the child that the gateway starts keeps the limit", async () => {
+  await withCustody(async (f, oauth) => {
+    // import-login before it reads the login: its standard input stays open.
+    const command = Bun.spawn(
+      [process.execPath, resolve("src/capability-gateway-server.ts"), "import-login", "claude"],
+      {
+        cwd: resolve("."),
+        env: custodyEnv(f, loginDirectory(f)),
+        stdin: "pipe",
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    )
+    try {
+      await untilAsync(async () => !(await coreState(command.pid)).dumpable)
+      expect(await coreState(command.pid)).toEqual({ limit: ["0", "0"], dumpable: false })
+      command.stdin.write(
+        JSON.stringify(
+          claudeLogin(syntheticValue("access"), syntheticValue("refresh"), Date.now() - 1000),
+        ),
+      )
+      await command.stdin.end()
+      expect(await command.exited).toBe(0)
+    } finally {
+      command.kill("SIGKILL")
+    }
+    // The gateway, and noscope and custody while the OAuth server holds custody's renewal.
+    oauth.mode("hold")
+    const gateway = await startGatewayProcess(
+      [process.execPath, "-e", gatewaySource(f)],
+      custodyEnv(f, loginDirectory(f)),
+      f.front,
+    )
+    try {
+      await f.reconcile()
+      const token = await runToken(gateway, "jti-core")
+      const call = client(gateway)
+        .call(token)
+        .catch(() => undefined)
+      await untilAsync(async () => oauth.requests().length === 1)
+      const [noscope] = await childrenOf(gateway.pid!)
+      const [custody] = await childrenOf(noscope!)
+      expect(await coreState(gateway.pid!)).toEqual({ limit: ["0", "0"], dumpable: false })
+      expect((await coreState(noscope!)).limit).toEqual(["0", "0"])
+      expect(await coreState(custody!)).toEqual({ limit: ["0", "0"], dumpable: false })
+      oauth.release()
+      await call
+    } finally {
+      await gateway.stop()
+    }
   })
 }, 30000)
+
+/** Waits until `ready` holds, for at most 10 seconds. */
+async function untilAsync(ready: () => Promise<boolean>) {
+  const end = Date.now() + 10000
+  while (!(await ready())) {
+    if (Date.now() > end) throw new Error("the condition did not come")
+    await Bun.sleep(20)
+  }
+}
 
 test("no verb of the control socket imports or returns a login", async () => {
   await withCustody(async (f, _oauth, start) => {

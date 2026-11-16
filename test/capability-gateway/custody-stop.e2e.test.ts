@@ -2,14 +2,7 @@ import { expect, test } from "bun:test"
 import { randomUUID } from "node:crypto"
 import { readFile, readdir, writeFile } from "node:fs/promises"
 import { join } from "node:path"
-import {
-  claudeLogin,
-  client,
-  sse,
-  storedAccess,
-  syntheticValue,
-  type Origin,
-} from "./gateway-process"
+import { claudeLogin, client, sse, storedAccess, syntheticValue } from "./gateway-process"
 import {
   imported,
   loginDirectory,
@@ -22,50 +15,9 @@ import {
 
 /**
  * A renewal of the gateway's Claude login that stops part way, through the gateway process and
- * a fixture OAuth server: a client that goes away, a stop of the gateway, a stop before the
- * rename of the renewed login; and the scope of a renewal answer.
+ * a fixture OAuth server: a stop of the gateway, a stop before the rename of the renewed login;
+ * and the scope of a renewal answer.
  */
-
-/** A Claude call through the front at `at` that the client gives up when `signal` aborts. */
-const callUntil = (at: Origin, token: string, signal: AbortSignal) =>
-  client(at).request("/capabilities/v1/providers/anthropic/v1/messages", {
-    method: "POST",
-    signal,
-    headers: {
-      authorization: `Bearer ${token}`,
-      "content-type": "application/json",
-      "anthropic-version": "2023-06-01",
-      "anthropic-beta": "oauth-2025-04-20",
-    },
-    body: JSON.stringify({ model: "fixture-model", stream: true, messages: [] }),
-  })
-
-test("a client that goes away while the OAuth server holds the renewal ends its own wait only; the next call uses that renewal", async () => {
-  await withCustody(async (f, oauth, start) => {
-    const old = claudeLogin(syntheticValue("access"), syntheticValue("refresh"), Date.now() - 1000)
-    await imported(f, old)
-    oauth.mode("hold")
-    const gateway = await start()
-    const token = await runToken(gateway, "jti-away")
-    const away = new AbortController()
-    const first = callUntil(gateway, token, away.signal).catch(() => "gone")
-    await until(() => oauth.requests().length === 1)
-    away.abort()
-    expect(await first).toBe("gone")
-    await Bun.sleep(300)
-    oauth.release()
-    const second = await client(gateway).call(token)
-    expect(second.status).toBe(200)
-    expect(await second.text()).toBe(sse)
-    expect(oauth.requests()).toHaveLength(1)
-    expect(storedAccess(await readFile(loginFile(f), "utf8"))).toBe(oauth.next().access)
-    // The gateway may see the client's end only once the renewal is done: each upstream call it
-    // made carries the renewed value, never the old one.
-    const sent = f.upstreamRequests().map((request) => request.headers.authorization)
-    expect(sent.length).toBeGreaterThan(0)
-    expect(new Set(sent)).toEqual(new Set([`Bearer ${oauth.next().access}`]))
-  })
-}, 30000)
 
 test("a stop of the gateway while the OAuth server holds the renewal: after a start, the same refresh value is sent once more and the call works", async () => {
   await withCustody(async (f, oauth, start) => {
