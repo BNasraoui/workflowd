@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test"
+import { expect, setSystemTime, test } from "bun:test"
 import { createHash } from "node:crypto"
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
@@ -7,6 +7,7 @@ import { Effect } from "effect"
 import type { GatewayEnd } from "../../src/capability-control/protocol"
 import { AgentRunIngress, agentRunIdentifiers } from "../../src/kernel/agent-run-ingress"
 import { AgentRunStore } from "../../src/kernel/agent-run-store"
+import { CapabilityGatewayUnavailable } from "../../src/sandbox/capability-control"
 import {
   daemonRuntime,
   githubStub,
@@ -166,18 +167,28 @@ const sha256 = (bytes: Buffer) => createHash("sha256").update(bytes).digest("hex
 const scripted = (script: {
   readonly body?: Buffer
   readonly ended?: GatewayEnd
+  /** What the gateway answers after the first batch: its fault, or nothing yet, ever. */
+  readonly later?: "unavailable" | "nothing"
+  /** Runs at each read after the first batch. */
+  readonly reading?: () => void
   readonly parts?: (offset: number) => { size: number; sha256: string; part: string }
 }): RunnerControl => ({
   authorize: () => Effect.succeed(undefined),
   revoke: () => Effect.succeed(null),
   startRevoke: () => Effect.void,
   sessionBound: () => Effect.succeed(true),
-  readEvents: (_runId, after) =>
-    Effect.succeed(
-      after === 0
-        ? { batches: [{ sequence: 1, lines }], result: false, ended: null }
-        : { batches: [], result: script.body !== undefined, ended: script.ended ?? null },
-    ),
+  readEvents: (_runId, after) => {
+    if (after === 0)
+      return Effect.succeed({ batches: [{ sequence: 1, lines }], result: false, ended: null })
+    script.reading?.()
+    if (script.later === "unavailable")
+      return Effect.fail(new CapabilityGatewayUnavailable({ reason: "fixture fault" }))
+    return Effect.succeed({
+      batches: [],
+      result: script.later !== "nothing" && script.body !== undefined,
+      ended: script.later === "nothing" ? null : (script.ended ?? null),
+    })
+  },
   readResult: (_runId, offset) =>
     Effect.sync(() => {
       if (script.parts !== undefined) return script.parts(offset)
@@ -191,38 +202,32 @@ const scripted = (script: {
 })
 
 /**
- * Dispatches the run with the gateway that `gateway` scripts, given the fixture remote, and waits
- * for its end. Gives the run's record, its message in the caller's mailbox and the remote.
+ * The daemon with the gateway that `gateway` scripts, given the fixture remote: its runtime and
+ * the remote, for `use`. `options` name what the daemon finds: the job's workflows in the
+ * repository (yes, unless named) and the remote that it pushes to (the fixture's, unless named).
  */
-async function dispatch(
+async function withDispatch<A>(
   gateway: (remote: Remote, root: string) => Promise<RunnerControl>,
-  prepare: (remote: Remote) => void = () => undefined,
+  use: (runtime: ReturnType<typeof daemonRuntime>, remote: Remote) => Promise<A>,
+  options: {
+    readonly prepare?: (remote: Remote) => void
+    readonly workflows?: boolean
+    readonly pushTo?: string
+  } = {},
 ) {
   const root = await mkdtemp(join(tmpdir(), "runner-dispatch-"))
   const remote = await gitRemote(join(root, "git"))
-  const github = await githubStub(remote.sourceSha, () => undefined)
-  prepare(remote)
+  const github = await githubStub(remote.sourceSha, () => undefined, options.workflows)
+  options.prepare?.(remote)
   const runtime = daemonRuntime(
     { root, database: join(root, "workflowd.db") },
     github,
-    remote.bare,
+    options.pushTo ?? remote.bare,
     runnerPolicy(image),
     Effect.succeed(await gateway(remote, root)),
   )
   try {
-    const receipt = await runtime.runPromise(
-      Effect.flatMap(AgentRunIngress, (ingress) => ingress.register(submission, new Date())),
-    )
-    const runs = await runtime.runPromise(AgentRunStore)
-    for (let tries = 0; tries < 300; tries++) {
-      const current = await runtime.runPromise(runs.read(receipt.runId))
-      if (current !== null && !["spawning", "spawned", "verified"].includes(current.state)) {
-        const messages = await runtime.runPromise(mailbox(receipt.runId))
-        return { run: current, message: messages[0]?.message, branch: remote.ref(branch) }
-      }
-      await Bun.sleep(50)
-    }
-    throw new Error("the run did not end")
+    return await use(runtime, remote)
   } finally {
     await runtime.dispose()
     await github.close()
@@ -231,16 +236,62 @@ async function dispatch(
   }
 }
 
+/** Registers `input` with the daemon: its receipt, or its refusal's text. */
+const register = (runtime: ReturnType<typeof daemonRuntime>, input = submission) =>
+  runtime.runPromise(
+    Effect.result(
+      Effect.flatMap(AgentRunIngress, (ingress) => ingress.register(input, new Date())),
+    ),
+  )
+
+/** The text of a refusal, with the message of each error that it holds. */
+const refusalText = (refusal: unknown) =>
+  JSON.stringify(refusal, (_key, value: unknown) =>
+    value instanceof Error ? value.message : value,
+  )
+
+/** Waits for the end of the run `runId`: its record, its message and the branch in the remote. */
+async function ended(runtime: ReturnType<typeof daemonRuntime>, remote: Remote, runId: string) {
+  const runs = await runtime.runPromise(AgentRunStore)
+  for (let tries = 0; tries < 300; tries++) {
+    const current = await runtime.runPromise(runs.read(runId))
+    if (current !== null && !["spawning", "spawned", "verified"].includes(current.state)) {
+      const messages = await runtime.runPromise(mailbox(runId))
+      return { run: current, message: messages[0]?.message, branch: remote.ref(branch) }
+    }
+    await Bun.sleep(50)
+  }
+  throw new Error("the run did not end")
+}
+
+/**
+ * Dispatches the run with the gateway that `gateway` scripts, given the fixture remote, and waits
+ * for its end. Gives the run's record, its message in the caller's mailbox and the remote.
+ */
+const dispatch = (
+  gateway: (remote: Remote, root: string) => Promise<RunnerControl>,
+  options: Parameters<typeof withDispatch>[2] = {},
+) =>
+  withDispatch(
+    gateway,
+    async (runtime, remote) => {
+      const receipt = await register(runtime)
+      if (receipt._tag === "Failure") throw new Error(JSON.stringify(receipt.failure))
+      return ended(runtime, remote, receipt.success.runId)
+    },
+    options,
+  )
+
 test("a sealed result that passes the check is pushed as agent-run/<id>, and the run completes", async () => {
-  const ended = await dispatch(async (remote, root) =>
+  const end = await dispatch(async (remote, root) =>
     scripted({ body: bodyOf(await seal(root, remote)) }),
   )
-  expect({ state: ended.run.state, diagnostic: ended.run.diagnostic }).toEqual({
+  expect({ state: end.run.state, diagnostic: end.run.diagnostic }).toEqual({
     state: "completed",
     diagnostic: null,
   })
-  expect(ended.branch).not.toBeNull()
-  expect(ended.message).toMatchObject({
+  expect(end.branch).not.toBeNull()
+  expect(end.message).toMatchObject({
     status: "completed",
     end_reason: "completed",
     final_message: "Done.",
@@ -355,35 +406,37 @@ const refused: ReadonlyArray<{
 for (const { check, result, prepare } of refused)
   test(`a sealed result that the check refuses for ${check} ends the run with that check, and nothing is pushed`, async () => {
     let pushedBefore: string | null = null
-    const ended = await dispatch(
+    const end = await dispatch(
       async (remote, root) => scripted({ body: await result(remote, root) }),
-      (remote) => {
-        prepare?.(remote)
-        pushedBefore = remote.ref(branch)
+      {
+        prepare: (remote) => {
+          prepare?.(remote)
+          pushedBefore = remote.ref(branch)
+        },
       },
     )
-    expect({ state: ended.run.state, diagnostic: ended.run.diagnostic }).toEqual({
+    expect({ state: end.run.state, diagnostic: end.run.diagnostic }).toEqual({
       state: "operator_required",
       diagnostic: expect.stringMatching(new RegExp(`^result_refused: ${check}(:|$)`)),
     })
-    expect(ended.branch).toBe(pushedBefore)
-    expect(ended.message).toMatchObject({
+    expect(end.branch).toBe(pushedBefore)
+    expect(end.message).toMatchObject({
       status: "operator_required",
-      end_reason: ended.run.diagnostic,
+      end_reason: end.run.diagnostic,
       placement: "runner",
     })
   }, 30000)
 
 test("a run that the gateway ended gives its reason and its use in the caller's message", async () => {
-  const ended = await dispatch(async () =>
+  const end = await dispatch(async () =>
     scripted({ ended: { reason: "budget", calls: 7, outputTokens: 1234 } }),
   )
-  expect({ state: ended.run.state, diagnostic: ended.run.diagnostic }).toEqual({
+  expect({ state: end.run.state, diagnostic: end.run.diagnostic }).toEqual({
     state: "operator_required",
     diagnostic: "gateway_ended: ended: budget (7 calls, 1234 output tokens)",
   })
-  expect(ended.branch).toBeNull()
-  expect(ended.message).toMatchObject({
+  expect(end.branch).toBeNull()
+  expect(end.message).toMatchObject({
     status: "operator_required",
     ended: "budget",
     used: { calls: 7, output_tokens: 1234 },
@@ -426,13 +479,73 @@ for (const [name, parts, reason] of [
   ],
 ] as const)
   test(`a stored result read as ${name} ends the run as result_format, and nothing is pushed`, async () => {
-    const ended = await dispatch(async (remote, root) => {
+    const end = await dispatch(async (remote, root) => {
       const body = bodyOf(await seal(root, remote))
       return scripted({ body, parts: parts(body) })
     })
-    expect({ state: ended.run.state, diagnostic: ended.run.diagnostic }).toEqual({
+    expect({ state: end.run.state, diagnostic: end.run.diagnostic }).toEqual({
       state: "operator_required",
       diagnostic: `result_format: ${reason}`,
     })
-    expect(ended.branch).toBeNull()
+    expect(end.branch).toBeNull()
   }, 30000)
+
+test("a runner run whose job's workflows the repository lacks is refused at its start", async () => {
+  const refusal = await withDispatch(
+    async () => scripted({}),
+    async (runtime) => register(runtime),
+    { workflows: false },
+  )
+  expect(refusal._tag).toBe("Failure")
+  expect(refusalText(refusal)).toContain("runner_start")
+})
+
+test("a runner run past the bound of runs at one time is refused runner_capacity", async () => {
+  const second = await withDispatch(
+    async () => scripted({ later: "nothing" }),
+    async (runtime) => {
+      const first = await register(runtime)
+      expect(first._tag).toBe("Success")
+      return register(runtime, { ...submission, prompt: "A second run." })
+    },
+  )
+  expect(second._tag).toBe("Failure")
+  expect(refusalText(second)).toContain("runner_capacity: 1 runner runs are live; the bound is 1")
+})
+
+test("a gateway that fails while the run's events are read ends the run gateway_unavailable", async () => {
+  const end = await dispatch(async () => scripted({ later: "unavailable" }))
+  expect({ state: end.run.state, diagnostic: end.run.diagnostic }).toEqual({
+    state: "operator_required",
+    diagnostic: "gateway_unavailable: gateway: CapabilityGatewayUnavailable",
+  })
+  expect(end.branch).toBeNull()
+})
+
+test("a run whose deadline passes before its result ends runner_deadline", async () => {
+  try {
+    const end = await dispatch(async () =>
+      scripted({
+        later: "nothing",
+        // The lease's deadline, 285 minutes from the start, has passed.
+        reading: () => setSystemTime(new Date(Date.now() + 286 * 60000)),
+      }),
+    )
+    expect({ state: end.run.state, diagnostic: end.run.diagnostic }).toEqual({
+      state: "operator_required",
+      diagnostic: "runner_deadline: the run's deadline passed before its result",
+    })
+  } finally {
+    setSystemTime()
+  }
+})
+
+test("a remote that the check cannot reach ends the run with the check's fault, and nothing is pushed", async () => {
+  const end = await dispatch(
+    async (remote, root) => scripted({ body: bodyOf(await seal(root, remote)) }),
+    { pushTo: "/nonexistent/remote.git" },
+  )
+  expect(end.run.state).toBe("operator_required")
+  expect(end.run.diagnostic).toContain("runner.result")
+  expect(end.branch).toBeNull()
+})

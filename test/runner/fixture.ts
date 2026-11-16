@@ -187,7 +187,12 @@ export async function gitRemote(root: string) {
  * lease ref starts (`actionsRunId`), its commits and its workflows. `started` runs once for each
  * lease ref that the daemon creates, as GitHub starts the caller workflow on its push.
  */
-export async function githubStub(sourceSha: string, started: (leaseId: string) => void) {
+export async function githubStub(
+  sourceSha: string,
+  started: (leaseId: string) => void,
+  /** Whether the repository holds the workflows of the runner job. */
+  workflows = true,
+) {
   const leases = new Set<string>()
   const ended = new Set<string>()
   const repository = "/repos/fixture/repo"
@@ -216,7 +221,8 @@ export async function githubStub(sourceSha: string, started: (leaseId: string) =
         private: false,
         visibility: "public",
       })
-    if (path.startsWith(`${repository}/contents/.github/workflows/`)) return Response.json({})
+    if (path.startsWith(`${repository}/contents/.github/workflows/`))
+      return workflows ? Response.json({}) : new Response(null, { status: 404 })
     if (path === `${repository}/commits/HEAD`) return Response.json({ sha: sourceSha })
     if (method === "POST" && path === `${repository}/git/refs`) {
       const body: unknown = stub?.requests.at(-1)?.body
