@@ -12,6 +12,8 @@ import { fixtureExecutable } from "../helpers/fixture-executable.mjs"
 import { loopbackCertificate, tlsFront } from "../helpers/loopback-tls"
 import { seedCapabilityRun, writeNoscopeProvider } from "./fixture"
 import { makeDaemonCapability, type DaemonCapability } from "../../src/sandbox/capability-control"
+import { capabilityDigest } from "../../src/capability-gateway/store"
+import { sessionBinder, sessionKeyPair, signRenewal } from "../../deploy/sandbox/renewal.mjs"
 
 const { privateKey, publicKey } = generateKeyPairSync("rsa", { modulusLength: 2048 })
 /** The private key of `jwks`: it signs the fixture's job proofs. */
@@ -535,8 +537,14 @@ export const seedLease = (
     if (actionsRunId !== null) yield* leases.recordRun(runId, actionsRunId, 1)
   })
 
-/** The runner's and the relay's requests to a gateway, through its front at `at`. */
-export const client = (at: Origin) => {
+/** The session key of the fixture's runner: each client signs with it unless it names another. */
+export const runnerKey = sessionKeyPair()
+
+/**
+ * The runner's and the relay's requests to a gateway, through its front at `at`. The client holds
+ * the session key `key`: its proofs bind the public key, and its renewals are signed with it.
+ */
+export const client = (at: Origin, key: { publicKey: string; privateKey: string } = runnerKey) => {
   const url = (path: string) => `${at.origin}${path}`
   /** A request to `path` of the gateway, through its front. */
   const request = (path: string, init: RequestInit = {}) =>
@@ -548,13 +556,17 @@ export const client = (at: Origin) => {
     const value = Schema.decodeUnknownSync(
       Schema.Struct({ channel: Schema.String, nonce: Schema.String, expiresAt: Schema.Number }),
     )(await issued.json())
-    return { ...value, audience: `workflowd:${value.channel}:${value.nonce}` }
+    return {
+      ...value,
+      audience: `workflowd:${value.channel}:${sessionBinder(value.nonce, key.publicKey)}`,
+    }
   }
-  const session = (token: string) =>
+  /** Posts the proof `token` with the public session key `publicKey`, the client's unless named. */
+  const session = (token: string, publicKey: string = key.publicKey) =>
     request("/capabilities/v1/session", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ token }),
+      body: JSON.stringify({ token, key: publicKey }),
     })
   const grant = async (response: Response) =>
     Schema.decodeUnknownSync(
@@ -581,13 +593,22 @@ export const client = (at: Origin) => {
     })
   const call = (token: string) =>
     provider(token, JSON.stringify({ model: "fixture-model", stream: true, messages: [] }))
-  const renew = (token: string) =>
+  /** A renewal of `token` whose body is `body`, as its exact text. */
+  const renewWith = (token: string, body: string) =>
     request("/capabilities/v1/renew", {
       method: "POST",
       headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
-      body: "{}",
+      body,
     })
-  return { url, request, challenge, audience, session, grant, provider, call, renew }
+  /** The relay's renewal of `token` on the run's `channel`, signed with the client's key. */
+  const renew = (token: string, channel: string) =>
+    renewWith(
+      token,
+      JSON.stringify({
+        signature: signRenewal(key.privateKey, channel, capabilityDigest(token)),
+      }),
+    )
+  return { url, request, challenge, audience, session, grant, provider, call, renew, renewWith }
 }
 
 /** Starts a gateway with `start` and the config `keys`, runs `body` against it, and always stops both. */

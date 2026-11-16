@@ -7,10 +7,12 @@ import {
   client,
   gateways,
   proof,
+  runnerKey,
   seedLease,
   startGatewayProcess,
   withGateway,
 } from "./gateway-process"
+import { sessionKeyPair } from "../../deploy/sandbox/renewal.mjs"
 
 test("a gateway process is ready at its full listening line, and one that ends first is refused", async () => {
   const env = { PATH: process.env.PATH }
@@ -152,3 +154,60 @@ for (const [mode, start] of gateways)
       }
     })
   }, 60000)
+
+for (const [mode, start] of gateways) {
+  test(`[${mode}] a session post with no key, a key of another form or length, or a key that its proof does not bind is refused with an empty 403, and fetches no key, mints nothing and opens no session`, async () => {
+    await withGateway(start, async (f, gateway) => {
+      const runner = client(gateway)
+      const live = await runner.audience()
+      const token = proof(live.audience, "jti-key")
+      const raw = Buffer.from(runnerKey.publicKey, "base64url")
+      // The last character of 32 bytes in base64url carries two unused bits; here one is set.
+      const last = runnerKey.publicKey.at(-1)!
+      const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+      const loose = runnerKey.publicKey.slice(0, -1) + alphabet[alphabet.indexOf(last) + 1]
+      const posts: ReadonlyArray<unknown> = [
+        { token },
+        { token, key: null },
+        { token, key: 7 },
+        { token, key: "" },
+        { token, key: runnerKey.publicKey.slice(0, -1) },
+        { token, key: `${runnerKey.publicKey}A` },
+        { token, key: Buffer.concat([raw, Buffer.from([0])]).toString("base64url") },
+        { token, key: raw.subarray(1).toString("base64url") },
+        { token, key: raw.toString("hex") },
+        { token, key: raw.toString("base64") },
+        { token, key: loose },
+        // A key of the right form that the proof's audience does not bind.
+        { token, key: sessionKeyPair().publicKey },
+        // An audience of the nonce alone binds no key.
+        {
+          token: proof(`workflowd:${live.channel}:${live.nonce}`, "jti-nonce"),
+          key: runnerKey.publicKey,
+        },
+      ]
+      for (const body of posts) {
+        const answer = await runner.request("/capabilities/v1/session", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
+        })
+        expect({ body, status: answer.status, text: await answer.text() }).toEqual({
+          body,
+          status: 403,
+          text: "",
+        })
+      }
+      const sessions = () =>
+        f.gatewaySql((sql) => sql`SELECT session FROM capability_bindings WHERE run_id='run'`)
+      expect({ keys: f.keyFetches(), mints: await f.mints(), sessions: await sessions() }).toEqual({
+        keys: 0,
+        mints: 0,
+        sessions: [{ session: 0 }],
+      })
+      // The same proof with the key that it binds opens the session: the refusals used nothing.
+      expect((await runner.session(token)).status).toBe(200)
+      expect(await sessions()).toEqual([{ session: 1 }])
+    })
+  }, 60000)
+}

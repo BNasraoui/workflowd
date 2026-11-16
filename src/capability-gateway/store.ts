@@ -2,13 +2,28 @@ import { createHash, randomBytes } from "node:crypto"
 import { maxJtiLength } from "../../deploy/sandbox/capability-limits.mjs"
 import { Effect, Schema } from "effect"
 import { SqlClient } from "effect/unstable/sql"
-import { renewalReplacements, renewalWindowMs } from "../../deploy/sandbox/renewal.mjs"
-import { CapabilityGrant, SessionPolicy } from "../capability-control/protocol"
+import {
+  isSessionKey,
+  renewalReplacements,
+  renewalWindowMs,
+  verifyRenewal,
+} from "../../deploy/sandbox/renewal.mjs"
+import { CapabilityGrant, EndReason, SessionPolicy } from "../capability-control/protocol"
 
 export class CapabilityRefused extends Schema.TaggedError<CapabilityRefused>()(
   "CapabilityRefused",
   {},
 ) {}
+/**
+ * A run token whose successor has authorized a call. It is refused as any refused token is; its
+ * binding is named so that a signed renewal of it can still show that the run has two holders.
+ */
+export class CapabilityRetired extends Schema.TaggedError<CapabilityRetired>()(
+  "CapabilityRetired",
+  { runId: Schema.String, channel: Schema.String },
+) {}
+/** The end reason of a run that a renewal showed to have two holders. */
+const twoHolders: typeof EndReason.Type = "two holders"
 /**
  * The lease cannot be challenged: it is unknown, its Actions run is not recorded, its run has
  * ended, or its binding is revoked. All of them get the same answer.
@@ -54,6 +69,7 @@ const Row = Schema.Struct({
   revoked: Schema.Int,
   session: Schema.Int,
   nonce: Schema.NullOr(Digest),
+  session_key: Schema.NullOr(Schema.String),
 })
 const StoredGrant = Schema.fromJsonString(CapabilityGrant)
 
@@ -197,19 +213,32 @@ export const makeCapabilityStore = Effect.gen(function* () {
     return { ...authority, expiresAt: token.expires_at }
   })
   /**
-   * The authority of a run token that may be renewed now. A token with more than
-   * `renewalWindowMs` left is not renewed, nor one whose successor would not outlive it by
-   * `minimumExtensionMs` (near the run's deadline), nor one whose successor has renewed already,
-   * nor one whose successor was replaced `maxReplacements` times.
+   * The authority of a run token that may be renewed now, signed by the binding's session key
+   * over the predecessor's digest. A token with more than `renewalWindowMs` left is not renewed,
+   * nor one whose successor would not outlive it by `minimumExtensionMs` (near the run's
+   * deadline), nor one whose successor has renewed already, nor one whose successor was replaced
+   * `maxReplacements` times. When the successor that it would replace has authorized a call, a
+   * second party holds the run's tokens: `twoHolders` is true and nothing else is checked.
    */
   const renewable = Effect.fn("CapabilityStore.renewable")(function* (
     binding: CapabilityBinding,
     predecessor: string,
+    /** The relay's signature of the renewal, in base64url. */
+    signature: string,
     /** The successor's expiry, or its longest for the run's deadline before it is minted. */
     successor: (deadline: number) => number,
     now: number,
   ) {
     const authority = yield* authorize(binding, predecessor, now)
+    const keys = yield* sql<{
+      readonly session_key: string | null
+    }>`SELECT session_key FROM capability_bindings WHERE run_id=${binding.runId}`
+    const key = keys[0]?.session_key
+    if (typeof key !== "string" || !verifyRenewal(key, binding.channel, predecessor, signature))
+      return yield* Effect.fail(new CapabilityRefused())
+    const used =
+      yield* sql`SELECT 1 FROM capability_tokens WHERE predecessor=${predecessor} AND used_at IS NOT NULL`
+    if (used.length > 0) return { ...authority, earlier: undefined, twoHolders: true }
     const successorExpiresAt = successor(authority.deadline)
     if (
       authority.expiresAt - now > renewalWindowMs ||
@@ -228,29 +257,43 @@ export const makeCapabilityStore = Effect.gen(function* () {
       if (renewed.length > 0 || replaced.length > 0)
         return yield* Effect.fail(new CapabilityRefused())
     }
-    return { ...authority, earlier: typeof earlier === "string" ? earlier : undefined }
+    return {
+      ...authority,
+      earlier: typeof earlier === "string" ? earlier : undefined,
+      twoHolders: false,
+    }
   })
   /**
    * Renews a run token. A renewal asked again for the same predecessor (its answer was lost)
-   * replaces the successor that has not renewed itself, so exactly one successor stays valid; it
-   * does so at most `maxReplacements` times for one predecessor.
+   * replaces the successor that has not renewed itself and has authorized no call, so exactly one
+   * successor stays valid; it does so at most `maxReplacements` times for one predecessor. When
+   * that successor has authorized a call, nothing is stored and the answer is `twoHolders`.
    */
   const renew = Effect.fn("CapabilityStore.renew")(function* (
     binding: CapabilityBinding,
     predecessor: string,
+    signature: string,
     successor: string,
     expiresAt: number,
     now: number,
   ) {
     yield* Schema.decodeUnknownEffect(Digest)(successor)
-    yield* sql.withTransaction(
+    return yield* sql.withTransaction(
       Effect.gen(function* () {
-        const { session, earlier } = yield* renewable(binding, predecessor, () => expiresAt, now)
+        const { session, earlier, twoHolders } = yield* renewable(
+          binding,
+          predecessor,
+          signature,
+          () => expiresAt,
+          now,
+        )
+        if (twoHolders) return { twoHolders }
         if (earlier !== undefined) {
           yield* sql`DELETE FROM capability_tokens WHERE digest=${earlier}`
           yield* sql`UPDATE capability_tokens SET replaced=replaced+1 WHERE digest=${predecessor}`
         }
         yield* sql`INSERT INTO capability_tokens(digest,run_id,predecessor,expires_at,session) VALUES(${successor},${binding.runId},${predecessor},${expiresAt},${session})`
+        return { twoHolders }
       }),
     )
   })
@@ -312,7 +355,8 @@ export const makeCapabilityStore = Effect.gen(function* () {
   })
   /**
    * A verified proof for the current unused challenge opens the run's next session: the jti is
-   * recorded once, the challenge is used, and every token of an earlier session stops being valid.
+   * recorded once, the challenge is used, every token of an earlier session stops being valid,
+   * and `sessionKey`, the public key that the proof binds, replaces the binding's key.
    */
   const bindSession = Effect.fn("CapabilityStore.bindSession")(function* (
     challenge: typeof Challenge.Type,
@@ -322,6 +366,7 @@ export const makeCapabilityStore = Effect.gen(function* () {
     now: number,
     /** When the proof itself expires; until then its jti stays recorded. */
     proofExpiresAt: number,
+    sessionKey: string,
   ) {
     yield* Schema.decodeUnknownEffect(Challenge)(challenge)
     yield* Schema.decodeUnknownEffect(Digest)(digest)
@@ -340,31 +385,33 @@ export const makeCapabilityStore = Effect.gen(function* () {
           jti.length > maxJtiLength ||
           !Number.isSafeInteger(expiresAt) ||
           expiresAt <= now ||
-          expiresAt > row.authority.deadline
+          expiresAt > row.authority.deadline ||
+          !isSessionKey(sessionKey)
         )
           return yield* Effect.fail(new CapabilityRefused())
         const session = row.session + 1
         yield* sql`INSERT INTO capability_proofs(jti_digest,run_id,expires_at) VALUES(${proof},${row.run_id},${proofExpiresAt})`
-        yield* sql`UPDATE capability_bindings SET session=${session},challenge_expires=0,nonce=NULL WHERE run_id=${row.run_id}`
+        yield* sql`UPDATE capability_bindings SET session=${session},challenge_expires=0,nonce=NULL,session_key=${sessionKey} WHERE run_id=${row.run_id}`
         yield* sql`INSERT INTO capability_tokens(digest,run_id,expires_at,session) VALUES(${digest},${row.run_id},${expiresAt},${session})`
         return { runId: row.run_id, channel: row.channel, session }
       }),
     )
   })
   /**
-   * What a session proof must match. The channel, nonce and jti come from the unverified proof:
-   * they only select, and refuse before any key is fetched or token minted. A proof for a nonce
-   * that is not the live one, a used proof and a run whose sessions are spent go no further.
+   * What a session proof must match, with the live nonce that the gateway issued for its channel.
+   * The channel and jti come from the unverified proof: they only select, and refuse before any
+   * key is fetched or token minted. A channel with no live nonce, a used proof and a run whose
+   * sessions are spent go no further.
    */
   const sessionContext = Effect.fn("CapabilityStore.sessionContext")(function* (
-    proof: { readonly channel: string; readonly nonce: string; readonly jti: string },
+    proof: { readonly channel: string; readonly jti: string },
     now: number,
   ) {
     const rows = yield* sql`SELECT b.run_id AS runId,g.lease_id AS leaseId,
-      json_extract(g.grant_json,'$.policy') AS policy,
+      json_extract(g.grant_json,'$.policy') AS policy,b.nonce,
       b.challenge_expires AS challengeExpires,json_extract(b.authority,'$.recipientId') AS recipientId
       FROM capability_bindings b JOIN capability_grants g ON g.run_id=b.run_id
-      WHERE b.channel=${proof.channel} AND b.challenge=${capabilityDigest(proof.nonce)}
+      WHERE b.channel=${proof.channel} AND b.nonce IS NOT NULL
       AND b.session<${maxSessions} AND b.revoked=0`
     if (rows.length !== 1) return yield* Effect.fail(new CapabilityRefused())
     const used =
@@ -375,6 +422,7 @@ export const makeCapabilityStore = Effect.gen(function* () {
         runId: Schema.String,
         leaseId: Schema.String,
         policy: Schema.fromJsonString(SessionPolicy),
+        nonce: Digest,
         challengeExpires: Schema.Number,
         recipientId: Schema.String,
       }),
@@ -428,6 +476,23 @@ export const makeCapabilityStore = Effect.gen(function* () {
       )
     })
   })
+  /**
+   * The one check of a run token, for each route that takes one: its binding, the session it
+   * belongs to and its authority. A token whose successor has authorized a call is refused as
+   * `CapabilityRetired`. The first call that a token authorizes is recorded.
+   */
+  const authenticate = Effect.fn("CapabilityStore.authenticate")(function* (
+    digest: string,
+    now: number,
+  ) {
+    const { session, ...binding } = yield* bindingFor(digest, now)
+    const grant = yield* authorize(binding, digest, now)
+    const used =
+      yield* sql`SELECT 1 FROM capability_tokens WHERE predecessor=${digest} AND used_at IS NOT NULL`
+    if (used.length > 0) return yield* Effect.fail(new CapabilityRetired(binding))
+    yield* sql`UPDATE capability_tokens SET used_at=${now} WHERE digest=${digest} AND used_at IS NULL`
+    return { binding, session, grant }
+  })
   return {
     leaseChallenge,
     sessionContext,
@@ -445,5 +510,22 @@ export const makeCapabilityStore = Effect.gen(function* () {
     revoke: Effect.fn("CapabilityStore.revoke")((runId: string) =>
       sql.withTransaction(revokeRun(runId)),
     ),
+    authenticate,
+    revokeTwoHolders: Effect.fn("CapabilityStore.revokeTwoHolders")((runId: string) =>
+      sql.withTransaction(
+        Effect.gen(function* () {
+          yield* revokeRun(runId)
+          yield* sql`UPDATE capability_grants SET end_reason=${twoHolders} WHERE run_id=${runId}`
+        }),
+      ),
+    ),
+    endReason: Effect.fn("CapabilityStore.endReason")(function* (runId: string) {
+      const rows = yield* sql<{
+        readonly end_reason: string | null
+      }>`SELECT end_reason FROM capability_grants WHERE run_id=${runId}`
+      return yield* Schema.decodeUnknownEffect(Schema.NullOr(EndReason))(
+        rows[0]?.end_reason ?? null,
+      )
+    }),
   }
 })

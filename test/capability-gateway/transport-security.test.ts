@@ -9,7 +9,14 @@ import { tmpdir } from "node:os"
 import { connect } from "node:tls"
 import { AgentRunStoreLive } from "../../src/kernel/agent-run-store"
 import { makeCapabilityGateway } from "../../src/capability-gateway/service"
-import { bindRunSession, seedCapabilityRun, writeNoscopeProviders } from "./fixture"
+import {
+  bindRunSession,
+  renewalSignature,
+  seedCapabilityRun,
+  writeNoscopeProviders,
+} from "./fixture"
+import { capabilityDigest } from "../../src/capability-gateway/store"
+import { maxRenewalBody } from "../../deploy/sandbox/renewal.mjs"
 import { loopbackCertificate, tlsFront } from "../helpers/loopback-tls"
 import { client } from "./gateway-process"
 
@@ -125,7 +132,7 @@ test("bound streaming preserves native bytes, renews with noscope, and denies cr
           body: new ReadableStream<Uint8Array>({
             start(controller) {
               upload = controller
-              controller.enqueue(new TextEncoder().encode("{}x"))
+              controller.enqueue(new TextEncoder().encode(`{${" ".repeat(maxRenewalBody)}`))
             },
             cancel() {
               cancelledUpload = true
@@ -163,8 +170,13 @@ test("bound streaming preserves native bytes, renews with noscope, and denies cr
         expect(yield* Effect.promise(() => readFile(join(root, "access-mints"), "utf8"))).toBe("x")
         // A renewal asked again replaces the successor that has not renewed: the last one holds.
         const renewals: Array<{ readonly token: string }> = []
+        const signedRenewal = JSON.stringify({
+          signature: renewalSignature(issued.binding, capabilityDigest(issued.token)),
+        })
         for (let asked = 0; asked < 3; asked++) {
-          const renew = yield* gateway.handle(request("/capabilities/v1/renew", issued.token, "{}"))
+          const renew = yield* gateway.handle(
+            request("/capabilities/v1/renew", issued.token, signedRenewal),
+          )
           expect(renew.status).toBe(200)
           renewals.push(
             yield* Effect.promise(() => renew.json()).pipe(
@@ -178,6 +190,8 @@ test("bound streaming preserves native bytes, renews with noscope, and denies cr
         const next = yield* gateway.handle(request(undefined, successor.token))
         expect(next.status).toBe(200)
         yield* Effect.promise(() => next.text())
+        // The successor has made a call: its predecessor is refused from now on.
+        expect((yield* gateway.handle(request())).status).toBe(403)
         for (const form of [
           "fixture-access",
           Buffer.from("fixture-access").toString("base64"),
@@ -192,9 +206,9 @@ test("bound streaming preserves native bytes, renews with noscope, and denies cr
         reflect = undefined
         for (const fault of ["redirect", "encoding", "header"]) {
           upstreamFault = fault
-          expect((yield* gateway.handle(request())).status).toBe(503)
+          expect((yield* gateway.handle(request(undefined, successor.token))).status).toBe(503)
           upstreamFault = undefined
-          const control = yield* gateway.handle(request())
+          const control = yield* gateway.handle(request(undefined, successor.token))
           expect(yield* Effect.promise(() => control.text())).toBe(responseBytes)
         }
         const beforeRevocation = sent.length
@@ -214,7 +228,7 @@ test("bound streaming preserves native bytes, renews with noscope, and denies cr
           ),
         )
         try {
-          const sentRequest = request()
+          const sentRequest = request(undefined, successor.token)
           const response = yield* Effect.promise(() =>
             client(front).request(new URL(sentRequest.url).pathname, {
               method: "POST",
@@ -239,7 +253,8 @@ test("bound streaming preserves native bytes, renews with noscope, and denies cr
         }
         expect((yield* gateway.handle(request(undefined, successor.token))).status).toBe(403)
         expect(
-          (yield* gateway.handle(request("/capabilities/v1/renew", issued.token, "{}"))).status,
+          (yield* gateway.handle(request("/capabilities/v1/renew", issued.token, signedRenewal)))
+            .status,
         ).toBe(403)
         expect(sent.length).toBe(beforeRevocation + 1)
       }).pipe(

@@ -5,6 +5,10 @@ export interface SessionGrant {
   deadline: number
   /** The provider id of the model route that the relay calls. */
   providerId: string
+  /** The run's channel, which each renewal's signature names. */
+  channel: string
+  /** The private session key, as PKCS #8 in base64url, which signs each renewal. */
+  sessionKey: string
 }
 export type JobIdentity = ((audience: string, signal: AbortSignal) => Promise<string>) & {
   clear: () => void
@@ -23,6 +27,8 @@ export function openSession(options: {
   clock?: () => number
   sleep?: (milliseconds: number, signal?: AbortSignal) => Promise<void>
   signal?: AbortSignal
+  /** The session key that each proof binds; a new one unless named. */
+  sessionKey?: { publicKey: string; privateKey: string }
 }): Promise<SessionGrant>
 export function takeJobIdentity(
   environment: Record<string, string | undefined>,

@@ -2,7 +2,18 @@ import { expect, test } from "bun:test"
 import { mkdtemp, readFile, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
-import { client, processGateway, proof, withGateway } from "../capability-gateway/gateway-process"
+import {
+  client,
+  processGateway,
+  proof,
+  runnerKey,
+  sse,
+  streamEnd,
+  withGateway,
+  type Fixture,
+  type Gateway,
+} from "../capability-gateway/gateway-process"
+import { sessionKeyPair } from "../../deploy/sandbox/renewal.mjs"
 import { renewalRequests } from "../../deploy/sandbox/renewal.mjs"
 import { fixtureExecutable } from "../helpers/fixture-executable.mjs"
 import { loopbackCertificate } from "../helpers/loopback-tls"
@@ -60,6 +71,8 @@ for (const scenario of ["headers", "renewal", "git-refs", "git-upload"] as const
         stdin: new Blob([
           JSON.stringify({
             token: first,
+            channel: "c".repeat(64),
+            sessionKey: sessionKeyPair().privateKey,
             expiresAt: expiry,
             renewAt: scenario === "renewal" ? now + 100 : expiry - 1000,
             deadline: expiry,
@@ -166,6 +179,8 @@ test("the relay refuses a config whose provider id is missing or not of the form
           stdin: new Blob([
             JSON.stringify({
               token: "a".repeat(43),
+              channel: "c".repeat(64),
+              sessionKey: sessionKeyPair().privateKey,
               expiresAt: Date.now() + 1000,
               renewAt: Date.now() + 500,
               deadline: Date.now() + 2000,
@@ -210,6 +225,8 @@ test("the relay refuses a gateway that is not an HTTPS origin", async () => {
           stdin: new Blob([
             JSON.stringify({
               token: "a".repeat(43),
+              channel: "c".repeat(64),
+              sessionKey: sessionKeyPair().privateKey,
               expiresAt: Date.now() + 1000,
               renewAt: Date.now() + 500,
               deadline: Date.now() + 2000,
@@ -255,7 +272,7 @@ test("the relay asks one renewal no more often than the gateway permits, and its
       // A token that lives 180 seconds is due for renewal at once: renewAt is 180 to 300 seconds
       // before its expiry, and never later.
       await f.tokenSeconds(180)
-      const { audience } = await runner.audience()
+      const { audience, channel } = await runner.audience()
       const answer = await runner.session(proof(audience, "jti-relay"))
       expect(answer.status).toBe(200)
       const grant = await runner.grant(answer)
@@ -270,7 +287,14 @@ test("the relay asks one renewal no more often than the gateway permits, and its
         ],
         {
           env: { PATH: "/usr/bin:/bin", HOME: root, NODE_EXTRA_CA_CERTS: f.tls.cert },
-          stdin: new Blob([JSON.stringify({ ...grant, gateway: f.front.origin })]),
+          stdin: new Blob([
+            JSON.stringify({
+              ...grant,
+              channel,
+              sessionKey: runnerKey.privateKey,
+              gateway: f.front.origin,
+            }),
+          ]),
           stdout: "pipe",
           stderr: "pipe",
         },
@@ -296,7 +320,7 @@ test("a renewal that the gateway refuses ends the relay at once: it sends no fur
     const streamOpen = Promise.withResolvers<void>()
     const runner = client(gateway)
     try {
-      const { audience } = await runner.audience()
+      const { audience, channel } = await runner.audience()
       const answer = await runner.session(proof(audience, "jti-relay"))
       expect(answer.status).toBe(200)
       // From here, the front records each answer to the relay.
@@ -322,7 +346,13 @@ test("a renewal that the gateway refuses ends the relay at once: it sends no fur
         {
           env: { PATH: "/usr/bin:/bin", HOME: root, NODE_EXTRA_CA_CERTS: f.tls.cert },
           stdin: new Blob([
-            JSON.stringify({ ...grant, renewAt: Date.now(), gateway: f.front.origin }),
+            JSON.stringify({
+              ...grant,
+              channel,
+              sessionKey: runnerKey.privateKey,
+              renewAt: Date.now(),
+              gateway: f.front.origin,
+            }),
           ]),
           stdout: "pipe",
           stderr: "pipe",
@@ -367,6 +397,237 @@ test("a renewal that the gateway refuses ends the relay at once: it sends no fur
       ])
       expect(await readFile(join(root, "relay-ended"), "utf8")).toBe("renewal\n")
       expect(await f.mints()).toBe(1)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+}, 40000)
+
+test("the relay refuses a config whose channel or session key is missing or not of the form", async () => {
+  const root = await mkdtemp(join(tmpdir(), "relay-session-key-"))
+  try {
+    const { generateKeyPairSync } = await import("node:crypto")
+    const rsa = generateKeyPairSync("rsa", { modulusLength: 2048 })
+      .privateKey.export({ type: "pkcs8", format: "der" })
+      .toString("base64url")
+    const valid = sessionKeyPair().privateKey
+    for (const [channel, sessionKey] of [
+      [undefined, valid],
+      ["C".repeat(64), valid],
+      ["c".repeat(63), valid],
+      ["c".repeat(64), undefined],
+      ["c".repeat(64), ""],
+      ["c".repeat(64), sessionKeyPair().publicKey],
+      ["c".repeat(64), rsa],
+      ["c".repeat(64), 7],
+    ]) {
+      const child = Bun.spawn(
+        [fixtureExecutable("node"), resolve("deploy/sandbox/capability-relay.mjs"), "runner", root],
+        {
+          env: { PATH: "/usr/bin:/bin" },
+          stdin: new Blob([
+            JSON.stringify({
+              token: "a".repeat(43),
+              channel,
+              sessionKey,
+              expiresAt: Date.now() + 1000,
+              renewAt: Date.now() + 500,
+              deadline: Date.now() + 2000,
+              providerId: "anthropic",
+              gateway: "https://127.0.0.1:1",
+            }),
+          ]),
+          stdout: "pipe",
+          stderr: "pipe",
+        },
+      )
+      const [code, stdout, stderr] = await Promise.all([
+        child.exited,
+        new Response(child.stdout).text(),
+        new Response(child.stderr).text(),
+      ])
+      expect({ channel, code, stdout, stderr }).toEqual({
+        channel,
+        code: 1,
+        stdout: "",
+        stderr: "capability relay unavailable\n",
+      })
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+/**
+ * Opens the run's session through the front with a token that may be renewed at once, and starts
+ * the real relay with its grant, channel and session key; the relay renews `renewIn` milliseconds
+ * after its start. It answers once the relay is ready. Each successor outlives its predecessor,
+ * so the gateway grants a renewal.
+ */
+async function relayOfRun(f: Fixture, gateway: Gateway, root: string, renewIn = 500) {
+  const runner = client(gateway)
+  await f.tokenSeconds(200)
+  const { audience, channel } = await runner.audience()
+  const grant = await runner.grant(await runner.session(proof(audience, "jti-relay")))
+  await f.tokenSeconds(300)
+  const child = Bun.spawn(
+    [
+      fixtureExecutable("node"),
+      resolve("test/sandbox/fixtures/capability-job.mjs"),
+      "runner",
+      root,
+    ],
+    {
+      env: { PATH: "/usr/bin:/bin", HOME: root, NODE_EXTRA_CA_CERTS: f.tls.cert },
+      stdin: new Blob([
+        JSON.stringify({
+          ...grant,
+          channel,
+          sessionKey: runnerKey.privateKey,
+          renewAt: Date.now() + renewIn,
+          gateway: f.front.origin,
+        }),
+      ]),
+      stdout: "pipe",
+      stderr: "pipe",
+    },
+  )
+  const output = child.stdout.getReader()
+  expect(Buffer.from((await output.read()).value ?? []).toString()).toBe("ready\n")
+  output.releaseLock()
+  const call = () =>
+    fetch("http://relay/v1/messages", {
+      unix: join(root, "gateway.sock"),
+      method: "POST",
+      headers: {
+        authorization: "Bearer workflowd-local",
+        "content-type": "application/json",
+        "anthropic-version": "2023-06-01",
+        "anthropic-beta": "oauth-2025-04-20",
+      },
+      body: JSON.stringify({ model: "fixture-model", stream: true, messages: [] }),
+    })
+  return { runner, grant, channel, child, call }
+}
+
+/** Waits up to five seconds for `ready`. */
+async function until(ready: () => boolean | Promise<boolean>) {
+  for (let tries = 0; !(await ready()) && tries < 100; tries++) await Bun.sleep(50)
+}
+
+test("a party with a copy of the run token cannot renew it, and the relay's signed renewal goes on", async () => {
+  await withGateway(processGateway, async (f, gateway) => {
+    const root = await mkdtemp(join(tmpdir(), "relay-copy-"))
+    const renewals: Array<number | undefined> = []
+    f.front.hook({
+      lost: (path, status) => {
+        if (path === "/capabilities/v1/renew") renewals.push(status)
+        return false
+      },
+    })
+    try {
+      const { runner, grant, channel, child, call } = await relayOfRun(f, gateway, root, 3000)
+      try {
+        // The copy's holder has no session key of the run: no body of its own is taken.
+        expect((await runner.renewWith(grant.token, "{}")).status).toBe(403)
+        expect((await client(gateway, sessionKeyPair()).renew(grant.token, channel)).status).toBe(
+          403,
+        )
+        await until(() => renewals.length === 3)
+        expect(renewals).toEqual([403, 403, 200])
+        const answer = await call()
+        expect(answer.status).toBe(200)
+        expect(await answer.text()).toBe(sse)
+        // The relay's call used the successor, so the copied predecessor is refused from now on.
+        expect((await runner.call(grant.token)).status).toBe(403)
+        expect(child.exitCode).toBeNull()
+        expect(await f.daemon((capability) => capability.endReason("run"))).toBeNull()
+      } finally {
+        child.kill("SIGKILL")
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+}, 40000)
+
+test("the relay asks again for a renewal whose answer the front dropped, gets a valid successor, and the dropped successor is refused", async () => {
+  await withGateway(processGateway, async (f, gateway) => {
+    const root = await mkdtemp(join(tmpdir(), "relay-dropped-"))
+    const renewals: Array<number | undefined> = []
+    let dropped = ""
+    f.front.hook({
+      lost: (path, status) => {
+        if (path !== "/capabilities/v1/renew") return false
+        renewals.push(status)
+        return renewals.length === 1
+      },
+      taken: (_, body) => {
+        dropped = body
+      },
+    })
+    try {
+      const { runner, grant, child, call } = await relayOfRun(f, gateway, root)
+      try {
+        await until(() => renewals.length === 2)
+        expect(renewals).toEqual([200, 200])
+        const answer = await call()
+        expect(answer.status).toBe(200)
+        expect(await answer.text()).toBe(sse)
+        expect(
+          (await runner.call((await runner.grant(Response.json(JSON.parse(dropped)))).token))
+            .status,
+        ).toBe(403)
+        expect((await runner.call(grant.token)).status).toBe(403)
+        expect(child.exitCode).toBeNull()
+        expect(await f.daemon((capability) => capability.endReason("run"))).toBeNull()
+      } finally {
+        child.kill("SIGKILL")
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+}, 40000)
+
+test("when a second client makes a call with the successor that the front took from the relay, the relay's next renewal ends the run: both tokens are refused, the open stream ends, and the end reason is two holders", async () => {
+  await withGateway(processGateway, async (f, gateway) => {
+    const root = await mkdtemp(join(tmpdir(), "relay-two-holders-"))
+    const renewals: Array<number | undefined> = []
+    const taken = Promise.withResolvers<string>()
+    const used = Promise.withResolvers<void>()
+    f.front.hook({
+      lost: (path, status) => {
+        if (path !== "/capabilities/v1/renew") return false
+        renewals.push(status)
+        return renewals.length === 1
+      },
+      taken: (_, body) => taken.resolve(body),
+      // The relay's next renewal reaches the gateway once the second client's stream is open.
+      held: (path) =>
+        path === "/capabilities/v1/renew" && renewals.length > 0 ? used.promise : undefined,
+    })
+    try {
+      const { runner, grant, child } = await relayOfRun(f, gateway, root)
+      try {
+        const successor = (await runner.grant(Response.json(JSON.parse(await taken.promise)))).token
+        const second = client(gateway, sessionKeyPair())
+        f.setStall(true)
+        const stream = await second.call(successor)
+        expect(stream.status).toBe(200)
+        const reader = stream.body!.getReader()
+        expect((await reader.read()).done).toBe(false)
+        used.resolve()
+        expect(await Promise.race([child.exited, Bun.sleep(10000).then(() => "live")])).toBe(0)
+        expect(renewals).toEqual([200, 403])
+        expect(await readFile(join(root, "relay-ended"), "utf8")).toBe("renewal\n")
+        expect(await streamEnd(reader, 10000)).toBe("ended")
+        expect((await second.call(successor)).status).toBe(403)
+        expect((await runner.call(grant.token)).status).toBe(403)
+        expect(await f.daemon((capability) => capability.endReason("run"))).toBe("two holders")
+      } finally {
+        child.kill("SIGKILL")
+      }
     } finally {
       await rm(root, { recursive: true, force: true })
     }

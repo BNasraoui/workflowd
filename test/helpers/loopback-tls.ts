@@ -104,6 +104,7 @@ export interface FrontHooks {
   readonly lost?: (path: string | undefined, status: number | undefined) => boolean
   readonly held?: (path: string | undefined) => Promise<void> | undefined
   readonly alter?: (headers: HeaderValues) => HeaderValues
+  readonly taken?: (path: string | undefined, body: string) => void
 }
 
 /**
@@ -114,7 +115,8 @@ export interface FrontHooks {
  * after its start: when `lost(path, status)` holds for a gateway answer, the gateway has sent it
  * and the client never gets it, as the front closes the connection instead; a request reaches the
  * gateway once `held(path)` settles; `alter` changes the headers that the front sends, as a front
- * other than Serve would. The front listens on `listen`: a free loopback port unless named, as a
+ * other than Serve would; `taken(path, body)` gets the body of each answer that `lost` holds, as a
+ * party on the path between the front and the runner would. The front listens on `listen`: a free loopback port unless named, as a
  * front in a container listens on the port that it publishes.
  */
 export async function tlsFront(
@@ -129,7 +131,12 @@ export async function tlsFront(
     (incoming, outgoing) => void forward(incoming, outgoing),
   )
   const forward = async (incoming: IncomingMessage, outgoing: ServerResponse) => {
-    const { lost = () => false, held = () => undefined, alter = (headers) => headers } = current
+    const {
+      lost = () => false,
+      held = () => undefined,
+      alter = (headers) => headers,
+      taken = () => undefined,
+    } = current
     await held(incoming.url)
     const headers = Object.entries(alter(serveHeaders(incoming.rawHeaders))).map(
       ([name, values]) => [name, values.length === 1 ? values[0]! : values] as const,
@@ -143,8 +150,12 @@ export async function tlsFront(
       },
       (reply) => {
         if (lost(incoming.url, reply.statusCode)) {
-          reply.resume()
-          reply.once("end", () => incoming.socket.destroy())
+          const chunks: Array<Buffer> = []
+          reply.on("data", (chunk: Buffer) => chunks.push(chunk))
+          reply.once("end", () => {
+            incoming.socket.destroy()
+            taken(incoming.url, Buffer.concat(chunks).toString("utf8"))
+          })
           return
         }
         outgoing.writeHead(reply.statusCode ?? 502, reply.headers)

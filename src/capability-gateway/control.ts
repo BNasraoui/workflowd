@@ -8,6 +8,7 @@ import {
   type ControlError,
   type ControlVerb,
   type ControlVerbSchemas,
+  type EndReason,
   maxControlFrame,
 } from "../capability-control/protocol"
 import { peerCredentials, serveSocket } from "../peer-socket"
@@ -35,6 +36,7 @@ export interface ControlTarget {
     actionsRunId: number,
     actionsAttempt: number,
   ) => Effect.Effect<boolean, ControlFailure>
+  readonly endReason: (runId: string) => Effect.Effect<typeof EndReason.Type | null, ControlFailure>
 }
 
 /** The request's body does not decode as its verb's request. */
@@ -81,6 +83,7 @@ const controlVerbs: Record<ControlVerb, ReturnType<typeof verb>> = {
     controlProtocol.sessionBound,
     (target) => (body) => target.sessionBound(body.runId, body.actionsRunId, body.actionsAttempt),
   ),
+  endReason: verb(controlProtocol.endReason, (target) => (body) => target.endReason(body.runId)),
 }
 const isControlVerb = (name: string): name is ControlVerb => Object.hasOwn(controlVerbs, name)
 

@@ -4,7 +4,13 @@ import { SqliteClient } from "@effect/sql-sqlite-bun"
 import { SqlClient } from "effect/unstable/sql"
 import { AgentRunStoreLive, AgentRunStore } from "../../src/kernel/agent-run-store"
 import { CapabilityRefused, makeCapabilityStore } from "../../src/capability-gateway/store"
-import { bindRunSession, grantLiveRuns, seedCapabilityRun } from "./fixture"
+import {
+  bindRunSession,
+  fixtureSessionKey,
+  grantLiveRuns,
+  renewalSignature,
+  seedCapabilityRun,
+} from "./fixture"
 
 const now = Date.now()
 const seed = Effect.gen(function* () {
@@ -44,6 +50,7 @@ test("a session proof is single-use and tokens bind existing run, recipient and 
               now + 3600000,
               now,
               now + 610000,
+              fixtureSessionKey.publicKey,
             ),
           ),
         ),
@@ -76,12 +83,26 @@ test("renewal cannot resurrect expiry or survive durable revocation and restart"
         digest: "a".repeat(64),
         expiresAt: now + 60000,
       })
-      yield* store.renew(binding, "a".repeat(64), "b".repeat(64), now + 3600000, now + 1)
+      yield* store.renew(
+        binding,
+        "a".repeat(64),
+        renewalSignature(binding, "a".repeat(64)),
+        "b".repeat(64),
+        now + 3600000,
+        now + 1,
+      )
       expect((yield* store.authorize(binding, "b".repeat(64), now + 2)).expiresAt).toBe(
         now + 3600000,
       )
       // Asked again, the renewal replaces the successor that has not renewed itself.
-      yield* store.renew(binding, "a".repeat(64), "c".repeat(64), now + 7200000, now + 2)
+      yield* store.renew(
+        binding,
+        "a".repeat(64),
+        renewalSignature(binding, "a".repeat(64)),
+        "c".repeat(64),
+        now + 7200000,
+        now + 2,
+      )
       expect(
         refusal(yield* Effect.result(store.authorize(binding, "b".repeat(64), now + 2))),
       ).toBeInstanceOf(CapabilityRefused)
@@ -91,7 +112,14 @@ test("renewal cannot resurrect expiry or survive durable revocation and restart"
       expect(
         refusal(
           yield* Effect.result(
-            store.renew(binding, "a".repeat(64), "d".repeat(64), now + 7200000, now + 60000),
+            store.renew(
+              binding,
+              "a".repeat(64),
+              renewalSignature(binding, "a".repeat(64)),
+              "d".repeat(64),
+              now + 7200000,
+              now + 60000,
+            ),
           ),
         ),
       ).toBeInstanceOf(CapabilityRefused)
@@ -143,7 +171,14 @@ test("accepted grant rejects each durable identity/context swap with adjacent ro
               expect(
                 refusal(
                   yield* Effect.result(
-                    store.renew(binding, "a".repeat(64), "b".repeat(64), now + 200000, now),
+                    store.renew(
+                      binding,
+                      "a".repeat(64),
+                      renewalSignature(binding, "a".repeat(64)),
+                      "b".repeat(64),
+                      now + 200000,
+                      now,
+                    ),
                   ),
                 ),
               ).toBeInstanceOf(CapabilityRefused)
@@ -160,10 +195,24 @@ test("accepted grant rejects each durable identity/context swap with adjacent ro
       yield* Effect.all(
         [
           store
-            .renew(binding, "a".repeat(64), "b".repeat(64), now + 200000, now + 1)
+            .renew(
+              binding,
+              "a".repeat(64),
+              renewalSignature(binding, "a".repeat(64)),
+              "b".repeat(64),
+              now + 200000,
+              now + 1,
+            )
             .pipe(Effect.result),
           store
-            .renew(binding, "a".repeat(64), "c".repeat(64), now + 200000, now + 1)
+            .renew(
+              binding,
+              "a".repeat(64),
+              renewalSignature(binding, "a".repeat(64)),
+              "c".repeat(64),
+              now + 200000,
+              now + 1,
+            )
             .pipe(Effect.result),
         ],
         { concurrency: "unbounded" },
@@ -180,7 +229,14 @@ test("accepted grant rejects each durable identity/context swap with adjacent ro
         [
           store.revoke("run"),
           store
-            .renew(binding, valid[0]!.repeat(64), "d".repeat(64), now + 400000, now + 2)
+            .renew(
+              binding,
+              valid[0]!.repeat(64),
+              renewalSignature(binding, valid[0]!.repeat(64)),
+              "d".repeat(64),
+              now + 400000,
+              now + 2,
+            )
             .pipe(Effect.result),
         ],
         { concurrency: "unbounded" },
@@ -207,10 +263,18 @@ test("a new session ends every token of the earlier one, and a proof opens one s
         now + 60000,
         now,
         now + 610000,
+        fixtureSessionKey.publicKey,
       )
       expect(binding).toEqual({ runId: "run", channel: first.channel, session: 1 })
       const { session: _, ...run } = binding
-      yield* store.renew(run, "a".repeat(64), "b".repeat(64), now + 200000, now + 1)
+      yield* store.renew(
+        run,
+        "a".repeat(64),
+        renewalSignature(run, "a".repeat(64)),
+        "b".repeat(64),
+        now + 200000,
+        now + 1,
+      )
       expect((yield* store.authorize(run, "b".repeat(64), now + 2)).session).toBe(1)
       // The used challenge, and the used proof on a new challenge, open nothing.
       expect(
@@ -223,6 +287,7 @@ test("a new session ends every token of the earlier one, and a proof opens one s
               now + 60000,
               now + 3,
               now + 610000,
+              fixtureSessionKey.publicKey,
             ),
           ),
         ),
@@ -240,6 +305,7 @@ test("a new session ends every token of the earlier one, and a proof opens one s
               now + 60000,
               now + 4,
               now + 610000,
+              fixtureSessionKey.publicKey,
             ),
           ),
         ),
@@ -252,6 +318,7 @@ test("a new session ends every token of the earlier one, and a proof opens one s
           now + 60000,
           now + 4,
           now + 610000,
+          fixtureSessionKey.publicKey,
         )).session,
       ).toBe(2)
       for (const digest of ["a", "b"]) {
@@ -265,7 +332,14 @@ test("a new session ends every token of the earlier one, and a proof opens one s
       expect(
         refusal(
           yield* Effect.result(
-            store.renew(run, "b".repeat(64), "d".repeat(64), now + 400000, now + 5),
+            store.renew(
+              run,
+              "b".repeat(64),
+              renewalSignature(run, "b".repeat(64)),
+              "d".repeat(64),
+              now + 400000,
+              now + 5,
+            ),
           ),
         ),
       ).toBeInstanceOf(CapabilityRefused)
@@ -301,13 +375,27 @@ test("a run token with exactly 330 seconds left is renewed, and one with 330 sec
       const { binding, expiresAt } = yield* bindRunSession(now, { digest: "a".repeat(64) })
       const opens = expiresAt - 330000
       const early = yield* Effect.result(
-        store.renew(binding, "a".repeat(64), "b".repeat(64), expiresAt + 600000, opens - 1),
+        store.renew(
+          binding,
+          "a".repeat(64),
+          renewalSignature(binding, "a".repeat(64)),
+          "b".repeat(64),
+          expiresAt + 600000,
+          opens - 1,
+        ),
       )
       expect(refusal(early)).toBeInstanceOf(CapabilityRefused)
       expect(
         refusal(yield* Effect.result(store.authorize(binding, "b".repeat(64), opens - 1))),
       ).toBeInstanceOf(CapabilityRefused)
-      yield* store.renew(binding, "a".repeat(64), "b".repeat(64), expiresAt + 600000, opens)
+      yield* store.renew(
+        binding,
+        "a".repeat(64),
+        renewalSignature(binding, "a".repeat(64)),
+        "b".repeat(64),
+        expiresAt + 600000,
+        opens,
+      )
       expect((yield* store.authorize(binding, "b".repeat(64), opens)).expiresAt).toBe(
         expiresAt + 600000,
       )

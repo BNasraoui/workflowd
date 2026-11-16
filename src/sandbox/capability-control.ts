@@ -96,6 +96,7 @@ export const controlClient = (socket: string) => ({
       actionsRunId,
       actionsAttempt,
     }),
+  endReason: (runId: string) => send(socket, "endReason", controlProtocol.endReason, { runId }),
 })
 
 /** workflowd's worker authorization ends a run's authority this long after the run was made. */
@@ -201,6 +202,10 @@ export const makeDaemonCapability = (options: {
       (runId: string, actionsRunId: number, actionsAttempt: number) =>
         control.sessionBound(runId, actionsRunId, actionsAttempt),
     )
+    /** Why the gateway ended the run by itself, or null when it did not. */
+    const endReason = Effect.fn("DaemonCapability.endReason")((runId: string) =>
+      control.endReason(runId),
+    )
     // A change notifies inside its transaction; this read waits for it to commit or roll back.
     yield* Queue.take(changed).pipe(
       Effect.flatMap((runId) =>
@@ -218,6 +223,6 @@ export const makeDaemonCapability = (options: {
       Effect.forever,
       Effect.forkScoped,
     )
-    return { authorize, revoke, reconcile, sessionBound }
+    return { authorize, revoke, reconcile, sessionBound, endReason }
   })
 export type DaemonCapability = Effect.Success<ReturnType<typeof makeDaemonCapability>>

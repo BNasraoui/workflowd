@@ -7,6 +7,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { setImmediate } from "node:timers/promises"
 import { serveRunnerRelay } from "../../../deploy/sandbox/capability-relay.mjs"
+import { sessionKeyPair } from "../../../deploy/sandbox/renewal.mjs"
 
 test("renewal never sends an expired predecessor after a clock jump", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "relay-clock-"))
@@ -32,6 +33,8 @@ test("renewal never sends an expired predecessor after a clock jump", async (t) 
   const relay = await serveRunnerRelay(
     {
       token: "a".repeat(43),
+      channel: "c".repeat(64),
+      sessionKey: sessionKeyPair().privateKey,
       expiresAt: now + 3600000,
       renewAt: now + 2700000,
       deadline: now + 7200000,

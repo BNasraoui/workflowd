@@ -8,6 +8,7 @@ import { randomBytes } from "node:crypto"
 import { runGatewayMigrations } from "../../src/capability-gateway/migrations"
 import { liveGrants } from "../../src/sandbox/capability-control"
 import { mkdir, writeFile } from "node:fs/promises"
+import { sessionKeyPair, signRenewal } from "../../deploy/sandbox/renewal.mjs"
 import { join, resolve } from "node:path"
 
 /** The mint command of the real run-capability provider. */
@@ -124,6 +125,13 @@ export const seedCapabilityRun = (
     return { sql, runs, leases }
   })
 
+/** The session key of each session that `bindRunSession` opens. */
+export const fixtureSessionKey = sessionKeyPair()
+
+/** The relay's signature of the renewal of the run token whose digest is `predecessor`. */
+export const renewalSignature = (binding: { readonly channel: string }, predecessor: string) =>
+  signRenewal(fixtureSessionKey.privateKey, binding.channel, predecessor)
+
 /**
  * Binds the run of `seedCapabilityRun(now, true)` as production does: the lease's challenge, the
  * runner's session for it (its proof already verified, named by `jti`), then the ready lease.
@@ -145,6 +153,7 @@ export const bindRunSession = (
       expiresAt,
       now,
       now + 610000,
+      fixtureSessionKey.publicKey,
     )
     if (yield* store.sessionBound("run", 78, 1))
       yield* (yield* makeSandboxStore).bindSession("run", 78, 1)

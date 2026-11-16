@@ -1,4 +1,5 @@
 import { maxProofLength, providerIdPattern } from "./capability-limits.mjs"
+import { sessionBinder, sessionKeyPair } from "./renewal.mjs"
 /** The gateway's origin: HTTPS only, with no credentials, path, query or fragment. */
 export function gatewayOrigin(value) {
   const url = new URL(value)
@@ -79,6 +80,9 @@ const passes = (error) =>
  * that is not well formed), another status, and a certificate that the runner does not trust,
  * which no wait can clear. An answer can be lost after the gateway sent it, so a lost or refused
  * session costs a new proof, at most `attempts` times.
+ * Each proof binds the session key `sessionKey`, a new one unless named: its audience is
+ * `workflowd:<channel>:<binder>`, and the session post carries the public key. The grant comes
+ * back with the run's channel and the private key, which the relay alone holds after this.
  */
 export async function openSession({
   gateway,
@@ -92,6 +96,7 @@ export async function openSession({
   clock = Date.now,
   sleep = pause,
   signal,
+  sessionKey = sessionKeyPair(),
 }) {
   const origin = gatewayOrigin(gateway)
   if (!/^[a-zA-Z0-9-]{1,80}$/.test(leaseId ?? "")) throw new Error("lease refused")
@@ -106,11 +111,12 @@ export async function openSession({
     if (!/^[a-f0-9]{64}$/.test(issued?.channel) || !/^[a-f0-9]{64}$/.test(issued?.nonce))
       throw new Error("challenge refused")
     attempt++
-    const token = await issue(`workflowd:${issued.channel}:${issued.nonce}`, bounded())
+    const binder = sessionBinder(issued.nonce, sessionKey.publicKey)
+    const token = await issue(`workflowd:${issued.channel}:${binder}`, bounded())
     if (typeof token !== "string" || token.length > maxProofLength)
       throw new Error("job identity refused")
-    const grant = await postSession(send, origin, token, bounded)
-    if (grant) return grant
+    const grant = await postSession(send, origin, token, sessionKey.publicKey, bounded)
+    if (grant) return { ...grant, channel: issued.channel, sessionKey: sessionKey.privateKey }
     if (attempt < attempts) await sleep(backoff(attempt), signal)
   }
   throw new Error("gateway session unavailable")
@@ -150,15 +156,16 @@ async function readyChallenge(ask, waiting) {
 }
 
 /**
- * Posts one proof: the session's grant, or undefined when the answer is refused or lost. An
- * untrusted certificate does not change by a new proof, so it ends the exchange.
+ * Posts one proof with the public session key `key`: the session's grant, or undefined when the
+ * answer is refused or lost. An untrusted certificate does not change by a new proof, so it ends
+ * the exchange.
  */
-async function postSession(send, origin, token, bounded) {
+async function postSession(send, origin, token, key, bounded) {
   try {
     const response = await send(new URL("/capabilities/v1/session", origin), {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ token }),
+      body: JSON.stringify({ token, key }),
       redirect: "error",
       signal: bounded(),
     })

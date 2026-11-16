@@ -41,7 +41,22 @@ const capabilityStore = Effect.gen(function* () {
   ) STRICT`
 })
 
+/**
+ * The session key of a binding, which signs each renewal of its run tokens; when a run token
+ * first authorized a call; and why the gateway ended a run, when it ended the run itself.
+ */
+const sessionKey = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient
+  yield* sql`ALTER TABLE capability_bindings ADD COLUMN session_key TEXT
+    CHECK(session_key IS NULL OR length(session_key)=43)`
+  yield* sql`ALTER TABLE capability_tokens ADD COLUMN used_at INTEGER`
+  yield* sql`ALTER TABLE capability_grants ADD COLUMN end_reason TEXT`
+})
+
 export const runGatewayMigrations = Migrator.make({})({
-  loader: Migrator.fromRecord({ "0001_capability_store": capabilityStore }),
+  loader: Migrator.fromRecord({
+    "0001_capability_store": capabilityStore,
+    "0002_session_key": sessionKey,
+  }),
   table: gatewayMigrationsTable,
 })

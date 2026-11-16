@@ -13,12 +13,14 @@ import {
   inProcessGateway,
   processGateway,
   proof,
+  runnerKey,
   seedLease,
   sse,
   streamEnd,
   type Fixture,
   type Gateway,
 } from "./gateway-process"
+import { sessionBinder } from "../../deploy/sandbox/renewal.mjs"
 
 async function scenario(start: (f: Fixture) => Promise<Gateway>) {
   const f = await fixture()
@@ -35,6 +37,8 @@ async function scenario(start: (f: Fixture) => Promise<Gateway>) {
   try {
     const at = (on: Gateway = gateway) => client(on)
     const challenge = (lease: string) => at().challenge(lease)
+    // The channel of each lease, as its challenge named it.
+    const channels = new Map<string, string>()
     const audienceOf = async (lease: string, on?: Gateway) => {
       const issued = await at(on).challenge(lease)
       expect(issued.status).toBe(200)
@@ -42,11 +46,12 @@ async function scenario(start: (f: Fixture) => Promise<Gateway>) {
       const value = Schema.decodeUnknownSync(
         Schema.Struct({ channel: Schema.String, nonce: Schema.String }),
       )(await issued.json())
-      return `workflowd:${value.channel}:${value.nonce}`
+      channels.set(lease, value.channel)
+      return `workflowd:${value.channel}:${sessionBinder(value.nonce, runnerKey.publicKey)}`
     }
     const session = (token: string, on?: Gateway) => at(on).session(token)
     const call = (token: string) => at().call(token)
-    const renew = (token: string) => at().renew(token)
+    const renew = (token: string) => at().renew(token, channels.get("lease") ?? "")
     const Grant = async (response: Response) => {
       const grant = await at().grant(response)
       expect(grant.deadline).toBeNumber()
@@ -86,7 +91,7 @@ async function scenario(start: (f: Fixture) => Promise<Gateway>) {
     // (a) A client sends a complete session request and leaves before the answer. The gateway
     // finishes the session without it; the runner proves itself again and gets the next one.
     await f.slowMints(true)
-    const body = JSON.stringify({ token: proof(first, "jti-1") })
+    const body = JSON.stringify({ token: proof(first, "jti-1"), key: runnerKey.publicKey })
     const socket = connect({
       host: "127.0.0.1",
       port: Number(new URL(gateway.origin).port),

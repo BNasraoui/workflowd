@@ -5,8 +5,14 @@ import { writeFileSync } from "node:fs"
 import { chmod } from "node:fs/promises"
 import { pathToFileURL } from "node:url"
 import { gatewayOrigin } from "./bootstrap-helper.mjs"
-import { renewalRequests } from "./renewal.mjs"
-import { maxHeaderBytes, maxStreamsPerRun, providerIdPattern } from "./capability-limits.mjs"
+import { renewalRequests, signRenewal } from "./renewal.mjs"
+import {
+  maxHeaderBytes,
+  maxStreamIdleMs,
+  maxStreamsPerRun,
+  providerIdPattern,
+} from "./capability-limits.mjs"
+import { createHash } from "node:crypto"
 
 const root = "/run/workflowd-sandbox"
 
@@ -32,10 +38,26 @@ async function configInput() {
   return JSON.parse(Buffer.concat(chunks).toString("utf8"))
 }
 
-/** The local half of a run's calls: it adds the run token and forwards to the gateway over HTTPS. */
+/** The signature of a renewal of `token`, or undefined when the session key cannot sign. */
+function signedRenewal(sessionKey, channel, token) {
+  try {
+    return signRenewal(sessionKey, channel, createHash("sha256").update(token).digest("hex"))
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * The local half of a run's calls: it adds the run token and forwards to the gateway over HTTPS.
+ * It signs each renewal with the session key of the run's channel, which it holds in memory only.
+ */
 export async function serveRunnerRelay(config, directory = root) {
   if (
     !/^[A-Za-z0-9_-]{43}$/.test(config.token) ||
+    typeof config.channel !== "string" ||
+    !/^[a-f0-9]{64}$/.test(config.channel) ||
+    typeof config.sessionKey !== "string" ||
+    signedRenewal(config.sessionKey, config.channel, config.token) === undefined ||
     !Number.isSafeInteger(config.expiresAt) ||
     !Number.isSafeInteger(config.renewAt) ||
     !Number.isSafeInteger(config.deadline) ||
@@ -118,7 +140,7 @@ export async function serveRunnerRelay(config, directory = root) {
           })
         },
       )
-      upstream.setTimeout(120000, () => upstream.destroy())
+      upstream.setTimeout(maxStreamIdleMs, () => upstream.destroy())
       upstream.once("close", () => {
         if (counted) streams--
         counted = false
@@ -146,6 +168,9 @@ export async function serveRunnerRelay(config, directory = root) {
       return
     }
     try {
+      const body = JSON.stringify({
+        signature: signedRenewal(config.sessionKey, config.channel, credential.token),
+      })
       const { status, raw } = await new Promise((resolve, reject) => {
         const call = httpsRequest(
           new URL("/capabilities/v1/renew", origin),
@@ -154,7 +179,7 @@ export async function serveRunnerRelay(config, directory = root) {
             headers: {
               authorization: `Bearer ${credential.token}`,
               "content-type": "application/json",
-              "content-length": "2",
+              "content-length": String(Buffer.byteLength(body)),
             },
             agent,
             timeout: 10000,
@@ -171,7 +196,7 @@ export async function serveRunnerRelay(config, directory = root) {
         )
         call.once("timeout", () => call.destroy(new Error("renewal unavailable")))
         call.once("error", reject)
-        call.end("{}")
+        call.end(body)
       })
       // A stopped relay reads no answer, whatever its agent did with the request in flight.
       if (closed) return

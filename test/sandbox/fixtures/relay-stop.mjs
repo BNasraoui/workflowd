@@ -6,6 +6,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { serveRunnerRelay } from "../../../deploy/sandbox/capability-relay.mjs"
+import { sessionKeyPair } from "../../../deploy/sandbox/renewal.mjs"
 
 /** Runs the event loop for `cycles` turns; the mocked timers do not move. */
 const turns = async (cycles) => {
@@ -56,6 +57,8 @@ async function renewalInFlight(t, body) {
   const relay = await serveRunnerRelay(
     {
       token: "a".repeat(43),
+      channel: "c".repeat(64),
+      sessionKey: sessionKeyPair().privateKey,
       expiresAt: now + 3600000,
       renewAt: now + 2700000,
       deadline: now + 7200000,
