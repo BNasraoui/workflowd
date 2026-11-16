@@ -481,15 +481,12 @@ export const makeCapabilityGateway = (
      * or retired since the first check, is refused as at the first check.
      */
     const checkedAgain = (digest: string) =>
-      store
-        .authenticate(digest, Date.now())
-        .pipe(
-          Effect.mapError((error) =>
-            error instanceof CapabilityRefused || error instanceof CapabilityRetired
-              ? new RequestRefused()
-              : error,
-          ),
-        )
+      store.authenticate(digest, Date.now()).pipe(
+        Effect.catchIf(
+          (error) => error instanceof CapabilityRefused || error instanceof CapabilityRetired,
+          () => Effect.fail(new RequestRefused()),
+        ),
+      )
     type Grant = Effect.Success<ReturnType<typeof store.authenticate>>["grant"]
     /**
      * The renew route: a body of the relay's signature and attempt number, at most
