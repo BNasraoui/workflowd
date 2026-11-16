@@ -22,7 +22,11 @@ import { Schema } from "effect"
  *
  * Only a refusal of the OAuth server (400 `invalid_grant`, RFC 6749 section 5.2) makes the login
  * need a new import. Any other answer, and any fault, leaves the stored login as it was, and the
- * next try waits: `firstRetryWaitMs`, doubled for each failed try, at most `retryWaitCapMs`.
+ * next try waits: `firstRetryWaitMs`, doubled for each failed try, at most `retryWaitCapMs`. A 200
+ * that holds a renewal value is the one exception: the server has replaced the stored value, so
+ * custody stores the new one before it judges the answer's other fields. After a renewal, no
+ * renewal request goes out before `firstRetryWaitMs` has passed, even when the new access value
+ * ends within `renewWithinMs`.
  */
 
 /** The largest login that custody imports or reads, in bytes. */
@@ -55,10 +59,12 @@ const Document = Schema.Record(Schema.String, Schema.Json)
 const ClaudeDocument = Schema.Struct({ claudeAiOauth: OAuth })
 const ClaudeRenewal = Schema.Struct({
   access_token: Schema.NonEmptyString.check(Schema.isMaxLength(8192)),
-  refresh_token: Schema.NonEmptyString.check(Schema.isMaxLength(8192)),
   expires_in: Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 86400 })),
   // RFC 6749 section 5.1: a server may leave the scope out when it did not change.
   scope: Schema.optionalKey(Schema.String),
+})
+const ClaudeRenewalValue = Schema.Struct({
+  refresh_token: Schema.NonEmptyString.check(Schema.isMaxLength(8192)),
 })
 const OAuthError = Schema.Struct({ error: Schema.String })
 
@@ -78,13 +84,28 @@ const providers = {
       ...document,
       claudeAiOauth: { ...fields(document.claudeAiOauth), ...next },
     }),
-    renewed: (answer: unknown, now: number, scopes: ReadonlyArray<string>): OAuth => {
-      const value = Schema.decodeUnknownSync(ClaudeRenewal)(answer)
+    /**
+     * A 200's renewal value, read on its own, and the login that the whole answer makes, when its
+     * other fields are custody's to take. RFC 6749 section 6: a server may keep the refresh value
+     * and leave it out; the stored one then stays. A renewal value that custody cannot read throws.
+     */
+    renewed: (answer: unknown, now: number, stored: OAuth) => {
+      const refreshToken = Object.hasOwn(fields(answer), "refresh_token")
+        ? Schema.decodeUnknownSync(ClaudeRenewalValue)(answer).refresh_token
+        : undefined
+      const value = Schema.decodeUnknownOption(ClaudeRenewal)(answer)
       return {
-        accessToken: value.access_token,
-        refreshToken: value.refresh_token,
-        expiresAt: now + value.expires_in * 1000,
-        scopes: value.scope === undefined ? scopes : value.scope.split(" "),
+        refreshToken,
+        next:
+          value._tag === "None"
+            ? undefined
+            : {
+                accessToken: value.value.access_token,
+                refreshToken: refreshToken ?? stored.refreshToken,
+                expiresAt: now + value.value.expires_in * 1000,
+                scopes:
+                  value.value.scope === undefined ? stored.scopes : value.value.scope.split(" "),
+              },
       }
     },
   },
@@ -114,7 +135,9 @@ class LoginScopeMissing extends Error {
  * The state of a login beside it. `renewing` is written before a request to the OAuth server and
  * removed once a renewal is stored. Seen by a later call it means: the stored refresh value is
  * sent again, not before `retryAt`, after `failures` failed tries. A stop during the request
- * leaves it with no wait.
+ * leaves it with no wait. `renewed` follows a renewal whose access value ends within the renewal
+ * lead: the stored access value serves calls until it ends, and no renewal request goes out
+ * before `renewAfter`.
  */
 const State = Schema.Union([
   Schema.Struct({
@@ -123,6 +146,7 @@ const State = Schema.Union([
     retryAt: Schema.Number,
   }),
   Schema.Struct({ state: Schema.Literal("import-required") }),
+  Schema.Struct({ state: Schema.Literal("renewed"), renewAfter: Schema.Number }),
 ])
 type State = typeof State.Type
 
@@ -286,7 +310,7 @@ export async function loginFault(path: string, provider: CustodyProvider) {
       const { oauth } = await readLogin(directory, provider)
       if (!oauth.scopes.includes(inferenceScope))
         return `custody: ${new LoginScopeMissing(provider).message}`
-      if (state && state.retryAt > Date.now())
+      if (state?.state === "renewing" && state.retryAt > Date.now())
         return `custody: the ${provider} login was not renewed; custody waits before it asks the OAuth server again`
       return undefined
     })
@@ -465,6 +489,8 @@ type Renewal =
   | { readonly kind: "renewed"; readonly next: OAuth }
   | { readonly kind: "refused" }
   | { readonly kind: "failed"; readonly cause: string; readonly askedWaitMs: number }
+  /** A 200 with a renewal value, whose other fields custody does not take: the value is stored. */
+  | { readonly kind: "replaced"; readonly refreshToken: string }
 
 /** One request with the refresh value of `stored`; no fault escapes it. */
 async function renew(provider: CustodyProvider, url: string, stored: OAuth): Promise<Renewal> {
@@ -494,10 +520,11 @@ async function renew(provider: CustodyProvider, url: string, stored: OAuth): Pro
         askedWaitMs: retryAfter(response, now),
       }
     }
-    return {
-      kind: "renewed",
-      next: providers[provider].renewed(await answer(response), now, stored.scopes),
-    }
+    const read = providers[provider].renewed(await answer(response), now, stored)
+    if (read.next) return { kind: "renewed", next: read.next }
+    if (read.refreshToken !== undefined)
+      return { kind: "replaced", refreshToken: read.refreshToken }
+    return { kind: "failed", cause: "gave no answer that custody reads", askedWaitMs: 0 }
   } catch (error) {
     // No answer, or one that does not parse: DNS, TLS, a refused or reset connection, the limit.
     return {
@@ -527,12 +554,21 @@ async function access(path: string, provider: CustodyProvider, url: string) {
     let state = await readState(directory, provider)
     if (state?.state === "import-required") throw new LoginImportRequired(provider)
     let { document, oauth } = await readLogin(directory, provider)
-    if (state && (await recover(directory, provider, oauth))) {
+    if (state?.state === "renewing" && (await recover(directory, provider, oauth))) {
       ;({ document, oauth } = await readLogin(directory, provider))
       await remove(directory, stateName(provider))
       state = undefined
     }
     await clearTemporaries(directory, provider)
+    if (state?.state === "renewed") {
+      if (state.renewAfter > Date.now()) {
+        if (oauth.expiresAt > Date.now()) return usable(provider, oauth)
+        throw new CustodyUnavailable(
+          `the ${provider} login waits to renew until ${new Date(state.renewAfter).toISOString()}`,
+        )
+      }
+      state = undefined
+    }
     if (!state && oauth.expiresAt > Date.now() + renewWithinMs) return usable(provider, oauth)
     if (state && state.retryAt > Date.now())
       throw new CustodyUnavailable(
@@ -546,10 +582,20 @@ async function access(path: string, provider: CustodyProvider, url: string) {
       await writeState(directory, provider, { state: "import-required" })
       throw new LoginImportRequired(provider)
     }
-    if (outcome.kind === "failed") {
+    if (outcome.kind === "replaced")
+      // The server has replaced the refresh value: it is stored before the answer is judged.
+      await persist(
+        directory,
+        loginName(provider),
+        JSON.stringify(
+          providers[provider].write(document, { ...oauth, refreshToken: outcome.refreshToken }),
+        ),
+      )
+    if (outcome.kind === "failed" || outcome.kind === "replaced") {
+      const asked = outcome.kind === "failed" ? outcome.askedWaitMs : 0
       const wait = Math.min(
         retryWaitCapMs,
-        Math.max(firstRetryWaitMs * 2 ** Math.min(failures, 16), outcome.askedWaitMs),
+        Math.max(firstRetryWaitMs * 2 ** Math.min(failures, 16), asked),
       )
       const retryAt = Date.now() + wait
       await writeState(directory, provider, {
@@ -557,8 +603,12 @@ async function access(path: string, provider: CustodyProvider, url: string) {
         failures: Math.min(failures + 1, 64),
         retryAt,
       })
+      const cause =
+        outcome.kind === "failed"
+          ? outcome.cause
+          : "answered with a renewal value, which custody stored, and fields that custody does not take"
       throw new CustodyUnavailable(
-        `the OAuth server of ${provider} ${outcome.cause}; no request before ${new Date(retryAt).toISOString()}`,
+        `the OAuth server of ${provider} ${cause}; no request before ${new Date(retryAt).toISOString()}`,
       )
     }
     // The server has replaced the refresh value: the new values are stored whatever their scope.
@@ -568,7 +618,14 @@ async function access(path: string, provider: CustodyProvider, url: string) {
       loginName(provider),
       JSON.stringify(providers[provider].write(document, next)),
     )
-    await remove(directory, stateName(provider))
+    // An access value that ends within the renewal lead serves calls until it ends, and no
+    // renewal request goes out before the first wait has passed.
+    if (next.expiresAt > Date.now() + renewWithinMs) await remove(directory, stateName(provider))
+    else
+      await writeState(directory, provider, {
+        state: "renewed",
+        renewAfter: Date.now() + firstRetryWaitMs,
+      })
     return usable(provider, next)
   })
 }
