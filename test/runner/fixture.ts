@@ -3,7 +3,7 @@ import { OpenCode } from "@opencode-ai/client/effect"
 import { Effect, Layer, ManagedRuntime, type Scope } from "effect"
 import { FetchHttpClient } from "effect/unstable/http"
 import { SqlClient } from "effect/unstable/sql"
-import { mkdir, readFile, writeFile } from "node:fs/promises"
+import { mkdir, readdir, readFile, writeFile } from "node:fs/promises"
 import { join, resolve } from "node:path"
 import { AgentRunIngressLive } from "../../src/kernel/agent-run-ingress"
 import { AgentRunStoreLive } from "../../src/kernel/agent-run-store"
@@ -497,8 +497,11 @@ export async function withRunnerDaemon<A>(
     readonly remote: Awaited<ReturnType<typeof gitRemote>>
     /** Settles once the job's run client ended; fails with the job's failure. */
     readonly jobEnded: () => Promise<void>
-    /** The job's private record of its harness steps, when the box wrote one. */
-    readonly harnessLog: () => Promise<string>
+    /**
+     * The job's record: the files of its run directory, its harness's record of its steps, the
+     * model calls that reached the fixture model and the end of the gateway's output.
+     */
+    readonly record: () => Promise<string>
   }) => Promise<A>,
 ): Promise<A> {
   const f = await fixture({ gitRead: true })
@@ -555,8 +558,17 @@ export async function withRunnerDaemon<A>(
       runtime,
       remote,
       jobEnded,
-      harnessLog: () =>
-        readFile(join(job.directory, "native", "harness.log"), "utf8").catch(() => ""),
+      record: async () =>
+        [
+          `run directory: ${(await readdir(job.directory).catch(() => [])).sort().join(" ")}`,
+          `run client end: ${await readFile(join(job.directory, "relay-ended"), "utf8").catch(() => "none")}`,
+          `harness: ${await readFile(join(job.directory, "native", "harness.log"), "utf8").catch(() => "none")}`,
+          `model calls: ${f
+            .upstreamRequests()
+            .map((call) => call.path)
+            .join(" ")}`,
+          `gateway: ${(gateway?.output?.() ?? "").slice(-3000)}`,
+        ].join("\n"),
     })
   } finally {
     const pid = await runClientPid(job.directory)
@@ -623,19 +635,31 @@ export const mailbox = (runId: string) =>
     }))
   })
 
-/** Runs `operation`; a failure names `name`, and the job's harness record when it has one. */
+/**
+ * Runs `operation` within `timeoutMs`; a failure or a timeout names `name`, with `record`, the
+ * job's own record of what it did, when one is given.
+ */
 export async function step<A>(
   name: string,
   operation: () => Promise<A>,
-  log?: () => Promise<string>,
+  record?: () => Promise<string>,
+  timeoutMs = 600000,
 ) {
+  let timer: ReturnType<typeof setTimeout> | undefined
   try {
-    return await operation()
+    return await Promise.race([
+      operation(),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`timed out after ${timeoutMs} ms`)), timeoutMs)
+      }),
+    ])
   } catch (error) {
-    const record = log === undefined ? "" : await log()
+    const text = record === undefined ? "" : await record()
     throw new Error(
-      `step ${name}: ${error instanceof Error ? error.message : String(error)}${record === "" ? "" : `\nharness record:\n${record}`}`,
+      `step ${name}: ${error instanceof Error ? error.message : String(error)}${text === "" ? "" : `\njob record:\n${text}`}`,
       { cause: error },
     )
+  } finally {
+    clearTimeout(timer)
   }
 }

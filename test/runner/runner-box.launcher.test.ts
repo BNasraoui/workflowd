@@ -96,7 +96,7 @@ test("a runner run on the real runner scripts runs the pinned Claude Code in the
   try {
     await withRunnerDaemon(
       { directory, image },
-      async ({ f, runtime, remote, jobEnded, harnessLog }) => {
+      async ({ f, runtime, remote, jobEnded, record }) => {
         f.onUpstream(async (request) => {
           const path = new URL(request.url).pathname
           const body = await request.clone().text()
@@ -105,20 +105,29 @@ test("a runner run on the real runner scripts runs the pinned Claude Code in the
           else if (body.includes('"name":"Write"')) f.setAnswerText(write)
           else f.setAnswerText(text("ok"))
         })
+        // The dispatch returns once the run's first event arrived; a job that ends first, with no
+        // event, fails this step with the job's record.
         const receipt = await step(
           "dispatch",
           () =>
-            runtime.runPromise(
-              Effect.flatMap(AgentRunIngress, (ingress) =>
-                ingress.register(
-                  { route: "claude", repository: "runner", prompt: "Write the proof file." },
-                  new Date(),
+            Promise.race([
+              runtime.runPromise(
+                Effect.flatMap(AgentRunIngress, (ingress) =>
+                  ingress.register(
+                    { route: "claude", repository: "runner", prompt: "Write the proof file." },
+                    new Date(),
+                  ),
                 ),
               ),
-            ),
-          harnessLog,
+              jobEnded().then(async (): Promise<never> => {
+                await Bun.sleep(30000)
+                throw new Error("the job ended and the run had no first event")
+              }),
+            ]),
+          record,
+          360000,
         )
-        await step("job", jobEnded, harnessLog)
+        await step("job", jobEnded, record, 300000)
         // The job's hold step ends well: the run client posted the run's result.
         const hold = await step(
           "hold",
@@ -134,7 +143,7 @@ test("a runner run on the real runner scripts runs the pinned Claude Code in the
                 "hold",
               ]),
             ),
-          harnessLog,
+          record,
         )
         expect(hold).toMatchObject({ outcome: "ok", reason: "none" })
         const runs = await runtime.runPromise(AgentRunStore)
@@ -149,7 +158,7 @@ test("a runner run on the real runner scripts runs the pinned Claude Code in the
             }
             throw new Error("the run did not end")
           },
-          harnessLog,
+          record,
         )
         expect({ state: ended.state, diagnostic: ended.diagnostic }).toEqual({
           state: "completed",
