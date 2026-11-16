@@ -270,6 +270,7 @@ test("the gateway config bounds its streams: an idle limit of 1 ms to the listen
         front: { uid: process.getuid!(), gid: process.getgid!() },
         service: "gateway.example.ts.net",
       },
+      1,
       async () => new Response(null),
     )
     await close()

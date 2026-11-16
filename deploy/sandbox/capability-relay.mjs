@@ -5,9 +5,10 @@ import { writeFileSync } from "node:fs"
 import { chmod } from "node:fs/promises"
 import { pathToFileURL } from "node:url"
 import { gatewayOrigin } from "./bootstrap-helper.mjs"
-import { maxRenewalAttempt, renewalRequests, signRenewal } from "./renewal.mjs"
+import { maxRenewalAttempt, renewalRequests, renewalTryMs, signRenewal } from "./renewal.mjs"
 import {
   maxHeaderBytes,
+  maxRelaySockets,
   maxStreamIdleMs,
   maxStreamsPerRun,
   providerIdPattern,
@@ -39,27 +40,34 @@ async function configInput() {
 }
 
 /**
- * The signature of the renewal request numbered `attempt` of `token`, or undefined when the
- * session key cannot sign.
+ * The signature of the renewal request numbered `attempt` of `token`, signed at `time`, or
+ * undefined when the session key cannot sign.
  */
-function signedRenewal(sessionKey, channel, token, attempt) {
+function signedRenewal(sessionKey, channel, token, attempt, time) {
   try {
     return signRenewal(
       sessionKey,
       channel,
       createHash("sha256").update(token).digest("hex"),
       String(attempt),
+      time,
     )
   } catch {
     return undefined
   }
 }
 
+/** The time of a renewal request signed now: the relay's clock in whole seconds. */
+const renewalTime = () => String(Math.floor(Date.now() / 1000))
+
 /**
  * The local half of a run's calls: it adds the run token and forwards to the gateway over HTTPS.
  * It signs each renewal with the session key of the run's channel, which it holds in memory only,
  * and numbers each renewal request of the session, a retry too, one higher than the one before:
  * the gateway takes only a number higher than each that it took, so a copy of a request is void.
+ * Each request, a retry too, carries the time at which the relay signed it, and the gateway takes
+ * it only within a minute of its own clock, so a copy of a request that it refused or could not
+ * serve is void too.
  */
 export async function serveRunnerRelay(config, directory = root) {
   if (
@@ -67,7 +75,8 @@ export async function serveRunnerRelay(config, directory = root) {
     typeof config.channel !== "string" ||
     !/^[a-f0-9]{64}$/.test(config.channel) ||
     typeof config.sessionKey !== "string" ||
-    signedRenewal(config.sessionKey, config.channel, config.token, 1) === undefined ||
+    signedRenewal(config.sessionKey, config.channel, config.token, 1, renewalTime()) ===
+      undefined ||
     !Number.isSafeInteger(config.expiresAt) ||
     !Number.isSafeInteger(config.renewAt) ||
     !Number.isSafeInteger(config.deadline) ||
@@ -77,7 +86,7 @@ export async function serveRunnerRelay(config, directory = root) {
   )
     throw new Error("relay configuration refused")
   const origin = gatewayOrigin(config.gateway)
-  const agent = new Agent({ keepAlive: true, maxSockets: 8 })
+  const agent = new Agent({ keepAlive: true, maxSockets: maxRelaySockets })
   let credential = config
   let renewal
   let streams = 0
@@ -185,9 +194,17 @@ export async function serveRunnerRelay(config, directory = root) {
     }
     attempts++
     try {
+      const time = renewalTime()
       const body = JSON.stringify({
-        signature: signedRenewal(config.sessionKey, config.channel, credential.token, attempts),
+        signature: signedRenewal(
+          config.sessionKey,
+          config.channel,
+          credential.token,
+          attempts,
+          time,
+        ),
         attempt: String(attempts),
+        time,
       })
       const { status, raw } = await new Promise((resolve, reject) => {
         const call = httpsRequest(
@@ -200,7 +217,7 @@ export async function serveRunnerRelay(config, directory = root) {
               "content-length": String(Buffer.byteLength(body)),
             },
             agent,
-            timeout: 10000,
+            timeout: renewalTryMs,
           },
           (reply) => {
             let text = ""

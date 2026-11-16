@@ -4,6 +4,7 @@ import { Effect, Schema } from "effect"
 import { SqlClient } from "effect/unstable/sql"
 import {
   isSessionKey,
+  isTimelyRenewal,
   renewalReplacements,
   renewalWindowMs,
   verifyRenewal,
@@ -28,10 +29,14 @@ export class CapabilityRetired extends Schema.TaggedError<CapabilityRetired>()(
  * tokens have two holders. It is the one end reason, and the store's CHECK names it.
  */
 export const twoHolders = "two holders"
-/** A signed renewal request: the relay's signature and the request's attempt number. */
+/**
+ * A signed renewal request: the relay's signature, the request's attempt number, and the time at
+ * which the relay signed it.
+ */
 export interface SignedRenewal {
   readonly signature: string
   readonly attempt: string
+  readonly time: string
 }
 /**
  * The lease cannot be challenged: it is unknown, its Actions run is not recorded, its run has
@@ -228,9 +233,11 @@ export const makeCapabilityStore = Effect.gen(function* () {
     )
   /**
    * The authority of a run token that may be renewed now by `renewal`: a signature by the
-   * binding's session key over the predecessor's digest and the request's attempt number, which
-   * is higher than each that the binding took. A binding with no session key renews nothing. A
-   * request whose number is not higher, a copy of one that was taken among them, is refused as a
+   * binding's session key over the predecessor's digest, the request's attempt number, which is
+   * higher than each that the binding took, and the request's time, which is within
+   * `renewalTimeSkewMs` of `now`. A binding with no session key renews nothing. A request whose
+   * number is not higher, a copy of one that was taken among them, or whose time is not within
+   * that bound, a copy of one that was refused or failed a minute ago among them, is refused as a
    * bad signature is, and changes nothing. A token with more than `renewalWindowMs` left is not
    * renewed, nor one whose successor would not outlive it by `minimumExtensionMs` (near the run's
    * deadline), nor one whose successor has renewed already, nor one whose successor was replaced
@@ -255,7 +262,15 @@ export const makeCapabilityStore = Effect.gen(function* () {
     if (
       typeof key !== "string" ||
       typeof taken !== "number" ||
-      !verifyRenewal(key, binding.channel, predecessor, renewal.attempt, renewal.signature) ||
+      !verifyRenewal(
+        key,
+        binding.channel,
+        predecessor,
+        renewal.attempt,
+        renewal.time,
+        renewal.signature,
+      ) ||
+      !isTimelyRenewal(renewal.time, now) ||
       Number(renewal.attempt) <= taken
     )
       return yield* Effect.fail(new CapabilityRefused())

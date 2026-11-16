@@ -131,21 +131,27 @@ export const fixtureSessionKey = sessionKeyPair()
 
 /**
  * The relay's signed renewal request numbered `attempt` of the run token whose digest is
- * `predecessor`.
+ * `predecessor`, signed at `at` milliseconds: the time of the store's check that it is meant for.
  */
 export const signedRenewal = (
   binding: { readonly channel: string },
   predecessor: string,
   attempt: number,
-) => ({
-  signature: signRenewal(
-    fixtureSessionKey.privateKey,
-    binding.channel,
-    predecessor,
-    String(attempt),
-  ),
-  attempt: String(attempt),
-})
+  at: number,
+) => {
+  const time = String(Math.floor(at / 1000))
+  return {
+    signature: signRenewal(
+      fixtureSessionKey.privateKey,
+      binding.channel,
+      predecessor,
+      String(attempt),
+      time,
+    ),
+    attempt: String(attempt),
+    time,
+  }
+}
 
 /**
  * Binds the run of `seedCapabilityRun(now, true)` as production does: the lease's challenge, the

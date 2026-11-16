@@ -102,6 +102,7 @@ test("real Git clone/fetch, repository and write fences", async () => {
               front: { uid: process.getuid!(), gid: process.getgid!() },
               service: front.service,
             },
+            config.maxStreams,
             capabilityApi(gateway),
           ),
         )
