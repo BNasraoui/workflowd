@@ -4,9 +4,11 @@ import { randomInt } from "node:crypto"
 import { mintCapability } from "./noscope"
 import { custodyProvider, loginFault, renewalWriteBoundMs } from "./custody"
 import {
+  budgetHeld,
   budgetSpent,
   claudeRequest,
   readRequestBody,
+  RunBudgetHeld,
   RunBudgetSpent,
   type ClaudeUpstream,
   type ReportedUsage,
@@ -582,7 +584,8 @@ export const makeCapabilityGateway = (
         const signal = AbortSignal.any([ownership.controller.signal, request.signal, interruption])
         /**
          * Launches an upstream request. A model call also counts against the run's budget and
-         * reserves `tokens` of its output tokens, in the same step as its launch.
+         * reserves `tokens` of its output tokens, under the same hold of the run-lifetime permit
+         * as its launch.
          */
         const send = async (start: () => Promise<Response>, tokens?: number) => {
           // Admission and launch share the run-lifetime fence; network waiting does not.
@@ -591,22 +594,23 @@ export const makeCapabilityGateway = (
               Effect.gen(function* () {
                 yield* store.authorize(binding, digest, Date.now())
                 if (tokens !== undefined) {
-                  const reservation = yield* store.reserve(binding.runId, tokens, Date.now())
-                  if (reservation === null) return { spent: true as const }
+                  const reserved = yield* store.reserve(binding.runId, tokens, Date.now())
+                  if (reserved === "spent" || reserved === "held") return reserved
                   // The stream holds the reservation before the commit, so its release settles it
                   // whenever it comes; the settlement waits for the commit, and a reservation that
                   // is rolled back is no row: its settlement changes nothing.
-                  ownership.reserved(reservation)
+                  ownership.reserved(reserved.reservation)
                 }
                 return yield* Effect.try(() => {
                   signal.throwIfAborted()
-                  return { spent: false as const, response: start() }
+                  return { response: start() }
                 })
               }),
             ),
             { signal },
           )
-          if (started.spent) throw new RunBudgetSpent()
+          if (started === "spent") throw new RunBudgetSpent()
+          if (started === "held") throw new RunBudgetHeld()
           return await started.response
         }
         const selected = route.git
@@ -635,15 +639,14 @@ export const makeCapabilityGateway = (
         }
         return boundedBody(selected, signal, ownership)
       }).pipe(
-        Effect.catch((error) =>
-          error instanceof RequestRefused
-            ? Effect.fail("refused" as const)
-            : error instanceof RunBudgetSpent
-              ? Effect.fail("spent" as const)
-              : logFailure("Capability route failed")(error).pipe(
-                  Effect.andThen(Effect.fail("unavailable" as const)),
-                ),
-        ),
+        Effect.catch((error) => {
+          if (error instanceof RequestRefused) return Effect.fail("refused" as const)
+          if (error instanceof RunBudgetSpent) return Effect.fail("spent" as const)
+          if (error instanceof RunBudgetHeld) return Effect.fail("held" as const)
+          return logFailure("Capability route failed")(error).pipe(
+            Effect.andThen(Effect.fail("unavailable" as const)),
+          )
+        }),
       )
     /**
      * A run's call. Its run token selects and authorizes its binding before any body is read; then
@@ -687,6 +690,7 @@ export const makeCapabilityGateway = (
               }
               ownership.release()
               if (result.failure === "spent") return budgetSpent()
+              if (result.failure === "held") return budgetHeld()
               return result.failure === "refused" ? denied() : unavailable()
             }),
           (ownership) =>

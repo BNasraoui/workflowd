@@ -27,13 +27,59 @@ export const openReservations = (f: Fixture) =>
     (sql) => sql<{ readonly n: number }>`SELECT count(*) AS n FROM capability_reservations`,
   )
 
-/** Polls `check` until it holds, for at most five seconds. */
+/** The body of a model call that open calls of its run hold back. */
+export const heldBody = {
+  type: "error",
+  error: { type: "rate_limit_error", message: "workflowd run budget held by open calls" },
+}
+
+/**
+ * Polls `check` every 50 ms until it holds: a settlement is stored after the stream that it
+ * settles has ended, and the timeout of the test bounds the wait.
+ */
 export async function eventually(check: () => Promise<boolean>) {
-  for (let poll = 0; poll < 100; poll++) {
-    if (await check()) return
-    await Bun.sleep(50)
+  while (!(await check())) await Bun.sleep(50)
+}
+
+/** Reads a stream until it ends or fails; the timeout of the test bounds the wait. */
+export async function readToEnd(reader: ReadableStreamDefaultReader<Uint8Array>) {
+  for (;;) {
+    const item = await reader.read().catch(() => undefined)
+    if (item === undefined || item.done) return
   }
-  throw new Error("the condition did not hold within five seconds")
+}
+
+/**
+ * Has the fixture upstream hold the next `count` requests that reach it before it answers them:
+ * `holding` resolves once all of them wait, and `letGo(n)` lets the first `n` that still wait
+ * be answered. Each later request is answered at once. Its disposal lets each one go, so a test
+ * that fails leaves no request held when its gateway stops.
+ */
+export function heldUpstream(f: Fixture, count: number) {
+  const waiting: Array<() => void> = []
+  let arrived = 0
+  let all: () => void = () => undefined
+  const holding = new Promise<void>((resolve) => {
+    all = resolve
+  })
+  f.onUpstream(async () => {
+    if (arrived === count) return
+    arrived++
+    const answer = new Promise<void>((resolve) => waiting.push(resolve))
+    if (arrived === count) all()
+    await answer
+  })
+  const letGo = (n: number) => {
+    for (const resolve of waiting.splice(0, n)) resolve()
+  }
+  return {
+    holding,
+    letGo,
+    [Symbol.dispose]: () => {
+      f.onUpstream(undefined)
+      letGo(waiting.length)
+    },
+  }
 }
 
 /** Reads an answer to its end, and gives its status and its text. */

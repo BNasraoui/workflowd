@@ -1,10 +1,13 @@
 import { expect, test } from "bun:test"
 import { defaultRunBudget } from "../../src/sandbox/config"
-import { client, gateways, processGateway, usageStream } from "./gateway-process"
+import { client, gateways, inProcessGateway, processGateway, usageStream } from "./gateway-process"
 import {
   answered,
   eventually,
+  heldBody,
+  heldUpstream,
   openReservations,
+  readToEnd,
   runToken,
   small,
   spentBody,
@@ -129,29 +132,96 @@ for (const [mode, start] of gateways) {
     })
   }, 30000)
 
-  test(`[${mode}] four streams that start at once with a budget that fits three: one gets the budget body`, async () => {
+  test(`[${mode}] with 100000 charged and three calls of 128000 open, a fourth gets 429 with the rate limit body and counts nothing; once one settles, the call is served`, async () => {
     await withBudget(
       start,
-      { ...small, outputTokens: 900 },
+      defaultRunBudget,
       async (f, gateway) => {
         const token = await runToken(gateway)
         const runner = client(gateway)
-        // The upstream's answer ends after 3 s. A gateway that its HTTP server tells that the client
-        // went away releases the stream then; one that it does not tell (Bun 1.3.14) releases it at
-        // the end of the answer. Either way the stream's reservation is settled once.
-        f.setTrickle(60, 50)
-        const answers = await Promise.all(Array.from({ length: 4 }, () => runner.call(token, 300)))
-        expect(answers.map((answer) => answer.status).sort()).toEqual([200, 200, 200, 403])
-        expect(f.upstreamRequests().length).toBe(3)
-        // The three open streams hold their reservations until they end; a ping reports no usage.
-        for (const answer of answers) await answer.body?.cancel()
+        f.setAnswerText(usageStream({ output_tokens: 1 }, { output_tokens: 100000 }))
+        expect((await answered(runner.call(token, 128000))).status).toBe(200)
+        // Three calls reserve and reach the upstream, which holds each until it is let go.
+        using upstream = heldUpstream(f, 3)
+        const open = Array.from({ length: 3 }, () => answered(runner.call(token, 128000)))
+        await upstream.holding
+        // 100000 charged and 384000 reserved: 128000 more passes 600000, 128000 alone does not.
+        const held = await runner.call(token, 128000)
+        expect(held.status).toBe(429)
+        expect(held.headers.get("retry-after")).toBe("5")
+        expect(held.headers.get("content-type")).toBe("application/json")
+        expect(await held.json()).toEqual(heldBody)
+        expect(await usage(f)).toMatchObject({ calls: 4, outputTokens: 100000, spent: false })
+        expect((await openReservations(f))[0]?.n).toBe(3)
+        // One open call ends with 2000 output tokens: 102000 charged and 256000 reserved.
+        f.setAnswerText(usageStream({ output_tokens: 1 }, { output_tokens: 2000 }))
+        upstream.letGo(1)
+        await eventually(async () => (await openReservations(f))[0]?.n === 2)
+        expect((await answered(runner.call(token, 128000))).status).toBe(200)
+        upstream.letGo(2)
+        for (const answer of await Promise.all(open)) expect(answer.status).toBe(200)
         await eventually(async () => (await openReservations(f))[0]?.n === 0)
-        expect(await usage(f)).toMatchObject({ calls: 3, outputTokens: 900, spent: true })
+        expect(await usage(f)).toMatchObject({ calls: 5, outputTokens: 108000, spent: false })
+      },
+      { maxStreamsPerRun: 4 },
+    )
+  }, 30000)
+
+  test(`[${mode}] a call that the budget cannot hold even with no call open gets the budget body and spends the run, while one that open calls hold back gets 429`, async () => {
+    await withBudget(
+      start,
+      small,
+      async (f, gateway) => {
+        const token = await runToken(gateway)
+        const runner = client(gateway)
+        f.setAnswerText(usageStream({ output_tokens: 1 }, { output_tokens: 350 }))
+        for (let served = 0; served < 2; served++)
+          expect((await answered(runner.call(token, 400))).status).toBe(200)
+        using upstream = heldUpstream(f, 1)
+        const open = answered(runner.call(token, 300))
+        await upstream.holding
+        // 700 charged and 300 reserved: 300 more fits once the open call settles.
+        const held = await runner.call(token, 300)
+        expect(held.status).toBe(429)
+        expect(await held.json()).toEqual(heldBody)
+        expect(await usage(f)).toMatchObject({ calls: 3, outputTokens: 700, spent: false })
+        // 700 charged and 400 asked passes 1000 with no call open.
+        const refused = await runner.call(token, 400)
+        expect(refused.status).toBe(403)
+        expect(await refused.json()).toEqual(spentBody)
+        expect(await usage(f)).toMatchObject({ calls: 3, outputTokens: 700, spent: true })
+        upstream.letGo(1)
+        expect((await open).status).toBe(200)
+        // The spent run refuses a call that would fit.
+        await eventually(async () => (await openReservations(f))[0]?.n === 0)
+        const after = await runner.call(token, 1)
+        expect(after.status).toBe(403)
+        expect(await after.json()).toEqual(spentBody)
       },
       { maxStreamsPerRun: 4 },
     )
   }, 30000)
 }
+
+test(`[in-process] a stream that the provider keeps open ends at its run token's expiry and settles its reservation, so open calls hold back a call of the run no longer than that`, async () => {
+  // A run token lives at most 15 minutes, so a stream that its provider keeps sending ends then;
+  // one with no byte for the idle limit ends sooner. A run that opens new calls as old ones end
+  // stays held back only while it pays for those calls.
+  await withBudget(inProcessGateway, small, async (f, gateway) => {
+    await f.tokenSeconds(8)
+    const token = await runToken(gateway)
+    await f.tokenSeconds(null)
+    // A ping every 100 ms for far longer than the token lives, well within the idle limit.
+    f.setTrickle(100000, 100)
+    const answer = await client(gateway).call(token, 300)
+    expect(answer.status).toBe(200)
+    await readToEnd(answer.body!.getReader())
+    // The gateway ended the answer: the upstream sees its cancel.
+    await eventually(async () => f.upstreamCancels() === 1)
+    await eventually(async () => (await openReservations(f))[0]?.n === 0)
+    expect(await usage(f)).toMatchObject({ calls: 1, outputTokens: 300 })
+  })
+}, 30000)
 
 test("[process] a change of the config's budget changes no run that workflowd has authorized", async () => {
   await withBudget(processGateway, { ...small, calls: 1 }, async (f, gateway) => {

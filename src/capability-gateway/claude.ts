@@ -472,6 +472,43 @@ function metered(body: ReadableStream<Uint8Array>, meter: UsageMeter) {
   )
 }
 
+/**
+ * The seconds that a model call held back by its run's open reservations waits before it asks
+ * again. A reservation lives as long as the stream of its model call, which takes seconds for a
+ * short answer and minutes for a long one; five seconds keeps a client's quick first retries from
+ * finding the same streams open, and stays far below the minute above which the pinned Claude
+ * Code does not retry a 429.
+ */
+const heldRetrySeconds = 5
+
+/**
+ * A model call that the run's budget holds only once the run's open reservations settle; the
+ * gateway answers it with `budgetHeld`.
+ */
+export class RunBudgetHeld extends Error {
+  readonly _tag = "RunBudgetHeld"
+  constructor() {
+    super("run budget held by open calls")
+  }
+}
+
+/** The answer to a call that open reservations hold back, in the provider's rate limit form. */
+export const budgetHeld = () =>
+  new Response(
+    JSON.stringify({
+      type: "error",
+      error: { type: "rate_limit_error", message: "workflowd run budget held by open calls" },
+    }),
+    {
+      status: 429,
+      headers: {
+        "content-type": "application/json",
+        "cache-control": "no-store",
+        "retry-after": String(heldRetrySeconds),
+      },
+    },
+  )
+
 /** A model call of a run whose budget is spent; the gateway answers it with `budgetSpent`. */
 export class RunBudgetSpent extends Error {
   readonly _tag = "RunBudgetSpent"

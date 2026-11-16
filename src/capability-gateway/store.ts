@@ -432,9 +432,11 @@ export const makeCapabilityStore = Effect.gen(function* () {
   })
   /**
    * Counts a call of a live run that asks `tokens` output tokens, and reserves them against the
-   * output tokens that are left, in one step: calls that start at once cannot pass the budget.
-   * Gives the reservation, or null when the budget cannot hold the call: the budget is then spent,
-   * and each later call of the run is refused.
+   * output tokens that are left. Gives the reservation; "spent" when the budget can never hold the
+   * call (its calls are used up, or the output tokens charged and `tokens` pass the budget): the
+   * budget is then spent, and each later call of the run is refused; "held" when the call fits
+   * only once the run's open reservations settle: nothing is counted or reserved, and the run
+   * stays live.
    */
   const reserve = Effect.fn("CapabilityStore.reserve")(function* (
     runId: string,
@@ -449,7 +451,7 @@ export const makeCapabilityStore = Effect.gen(function* () {
             WHERE r.run_id=u.run_id) AS reserved
           FROM capability_usage u WHERE u.run_id=${runId}`
         if (rows.length !== 1) return yield* Effect.fail(new CapabilityRefused())
-        const held = yield* Schema.decodeUnknownEffect(
+        const counts = yield* Schema.decodeUnknownEffect(
           Schema.Struct({
             calls: Schema.Int,
             outputTokens: Schema.Int,
@@ -457,19 +459,18 @@ export const makeCapabilityStore = Effect.gen(function* () {
             reserved: Schema.Int,
           }),
         )(rows[0])
-        if (
-          held.spent !== 0 ||
-          held.calls >= budget.calls ||
-          held.outputTokens + held.reserved + tokens > budget.outputTokens
-        ) {
+        if (counts.spent !== 0) return "spent" as const
+        if (counts.calls >= budget.calls || counts.outputTokens + tokens > budget.outputTokens) {
           yield* sql`UPDATE capability_usage SET spent=1 WHERE run_id=${runId}`
-          return null
+          return "spent" as const
         }
+        if (counts.outputTokens + counts.reserved + tokens > budget.outputTokens)
+          return "held" as const
         const reservation = randomBytes(16).toString("hex")
         yield* sql`UPDATE capability_usage SET calls=calls+1 WHERE run_id=${runId}`
         yield* sql`INSERT INTO capability_reservations(id,run_id,tokens)
           VALUES(${reservation},${runId},${tokens})`
-        return reservation
+        return { reservation }
       }),
     )
   })
