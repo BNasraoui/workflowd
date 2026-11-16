@@ -75,11 +75,12 @@ a lease. Writes go through protected publication with the pinned publisher
 
 ## Fixture suites in CI
 
-`scripts/capability-suites.ts` names five suites of test files: `core`, `gateway`,
-`publication-local`, `final-local` and `gateway-budget`. Each test file of
+`scripts/capability-suites.ts` names six suites of test files: `core`, `gateway`,
+`publication-local`, `final-local`, `gateway-budget` and `gateway-renewal`. Each test file of
 `test/capability-gateway`, at each depth, belongs to one of them: the end-to-end files of the
-run budget (`budget*.e2e.test.ts`) to `gateway-budget`, so that each suite ends within the unit's
-time limit, the other end-to-end files to `gateway`, the others to `core`,
+run budget (`budget*.e2e.test.ts`) to `gateway-budget` and those of the renewal
+(`renewal*.e2e.test.ts`) to `gateway-renewal`, so that each suite ends within the unit's time
+limit, the other end-to-end files to `gateway`, the others to `core`,
 except the pinned Claude Code test, `claude-pinned.launcher.test.ts`. One step of the Tests
 job runs that file, as the runner's user, in a network namespace whose only interface is
 loopback; the file fails when it runs anywhere else. No file is in two suites, and
