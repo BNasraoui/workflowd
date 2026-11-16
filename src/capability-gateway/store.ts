@@ -69,7 +69,6 @@ const Row = Schema.Struct({
   revoked: Schema.Int,
   session: Schema.Int,
   nonce: Schema.NullOr(Digest),
-  session_key: Schema.NullOr(Schema.String),
 })
 const StoredGrant = Schema.fromJsonString(CapabilityGrant)
 
@@ -212,6 +211,11 @@ export const makeCapabilityStore = Effect.gen(function* () {
     )
     return { ...authority, expiresAt: token.expires_at }
   })
+  /** Whether the successor of the run token `digest` has authorized a call. */
+  const successorUsed = (digest: string) =>
+    sql`SELECT 1 FROM capability_tokens WHERE predecessor=${digest} AND used_at IS NOT NULL`.pipe(
+      Effect.map((rows) => rows.length > 0),
+    )
   /**
    * The authority of a run token that may be renewed now, signed by the binding's session key
    * over the predecessor's digest. A token with more than `renewalWindowMs` left is not renewed,
@@ -236,9 +240,8 @@ export const makeCapabilityStore = Effect.gen(function* () {
     const key = keys[0]?.session_key
     if (typeof key !== "string" || !verifyRenewal(key, binding.channel, predecessor, signature))
       return yield* Effect.fail(new CapabilityRefused())
-    const used =
-      yield* sql`SELECT 1 FROM capability_tokens WHERE predecessor=${predecessor} AND used_at IS NOT NULL`
-    if (used.length > 0) return { ...authority, earlier: undefined, twoHolders: true }
+    if (yield* successorUsed(predecessor))
+      return { ...authority, earlier: undefined, twoHolders: true }
     const successorExpiresAt = successor(authority.deadline)
     if (
       authority.expiresAt - now > renewalWindowMs ||
@@ -487,9 +490,7 @@ export const makeCapabilityStore = Effect.gen(function* () {
   ) {
     const { session, ...binding } = yield* bindingFor(digest, now)
     const grant = yield* authorize(binding, digest, now)
-    const used =
-      yield* sql`SELECT 1 FROM capability_tokens WHERE predecessor=${digest} AND used_at IS NOT NULL`
-    if (used.length > 0) return yield* Effect.fail(new CapabilityRetired(binding))
+    if (yield* successorUsed(digest)) return yield* Effect.fail(new CapabilityRetired(binding))
     yield* sql`UPDATE capability_tokens SET used_at=${now} WHERE digest=${digest} AND used_at IS NULL`
     return { binding, session, grant }
   })
