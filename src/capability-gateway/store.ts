@@ -14,6 +14,7 @@ import {
   CapabilityGrant,
   EventBatch,
   type GatewayEnd,
+  maxEventsAnswerBatches,
   maxEventsAnswerBytes,
   maxRunEventBytes,
   resultPartBytes,
@@ -388,6 +389,8 @@ export const makeCapabilityStore = Effect.gen(function* () {
         const kept = now - runRecordsKeptMs
         yield* sql`DELETE FROM capability_run_events WHERE run_id IN (SELECT run_id
           FROM capability_grants WHERE json_extract(grant_json,'$.deadline')<=${kept})`
+        yield* sql`DELETE FROM capability_run_event_heads WHERE run_id IN (SELECT run_id
+          FROM capability_grants WHERE json_extract(grant_json,'$.deadline')<=${kept})`
         yield* sql`DELETE FROM capability_run_results WHERE run_id IN (SELECT run_id
           FROM capability_grants WHERE json_extract(grant_json,'$.deadline')<=${kept})`
       }),
@@ -679,20 +682,25 @@ export const makeCapabilityStore = Effect.gen(function* () {
   ) {
     return yield* sql.withTransaction(
       Effect.gen(function* () {
-        const rows = yield* sql<{
+        // The run's head row, by its key: no batch before the last one is read.
+        const heads = yield* sql<{
           readonly last: number
           readonly total: number
-          readonly held: string | null
-        }>`SELECT coalesce(max(sequence),0) AS last,coalesce(sum(bytes),0) AS total,
-          (SELECT lines FROM capability_run_events WHERE run_id=${runId} AND sequence=${sequence}) AS held
-          FROM capability_run_events WHERE run_id=${runId}`
-        const row = rows[0]
-        if (row === undefined) return yield* Effect.fail(new CapabilityRefused())
-        if (sequence === row.last && row.held === lines) return
-        if (sequence !== row.last + 1 || row.total + bytes > maxRunEventBytes)
+        }>`SELECT last,total FROM capability_run_event_heads WHERE run_id=${runId}`
+        const last = heads[0]?.last ?? 0
+        const total = heads[0]?.total ?? 0
+        if (sequence === last) {
+          const held = yield* sql<{ readonly lines: string }>`SELECT lines
+            FROM capability_run_events WHERE run_id=${runId} AND sequence=${sequence}`
+          if (held[0]?.lines === lines) return
+        }
+        if (sequence !== last + 1 || total + bytes > maxRunEventBytes)
           return yield* Effect.fail(new CapabilityRefused())
         yield* sql`INSERT INTO capability_run_events(run_id,sequence,lines,bytes)
           VALUES(${runId},${sequence},${lines},${bytes})`
+        yield* sql`INSERT INTO capability_run_event_heads(run_id,last,total)
+          VALUES(${runId},${sequence},${total + bytes})
+          ON CONFLICT(run_id) DO UPDATE SET last=excluded.last,total=excluded.total`
       }),
     )
   })
@@ -742,7 +750,8 @@ export const makeCapabilityStore = Effect.gen(function* () {
       readonly lines: string
       readonly bytes: number
     }>`SELECT sequence,lines,bytes FROM capability_run_events
-      WHERE run_id=${runId} AND sequence>${after} ORDER BY sequence`
+      WHERE run_id=${runId} AND sequence>${after} ORDER BY sequence
+      LIMIT ${maxEventsAnswerBatches}`
     const batches: Array<EventBatch> = []
     let bytes = 0
     for (const row of rows) {

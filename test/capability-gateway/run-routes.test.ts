@@ -22,6 +22,8 @@ import { runGatewayMigrations } from "../../src/capability-gateway/migrations"
 import { serveCapabilityListener } from "../../src/capability-gateway/http"
 import { liveGrants } from "../../src/sandbox/capability-control"
 import {
+  maxControlFrame,
+  maxEventsAnswerBatches,
   maxLaunchPromptBytes,
   maxRunEventBytes,
   RunLaunch,
@@ -381,6 +383,37 @@ test("a run's event lines are held up to maxRunEventBytes in all, and a batch pa
     await inStore(sql`SELECT count(*) AS batches,sum(bytes) AS bytes,max(sequence) AS last
       FROM capability_run_events WHERE run_id='run'`),
   ).toEqual([{ batches: full + 1, bytes: maxRunEventBytes, last: full + 1 }])
+})
+
+test("a read of a run's events answers at most maxEventsAnswerBatches batches, well below the control frame, and the next read takes the next ones", async () => {
+  // A run that posted 40 000 empty batches, which the daemon has not read yet.
+  const posted = 40_000
+  await inStore(sql`WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<${posted})
+    INSERT INTO capability_run_events(run_id,sequence,lines,bytes) SELECT 'run',i,'[]',2 FROM n`)
+  const sequences: Array<number> = []
+  for (let after = 0; after < posted;) {
+    const answer = await readEvents(after)
+    expect(answer.batches.length).toBeGreaterThan(0)
+    expect(answer.batches.length).toBeLessThanOrEqual(maxEventsAnswerBatches)
+    expect(Buffer.byteLength(JSON.stringify(answer))).toBeLessThan(maxControlFrame / 2)
+    sequences.push(...answer.batches.map((batch) => batch.sequence))
+    after = answer.batches.at(-1)!.sequence
+  }
+  expect(sequences).toEqual(Array.from({ length: posted }, (_, index) => index + 1))
+}, 60000)
+
+test("an append keeps the run's last sequence and the bytes of its batches in one row of the run", async () => {
+  expect(await postEvents(1, ["one"])).toBe(204)
+  expect(await postEvents(2, ["two", "three"])).toBe(204)
+  // The last batch again changes nothing; a gap is refused.
+  expect(await postEvents(2, ["two", "three"])).toBe(204)
+  expect(await postEvents(4, ["gap"])).toBe(403)
+  const bytes = Buffer.byteLength('["one"]') + Buffer.byteLength('["two","three"]')
+  expect(
+    await inStore(sql`SELECT run_id AS runId,last,total FROM capability_run_event_heads`),
+  ).toEqual([{ runId: "run", last: 2, total: bytes }])
+  expect(await postEvents(3, ["four"])).toBe(204)
+  expect(await inStore(sql`SELECT last FROM capability_run_event_heads`)).toEqual([{ last: 3 }])
 })
 
 test("no run route takes a request at or after the run's deadline, where its run token ends", async () => {

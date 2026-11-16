@@ -104,12 +104,31 @@ const runRecords = Effect.gen(function* () {
   ) STRICT`
 })
 
+/**
+ * The head of each runner run's event batches: the last sequence and the bytes of all of them, in
+ * one row, so a batch is held with no read of the batches before it.
+ */
+const runEventHeads = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient
+  yield* sql`CREATE TABLE capability_run_event_heads (
+    run_id TEXT PRIMARY KEY REFERENCES capability_grants(run_id),
+    last INTEGER NOT NULL CHECK(last>=1),
+    total INTEGER NOT NULL CHECK(total>=0)
+  ) STRICT`
+  yield* sql`INSERT INTO capability_run_event_heads(run_id,last,total)
+    SELECT run_id,max(sequence),sum(bytes) FROM capability_run_events GROUP BY run_id`
+})
+
+/** The migrations of the gateway's store, by name, in their order. */
+export const gatewayMigrations = {
+  "0001_capability_store": capabilityStore,
+  "0002_run_usage": runUsage,
+  "0003_session_key": sessionKey,
+  "0004_run_records": runRecords,
+  "0005_run_event_heads": runEventHeads,
+}
+
 export const runGatewayMigrations = Migrator.make({})({
-  loader: Migrator.fromRecord({
-    "0001_capability_store": capabilityStore,
-    "0002_run_usage": runUsage,
-    "0003_session_key": sessionKey,
-    "0004_run_records": runRecords,
-  }),
+  loader: Migrator.fromRecord(gatewayMigrations),
   table: gatewayMigrationsTable,
 })

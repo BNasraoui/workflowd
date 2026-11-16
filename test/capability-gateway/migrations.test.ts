@@ -1,12 +1,12 @@
 import { expect, test } from "bun:test"
 import { Effect } from "effect"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
-import { SqlClient } from "effect/unstable/sql"
+import { Migrator, SqlClient } from "effect/unstable/sql"
 import { gatewayMigrationsTable } from "../../src/capability-control/protocol"
-import { runGatewayMigrations } from "../../src/capability-gateway/migrations"
+import { gatewayMigrations, runGatewayMigrations } from "../../src/capability-gateway/migrations"
 import { maxRenewalAttempt } from "../../deploy/sandbox/renewal.mjs"
 
-test("the gateway's store runs its migrations in order: the capability store, the usage of each run, the session key, the records of runner runs", async () => {
+test("the gateway's store runs its migrations in order: the capability store, the usage of each run, the session key, the records of runner runs, the head of each run's events", async () => {
   const applied = await Effect.runPromise(
     Effect.gen(function* () {
       yield* runGatewayMigrations
@@ -19,6 +19,30 @@ test("the gateway's store runs its migrations in order: the capability store, th
     { migration_id: 2, name: "run_usage" },
     { migration_id: 3, name: "session_key" },
     { migration_id: 4, name: "run_records" },
+    { migration_id: 5, name: "run_event_heads" },
+  ])
+})
+
+test("the migration of the event heads holds the last sequence and the bytes of the events of each run that the store held before it", async () => {
+  const heads = await Effect.runPromise(
+    Effect.gen(function* () {
+      const { "0005_run_event_heads": _heads, ...before } = gatewayMigrations
+      yield* Migrator.make({})({
+        loader: Migrator.fromRecord(before),
+        table: gatewayMigrationsTable,
+      })
+      const sql = yield* SqlClient.SqlClient
+      for (const run of ["one", "two", "none"])
+        yield* sql`INSERT INTO capability_grants(run_id,lease_id,grant_json) VALUES(${run},${run},'{}')`
+      yield* sql`INSERT INTO capability_run_events(run_id,sequence,lines,bytes)
+        VALUES('one',1,'[]',2),('one',2,'["a"]',5),('two',1,'["bc"]',6)`
+      yield* runGatewayMigrations
+      return yield* sql`SELECT run_id AS runId,last,total FROM capability_run_event_heads ORDER BY run_id`
+    }).pipe(Effect.provide(SqliteClient.layer({ filename: ":memory:" }))),
+  )
+  expect(heads).toEqual([
+    { runId: "one", last: 2, total: 7 },
+    { runId: "two", last: 1, total: 6 },
   ])
 })
 

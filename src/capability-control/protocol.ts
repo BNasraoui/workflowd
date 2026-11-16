@@ -158,6 +158,11 @@ export type CapabilityGrant = typeof CapabilityGrant.Type
 export const maxRunEventBytes = 16 * 1024 * 1024
 /** The most bytes of the events of one `readEvents` answer; a batch is never split. */
 export const maxEventsAnswerBytes = 512 * 1024
+/**
+ * The most batches of one `readEvents` answer; a later read takes the next ones. With
+ * `maxEventsAnswerBytes`, an answer stays well below `maxControlFrame`, also of many small batches.
+ */
+export const maxEventsAnswerBatches = 256
 /** The most bytes of the part of a result in one `readResult` answer. */
 export const resultPartBytes = 512 * 1024
 
@@ -218,8 +223,8 @@ export const controlProtocol = {
   }),
   /**
    * The event batches of a runner run after sequence `after`, in order, at most
-   * `maxEventsAnswerBytes` of lines; whether its result is held; and the gateway's own end of the
-   * run, when it ended it.
+   * `maxEventsAnswerBatches` of them and `maxEventsAnswerBytes` of lines; whether its result is
+   * held; and the gateway's own end of the run, when it ended it.
    */
   readEvents: schemas({
     request: Schema.Struct({

@@ -85,6 +85,7 @@ export const serveCapabilityGateway = (
       "capability_usage",
       "capability_reservations",
       "capability_run_events",
+      "capability_run_event_heads",
       "capability_run_results",
     ])
     if (tables?.some((name) => !own.has(name)))
