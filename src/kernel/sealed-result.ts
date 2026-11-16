@@ -709,31 +709,59 @@ const scratchRootReady = (root: string) =>
       }),
   })
 
+/** The lock file of a runner, inside its scratch root. The removal of scratch keeps it. */
+const scratchLockName = ".lock"
+
 /**
- * Holds an exclusive flock(2) on `<root>.lock` for the scope of the runner, so one
- * runner at a time removes and bounds the scratch below a root, also in one process.
- * The kernel releases the lock when the process ends, SIGKILL included, so a lock that
- * a dead process left does not stop the next start.
+ * Why the lock file at `path` cannot be taken, from what it is now: not a regular file
+ * of one link, of another owner, of a mode other than 0600, or else (it is missing, or
+ * open or flock(2) failed) an I/O error.
+ */
+const scratchLockFault = async (path: string, uid: number) => {
+  const stat = await lstat(path).catch(() => undefined)
+  const notPrivate =
+    stat !== undefined &&
+    (!stat.isFile() || stat.uid !== uid || (stat.mode & 0o777) !== 0o600 || stat.nlink !== 1)
+  if (!notPrivate) return "Scratch root lock cannot be opened or locked"
+  if (!stat.isFile()) return "Scratch root lock is not a regular file of one link"
+  if (stat.uid !== uid) return "Scratch root lock is not owned by the daemon"
+  if ((stat.mode & 0o777) !== 0o600) return "Scratch root lock does not have mode 0600"
+  return "Scratch root lock is not a regular file of one link"
+}
+
+/** The release of the lock, `held` when a live holder has it, or why it cannot be taken. */
+const takeScratchLock = (path: string, uid: number) =>
+  Effect.promise(() =>
+    tryFileLock(path, uid, true).then(
+      (release) => release ?? ("held" as const),
+      async () => ({ fault: await scratchLockFault(path, uid) }),
+    ),
+  )
+
+/**
+ * Holds an exclusive flock(2) on `.lock` inside the scratch root for the scope of the
+ * runner, so one runner at a time removes and bounds the scratch below a root, also in
+ * one process. The file sits where the owner and the mode of the root are checked, so
+ * every spelling of the root (a trailing `/`, a path through a symbolic link) reaches
+ * one file, and no other user can make, open or replace it. The kernel releases the
+ * lock when the process ends, SIGKILL included, so a lock that a dead process left
+ * does not stop the next start. A live holder is `scratch_root_held`; each other cause
+ * is a `scratch` fault with a text of its own.
  */
 const holdScratchRoot = (root: string) =>
   Effect.acquireRelease(
-    Effect.tryPromise({
-      try: () => tryFileLock(`${root}.lock`, process.getuid!(), true),
-      catch: () =>
-        new SealedResultFault({
-          operation: "scratch",
-          message: "Scratch root lock is not a private lock file",
-        }),
-    }).pipe(
-      Effect.flatMap((release) =>
-        release === undefined
+    takeScratchLock(join(root, scratchLockName), process.getuid!()).pipe(
+      Effect.flatMap((lock) =>
+        lock === "held"
           ? Effect.fail(
               new SealedResultFault({
                 operation: "scratch_root_held",
                 message: "Scratch root is held by another git runner",
               }),
             )
-          : Effect.succeed(release),
+          : typeof lock === "function"
+            ? Effect.succeed(lock)
+            : Effect.fail(new SealedResultFault({ operation: "scratch", message: lock.fault })),
       ),
     ),
     (release) =>

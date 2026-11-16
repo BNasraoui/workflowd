@@ -13,6 +13,7 @@ import {
 } from "effect"
 import {
   chmod,
+  link,
   lstat,
   mkdir,
   mkdtemp,
@@ -314,12 +315,16 @@ const openRunner = async (settings: SealedResultGitSettings) => {
 const built = (settings: SealedResultGitSettings) =>
   Effect.runPromiseExit(Effect.scoped(Effect.asVoid(makeSealedResultGit(settings))))
 
+/** The entries below a scratch root but the lock file of its runner, which stays. */
+const scratchEntries = async (root: string) =>
+  (await readdir(root)).filter((entry) => entry !== ".lock")
+
 const withFixture = (body: (f: Fixture) => Promise<void>) => async () => {
   const f = await fixture()
   try {
     await body(f)
     // The scratch repository is gone on each path: accept, refuse, fault and timeout.
-    expect(await readdir(f.scratchRoot)).toEqual([])
+    expect(await scratchEntries(f.scratchRoot)).toEqual([])
   } finally {
     await rm(f.root, { recursive: true, force: true })
   }
@@ -1462,7 +1467,7 @@ test(
     let sampling = true
     const sampler = (async () => {
       while (sampling) {
-        most = Math.max(most, (await readdir(f.scratchRoot)).length)
+        most = Math.max(most, (await scratchEntries(f.scratchRoot)).length)
         await Bun.sleep(5)
       }
     })()
@@ -1723,7 +1728,7 @@ test(
     expect(Date.now() - started).toBeLessThan(2_000)
     expect(await ends(git!)).toBe(true)
     expect(await ends(child!)).toBe(true)
-    expect(await readdir(f.scratchRoot)).toEqual([])
+    expect(await scratchEntries(f.scratchRoot)).toEqual([])
   }),
 )
 
@@ -1781,6 +1786,129 @@ await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
 )
 
 test(
+  "a scratch root spelled with a trailing slash or through a symbolic link reaches the lock of the root",
+  withFixture(async (f) => {
+    const first = await openRunner(options(f).git)
+    try {
+      const alias = join(f.root, "alias")
+      await symlink(f.root, alias)
+      for (const spelling of [`${f.scratchRoot}/`, join(alias, "scratch")]) {
+        const second = await built(options(f, { scratchRoot: spelling }).git)
+        expect(scratchRootHeld(second)).toBe("scratch_root_held")
+      }
+    } finally {
+      await first.close()
+    }
+    expect(Exit.isSuccess(await built(options(f, { scratchRoot: `${f.scratchRoot}/` }).git))).toBe(
+      true,
+    )
+  }),
+)
+
+/** The fault of a build of a runner that cannot take its lock. */
+const lockFault = (exit: Exit.Exit<unknown, unknown>) => {
+  const error = failure(exit)
+  if (!(error instanceof SealedResultFault)) throw error
+  return { operation: error.operation, message: error.message }
+}
+
+const lockCauses: ReadonlyArray<readonly [string, string, (f: Fixture) => Promise<void>]> = [
+  [
+    "a symbolic link",
+    "Scratch root lock is not a regular file of one link",
+    async (f) => {
+      await writeFile(join(f.root, "elsewhere"), "", { mode: 0o600 })
+      await symlink(join(f.root, "elsewhere"), join(f.scratchRoot, ".lock"))
+    },
+  ],
+  [
+    "a directory",
+    "Scratch root lock is not a regular file of one link",
+    (f) => mkdir(join(f.scratchRoot, ".lock")),
+  ],
+  [
+    "a file of a second link",
+    "Scratch root lock is not a regular file of one link",
+    async (f) => {
+      await writeFile(join(f.scratchRoot, ".lock"), "", { mode: 0o600 })
+      await link(join(f.scratchRoot, ".lock"), join(f.root, "second-link"))
+    },
+  ],
+  [
+    "a file of mode 0644",
+    "Scratch root lock does not have mode 0600",
+    async (f) => {
+      await writeFile(join(f.scratchRoot, ".lock"), "")
+      await chmod(join(f.scratchRoot, ".lock"), 0o644)
+    },
+  ],
+  [
+    "missing in a root that the daemon cannot write",
+    "Scratch root lock cannot be opened or locked",
+    (f) => chmod(f.scratchRoot, 0o500),
+  ],
+]
+
+for (const [cause, message, make] of lockCauses)
+  test(
+    `a git runner whose lock is ${cause} is not built, with a text of its own`,
+    withFixture(async (f) => {
+      await make(f)
+      try {
+        expect(lockFault(await built(options(f).git))).toEqual({ operation: "scratch", message })
+      } finally {
+        await chmod(f.scratchRoot, 0o700)
+        await rm(join(f.scratchRoot, ".lock"), { recursive: true, force: true })
+      }
+    }),
+  )
+
+test(
+  "a git runner whose lock is a file of another owner is not built, with a text of its own",
+  withFixture(async (f) => {
+    await writeFile(join(f.scratchRoot, ".lock"), "", { mode: 0o600 })
+    // In a user and mount namespace the daemon is uid 0 and owns the root; a file of
+    // root, bound over the lock, shows the owner that has no mapping there.
+    const child = Bun.spawn(
+      [
+        "unshare",
+        "--user",
+        "--map-root-user",
+        "--mount",
+        "/bin/sh",
+        "-c",
+        'mount --bind /etc/passwd "$0" && exec "$@"',
+        join(f.scratchRoot, ".lock"),
+        process.execPath,
+        "-e",
+        `import { Effect } from "effect"
+import { makeSealedResultGit } from "./src/kernel/sealed-result"
+const settings = JSON.parse(process.env.SEALED_RESULT_SETTINGS)
+const exit = await Effect.runPromiseExit(Effect.scoped(makeSealedResultGit(settings)))
+console.log(JSON.stringify(exit._tag === "Failure" ? exit.cause.reasons[0].error : "built"))`,
+      ],
+      {
+        cwd: resolve("."),
+        env: { ...process.env, SEALED_RESULT_SETTINGS: JSON.stringify(options(f).git) },
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    )
+    const [status, stdout, stderr] = await Promise.all([
+      child.exited,
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+    ])
+    expect({ status, stderr }).toEqual({ status: 0, stderr: "" })
+    expect(JSON.parse(stdout)).toMatchObject({
+      operation: "scratch",
+      message: "Scratch root lock is not owned by the daemon",
+    })
+  }),
+  30_000,
+)
+
+test(
   "the runner removes what an earlier process left below its scratch root when it is built, and only below its own root",
   withFixture(async (f) => {
     const leave = async (root: string) => {
@@ -1790,12 +1918,13 @@ test(
     }
     await leave(f.scratchRoot)
     expect(Exit.isSuccess(await built(options(f).git))).toBe(true)
-    expect(await readdir(f.scratchRoot)).toEqual([])
+    // The lock file of the runner is inside the root, and the removal keeps it.
+    expect(await readdir(f.scratchRoot)).toEqual([".lock"])
     // A second runner of another root, built later, leaves the first root alone.
     await leave(f.scratchRoot)
     const other = join(f.root, "other-root")
     expect(Exit.isSuccess(await built(options(f, { scratchRoot: other }).git))).toBe(true)
-    expect(await readdir(f.scratchRoot)).toEqual(["sealed-result-earlier"])
+    expect(await scratchEntries(f.scratchRoot)).toEqual(["sealed-result-earlier"])
     await rm(join(f.scratchRoot, "sealed-result-earlier"), { recursive: true })
     const sealed = await sealWithResultPy(f, async (workspace) => {
       await writeFile(join(workspace, "result.txt"), "content\n")
@@ -1815,7 +1944,7 @@ test(
     const exit = await publish(result, options(f, { scratchRoot: fresh }))
     if (Exit.isFailure(exit)) throw Cause.squash(exit.cause)
     expect((await lstat(fresh)).mode & 0o777).toBe(0o700)
-    expect(await readdir(fresh)).toEqual([])
+    expect(await readdir(fresh)).toEqual([".lock"])
   }),
 )
 
@@ -1912,7 +2041,7 @@ test(
       )
       expect(failure(exit)).toMatchObject({ _tag: "SealedResultFault", operation: "remote" })
     }
-    expect(await readdir(f.scratchRoot)).toEqual([])
+    expect(await scratchEntries(f.scratchRoot)).toEqual([])
     expect(await remoteRef(f)).toBe("")
   }),
 )
