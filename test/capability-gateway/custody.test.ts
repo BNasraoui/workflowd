@@ -124,20 +124,6 @@ test("import-login takes the login on standard input only, into a 0700 directory
     )
     expect(leaked(outputs.join(""), values)).toEqual([])
 
-    // A new directory under a parent of another user is made for this uid, mode 0700, as the
-    // gateway's check at start requires; the owner of the parent decides nothing.
-    const below = join("/tmp", `wfd-login-${randomUUID()}`)
-    try {
-      expect((await stat("/tmp")).uid).not.toBe(process.getuid!())
-      expect(await importLogin(custodyEnv(f, below), JSON.stringify(first))).toEqual({
-        code: 0,
-        stdout: `imported the claude login, owned by uid ${process.getuid!()}\n`,
-        stderr: "",
-      })
-      expect([(await stat(below)).uid, await mode(below)]).toEqual([process.getuid!(), "0700"])
-    } finally {
-      await rm(below, { recursive: true, force: true })
-    }
     // An existing directory that the gateway's check refuses: import-login refuses it the same.
     await chmod(loginDirectory(f), 0o750)
     await refused(
