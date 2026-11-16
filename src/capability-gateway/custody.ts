@@ -18,6 +18,10 @@ import { Schema } from "effect"
  * custody stores the new one before it judges the answer's other fields. After a renewal, no
  * renewal request goes out before `firstRetryWaitMs` has passed, even when the new access value
  * ends within `renewWithinMs`.
+ *
+ * A stop (the `stop` signal of `loginAccess`) ends a call at once, except a renewal whose request
+ * has gone out: it gets its answer or reaches its limit, and its result is stored, within
+ * `renewalWriteBoundMs`. The OAuth server may have replaced the stored refresh value by then.
  */
 
 /** The largest login that custody imports or reads, in bytes. */
@@ -26,7 +30,7 @@ export const loginLimit = 16384
 const renewalLimitMs = 5000
 /**
  * The longest a renewal takes once its request is sent: the request's limit, then the write of
- * the answer. A gateway that stops waits this long for a renewal in flight.
+ * the answer. A stopped custody, and a gateway that stops, wait this long for a renewal in flight.
  */
 export const renewalWriteBoundMs = renewalLimitMs + 1000
 /** A login whose access value has this long or less to live is renewed before it is used. */
@@ -231,8 +235,9 @@ async function withDirectory<A>(path: string, body: (directory: Directory) => Pr
 const loginName = (provider: CustodyProvider) => `${provider}.json`
 const stateName = (provider: CustodyProvider) => `${provider}.state`
 /**
- * The line that custody wrote for the last call that failed, for the gateway's log: it names a
- * cause and a path, never a value. Removed once a call succeeds.
+ * The line that custody wrote for the last call that failed, for the gateway's log: it names the
+ * cause of that call and a path, never a value (`faultLine`). A later failure replaces it, and a
+ * call that succeeds removes it.
  */
 const faultName = (provider: CustodyProvider) => `${provider}.fault`
 
@@ -373,38 +378,39 @@ export async function loginFault(path: string, provider: CustodyProvider) {
 }
 
 /**
- * Runs `body` while this process holds the login of `provider`, in its open directory. The lock
- * is an advisory lock on a file of its own.
+ * Runs `body` while this process holds the login of `provider` in `directory`. The lock is an
+ * advisory lock on a file of its own. A wait for it ends once `stop` is aborted.
  */
 async function holding<A>(
-  path: string,
+  directory: Directory,
   provider: CustodyProvider,
-  body: (directory: Directory) => Promise<A>,
+  body: () => Promise<A>,
+  stop?: AbortSignal,
 ) {
-  return await withDirectory(path, async (directory) => {
-    const name = `${provider}.lock`
-    const lock = await open(
-      directory.at(name),
-      constants.O_RDWR | constants.O_CREAT | constants.O_NOFOLLOW | constants.O_NONBLOCK,
-      0o600,
-    )
-    const libc = dlopen("libc.so.6", {
-      flock: { args: [FFIType.i32, FFIType.i32], returns: FFIType.i32 },
-    })
-    try {
-      refuse(join(path, name), await lock.stat(), "file")
-      const until = Date.now() + lockWaitMs
-      // LOCK_EX | LOCK_NB, so that a wait never blocks the process past its limit.
-      while (libc.symbols.flock(lock.fd, 2 | 4) !== 0) {
-        if (Date.now() > until) throw new CustodyUnavailable(`the ${provider} login is busy`)
-        await Bun.sleep(25)
-      }
-      return await body(directory)
-    } finally {
-      await lock.close()
-      libc.close()
-    }
+  const name = `${provider}.lock`
+  const lock = await open(
+    directory.at(name),
+    constants.O_RDWR | constants.O_CREAT | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+    0o600,
+  )
+  const libc = dlopen("libc.so.6", {
+    flock: { args: [FFIType.i32, FFIType.i32], returns: FFIType.i32 },
   })
+  try {
+    refuse(join(directory.path, name), await lock.stat(), "file")
+    const until = Date.now() + lockWaitMs
+    // LOCK_EX | LOCK_NB, so that a wait never blocks the process past its limit.
+    while (libc.symbols.flock(lock.fd, 2 | 4) !== 0) {
+      if (stop?.aborted)
+        throw new CustodyUnavailable(`custody stopped before it held the ${provider} login`)
+      if (Date.now() > until) throw new CustodyUnavailable(`the ${provider} login is busy`)
+      await Bun.sleep(25)
+    }
+    return await body()
+  } finally {
+    await lock.close()
+    libc.close()
+  }
 }
 
 /** The temporary files of a stopped write of `provider`'s files. */
@@ -487,20 +493,22 @@ export async function importLogin(path: string, provider: CustodyProvider, input
     }
   }
   await checkLogin(path, provider)
-  const outcome = await holding(path, provider, async (directory) => {
-    const existed = await lstat(directory.at(loginName(provider))).then(
-      () => true,
-      (error: unknown) => {
-        if (absent(error)) return false
-        throw error
-      },
-    )
-    await clearTemporaries(directory, provider)
-    await persist(directory, loginName(provider), JSON.stringify(document))
-    await remove(directory, stateName(provider))
-    await remove(directory, faultName(provider))
-    return existed ? ("replaced" as const) : ("imported" as const)
-  })
+  const outcome = await withDirectory(path, (directory) =>
+    holding(directory, provider, async () => {
+      const existed = await lstat(directory.at(loginName(provider))).then(
+        () => true,
+        (error: unknown) => {
+          if (absent(error)) return false
+          throw error
+        },
+      )
+      await clearTemporaries(directory, provider)
+      await persist(directory, loginName(provider), JSON.stringify(document))
+      await remove(directory, stateName(provider))
+      await remove(directory, faultName(provider))
+      return existed ? ("replaced" as const) : ("imported" as const)
+    }),
+  )
   return { outcome, owner }
 }
 
@@ -611,35 +619,66 @@ function usable(provider: CustodyProvider, oauth: OAuth) {
 }
 
 /**
- * The access value of the login of `provider`, renewed first when it ends within a minute or a
- * renewal was not finished. Calls at one time wait for each other, so one renewal serves them
- * all. The renewed login is on disk before its access value is returned.
+ * The access value of the login of `provider` in the directory `path`, renewed first when it ends
+ * within a minute or a renewal was not finished. `tokenUrlOverride` replaces the OAuth server's
+ * token URL; only a fixture names one. Calls at one time wait for each other, so one renewal
+ * serves them all. The renewed login is on disk before its access value is returned. Once `stop`
+ * is aborted, the call ends before it holds the login or sends a request; a request sent already
+ * gets its answer or reaches its limit, and its result is stored.
  */
-async function access(path: string, provider: CustodyProvider, url: string) {
-  return await holding(path, provider, async (directory) => {
+export async function loginAccess(
+  path: string,
+  provider: CustodyProvider,
+  stop: AbortSignal,
+  tokenUrlOverride?: string,
+) {
+  const url = tokenUrl(provider, tokenUrlOverride)
+  return await withDirectory(path, async (directory) => {
     try {
-      const value = await renewedAccess(directory, provider, url)
+      const value = await holding(
+        directory,
+        provider,
+        () => renewedAccess(directory, provider, url, stop),
+        stop,
+      )
       await remove(directory, faultName(provider))
       return value
     } catch (error) {
-      // The cause of a failed call, for the gateway's log. A call within a wait keeps the line of
-      // the try that set the wait.
-      const line =
-        error instanceof RenewalFailed
-          ? error.line
-          : error instanceof CustodyRefused
-            ? error.message
-            : error instanceof LoginImportRequired || error instanceof LoginScopeMissing
-              ? `custody: ${error.message}`
-              : undefined
-      if (line !== undefined) await persist(directory, faultName(provider), `${line}\n`)
+      await persist(directory, faultName(provider), `${faultLine(error)}\n`)
       throw error
     }
   })
 }
 
-/** `access` while this process holds the login, in its open directory. */
-async function renewedAccess(directory: Directory, provider: CustodyProvider, url: string) {
+/** The longest line of the `.fault` file, in characters. */
+const faultLimit = 512
+/**
+ * The line of the `.fault` file for the failure `error`: custody's own text, which names at most a
+ * path of the configuration, an HTTP status and an OAuth error code. Each character outside a
+ * fixed set (letters, digits, space and `./:;,_()'-`) is written as `?`, and the line is cut at
+ * `faultLimit`: no control character and no long text reaches the gateway's log.
+ */
+function faultLine(error: unknown) {
+  const line =
+    error instanceof RenewalFailed
+      ? error.line
+      : error instanceof CustodyRefused
+        ? error.message
+        : error instanceof LoginImportRequired ||
+            error instanceof LoginScopeMissing ||
+            error instanceof CustodyUnavailable
+          ? `custody: ${error.message}`
+          : "custody: refused"
+  return line.replace(/[^A-Za-z0-9 ./:;,_()'-]/g, "?").slice(0, faultLimit)
+}
+
+/** `loginAccess` while this process holds the login, in its open directory. */
+async function renewedAccess(
+  directory: Directory,
+  provider: CustodyProvider,
+  url: string,
+  stop: AbortSignal,
+) {
   let state = await readState(directory, provider)
   if (state?.state === "import-required") throw new LoginImportRequired(provider)
   // A wait on disk longer from now than it can be (a clock set back) is read as its longest.
@@ -669,7 +708,10 @@ async function renewedAccess(directory: Directory, provider: CustodyProvider, ur
       `the ${provider} login waits to renew until ${new Date(state.retryAt).toISOString()}`,
     )
   const failures = state?.failures ?? 0
-  // From here the OAuth server may take the refresh value: a stop leaves `renewing`.
+  if (stop.aborted)
+    throw new CustodyUnavailable(`custody stopped before it renewed the ${provider} login`)
+  // From here the OAuth server may take the refresh value: a kill leaves `renewing`, and a stop
+  // waits for the answer and stores it.
   await writeState(directory, provider, { state: "renewing", failures, retryAt: 0 })
   const outcome = await renew(provider, url, oauth)
   if (outcome.kind === "refused") {
@@ -721,36 +763,8 @@ async function renewedAccess(directory: Directory, provider: CustodyProvider, ur
   return usable(provider, next)
 }
 
-/**
- * The noscope provider command: `access <directory> [--token-url <url>] <provider> <ttl>`. It
- * prints the access value as noscope's provider contract asks, or throws.
- */
-export async function custodyCommand(args: ReadonlyArray<string>) {
-  const [operation, directory, ...rest] = args
-  const override = rest[0] === "--token-url" ? rest[1] : undefined
-  const [name, ttlText, ...extra] = override === undefined ? rest : rest.slice(2)
-  const provider = custodyProvider(name ?? "")
-  const ttl = Number(ttlText)
-  if (
-    operation !== "access" ||
-    !directory?.startsWith("/") ||
-    !provider ||
-    extra.length > 0 ||
-    !Number.isInteger(ttl) ||
-    ttl < 1 ||
-    ttl > 3600
-  )
-    throw new CustodyRefused("refused")
-  const value = await access(directory, provider, tokenUrl(provider, override))
-  return {
-    token: value.token,
-    token_id: randomUUID(),
-    expires_at: new Date(Math.min(value.expiresAt, Date.now() + ttl * 1000)).toISOString(),
-  }
-}
-
 /** The line of standard error for a failed command; it names no value. */
-const custodyFailure = (error: unknown) =>
+export const custodyFailure = (error: unknown) =>
   `custody: ${
     error instanceof LoginImportRequired ||
     error instanceof LoginScopeMissing ||
@@ -779,28 +793,5 @@ export function forbidCoreFiles() {
       throw new Error("the core file limit was not set")
   } finally {
     libc.close()
-  }
-}
-
-// Noscope starts the command in its own process group: parent-death signaling ends it with
-// noscope, and it refuses to run when its parent is gone.
-if (import.meta.main) {
-  const parent = process.ppid
-  const libc = dlopen("libc.so.6", {
-    prctl: {
-      args: [FFIType.i32, FFIType.u64, FFIType.u64, FFIType.u64, FFIType.u64],
-      returns: FFIType.i32,
-    },
-  })
-  // PR_SET_PDEATHSIG, SIGKILL
-  const attached = parent > 1 && libc.symbols.prctl(1, 9, 0, 0, 0) === 0 && process.ppid === parent
-  libc.close()
-  try {
-    if (!attached) throw new CustodyRefused("refused")
-    forbidCoreFiles()
-    process.stdout.write(JSON.stringify(await custodyCommand(process.argv.slice(2))))
-  } catch (error) {
-    process.stderr.write(custodyFailure(error))
-    process.exitCode = 1
   }
 }

@@ -338,10 +338,17 @@ test("the release of a native lease, and the release of a plain lease after it, 
         expect(["releasing", "released"]).toContain(String((yield* read("run-q"))?.state))
         // The gateway holds the revoke of the native run, and no failure of it is recorded.
         yield* Effect.promise(() => silent.held)
+        const heldAt = performance.now()
         expect(logs.filter((line) => line.includes("revoke unconfirmed"))).toEqual([])
         // The revoke ends when the gateway answers it, after both releases.
         silent.answer()
+        const answeredAt = performance.now()
         yield* Effect.promise(() => silent.closed)
+        // The client ends a connection that is idle for 10 seconds (`controlClient`).
+        expect(
+          answeredAt - heldAt,
+          "the gateway answered within the idle limit of the client's connection",
+        ).toBeLessThan(10000)
         expect(logs.filter((line) => line.includes("revoke unconfirmed"))).toEqual([])
       }).pipe(
         Effect.provide(Logger.layer([Logger.make(({ message }) => logs.push(String(message)))])),
@@ -354,3 +361,152 @@ test("the release of a native lease, and the release of a plain lease after it, 
     await f.close()
   }
 }, 40000)
+
+test("a revoke that a stop of the daemon interrupts is logged with its run and the cause interrupted", async () => {
+  const f = await fixture()
+  const native = await sandboxGithubFixture(policy, "lease-i")
+  const silent = await silentGateway(f.config.controlSocket)
+  const logs: string[] = []
+  try {
+    await f.store(
+      Effect.gen(function* () {
+        yield* seedLease("run-i", "lease-i", null)
+        native.mutateRun({ status: "completed", conclusion: "cancelled" })
+        // The daemon's client lives in its own scope; its end is the daemon's stop.
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const capability = yield* makeDaemonCapability({
+              socket: f.config.controlSocket,
+              reconcileEveryMs: 3600000,
+            })
+            const leases = yield* leaseService(f, native, capability)
+            yield* Effect.exit(leases.release("run-i"))
+            yield* Effect.promise(() => silent.held)
+          }),
+        )
+        expect(logs.filter((line) => line.includes("revoke unconfirmed"))).toEqual([
+          "Capability gateway revoke unconfirmed for run-i; the next reconcile revokes it: interrupted",
+        ])
+      }).pipe(
+        Effect.provide(Logger.layer([Logger.make(({ message }) => logs.push(String(message)))])),
+      ),
+    )
+  } finally {
+    await silent.stop()
+    await native.close()
+    await f.close()
+  }
+})
+
+/**
+ * A stand-in gateway on the control socket that records each whole request, with the runs that
+ * a reconcile names live and the time of `now` at its arrival. It holds unanswered each revoke
+ * and each reconcile that `holds` names by its number among the reconciles, from 1; it answers
+ * each other request at once.
+ */
+async function recordingGateway(
+  socket: string,
+  holds: (reconcile: number) => boolean,
+  now: () => number,
+) {
+  const requests: Array<{
+    readonly verb: string
+    readonly live: ReadonlyArray<string>
+    readonly at: number
+  }> = []
+  const Live = Schema.Struct({ live: Schema.Array(Schema.Struct({ runId: Schema.String })) })
+  const server = createServer((connection) => {
+    let request = Buffer.alloc(0)
+    connection.on("data", (chunk) => {
+      request = Buffer.concat([request, Buffer.from(chunk)])
+      if (request.length < 4 || request.readUInt32BE(0) !== request.length - 4) return
+      const { verb, body } = Schema.decodeUnknownSync(ControlRequest)(
+        request.subarray(4).toString("utf8"),
+      )
+      const live =
+        verb === "reconcile"
+          ? Schema.decodeUnknownSync(Live)(body).live.map(({ runId }) => runId)
+          : []
+      requests.push({ verb, live, at: now() })
+      const reconciles = requests.filter((recorded) => recorded.verb === "reconcile").length
+      if (verb === "revoke" || (verb === "reconcile" && holds(reconciles))) return
+      connection.end(controlFrame({ ok: true, value: null }))
+    })
+    connection.on("error", () => connection.destroy())
+  })
+  await mkdir(dirname(socket), { recursive: true, mode: 0o700 })
+  await new Promise<void>((resolve) => server.listen(socket, resolve))
+  return {
+    reconciles: () => requests.filter(({ verb }) => verb === "reconcile"),
+    stop: () => new Promise<void>((resolve) => server.close(() => resolve())),
+  }
+}
+
+test("a released run whose revoke fails is revoked by the next reconcile, which reaches the gateway within 40 seconds of the release on the test clock", async () => {
+  const { TestClock } = await import("effect/testing")
+  const f = await fixture()
+  const native = await sandboxGithubFixture(policy, "lease-b")
+  let now = () => 0
+  // The second reconcile is in flight at the release; the gateway holds it unanswered.
+  const gateway = await recordingGateway(
+    f.config.controlSocket,
+    (reconcile) => reconcile === 2,
+    () => now(),
+  )
+  const logs: string[] = []
+  const failed =
+    "Capability gateway revoke unconfirmed for run-b; the next reconcile revokes it: timed out"
+  /**
+   * Moves the test clock a second at a time, and lets the socket calls that it starts run
+   * between the steps, until `done` holds; it fails with `what` past `limitMs` of the clock.
+   */
+  const advanceUntil = (done: () => boolean, limitMs: number, what: string) =>
+    Effect.gen(function* () {
+      for (let moved = 0; !done(); moved += 1000) {
+        if (moved >= limitMs)
+          return yield* Effect.die(new Error(`${what} did not come within ${limitMs} ms`))
+        yield* TestClock.adjust("1 second")
+        yield* Effect.promise(() => Bun.sleep(5))
+      }
+    })
+  try {
+    await f.store(
+      Effect.gen(function* () {
+        const clock = yield* TestClock.testClockWith(Effect.succeed)
+        now = () => clock.currentTimeMillisUnsafe()
+        yield* seedLease("run-b", "lease-b", 41)
+        native.mutateRun({ status: "completed", conclusion: "cancelled" })
+        const capability = yield* makeDaemonCapability({ socket: f.config.controlSocket })
+        const leases = yield* leaseService(f, native, capability)
+        yield* advanceUntil(() => gateway.reconciles().length === 2, 30000, "a second reconcile")
+        // The reconcile in flight read the run as live, and holds the only permit of the client.
+        expect(gateway.reconciles().map(({ live }) => live.includes("run-b"))).toEqual([true, true])
+        const released = now()
+        yield* Effect.exit(leases.release("run-b"))
+        // The revoke waits for the permit within its limit of 15 seconds, and fails; the held
+        // reconcile ends at its own limit, and the next one starts after the period.
+        yield* advanceUntil(
+          () => logs.includes(failed) && gateway.reconciles().length === 3,
+          60000,
+          "the failed revoke and a third reconcile",
+        )
+        const third = gateway.reconciles()[2]!
+        expect(third.live, "the first reconcile after the release names the run").not.toContain(
+          "run-b",
+        )
+        expect(
+          third.at - released,
+          "the reconcile after a failed revoke reaches the gateway within 40 seconds",
+        ).toBeLessThanOrEqual(40000)
+        console.log(`release to the next reconcile, on the test clock: ${third.at - released} ms`)
+      }).pipe(
+        Effect.provide(TestClock.layer()),
+        Effect.provide(Logger.layer([Logger.make(({ message }) => logs.push(String(message)))])),
+      ),
+    )
+  } finally {
+    await gateway.stop()
+    await native.close()
+    await f.close()
+  }
+})

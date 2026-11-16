@@ -49,6 +49,14 @@ test("the gateway's process loads no module of workflowd's store, through any mo
   expect(modules.filter((path) => workflowdStore.test(path))).toEqual([])
 })
 
+test("custody's process, which noscope starts for the provider provider-access, loads custody and nothing else of workflowd", () => {
+  expect(loaded("capability-gateway/custody-process.ts")).toEqual([
+    "capability-gateway/custody-process.ts",
+    "capability-gateway/custody.ts",
+    "capability-gateway/parent-death.ts",
+  ])
+})
+
 test("no process of workflowd loads a module of the capability gateway, through any module", () => {
   for (const entry of [
     "main.ts",
