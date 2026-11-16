@@ -81,6 +81,8 @@ export type RunnerHandle = {
   readonly boxReady: Deferred.Deferred<void>
   /** The cause of the run's failure, once its run client posted it (run-failure.mjs). */
   failure: { readonly cause: string; readonly detail: string } | null
+  /** Since when each read of the run's events failed, or null after one that did not. */
+  unreadSince: number | null
 }
 
 /** The text of the gateway's end of a run, with the counts that it used. */
@@ -174,6 +176,7 @@ export const makeRunnerExecutor = (options: {
               jobReadAt: started,
               boxReady: Deferred.makeUnsafe<void>(),
               failure: null,
+              unreadSince: null,
             }
             handles.set(launch.runId, handle)
             return handle
@@ -194,6 +197,27 @@ export const makeRunnerExecutor = (options: {
   const ending = (reason: RunnerFailure, message: string) =>
     Effect.fail(new RunnerRunFailed({ reason, message }))
   /**
+   * One read of the run's events after `after`, or undefined when it failed: a failed read is
+   * tried again at the next step, and only reads that fail for `lostAfterMs` end the run
+   * `gateway_unavailable`, as a run client that posts nothing for that long is lost.
+   */
+  const readEvents = (handle: RunnerHandle, after: number) =>
+    options.gateway.readEvents(handle.runId, after).pipe(
+      Effect.tap(() =>
+        Effect.sync(() => {
+          handle.unreadSince = null
+        }),
+      ),
+      Effect.catch((cause) =>
+        Effect.suspend(() => {
+          handle.unreadSince ??= Date.now()
+          return handle.stopping || Date.now() - handle.unreadSince < lostAfterMs
+            ? Effect.succeed(undefined)
+            : Effect.fail(gatewayUnavailable(cause))
+        }),
+      ),
+    )
+  /**
    * The run's events in order: its first line, which must be the line of its ready box
    * (`boxReadyLine`; another first line ends the run `runner_start`), marks `boxReady` done; each
    * later line of each batch is a Claude stream-json line. The stream
@@ -212,14 +236,13 @@ export const makeRunnerExecutor = (options: {
             "runner_failed",
             `the run's job failed at ${handle.failure.cause}${handle.failure.detail === "" ? "" : `: ${handle.failure.detail}`}`,
           )
-        const read = yield* options.gateway.readEvents(handle.runId, after).pipe(
-          Effect.mapError(gatewayUnavailable),
-          // A stop during the read revokes the run, so the read may fail: the stop still wins.
-          Effect.catch((error) =>
-            handle.stopping ? ending("cancelled", "the run was stopped") : Effect.fail(error),
-          ),
-        )
+        const read = yield* readEvents(handle, after)
+        // A stop during the read revokes the run, so the read may fail: the stop still wins.
         if (handle.stopping) return yield* ending("cancelled", "the run was stopped")
+        if (read === undefined) {
+          yield* Effect.sleep(pollMs)
+          return [[], Option.some(after)] as const
+        }
         const last = read.batches.at(-1)?.sequence ?? after
         if (read.batches.length > 0) {
           handle.lastPost = Date.now()
@@ -250,10 +273,9 @@ export const makeRunnerExecutor = (options: {
         const job = yield* jobOf(handle, quiet)
         if (job?.status === "completed") {
           // The job may have posted its last batches and its result after the read above.
-          const again = yield* options.gateway
-            .readEvents(handle.runId, after)
-            .pipe(Effect.mapError(gatewayUnavailable))
-          if (again.batches.length > 0 || again.result) return [[], Option.some(after)] as const
+          const again = yield* readEvents(handle, after)
+          if (again === undefined || again.batches.length > 0 || again.result)
+            return [[], Option.some(after)] as const
           return yield* job.conclusion === "cancelled"
             ? ending("runner_cancelled", "the run's Actions run was cancelled before its result")
             : ending(
@@ -313,6 +335,21 @@ export const makeRunnerExecutor = (options: {
         })
       return yield* decodeSealedResult(framed.json, framed.bundle)
     }) satisfies Effect.Effect<SealedResult, RunnerRunFailed | SealedResultRefused>
+  /**
+   * The handle of a run that this executor did not start, to read its result: a run that a daemon
+   * before this one dispatched, whose job posted its result to the gateway.
+   */
+  const held = (runId: string): RunnerHandle => ({
+    runId,
+    deadline: 0,
+    ended: null,
+    stopping: false,
+    lastPost: Date.now(),
+    jobReadAt: Date.now(),
+    boxReady: Deferred.makeUnsafe<void>(),
+    failure: null,
+    unreadSince: null,
+  })
   /** Revokes the run in the gateway, which ends its token and its open model streams. */
   const stop = (handle: RunnerHandle) =>
     options.gateway.revoke(handle.runId).pipe(Effect.mapError(gatewayUnavailable))
@@ -322,6 +359,7 @@ export const makeRunnerExecutor = (options: {
     events,
     stop,
     result,
+    held,
     /**
      * The caller's stop of the run `runId`: its events end `cancelled`, and the gateway revokes
      * it. A run that is starting ends its start; false when this executor holds no such run.
@@ -345,5 +383,6 @@ export const makeRunnerExecutor = (options: {
   } satisfies Executor<RunnerHandle, RunnerRunFailed | SealedResultRefused> & {
     readonly stopRun: (runId: string) => Effect.Effect<boolean, RunnerRunFailed>
     readonly release: (runId: string) => void
+    readonly held: (runId: string) => RunnerHandle
   }
 }

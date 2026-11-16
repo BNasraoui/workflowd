@@ -604,9 +604,10 @@ export async function withRunnerDaemon<A>(
     readonly runClient: () => Promise<number | undefined>
     /**
      * Stops the daemon and starts it again on the same store, as a restart of the daemon's
-     * service does; the gateway process, the job and GitHub go on. Gives the new daemon's runtime.
+     * service does; the gateway process, the job and GitHub go on, and `between` runs while no
+     * daemon does. Gives the new daemon's runtime.
      */
-    readonly restart: () => Promise<ReturnType<typeof daemonRuntime>>
+    readonly restart: (between?: () => Promise<void>) => Promise<ReturnType<typeof daemonRuntime>>
     /**
      * The job's record: the files of its run directory, its harness's record of its steps, the
      * model calls that reached the fixture model and the end of the gateway's output.
@@ -686,8 +687,9 @@ export async function withRunnerDaemon<A>(
       github,
       leaseId: () => lease.id,
       runClient: () => runClientPid(job.directory),
-      restart: async () => {
+      restart: async (between) => {
         await runtime?.dispose()
+        await between?.()
         runtime = daemon()
         return runtime
       },

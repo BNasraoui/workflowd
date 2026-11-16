@@ -596,13 +596,23 @@ test("a runner run past the bound of runs at one time is refused runner_capacity
   expect(refusalText(second)).toContain("runner_capacity: 1 runner runs are live; the bound is 1")
 })
 
-test("a gateway that fails while the run's events are read ends the run gateway_unavailable", async () => {
-  const end = await dispatch(async () => scripted({ later: "unavailable" }))
-  expect({ state: end.run.state, diagnostic: end.run.diagnostic }).toEqual({
-    state: "operator_required",
-    diagnostic: "gateway_unavailable: gateway: CapabilityGatewayUnavailable",
-  })
-  expect(end.branch).toBeNull()
+test("a gateway that fails each read of the run's events for the lost-runner window ends the run gateway_unavailable", async () => {
+  try {
+    const end = await dispatch(async () =>
+      scripted({
+        later: "unavailable",
+        // Each failed read comes a minute after the one before it.
+        reading: () => setSystemTime(new Date(Date.now() + 60000)),
+      }),
+    )
+    expect({ state: end.run.state, diagnostic: end.run.diagnostic }).toEqual({
+      state: "operator_required",
+      diagnostic: "gateway_unavailable: gateway: CapabilityGatewayUnavailable",
+    })
+    expect(end.branch).toBeNull()
+  } finally {
+    setSystemTime()
+  }
 })
 
 test("a run whose deadline passes before its result ends runner_deadline", async () => {

@@ -932,17 +932,37 @@ export const makeSandboxDispatch = (options: {
         (effect) => sandboxStage("dispatch.observe", effect),
         Effect.tapError((cause) => retainSandboxFailure(run.directory, "dispatch.observe", cause)),
       )
+    /**
+     * The result of a runner run that a daemon before this one dispatched, when the gateway holds
+     * it: checked and pushed, as its executor would have, so the run completes with it.
+     */
+    const recoverRunner = (run: AgentRunRecord) =>
+      Effect.gen(function* () {
+        const policy = runnerPolicy(run.repository)
+        if (policy === undefined || runnerOptions === undefined || runnerExecutor === undefined)
+          return
+        const read = yield* runnerOptions.gateway.readEvents(run.runId, 0)
+        if (read.result && read.ended === null)
+          yield* publishRunner(run, runnerExecutor.held(run.runId), policy)
+      })
     // A new coordinator never resumes an abandoned execution or injects resident tools. A runner
-    // run's events are read by no executor of this coordinator: its lease is released, which
-    // revokes it and cancels its Actions run, and it ends once.
+    // run's events are read by no executor of this coordinator: a result that the gateway holds
+    // for it is checked and pushed, then its lease is released, which revokes it and cancels its
+    // Actions run, and it ends once: completed with that result, or operator_required.
     for (const lease of yield* store.active()) {
       const run = yield* runs.read(lease.run_id)
       if (run !== null && runnerPolicy(run.repository) !== undefined)
-        yield* finishRunner(run, {
-          state: "operator_required",
-          finalMessage: null,
-          diagnostic: "Sandbox coordinator restarted",
-        }).pipe(Effect.ignore)
+        yield* recoverRunner(run).pipe(
+          Effect.ignore,
+          Effect.andThen(
+            finishRunner(run, {
+              state: "operator_required",
+              finalMessage: null,
+              diagnostic: "Sandbox coordinator restarted",
+            }),
+          ),
+          Effect.ignore,
+        )
       else if (run !== null)
         yield* settle(run, {
           state: "operator_required",

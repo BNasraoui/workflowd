@@ -9,6 +9,7 @@ import { AgentRunStore } from "../../src/kernel/agent-run-store"
 import { controlClient, liveGrants } from "../../src/sandbox/capability-control"
 import { defaultRunBudget } from "../../src/sandbox/config"
 import { client } from "../capability-gateway/gateway-process"
+import { CapabilityGatewayUnavailable } from "../../src/sandbox/capability-control"
 import { fixtureExecutable } from "../helpers/fixture-executable.mjs"
 import {
   boxReadyModule,
@@ -19,6 +20,7 @@ import {
   mailbox,
   runnerIdentity,
   runnerModel,
+  run,
   runnerPolicy,
   step,
   withRunnerDaemon,
@@ -66,18 +68,19 @@ async function until<A>(name: string, ready: () => Promise<A | undefined> | A | 
  * `mode`: `stream` makes a model call through the relay, records when its stream ended and the
  * answer of one more call, and writes a line; `quiet` writes nothing more; `unchanged` takes the
  * source from the fixture remote `bare`, changes nothing and seals it with the harness's own seal,
- * which leaves a completion with no bundle. `stream` and `quiet` then wait.
+ * which leaves a completion with no bundle; `late` waits for a file `fixture-go` in the run
+ * directory, then writes a file and seals the change. `stream` and `quiet` then wait.
  */
 async function writeEndingHarness(
   directory: string,
-  mode: "stream" | "quiet" | "unchanged",
+  mode: "stream" | "quiet" | "unchanged" | "late",
   bare: string,
 ) {
   const path = join(directory, `ending-${mode}.mjs`)
   await writeFile(
     path,
     `import { execFileSync } from "node:child_process"
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { request } from "node:http"
 import { sealRun } from ${JSON.stringify(resolve("deploy/sandbox/native-seal.mjs"))}
 import { directoryArchive } from ${JSON.stringify(workspaceArchiveModule)}
@@ -127,7 +130,9 @@ if (${mode === "stream"}) {
   record("after", JSON.stringify(await call()))
   line({ type: "assistant", message: { content: [{ type: "text", text: "after the stop" }] } })
 }
-if (${mode === "unchanged"}) {
+if (${mode === "unchanged" || mode === "late"}) {
+  if (${mode === "late"})
+    while (!existsSync(directory + "/fixture-go")) await new Promise((go) => setTimeout(go, 100))
   line({ type: "assistant", message: { content: [{ type: "text", text: "Nothing to change." }] } })
   line({ type: "result", subtype: "success", is_error: false, result: "Nothing to change." })
   const native = directory + "/native"
@@ -137,6 +142,7 @@ if (${mode === "unchanged"}) {
   run(["git", "init", "--quiet", "--bare", "source.git"])
   run(["git", "-C", "source.git", "fetch", "--quiet", "--no-tags", ${JSON.stringify(bare)}, launch.sourceSha])
   run(["sh", "-c", 'git -C source.git archive "$1" | tar -x -C workspace', "sh", launch.sourceSha])
+  if (${mode === "late"}) writeFileSync(native + "/workspace/runner-proof.txt", "written late\\n")
   await sealRun({ directory, native, sourceSha: launch.sourceSha, identity: launch.identity, reply: "Nothing to change.", workspace: () => directoryArchive(native + "/workspace") })
 } else setInterval(() => undefined, 60000)
 `,
@@ -217,7 +223,7 @@ async function endJob(daemon: Daemon, directory: string) {
 
 /** Runs `use` with the daemon of a runner job whose harness runs in `mode`. */
 async function withEnding<A>(
-  mode: "stream" | "quiet" | "unchanged",
+  mode: "stream" | "quiet" | "unchanged" | "late",
   use: (daemon: Daemon, directory: string) => Promise<A>,
 ) {
   const directory = await mkdtemp(join(tmpdir(), "runner-ending-"))
@@ -394,7 +400,8 @@ test("a run that changed nothing ends at once with its final message, end reason
 /**
  * The gateway as a script, for two causes at one read: its first read gives Claude's first
  * lines; each later read first runs `reading` (which may move the clock, end the Actions run or
- * wait for the test's stop), then gives nothing. Each revoke is counted.
+ * wait for the test's stop), then gives nothing, or fails when `reading` throws, as a gateway that
+ * does not answer. Each revoke is counted.
  */
 const scripted = (reading: () => Promise<void>) => {
   const revokes: Array<string> = []
@@ -413,7 +420,10 @@ const scripted = (reading: () => Promise<void>) => {
     readEvents: (_id, after) =>
       after === 0
         ? Effect.succeed({ batches: [{ sequence: 1, lines }], result: false, ended: null })
-        : Effect.promise(reading).pipe(Effect.as({ batches: [], result: false, ended: null })),
+        : Effect.tryPromise({
+            try: reading,
+            catch: () => new CapabilityGatewayUnavailable({ reason: "fixture fault" }),
+          }).pipe(Effect.as({ batches: [], result: false, ended: null })),
     readResult: () => Effect.die("no result is held"),
   }
   return { control, revokes }
@@ -480,6 +490,39 @@ test("a stop that comes as the run's deadline passes ends the run cancelled, wit
   expect(end.messages.map((entry) => entry.message)).toEqual([stoppedMessage(runId)])
   expect(end.revokes[0]).toBe(runId)
   expect(end.cancels).toEqual([actionsRunId])
+}, 30000)
+
+test("a read of the run's events that fails once ends nothing: the run goes on to its stop", async () => {
+  const end = await scriptedEnd((_github, stop) => {
+    let reads = 0
+    return async () => {
+      reads += 1
+      if (reads === 1) throw new Error("the gateway does not answer")
+      if (reads === 3) await stop()
+    }
+  })
+  expect({ state: end.run.state, diagnostic: end.run.diagnostic }).toEqual({
+    state: "cancelled",
+    diagnostic: "cancelled",
+  })
+  expect(end.messages.length).toBe(1)
+}, 30000)
+
+test("reads of the run's events that fail for the lost-runner window end the run gateway_unavailable", async () => {
+  const end = await scriptedEnd(() => {
+    let reads = 0
+    return async () => {
+      reads += 1
+      // The second failed read comes two minutes after the first.
+      if (reads === 2) setSystemTime(new Date(Date.now() + 120000))
+      throw new Error("the gateway does not answer")
+    }
+  })
+  expect({ state: end.run.state, diagnostic: end.run.diagnostic }).toEqual({
+    state: "operator_required",
+    diagnostic: "gateway_unavailable: gateway: CapabilityGatewayUnavailable",
+  })
+  expect(end.messages.length).toBe(1)
 }, 30000)
 
 test("a deadline that passes with no stop ends the run runner_deadline; a stop after that end is refused and adds no message", async () => {
@@ -741,6 +784,39 @@ test("a runner run that is live at a restart of the daemon, over the gateway tha
     expect((await runtime.runPromise(mailbox(id))).length).toBe(1)
   })
 }, 90000)
+
+test("a runner run whose job posted its result while no daemon ran completes at the next start with that result, pushed once", async () => {
+  await withEnding("late", async (daemon, directory) => {
+    const id = await dispatch(daemon)
+    // The daemon stops; the job seals its change and posts its result to the gateway, and ends.
+    const runtime = await step("restart", () =>
+      daemon.restart(async () => {
+        await writeFile(join(directory, "fixture-go"), "")
+        await step("job end", daemon.jobEnded, undefined, 60000)
+      }),
+    )
+    const end = await ended(runtime, id)
+    expect({ state: end.run.state, diagnostic: end.run.diagnostic }).toEqual({
+      state: "completed",
+      diagnostic: null,
+    })
+    expect(end.messages.map((entry) => entry.message)).toEqual([
+      expect.objectContaining({
+        status: "completed",
+        final_message: "Nothing to change.",
+        placement: "runner",
+      }),
+    ])
+    const pushed = daemon.remote.ref(
+      `refs/heads/agent-run/${id.replace(/^agent-run-/, "").slice(0, 16)}`,
+    )
+    expect(pushed).not.toBeNull()
+    expect(
+      run("branch", ["git", "-C", daemon.remote.bare, "show", `${pushed}:runner-proof.txt`]),
+    ).toBe("written late")
+    await released({ ...daemon, runtime }, true)
+  })
+}, 120000)
 
 test("a runner whose posts stop while GitHub cannot be read ends runner_lost, and does not hold its lease to its deadline", async () => {
   const end = await scriptedEnd((github) => {
