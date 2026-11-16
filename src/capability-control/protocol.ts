@@ -7,6 +7,11 @@ import { Effect, Schema } from "effect"
  * `{ ok: false, error }`. Neither side imports the other's store: this module holds all they share.
  */
 export const maxControlFrame = 1 << 20
+/**
+ * The daemon's connections that the gateway holds open at once; another one gets `unavailable`.
+ * workflowd's control client opens no more than this many at once.
+ */
+export const maxControlConnections = 16
 
 export const controlFrame = (value: unknown) => {
   const body = Buffer.from(JSON.stringify(value))

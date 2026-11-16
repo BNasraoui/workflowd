@@ -7,11 +7,13 @@ import {
   RunBudget,
   controlFrame,
   controlProtocol,
+  maxControlConnections,
   maxControlFrame,
   type ControlVerb,
   type ControlVerbSchemas,
 } from "../capability-control/protocol"
 import { runLifetime } from "../store/run-lifetime"
+import { ScopedKeyedLock } from "../workspace/locks"
 import { authorizeWorker } from "../worker-identity/access"
 import { defaultRunBudget } from "./config"
 
@@ -26,7 +28,7 @@ export class CapabilityControlRefused extends Schema.TaggedError<CapabilityContr
   { reason: Schema.String },
 ) {}
 
-/** The time limit of one call on the control socket, with its wait for a permit where it takes one. */
+/** The time limit of one call on the control socket, with its waits for its turn where it has one. */
 const withinCallLimit = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
   effect.pipe(
     Effect.timeout("15 seconds"),
@@ -174,6 +176,9 @@ const fixedBudget = Effect.fn("DaemonCapability.fixedBudget")(function* (
  *   followed once the change commits: a run that is no longer live is revoked, at once.
  * - `reconcile` sends every live run, so the gateway revokes the others; it runs at start and
  *   every `reconcileEveryMs`, which also covers a revoke that the gateway missed while it was down.
+ *
+ * The calls of one run reach the gateway one at a time, in the order they start, so a run's
+ * authorize comes before its revoke; the calls of different runs do not wait for each other.
  */
 export const makeDaemonCapability = (options: {
   readonly socket: string
@@ -186,11 +191,21 @@ export const makeDaemonCapability = (options: {
     const lifetime = runLifetime(sql)
     const control = controlClient(options.socket)
     const scope = yield* Effect.scope
-    const calls = yield* Semaphore.make(1)
-    // `authorize`, `revoke` and `reconcile` take one permit each; the wait for it counts toward
-    // the time limit of the call.
-    const permitted = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
-      withinCallLimit(calls.withPermits(1)(effect))
+    // The runs with a call in flight or waiting; a run leaves when its last call ends.
+    const runs = new ScopedKeyedLock()
+    // The places of the daemon's connections at the gateway: each connection holds one, so the
+    // client never opens more than the gateway accepts. A reconcile holds them all, so no grant
+    // reaches the gateway between its read of the live runs and the gateway's answer, which would
+    // revoke a run granted after that read. A call that needs one place passes a reconcile that
+    // waits for all of them. So a call of a run waits for the calls of its own run, for a
+    // reconcile in flight, and, while every place is taken, for a place.
+    const places = yield* Semaphore.make(maxControlConnections)
+    const placed = places.withPermits(1)
+    /** `effect` as a call of `runId`: after the calls of that run that started before it. */
+    const ofRun =
+      (runId: string) =>
+      <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+        withinCallLimit(Effect.scoped(Effect.andThen(runs.acquire(runId), effect)))
     const watched = new Map<string, () => void>()
     const changed = yield* Queue.unbounded<string>()
     const grants = (runId: string | null) =>
@@ -208,33 +223,40 @@ export const makeDaemonCapability = (options: {
       watched.get(runId)?.()
       watched.delete(runId)
     }
-    const revoke = Effect.fn("DaemonCapability.revoke")(function* (runId: string) {
-      yield* permitted(control.revoke(runId))
-      unwatch(runId)
-    })
-    const authorize = Effect.fn("DaemonCapability.authorize")(function* (runId: string) {
+    // The revoke and the authorize of a run, in its turn.
+    const revokeRun = (runId: string) =>
+      placed(control.revoke(runId)).pipe(Effect.tap(() => Effect.sync(() => unwatch(runId))))
+    const authorizeRun = Effect.fnUntraced(function* (runId: string) {
       const [grant] = yield* grants(runId)
       if (grant === undefined)
         return yield* Effect.fail(new CapabilityControlRefused({ reason: "run is not live" }))
       watch(runId)
-      yield* permitted(control.authorize(grant))
+      yield* placed(control.authorize(grant))
     })
+    const revoke = Effect.fn("DaemonCapability.revoke")((runId: string) =>
+      ofRun(runId)(revokeRun(runId)),
+    )
+    const authorize = Effect.fn("DaemonCapability.authorize")((runId: string) =>
+      ofRun(runId)(authorizeRun(runId)),
+    )
     const reconcile = Effect.fn("DaemonCapability.reconcile")(function* () {
-      yield* permitted(
-        Effect.gen(function* () {
-          // The live set is read under the same permit as each grant, so no grant sent after it
-          // can be revoked by it.
-          const live = yield* grants(null)
-          for (const grant of live) watch(grant.runId)
-          yield* control.reconcile(live)
-          for (const runId of watched.keys())
-            if (!live.some((grant) => grant.runId === runId)) unwatch(runId)
-        }),
+      yield* withinCallLimit(
+        places.withPermits(maxControlConnections)(
+          Effect.gen(function* () {
+            // The live set is read while the reconcile holds every place, so no grant sent after
+            // the read can be revoked by it.
+            const live = yield* grants(null)
+            for (const grant of live) watch(grant.runId)
+            yield* control.reconcile(live)
+            for (const runId of watched.keys())
+              if (!live.some((grant) => grant.runId === runId)) unwatch(runId)
+          }),
+        ),
       )
     })
     const sessionBound = Effect.fn("DaemonCapability.sessionBound")(
       (runId: string, actionsRunId: number, actionsAttempt: number) =>
-        control.sessionBound(runId, actionsRunId, actionsAttempt),
+        ofRun(runId)(placed(control.sessionBound(runId, actionsRunId, actionsAttempt))),
     )
     /**
      * Starts the revoke of `runId` and returns at once. The revoke ends in this client's scope,
@@ -254,12 +276,15 @@ export const makeDaemonCapability = (options: {
       )
     })
     // A change notifies inside its transaction; this read waits for it to commit or roll back.
+    // Each change is followed in its run's turn, on a fiber of its own, so the change of one run
+    // does not wait for the calls of another.
     yield* Queue.take(changed).pipe(
       Effect.flatMap((runId) =>
-        grants(runId).pipe(
-          Effect.flatMap((live) => (live.length === 0 ? revoke(runId) : authorize(runId))),
-          Effect.ignore,
-        ),
+        ofRun(runId)(
+          grants(runId).pipe(
+            Effect.flatMap((live) => (live.length === 0 ? revokeRun(runId) : authorizeRun(runId))),
+          ),
+        ).pipe(Effect.ignore, Effect.forkIn(scope)),
       ),
       Effect.forever,
       Effect.forkScoped,
@@ -270,6 +295,14 @@ export const makeDaemonCapability = (options: {
       Effect.forever,
       Effect.forkScoped,
     )
-    return { authorize, revoke, reconcile, sessionBound, startRevoke }
+    return {
+      authorize,
+      revoke,
+      reconcile,
+      sessionBound,
+      startRevoke,
+      /** The runs that have a call in flight or waiting for its turn. */
+      runsWithCalls: () => runs.size,
+    }
   })
 export type DaemonCapability = Effect.Success<ReturnType<typeof makeDaemonCapability>>
