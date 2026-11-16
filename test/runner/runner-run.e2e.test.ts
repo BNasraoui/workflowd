@@ -26,6 +26,7 @@ import {
   step,
   withRunnerDaemon,
   writeHarness,
+  sealingReply,
   writeSealingHarness,
 } from "./fixture"
 
@@ -363,7 +364,7 @@ test("a runner dispatch goes from the ingress through the lease, the job's sessi
           status: "completed",
           end_reason: "completed",
           ended_at: expect.any(String),
-          final_message: "Runner run done.",
+          final_message: sealingReply,
           final_message_ref: null,
           placement: "runner",
         })

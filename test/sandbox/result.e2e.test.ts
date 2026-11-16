@@ -4,6 +4,7 @@ import { chmod, mkdtemp, mkdir, rm, writeFile, symlink } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { createHash } from "node:crypto"
+import { finalMessageText } from "../../deploy/sandbox/hidden-text.mjs"
 import { command } from "./harness"
 import { pathBytes, sealedTextCases } from "../kernel/sealed-text-cases"
 
@@ -734,9 +735,10 @@ for (const variant of sealVariants)
     }
   })
 
-// The seal's rules for each text and path, run on the cases that the daemon's check
-// runs on too.
-test("the seal gives each text and path of the shared table its expected result", async () => {
+/** Whether the seal's rule of each item's field admits its value; a path as its bytes. */
+async function sealAdmits(
+  items: ReadonlyArray<{ readonly field: string; readonly value: string }>,
+): Promise<ReadonlyArray<boolean>> {
   const child = Bun.spawn(
     [
       "python3",
@@ -766,18 +768,7 @@ print(json.dumps(results))
 `,
       script,
     ],
-    {
-      stdin: new Blob([
-        JSON.stringify(
-          sealedTextCases.map((item) => ({
-            field: item.field,
-            value: item.field === "path" ? pathBytes(item).toString("base64") : item.value,
-          })),
-        ),
-      ]),
-      stdout: "pipe",
-      stderr: "pipe",
-    },
+    { stdin: new Blob([JSON.stringify(items)]), stdout: "pipe", stderr: "pipe" },
   )
   const [status, stdout, stderr] = await Promise.all([
     child.exited,
@@ -785,8 +776,32 @@ print(json.dumps(results))
     new Response(child.stderr).text(),
   ])
   expect({ status, stderr }).toEqual({ status: 0, stderr: "" })
-  const results = Schema.decodeUnknownSync(Schema.Array(Schema.Boolean))(JSON.parse(stdout))
+  return Schema.decodeUnknownSync(Schema.Array(Schema.Boolean))(JSON.parse(stdout))
+}
+
+// The seal's rules for each text and path, run on the cases that the daemon's check
+// runs on too.
+test("the seal gives each text and path of the shared table its expected result", async () => {
+  const results = await sealAdmits(
+    sealedTextCases.map((item) => ({
+      field: item.field,
+      value: item.field === "path" ? pathBytes(item).toString("base64") : item.value,
+    })),
+  )
   expect(sealedTextCases.map((item, index) => ({ ...item, accepted: results[index] }))).toEqual([
     ...sealedTextCases,
   ])
+})
+
+// A runner's harness gives the seal the run's reply as its final message: what the seal refuses
+// in a final message is never in it, so a reply never costs the run its result.
+test("the seal admits the final message that a runner's harness makes of each final message of the shared table, and one that it admits is kept as it is", async () => {
+  const messages = sealedTextCases.filter((item) => item.field === "finalMessage")
+  const made = messages.map((item) => finalMessageText(item.value))
+  expect(await sealAdmits(made.map((value) => ({ field: "finalMessage", value })))).toEqual(
+    made.map(() => true),
+  )
+  expect(
+    made.filter((value, index) => messages[index]!.accepted && value !== messages[index]!.value),
+  ).toEqual([])
 })

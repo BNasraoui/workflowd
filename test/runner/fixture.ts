@@ -650,23 +650,34 @@ export async function withRunnerDaemon<A>(
 }
 
 /**
+ * The reply of the run of `writeSealingHarness`, as Claude Code's result line gives it: with a
+ * Hangul filler, a Mongolian variation selector, a U+FE0F after a letter and one after an emoji.
+ * The seal refuses each of them in a final message but the last.
+ */
+export const sealingReply = "Runner run done.\u3164\u180B Ok\uFE0F \u{1F642}\uFE0F"
+/** `sealingReply` as the seal admits it, which is the run's final message. */
+export const sealedReply = "Runner run done. Ok \u{1F642}\uFE0F"
+
+/**
  * The harness of the run client in place of the box, for a host with no Docker: it writes
  * Claude's stream-json lines for the launch, makes the run's change on the source, which it
- * fetches from the fixture remote `bare`, and seals it with the real result.py as the box's
- * harness does, as the launch's agent identity.
+ * fetches from the fixture remote `bare`, and seals it with the harness's own seal
+ * (native-seal.mjs), as the launch's agent identity, with the reply `sealingReply`.
  */
 export async function writeSealingHarness(directory: string, bare: string) {
   const path = join(directory, "sealing-harness.mjs")
   await writeFile(
     path,
     `import { execFileSync } from "node:child_process"
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs"
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs"
+import { sealRun } from ${JSON.stringify(resolve("deploy/sandbox/native-seal.mjs"))}
 const launch = JSON.parse(readFileSync(0, "utf8"))
 const directory = process.env.WORKFLOWD_RUN_DIRECTORY
 const native = directory + "/native"
 const env = { PATH: "/usr/bin:/bin", HOME: "/nonexistent", GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" }
-const run = (argv, input) => execFileSync(argv[0], argv.slice(1), { cwd: native, env, input, encoding: "utf8" })
+const run = (argv) => execFileSync(argv[0], argv.slice(1), { cwd: native, env, encoding: "utf8" })
 const line = (value) => process.stdout.write(JSON.stringify(value) + "\\n")
+const reply = ${JSON.stringify(sealingReply)}
 line({ type: "system", subtype: "init", session_id: "fixture-session", model: launch.model })
 line({ type: "assistant", message: { content: [{ type: "text", text: "prompt: " + launch.prompt }] } })
 mkdirSync(native + "/workspace", { recursive: true })
@@ -674,17 +685,10 @@ run(["git", "init", "--quiet", "--bare", "source.git"])
 run(["git", "-C", "source.git", "fetch", "--quiet", "--no-tags", ${JSON.stringify(bare)}, launch.sourceSha])
 run(["sh", "-c", 'git -C source.git archive "$1" | tar -x -C workspace', "sh", launch.sourceSha])
 writeFileSync(native + "/workspace/runner-proof.txt", "written by the runner run\\n")
+line({ type: "assistant", message: { content: [{ type: "text", text: reply }] } })
+line({ type: "result", subtype: "success", is_error: false, result: reply })
 run(["tar", "-cf", "capture.tar", "-C", "workspace", "."])
-const result = ${JSON.stringify(resolve("deploy/sandbox/result.py"))}
-run(["python3", "-I", result, "native-export", "capture.tar", launch.sourceSha])
-run(["python3", "-I", result, "native-seal", launch.sourceSha], JSON.stringify({
-  completion: { title: "workflowd agent run", commitMessage: "workflowd agent run\\n", body: "One file.", finalMessage: "Runner run done." },
-  sensitiveValues: [],
-  identity: launch.identity,
-}))
-renameSync(native + "/result", directory + "/result")
-line({ type: "assistant", message: { content: [{ type: "text", text: "Runner run done." }] } })
-line({ type: "result", subtype: "success", is_error: false, result: "Runner run done." })
+await sealRun({ directory, native, sourceSha: launch.sourceSha, identity: launch.identity, reply })
 `,
   )
   return path

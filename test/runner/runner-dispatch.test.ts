@@ -2,8 +2,9 @@ import { expect, setSystemTime, test } from "bun:test"
 import { createHash } from "node:crypto"
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
-import { dirname, join, resolve } from "node:path"
+import { dirname, join } from "node:path"
 import { Effect } from "effect"
+import { sealRun } from "../../deploy/sandbox/native-seal.mjs"
 import type { GatewayEnd } from "../../src/capability-control/protocol"
 import { AgentRunIngress, agentRunIdentifiers } from "../../src/kernel/agent-run-ingress"
 import { AgentRunStore } from "../../src/kernel/agent-run-store"
@@ -45,8 +46,8 @@ type Remote = Awaited<ReturnType<typeof gitRemote>>
 type Sealed = { readonly manifest: Record<string, unknown>; readonly bundle: Buffer }
 
 /**
- * A result as the box seals it, with the real result.py: `files` written on `base` (the source,
- * unless named) and committed as `identity` (the daemon's agent identity, unless named).
+ * A result as the box seals it, with the harness's own seal: `files` written on `base` (the
+ * source, unless named) and committed as `identity` (the daemon's agent identity, unless named).
  */
 async function seal(
   root: string,
@@ -76,23 +77,13 @@ async function seal(
     await writeFile(join(directory, "workspace", path), text)
   }
   run("seal", ["tar", "-cf", "capture.tar", "-C", "workspace", "."], directory)
-  const result = resolve("deploy/sandbox/result.py")
-  run("seal", ["python3", "-I", result, "native-export", "capture.tar", base], directory)
-  run(
-    "seal",
-    ["python3", "-I", result, "native-seal", base],
+  await sealRun({
     directory,
-    JSON.stringify({
-      completion: {
-        title: "workflowd agent run",
-        commitMessage: "workflowd agent run\n",
-        body: "One file.",
-        finalMessage: "Done.",
-      },
-      sensitiveValues: [],
-      identity: options.identity ?? runnerIdentity,
-    }),
-  )
+    native: directory,
+    sourceSha: base,
+    identity: options.identity ?? runnerIdentity,
+    reply: "Done.",
+  })
   const manifest: unknown = JSON.parse(
     await readFile(join(directory, "result/result.json"), "utf8"),
   )

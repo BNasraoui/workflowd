@@ -3,32 +3,16 @@
 // each of them as an event. It leaves the run's sealed result in <run directory>/result.
 import { randomBytes } from "node:crypto"
 import { appendFileSync } from "node:fs"
-import { mkdir, rename, writeFile } from "node:fs/promises"
+import { mkdir } from "node:fs/promises"
 import { dirname, join } from "node:path"
 import { createInterface } from "node:readline"
 import { fileURLToPath, pathToFileURL } from "node:url"
 import { boxNetwork, boxPort, boxSentinel, command, docker, makeBox } from "./native-docker.mjs"
+import { sealRun } from "./native-seal.mjs"
 
 const tooling = dirname(fileURLToPath(import.meta.url))
 /** What the run's stop (SIGTERM from the run client) does: the box, once made, is removed. */
 let onStop = () => process.exit(1)
-
-/**
- * The completion of the sealed result. A run in print mode names no title of its own, so the
- * title, the commit message and the body are fixed; the final message is the run's own.
- */
-const completion = {
-  title: "workflowd agent run",
-  commitMessage: "workflowd agent run\n\nThe workspace of one agent run, sealed on its runner.\n",
-  body: "The workspace of one agent run, sealed on its runner.",
-}
-
-/** The final message as the seal admits it: no control or format character but newline and tab. */
-const finalText = (text) =>
-  Buffer.from(text.replace(/(?![\n\t])[\p{Cc}\p{Cf}]/gu, ""), "utf8")
-    .subarray(0, 65536)
-    .toString("utf8")
-    .replace(/�$/u, "")
 
 /** The launch on standard input: at most 64 KiB, with the keys that the run client checked. */
 async function readLaunch() {
@@ -176,42 +160,9 @@ async function runBox(directory, launch) {
     const result = await step("claude", () => runClaude(box, launch, log))
     await step("stop", () => box.stop())
     await step("export", () => box.exportWorkspace(join(native, "capture.tar")))
-    await step("seal", async () => {
-      const python = (operation, input) =>
-        command(operation, "/usr/bin/python3", ["-I", join(tooling, "result.py"), ...operation.split(" "), launch.sourceSha], {
-          cwd: native,
-          input,
-          timeoutMs: 300000,
-        })
-      // The workspace archive, read by the seal; the run's own .git is never read.
-      await python("native-export capture.tar")
-      const sealed = JSON.parse(
-        await python(
-          "native-seal",
-          JSON.stringify({
-            completion: { ...completion, finalMessage: finalText(result) },
-            sensitiveValues: [],
-            identity: launch.identity,
-          }),
-        ),
-      )
-      if (sealed.empty === true) {
-        // A run that changed nothing: its completion with no bundle, so its caller hears its end.
-        const manifest = {
-          sourceSha: launch.sourceSha,
-          title: completion.title,
-          body: completion.body,
-          finalMessage: finalText(result),
-        }
-        await mkdir(join(directory, "result"), { mode: 0o700 })
-        await writeFile(join(directory, "result", "result.json"), JSON.stringify(manifest), {
-          mode: 0o600,
-          flag: "wx",
-        })
-        return
-      }
-      await rename(join(native, "result"), join(directory, "result"))
-    })
+    await step("seal", () =>
+      sealRun({ directory, native, sourceSha: launch.sourceSha, identity: launch.identity, reply: result }),
+    )
   } finally {
     await box.remove()
   }

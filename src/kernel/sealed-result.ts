@@ -2,6 +2,12 @@ import { lstat, mkdir, mkdtemp, readdir, rm } from "node:fs/promises"
 import { join } from "node:path"
 import { inflateSync } from "node:zlib"
 import { Context, Data, Effect, Layer, Redacted, Schema, Semaphore, type Scope } from "effect"
+import {
+  finalMessageBytes,
+  invisible,
+  isFinalMessage,
+  withoutPresentation,
+} from "../../deploy/sandbox/hidden-text.mjs"
 import type { AgentGitConfig } from "../agent-git/config"
 import { PublicationBody, PublicationMessage, PublicationTitle } from "../sandbox/config"
 import { tryFileLock } from "../file-lock"
@@ -31,7 +37,7 @@ export const sealedResultLimits = {
   /** A commit object: its four headers and its message. */
   commitBytes: 16 * 1024,
   bodyBytes: 32 * 1024,
-  finalMessageBytes: 64 * 1024,
+  finalMessageBytes,
   /** Wall clock for the whole check, and again for the push; a git child is killed at it. */
   timeLimitMs: 120_000,
   /**
@@ -181,32 +187,15 @@ const quoted = (value: string) => `"${printable(value, 120)}"`
 const decoder = new TextDecoder("utf-8", { fatal: true })
 const utf8Bytes = (value: string) => new TextEncoder().encode(value).byteLength
 const commitId = /^[0-9a-f]{40}$/
-/**
- * The code points that a reader cannot see, as a class of the regular expression
- * engine: each format character (Cf: the bidi controls, the joiners, the byte order
- * mark and the tags among them) and each default-ignorable code point (the variation
- * selectors, the Hangul fillers and the reserved code points of that property among
- * them). No text and no path of a result holds one. The seal writes the second
- * property out as ranges (result.py DEFAULT_IGNORABLE); a test compares them.
- */
-const invisible = String.raw`\p{Cf}\p{Default_Ignorable_Code_Point}`
-/**
- * The text with each U+FE0F that selects the emoji form left out: one directly after a code
- * point with the Emoji property that is not ASCII (so not after a digit, `#` or `*`). A commit
- * message and a final message may hold one there and nowhere else, so U+FE0F after a letter,
- * after another U+FE0F or at the start stays refused as each invisible code point is. A path
- * holds no U+FE0F. The seal has the same rule (result.py without_presentation, EMOJI).
- */
-// A capture and not a lookbehind: the engine of Bun 1.3 does not match a code point above
-// U+FFFF with a property class in a lookbehind.
-const emojiPresentation = new RegExp(String.raw`([\p{Emoji}--\p{ASCII}])\uFE0F`, "gv")
-const withoutPresentation = (value: string) => value.replace(emojiPresentation, "$1")
-// A title is one line; a body or a commit message may hold newlines and no other
-// control; a final message may hold newlines and tabs and no other control. None
-// holds an invisible code point.
+// The code points that a reader cannot see (`invisible`), U+FE0F where it selects the emoji
+// form (`withoutPresentation`) and the final message's rule (`isFinalMessage`) are one rule with
+// the final message that a runner's harness seals (hidden-text.mjs). The seal writes the
+// default-ignorable property out as ranges (result.py DEFAULT_IGNORABLE); a test compares them.
+// A title is one line; a body or a commit message may hold newlines and no other control; a
+// final message may hold newlines and tabs and no other control. None holds an invisible code
+// point.
 const controlOrInvisible = new RegExp(String.raw`[\p{Cc}${invisible}\u2028\u2029]`, "u")
 const controlButNewline = new RegExp(String.raw`(?![\n])[\p{Cc}${invisible}]`, "u")
-const controlButNewlineOrTab = new RegExp(String.raw`(?![\n\t])[\p{Cc}${invisible}]`, "u")
 // The publication rules of the seal (result.py safe_publication), with the same
 // Unicode data: no mention, HTML, math, backslash, character reference, closing
 // issue reference, link reference definition, stacked marks or ambiguous fence.
@@ -237,14 +226,7 @@ const textChecks: ReadonlyArray<
       !controlButNewline.test(value) &&
       isBody(value),
   ],
-  [
-    "finalMessage",
-    "final_message",
-    (value) =>
-      value.isWellFormed() &&
-      utf8Bytes(value) <= sealedResultLimits.finalMessageBytes &&
-      !controlButNewlineOrTab.test(withoutPresentation(value)),
-  ],
+  ["finalMessage", "final_message", isFinalMessage],
 ]
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
