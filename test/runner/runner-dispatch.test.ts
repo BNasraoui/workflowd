@@ -422,7 +422,7 @@ const refused: ReadonlyArray<{
     },
   },
   {
-    check: "github_path",
+    check: "protected_path",
     // The seal itself refuses such a path; a run that bypasses it commits with git.
     result: async (remote, root) =>
       bodyOf(await committed(root, remote, ".GitHub/workflows/x.yml")),

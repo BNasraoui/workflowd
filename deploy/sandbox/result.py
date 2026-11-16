@@ -302,23 +302,33 @@ RESULT_BOUNDS = {'blobBytes': 1024**2, 'changedBytes': 8 * 1024**2, 'changedPath
                  'commits': 100, 'objects': 10000, 'objectBytes': 64 * 1024**2}
 
 
-# Characters that change what a reviewer of a pushed path sees: each invisible code
-# point (the bidi controls, the joiners, the variation selectors and the tags among
-# them) and the line and paragraph separators (as the daemon's check).
-PATH_MARKS = re.compile('[\u2028\u2029]')
+def refused_in_path(c):
+    """A code point that a path may not hold: a control character, a backslash, an invisible code
+    point, a line or paragraph separator, a space separator other than U+0020, or the blank Braille
+    pattern U+2800 (result-rules.mjs refusedInPath)."""
+    category = unicodedata.category(c)
+    return (c in '\\\u2028\u2029\u2800' or category == 'Cc' or invisible(c)
+            or (c != ' ' and category == 'Zs'))
 
 
 def safe_path(raw):
+    """The rules of a path that a change adds, changes or removes, as the daemon's check holds them
+    (result-rules.mjs pathRefusal). Gives the key under which a checkout on macOS or Windows reads
+    the path."""
     name = raw.decode('utf8', errors='strict')
-    parts = name.split('/')
-    if any(p in ('', '.', '..') or p.lower().startswith('.git') for p in parts):
-        raise ValueError('Unsafe path component')
-    if name.startswith('deploy/sandbox/') or name == 'deploy/sandbox':
-        raise ValueError('Sandbox tooling path is forbidden')
-    if '\\' in name or PATH_MARKS.search(name) or any(unicodedata.category(c) == 'Cc' or invisible(c) for c in name):
+    if any(refused_in_path(c) for c in name):
         raise ValueError('Invalid path characters')
-    if unicodedata.normalize('NFC', name) != name:
-        raise ValueError('Path must be NFC normalized')
+    if unicodedata.normalize('NFKC', name) != name:
+        raise ValueError('Path must be NFKC normalized')
+    parts = name.split('/')
+    if any(p in ('', '.', '..') or p.endswith((' ', '.')) for p in parts):
+        raise ValueError('Unsafe path component')
+    if '~' in parts[0] or ':' in parts[0]:
+        raise ValueError('Unsafe first path component')
+    if any(p.lower().startswith('.git') or p.upper().startswith('.GIT') for p in parts):
+        raise ValueError('Unsafe path component')
+    if name.lower() == 'deploy/sandbox' or name.lower().startswith('deploy/sandbox/'):
+        raise ValueError('Sandbox tooling path is forbidden')
     return name.casefold()
 
 
@@ -566,9 +576,8 @@ def inspect_changes(repo, source, result, sensitive=()):
         total += int(size)
         if total > RESULT_BOUNDS['objectBytes']:
             raise ValueError('Object bytes exceeded bound')
-        # The content of each new file and commit. A tree holds the names of the paths beside a
-        # changed one, which the run did not change; each changed path is checked below.
-        if kind != 'tree':
+        # Each new commit: its message. Each added or changed file is checked below, by its diff.
+        if kind == 'commit':
             content_check(git(repo, 'cat-file', '-p', oid), sensitive)
     parent = source
     content = 0
@@ -605,11 +614,12 @@ def inspect_changes(repo, source, result, sensitive=()):
                 content += size
                 if content > RESULT_BOUNDS['changedBytes']:
                     raise ValueError('Content exceeded bound')
+                content_check(git(repo, 'cat-file', 'blob', blob), sensitive)
         # Detect case/normalization collisions against the complete tree, including base paths.
         names = git(repo, 'ls-tree', '-r', '-z', '--name-only', commit).split(b'\0')[:-1]
         folded = {}
         for name in names:
-            key = unicodedata.normalize('NFC', name.decode('utf8')).casefold()
+            key = unicodedata.normalize('NFC', name.decode('utf8', errors='replace')).casefold()
             if name in changed:
                 if not (key not in folded or folded[key] == name):
                     raise ValueError('Path collision')

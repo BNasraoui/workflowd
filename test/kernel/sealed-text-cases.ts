@@ -1,13 +1,8 @@
 /**
- * The texts and the paths of a sealed result, with the one result that both the seal
- * (deploy/sandbox/result.py) and the daemon's check (src/kernel/sealed-result.ts)
- * must give. The tests of each read this table, so a rule that changes on one side
- * only fails a test.
- *
- * The seal refuses more paths than the daemon on purpose (any component that starts
- * with `.git`, a path below deploy/sandbox, a name that is not NFC); those rules are
- * the seal's own and are not here. The daemon refuses a first path
- * component with `~` or `:`, which the seal accepts; that rule is not here either.
+ * The texts, the paths and the changes of a sealed result, with the one result that both the seal
+ * (deploy/sandbox/result.py) and the daemon's check (src/kernel/sealed-result.ts) must give. The
+ * tests of each run every case of these tables, so a rule that changes on one side only fails a
+ * test: what the seal refuses the check refuses, and what the seal accepts the check accepts.
  */
 export type SealedTextField = "title" | "commitMessage" | "body" | "finalMessage" | "path"
 
@@ -231,6 +226,47 @@ export const sealedTextCases: ReadonlyArray<SealedTextCase> = [
     "two \u2714\ufe0f\ufe0f",
     "tab\t\ufe0f",
   ]),
+  // The names that the seal protects, in any directory: each component that starts with `.git`
+  // (attributes, submodules, ignore rules, workflows), the runner's own tooling, and a first
+  // component that a checkout on Windows reads as another name (a short name or a stream).
+  ...cases("path", false, [
+    ".gitattributes",
+    ".gitmodules",
+    ".gitignore",
+    "src/.gitignore",
+    ".GITATTRIBUTES",
+    "sub/.github/workflows/x.yml",
+    "deploy/sandbox/runner.sh",
+    "Deploy/Sandbox/runner.sh",
+    "deploy/sandbox",
+    "notes~1/x.txt",
+    "GITHUB~1/workflows/x.yml",
+    "a:b.txt",
+  ]),
+  // Names that read as another name or as blank: a component that ends with a space or a dot, a
+  // space other than U+0020, the blank Braille pattern, and a name that NFKC changes (a ligature,
+  // a compatibility form, a decomposed letter).
+  ...cases("path", false, [
+    "notes /x.txt",
+    "notes./x.txt",
+    "x.txt ",
+    "x.txt\u00a0",
+    "a\u3000b.txt",
+    "\u2800.txt",
+    "notes/\u2800",
+    "con\ufb01g",
+    "\uff41.txt",
+    "docs/cafe\u0301.md",
+  ]),
+  ...cases("path", false, [`ghp_${"A".repeat(36)}.txt`]),
+  ...cases("path", true, [
+    "docs/a b.md",
+    "src/.eslintrc.json",
+    "notes/x~1.txt",
+    "notes/a:b.txt",
+    "docs/na\u00efve.md",
+    ".well-known/x.txt",
+  ]),
   {
     field: "path",
     value: "not UTF-8 (an encoded surrogate)",
@@ -261,3 +297,112 @@ export const sealedTextCases: ReadonlyArray<SealedTextCase> = [
 /** The bytes of the path of a case. */
 export const pathBytes = (item: SealedTextCase) =>
   item.pathHex === undefined ? Buffer.from(item.value) : Buffer.from(item.pathHex, "hex")
+
+/** A file of a change: its text, executable or not; null removes the path. */
+export type ChangeFile = string | { readonly text: string; readonly executable: boolean } | null
+
+/** Text in the shape of a GitHub token, as a tracked test fixture may hold it. */
+export const credentialText = `token = "ghp_${"A".repeat(36)}"\n`
+
+/**
+ * The source tree of each case of `sealedChangeCases`, beside the README.md and the executable
+ * run.sh of the fixture: a name in NFD, two names that differ by case, credential-shaped text and
+ * ignore rules, all tracked and all left as they are unless a case changes them.
+ */
+export const changeBase: Readonly<Record<string, string>> = {
+  "docs/cafe\u0301.md": "decomposed\n",
+  "notes/Twin.md": "one\n",
+  "notes/twin.md": "two\n",
+  "fixture.txt": credentialText,
+  ".gitignore": "build/\n",
+}
+
+export type SealedChangeCase = {
+  readonly name: string
+  /** The one commit of the change on `changeBase`: each path and its new file. */
+  readonly change: Readonly<Record<string, ChangeFile>>
+  readonly accepted: boolean
+}
+
+const mebibyte = "a".repeat(1024 * 1024)
+
+/** Changes of one commit, with the result that both the seal and the check must give. */
+export const sealedChangeCases: ReadonlyArray<SealedChangeCase> = [
+  { name: "a new file", change: { "docs/new.md": "new\n" }, accepted: true },
+  {
+    name: "a change beside tracked twins, a tracked NFD name and tracked credential-shaped text",
+    change: { "README.md": "changed\n" },
+    accepted: true,
+  },
+  { name: "a removed file", change: { "README.md": null }, accepted: true },
+  { name: "a file of the bound of a blob", change: { "big.txt": mebibyte }, accepted: true },
+  {
+    name: "a name in NFC beside its tracked NFD twin",
+    change: { "docs/caf\u00e9.md": "composed\n" },
+    accepted: false,
+  },
+  {
+    name: "a name in NFD beside the same name in NFC",
+    change: { "docs/x\u00e9.md": "composed\n", "docs/xe\u0301.md": "decomposed\n" },
+    accepted: false,
+  },
+  { name: "readme.md beside README.md", change: { "readme.md": "lower\n" }, accepted: false },
+  {
+    name: "a change of one of two tracked twins",
+    change: { "notes/twin.md": "changed\n" },
+    accepted: false,
+  },
+  { name: ".gitattributes", change: { ".gitattributes": "*.md binary\n" }, accepted: false },
+  { name: ".gitmodules", change: { ".gitmodules": "[submodule]\n" }, accepted: false },
+  { name: "a changed .gitignore", change: { ".gitignore": "build/\nout/\n" }, accepted: false },
+  { name: "a removed .gitignore", change: { ".gitignore": null }, accepted: false },
+  {
+    name: "the runner's own tooling",
+    change: { "deploy/sandbox/runner.sh": "#!/bin/sh\n" },
+    accepted: false,
+  },
+  {
+    name: "a nested workflow",
+    change: { "sub/.github/workflows/x.yml": "on: push\n" },
+    accepted: false,
+  },
+  { name: "credential-shaped text", change: { "token.txt": credentialText }, accepted: false },
+  {
+    name: "a copy of the tracked credential-shaped fixture",
+    change: { "copy.txt": credentialText },
+    accepted: false,
+  },
+  {
+    name: "credential-shaped text split by white space",
+    change: { "split.txt": `ghp_${"B".repeat(8)}\n  ${"B".repeat(30)}\n` },
+    accepted: false,
+  },
+  { name: "a short name", change: { "notes~1/x.txt": "x\n" }, accepted: false },
+  { name: "a stream name", change: { "a:b.txt": "x\n" }, accepted: false },
+  { name: "a trailing space", change: { "notes /x.txt": "x\n" }, accepted: false },
+  { name: "a trailing no-break space", change: { "x.txt\u00a0": "x\n" }, accepted: false },
+  { name: "the blank Braille pattern", change: { "\u2800.txt": "x\n" }, accepted: false },
+  { name: "config written with U+FB01", change: { "con\ufb01g": "x\n" }, accepted: false },
+  {
+    name: "a new executable file",
+    change: { "tool.sh": { text: "#!/bin/sh\n", executable: true } },
+    accepted: false,
+  },
+  {
+    name: "a mode change",
+    change: { "run.sh": { text: "#!/bin/sh\n", executable: false } },
+    accepted: false,
+  },
+  {
+    name: "a file over the bound of a blob",
+    change: { "big.txt": `${mebibyte}b` },
+    accepted: false,
+  },
+  {
+    name: "more than the bound of all changed files",
+    change: Object.fromEntries(
+      Array.from({ length: 9 }, (_, index) => [`big/${index}.txt`, `${index}${mebibyte.slice(1)}`]),
+    ),
+    accepted: false,
+  },
+]

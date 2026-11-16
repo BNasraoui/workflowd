@@ -6,7 +6,8 @@ import { join, resolve } from "node:path"
 import { createHash } from "node:crypto"
 import { finalMessageText } from "../../deploy/sandbox/hidden-text.mjs"
 import { command } from "./harness"
-import { pathBytes, sealedTextCases } from "../kernel/sealed-text-cases"
+import { commitChange } from "../kernel/sealed-change"
+import { pathBytes, sealedChangeCases, sealedTextCases } from "../kernel/sealed-text-cases"
 
 const wording = {
   body: "## Result\n\nReadable agent description.",
@@ -776,7 +777,7 @@ rules = {
     'commitMessage': m.commit_message,
     'body': m.publication_body,
     'finalMessage': m.final_message,
-    'path': lambda value: m.safe_path(base64.b64decode(value)),
+    'path': lambda value: (m.content_check(base64.b64decode(value), ()), m.safe_path(base64.b64decode(value))),
 }
 results = []
 for item in json.load(sys.stdin):
@@ -826,3 +827,77 @@ test("the seal admits the final message that a runner's harness makes of each fi
     made.filter((value, index) => messages[index]!.accepted && value !== messages[index]!.value),
   ).toEqual([])
 })
+
+// The seal's rules for each change of the shared table (result.py inspect_changes), which the
+// daemon's check runs too: each change is one commit on the table's base.
+test("the seal gives each change of the shared table its expected result", async () => {
+  const root = await mkdtemp(join(tmpdir(), "seal-changes-"))
+  try {
+    const changes: Array<{
+      readonly repo: string
+      readonly base: string
+      readonly result: string
+    }> = []
+    for (const [index, item] of sealedChangeCases.entries()) {
+      const repo = join(root, String(index))
+      await mkdir(repo)
+      const git = (...args: string[]) =>
+        command(
+          [
+            "git",
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "-c",
+            "core.quotePath=false",
+            ...args,
+          ],
+          repo,
+        )
+      await git("init", "-q", "-b", "main")
+      await writeFile(join(repo, "README.md"), "fixture\n")
+      await writeFile(join(repo, "run.sh"), "#!/bin/sh\n")
+      await chmod(join(repo, "run.sh"), 0o755)
+      await git("add", ".")
+      await git("commit", "-q", "-m", "source")
+      changes.push({ repo, ...(await commitChange(git, repo, item)) })
+    }
+    const child = Bun.spawn(
+      [
+        "python3",
+        "-I",
+        "-B",
+        "-c",
+        `
+import importlib.util, json, sys
+spec = importlib.util.spec_from_file_location('result', sys.argv[1])
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+results = []
+for change in json.load(sys.stdin):
+    try:
+        m.inspect_changes(change['repo'], change['base'], change['result'])
+        results.append(True)
+    except ValueError:
+        results.append(False)
+print(json.dumps(results))
+`,
+        script,
+      ],
+      { stdin: new Blob([JSON.stringify(changes)]), stdout: "pipe", stderr: "pipe" },
+    )
+    const [status, stdout, stderr] = await Promise.all([
+      child.exited,
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+    ])
+    expect({ status, stderr }).toEqual({ status: 0, stderr: "" })
+    const results = Schema.decodeUnknownSync(Schema.Array(Schema.Boolean))(JSON.parse(stdout))
+    expect(
+      sealedChangeCases.map((item, index) => ({ name: item.name, accepted: results[index] })),
+    ).toEqual(sealedChangeCases.map((item) => ({ name: item.name, accepted: item.accepted })))
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+}, 120_000)

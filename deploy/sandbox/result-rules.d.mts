@@ -7,3 +7,6 @@ export const resultBounds: {
   readonly objectBytes: number
 }
 export const resultRules: string
+export function pathRefusal(path: string): "path_name" | "github_path" | "protected_path" | undefined
+export function pathKey(path: string): string
+export function credentialShaped(bytes: Uint8Array): boolean

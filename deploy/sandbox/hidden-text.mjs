@@ -13,6 +13,11 @@
  */
 export const invisible = String.raw`\p{Cf}\p{Default_Ignorable_Code_Point}`
 
+const invisibleCharacter = new RegExp(String.raw`^[${invisible}]$`, "u")
+
+/** Whether the one code point `character` is invisible (`invisible`). */
+export const isInvisible = (character) => invisibleCharacter.test(character)
+
 /**
  * U+FE0F where it selects the emoji form: directly after a code point with the Emoji property
  * that is not ASCII (so not after a digit, `#` or `*`). A commit message and a final message may

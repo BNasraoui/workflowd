@@ -8,6 +8,12 @@ import {
   isFinalMessage,
   withoutPresentation,
 } from "../../deploy/sandbox/hidden-text.mjs"
+import {
+  credentialShaped,
+  pathKey,
+  pathRefusal,
+  resultBounds,
+} from "../../deploy/sandbox/result-rules.mjs"
 import type { AgentGitConfig } from "../agent-git/config"
 import { PublicationBody, PublicationMessage, PublicationTitle } from "../sandbox/config"
 import { tryFileLock } from "../file-lock"
@@ -27,11 +33,13 @@ const MiB = 1024 * 1024
 export const sealedResultLimits = {
   manifestBytes: 256 * 1024,
   bundleBytes: 16 * MiB,
-  commits: 100,
-  objects: 10_000,
-  objectBytes: 64 * MiB,
-  changedPaths: 100,
-  blobBytes: MiB,
+  // The bounds of the change, one table with the seal (result-rules.mjs, result.py RESULT_BOUNDS).
+  commits: resultBounds.commits,
+  objects: resultBounds.objects,
+  objectBytes: resultBounds.objectBytes,
+  changedPaths: resultBounds.changedPaths,
+  blobBytes: resultBounds.blobBytes,
+  changedBytes: resultBounds.changedBytes,
   titleCharacters: 200,
   commitMessageBytes: 10 * 1024,
   /** A commit object: its four headers and its message. */
@@ -129,8 +137,12 @@ export type SealedResultCheck =
   | "file_mode"
   | "mode_change"
   | "github_path"
+  | "protected_path"
   | "path_name"
+  | "path_collision"
+  | "credential"
   | "changed_paths"
+  | "changed_bytes"
   | "blob_size"
   | "identity"
   | "commit_format"
@@ -843,53 +855,54 @@ const parseDiff = (raw: Uint8Array): ReadonlyArray<DiffEntry> => {
   return entries
 }
 
-/**
- * What a path may not hold: a control character (C0, DEL and C1, so also no newline or
- * tab), a backslash in any component, and the characters that change what a reviewer
- * of the pushed result sees: each invisible code point (`invisible`, U+FE0F among them, so
- * `src/a\uFE0Fb.txt` is not a second `src/ab.txt`), U+2028 and U+2029. So a file name with
- * an emoji sequence that needs a joiner or a variation selector is refused. The seal has the
- * same rule (result.py safe_path).
- */
-const unsafePathCharacter = new RegExp(String.raw`[\p{Cc}\\${invisible}\u2028\u2029]`, "u")
-
 const regularModes = new Set(["000000", "100644", "100755"])
-const invisibleCharacters = new RegExp(`[${invisible}]`, "gu")
 
 /**
- * Whether a first path component is `.github` or a name that a checkout on Windows
- * or macOS maps to it. The rule refuses more than the exact forms: any `~` (a short
- * name such as GITHUB~1) or `:` (a stream such as `::$INDEX_ALLOCATION`), and any
- * name that is `.github` in either case after NFKC, after dropping format and
- * default-ignorable characters (which HFS+ ignores), and after dropping trailing
- * dots and spaces (which NTFS ignores). A `\`, which an archive tool may make into a
- * directory, is refused in any component before this rule (`unsafePathCharacter`).
+ * The rules of one entry of a commit's change, as the seal holds them (result.py inspect_changes):
+ * the path (`pathRefusal`: its characters, its normal form, the protected names and paths), no
+ * credential-shaped text in it, a regular file on both sides, a new file that is not executable
+ * and no change of mode.
  */
-const isGithubName = (component: string) => {
-  if (/[~:]/.test(component)) return true
-  const name = component
-    .normalize("NFKC")
-    .replace(invisibleCharacters, "")
-    .replace(/[. ]+$/, "")
-  return name.toLowerCase() === ".github" || name.toUpperCase() === ".GITHUB"
-}
-
 const checkEntry = (entry: DiffEntry): SealedResultRefused | undefined => {
-  if (!entry.utf8 || unsafePathCharacter.test(entry.path))
-    return refused("path_name", quoted(entry.path))
+  if (!entry.utf8) return refused("path_name", quoted(entry.path))
+  const rule = pathRefusal(entry.path)
+  if (rule !== undefined) return refused(rule, quoted(entry.path))
+  if (credentialShaped(new TextEncoder().encode(entry.path)))
+    return refused("credential", "in a path")
   if (!regularModes.has(entry.oldMode) || !regularModes.has(entry.newMode))
     return refused("file_mode", quoted(entry.path))
+  if (entry.oldMode === "000000" && entry.newMode === "100755")
+    return refused("file_mode", `${quoted(entry.path)} is a new executable file`)
   if (entry.oldMode !== "000000" && entry.newMode !== "000000" && entry.oldMode !== entry.newMode)
     return refused("mode_change", quoted(entry.path))
-  if (isGithubName(entry.path.split("/")[0]!)) return refused("github_path", quoted(entry.path))
   return undefined
 }
 
-/** Paths and modes of each commit, the changed path count and each new blob's size. */
+/**
+ * The paths of `commit`'s tree that a checkout on macOS or Windows reads as one (`pathKey`), when
+ * one of them is a path of the change: the first such path, or undefined.
+ */
+const collision = (names: ReadonlyArray<string>, changed: ReadonlySet<string>) => {
+  const byKey = new Map<string, string>()
+  for (const name of names) {
+    const key = pathKey(name)
+    const other = byKey.get(key)
+    if (other !== undefined && other !== name && (changed.has(name) || changed.has(other)))
+      return changed.has(name) ? name : other
+    byKey.set(key, name)
+  }
+  return undefined
+}
+
+/**
+ * The change of each commit: each entry's rules (`checkEntry`), the changed path count, no two paths
+ * of the tree that a checkout reads as one where one is changed, each new file's size, the bytes of
+ * all added or changed files, and no credential-shaped text in an added or changed file.
+ */
 const checkChanges = (context: GitContext, commits: ReadonlyArray<string>, base: string) =>
   Effect.gen(function* () {
     const changed = new Set<string>()
-    const blobs = new Map<string, string>()
+    const written: Array<{ readonly blob: string; readonly path: string }> = []
     let parent = base
     for (const commit of commits) {
       const raw = yield* gitOkBytes(context, [
@@ -905,25 +918,52 @@ const checkChanges = (context: GitContext, commits: ReadonlyArray<string>, base:
         const refusal = checkEntry(entry)
         if (refusal !== undefined) return yield* refusal
         changed.add(entry.path)
-        if (entry.newMode !== "000000") blobs.set(entry.blob, entry.path)
+        if (entry.newMode !== "000000") written.push({ blob: entry.blob, path: entry.path })
       }
       if (changed.size > sealedResultLimits.changedPaths)
         return yield* refused("changed_paths", `the bound is ${sealedResultLimits.changedPaths}`)
+      const names = nulFields(
+        yield* gitOkBytes(context, ["ls-tree", "-r", "-z", "--name-only", commit]),
+      ).map((name) => new TextDecoder().decode(name))
+      const twin = collision(names, changed)
+      if (twin !== undefined)
+        return yield* refused("path_collision", `${quoted(twin)} is another path of the tree`)
       parent = commit
     }
-    const shas = [...blobs.keys()]
-    const sizes = yield* gitOk(
-      context,
-      ["cat-file", "--batch-check=%(objectsize)"],
-      new TextEncoder().encode(shas.map((sha) => `${sha}\n`).join("")),
+    const shas = [...new Set(written.map((entry) => entry.blob))]
+    const input = new TextEncoder().encode(shas.map((sha) => `${sha}\n`).join(""))
+    const sizes = new Map(
+      (yield* gitOk(context, ["cat-file", "--batch-check=%(objectname) %(objectsize)"], input))
+        .trim()
+        .split("\n")
+        .filter((line) => line !== "")
+        .map((line) => [line.split(" ")[0]!, Number(line.split(" ")[1])] as const),
     )
-    const lines = sizes.trim().split("\n")
-    const index = lines.findIndex((line) => Number(line) > sealedResultLimits.blobBytes)
-    if (index >= 0)
-      return yield* refused(
-        "blob_size",
-        `${quoted(blobs.get(shas[index]!)!)} is over ${sealedResultLimits.blobBytes} bytes`,
-      )
+    let bytes = 0
+    for (const entry of written) {
+      const size = sizes.get(entry.blob) ?? 0
+      if (size > sealedResultLimits.blobBytes)
+        return yield* refused(
+          "blob_size",
+          `${quoted(entry.path)} is over ${sealedResultLimits.blobBytes} bytes`,
+        )
+      bytes += size
+      if (bytes > sealedResultLimits.changedBytes)
+        return yield* refused("changed_bytes", `the bound is ${sealedResultLimits.changedBytes}`)
+    }
+    // Each object is `<sha> blob <size>\n<content>\n`, in the order of the input.
+    const contents = (yield* git(context, ["cat-file", "--batch"], input)).stdout
+    let offset = 0
+    for (const sha of shas) {
+      const end = contents.indexOf(0x0a, offset)
+      const size = Number(new TextDecoder().decode(contents.subarray(offset, end)).split(" ")[2])
+      if (credentialShaped(contents.subarray(end + 1, end + 1 + size)))
+        return yield* refused(
+          "credential",
+          `in ${quoted(written.find((entry) => entry.blob === sha)!.path)}`,
+        )
+      offset = end + 1 + size + 1
+    }
   })
 
 /** History from the base: 1–100 commits, each with the previous one as its single parent. */
@@ -983,6 +1023,7 @@ const checkCommit = (
     if (identity?.[1] !== agentGit.name || identity[2] !== agentGit.email)
       return refused("identity", `${sha} is not by ${agentGit.name} <${agentGit.email}>`)
   }
+  if (credentialShaped(raw)) return refused("credential", `in ${sha}`)
   const message = text.slice(split + 2)
   const folded = message.toLowerCase()
   if (agentGit.blockedEmails.some((email) => folded.includes(email.toLowerCase())))

@@ -49,9 +49,11 @@ import { command } from "../sandbox/harness"
 import {
   hostileValues,
   pathBytes,
+  sealedChangeCases,
   sealedTextCases,
   type SealedTextField,
 } from "./sealed-text-cases"
+import { commitChange } from "./sealed-change"
 
 // The real sealing script of the runner, and a daemon check that pushes into a bare
 // fixture remote on disk. Nothing here reaches GitHub.
@@ -536,22 +538,28 @@ test(
       hostile,
       `[core]\n\thooksPath = ${hooks}\n[filter "evil"]\n\tclean = touch ${marker}\n\tsmudge = touch ${marker}\n\tprocess = touch ${marker}\n[credential]\n\thelper = !touch ${marker}\n`,
     )
-    const bundle = await handBundle(f, async (git, dir) => {
+    // Attributes that name the hostile filter are refused; hook-named files are content.
+    const attributes = await handBundle(f, async (git, dir) => {
       await writeFile(join(dir, ".gitattributes"), "* filter=evil\n")
+      await writeFile(join(dir, "notes.txt"), "filtered\n")
+      await git("add", "-A")
+      await git("commit", "-q", "-m", "attributes")
+    })
+    const bundle = await handBundle(f, async (git, dir) => {
       await mkdir(join(dir, "hooks"))
       await writeFile(join(dir, "hooks", "post-checkout"), `#!/bin/sh\ntouch ${marker}\n`)
-      await chmod(join(dir, "hooks", "post-checkout"), 0o755)
       await writeFile(join(dir, "pre-push"), `#!/bin/sh\ntouch ${marker}\n`)
       await git("add", "-A")
-      await git("commit", "-q", "-m", "hook-named files and attributes")
+      await git("commit", "-q", "-m", "hook-named files")
     })
-    const result = await decode(manifest(f.sourceSha), bundle)
     const saved = { ...process.env }
     try {
       process.env.GIT_CONFIG_GLOBAL = hostile
       process.env.GIT_CONFIG_PARAMETERS = `'core.hookspath'='${hooks}'`
       process.env.GIT_ASKPASS = join(hooks, "pre-push")
-      const exit = await publish(result, options(f))
+      const refusedExit = await publish(await decode(manifest(f.sourceSha), attributes), options(f))
+      expect(refusedCheck(refusedExit)).toBe("protected_path")
+      const exit = await publish(await decode(manifest(f.sourceSha), bundle), options(f))
       if (Exit.isFailure(exit)) throw Cause.squash(exit.cause)
     } finally {
       for (const key of ["GIT_CONFIG_GLOBAL", "GIT_CONFIG_PARAMETERS", "GIT_ASKPASS"])
@@ -559,8 +567,8 @@ test(
         else process.env[key] = saved[key]
     }
     expect(await Bun.file(marker).exists()).toBe(false)
-    expect(await command(["git", "show", `${await remoteRef(f)}:.gitattributes`], f.remote)).toBe(
-      "* filter=evil",
+    expect(await command(["git", "show", `${await remoteRef(f)}:pre-push`], f.remote)).toBe(
+      `#!/bin/sh\ntouch ${marker}`,
     )
   }),
 )
@@ -657,6 +665,7 @@ test(
         "cat-file",
         "rev-list",
         "diff-tree",
+        "ls-tree",
         "push",
       ]),
     )
@@ -2308,24 +2317,28 @@ const refusals: ReadonlyArray<
         }),
       ] as const,
   ),
-  // Each first path component a checkout on Windows or macOS maps to .github.
-  ...[
-    ".GitHub",
-    ".github.",
-    ".github...",
-    ".github ",
-    ".github. .",
-    "GITHUB~1",
-    "github~2",
-    "GI3F2A~1",
-    ".g\u0131thub",
-    "\uff0egithub",
-    ".github::$INDEX_ALLOCATION",
-  ].map(
-    (name) =>
+  // Each first path component a checkout on Windows or macOS maps to .github, by the rule that
+  // refuses it: a name that starts with .git in either case, a short name or a stream, a
+  // component that ends with a dot or a space, a name that NFKC changes.
+  ...(
+    [
+      [".GitHub", "protected_path"],
+      [".g\u0131thub", "protected_path"],
+      [".github.", "path_name"],
+      [".github...", "path_name"],
+      [".github ", "path_name"],
+      [".github. .", "path_name"],
+      ["\uff0egithub", "path_name"],
+      ["GITHUB~1", "github_path"],
+      ["github~2", "github_path"],
+      ["GI3F2A~1", "github_path"],
+      [".github::$INDEX_ALLOCATION", "github_path"],
+    ] as const
+  ).map(
+    ([name, check]) =>
       [
         `a path below ${shown(name)}`,
-        "github_path",
+        check,
         async (f: Fixture) => ({
           bundle: await handBundle(f, (git, dir) =>
             commitFile(git, dir, `${name}/workflows/x.yml`, "on: push\n"),
@@ -2588,8 +2601,34 @@ const textChecks: Record<SealedTextField, ReadonlyArray<SealedResultCheck>> = {
   body: ["body"],
   finalMessage: ["final_message"],
   commitMessage: ["commit_message"],
-  path: ["path_name", "github_path"],
+  path: ["path_name", "github_path", "protected_path", "credential"],
 }
+
+// The daemon's rules for each change of the shared table, which the seal runs too.
+for (const item of sealedChangeCases)
+  test(
+    `the daemon gives the change "${item.name}" of the shared table its expected result`,
+    withFixture(async (f) => {
+      let base = ""
+      const bundle = await handBundle(
+        f,
+        async (git, dir) => {
+          base = (await commitChange(git, dir, item)).base
+          // The base is the run's source, which the remote holds.
+          await git("push", "-q", f.remote, `${base}:refs/heads/change-base`)
+        },
+        () => ["refs/workflowd/result", `^${base}`],
+      )
+      const exit = await publish(
+        await decode(manifest(base), bundle),
+        options(f, { sourceSha: base }),
+      )
+      if (item.accepted) {
+        if (Exit.isFailure(exit)) throw Cause.squash(exit.cause)
+      } else expect(refusal(exit)._tag).toBe("SealedResultRefused")
+    }),
+    30_000,
+  )
 
 // The daemon's rules for each text and path, run on the cases that the seal runs on too.
 for (const item of sealedTextCases)
@@ -2714,7 +2753,8 @@ const longPath = `\u00e9\u96ea${"x".repeat(3000)}.txt`
 const pathRefusals: ReadonlyArray<
   readonly [SealedResultCheck, (f: Fixture, dir: string) => Promise<void>]
 > = [
-  ["github_path", (f, dir) => pathCommit(f, dir, Buffer.from(`.github/${longPath}`))],
+  ["github_path", (f, dir) => pathCommit(f, dir, Buffer.from(`notes~1/${longPath}`))],
+  ["protected_path", (f, dir) => pathCommit(f, dir, Buffer.from(`.github/${longPath}`))],
   ["file_mode", (f, dir) => pathCommit(f, dir, Buffer.from(longPath), "120000")],
   [
     "mode_change",
