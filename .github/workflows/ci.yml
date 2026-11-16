@@ -408,7 +408,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        suite: [core, gateway, publication-local, final-local]
+        suite: [core, gateway, publication-local, final-local, gateway-budget]
     steps:
       - name: Anonymous checkout
         env:

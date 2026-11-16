@@ -46,9 +46,15 @@ test("each gateway test file belongs to exactly one suite, or names the job that
       file,
       suites: file in ownStep ? 0 : 1,
     })
-  expect(suites["gateway"]).toEqual(
+  expect(
+    [...suites["gateway"]!, ...suites["gateway-budget"]!].sort((a, b) => a.localeCompare(b)),
+  ).toEqual(
     files.filter((file) => file.endsWith(".e2e.test.ts")).sort((a, b) => a.localeCompare(b)),
   )
+  expect(suites["gateway-budget"]).toEqual([
+    `${gatewayTestDirectory}/budget-settlement.e2e.test.ts`,
+    `${gatewayTestDirectory}/budget.e2e.test.ts`,
+  ])
 })
 
 test("each suite names existing test files, and no file runs in two suites", async () => {
