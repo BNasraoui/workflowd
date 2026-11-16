@@ -23,13 +23,12 @@ import {
  * The gateway image under Docker, against the session fixtures. The preload holds the run under
  * the test resource guard, as test/resources/run.ts does: workflowd's store and the gateway's,
  * the noscope providers, key server and model upstream, with the image's own Bun, modules and
- * noscope. Each gateway container runs as the image's own user, on a bridge network of its own
- * for its calls to the fixture servers, which listen on the bridge's address of this host; it
+ * noscope. Each gateway container runs as the image's own user, on Docker's default bridge for
+ * its calls to the fixture servers, which listen on the bridge's address of this host; it
  * publishes no port. Its listener is a Unix socket in a volume, a directory of this host, that it
- * shares with the front
- * container and with no other: the front runs the test front of test/helpers/loopback-tls.ts as
- * the front's user and publishes one port, through which each client of this test reaches the
- * gateway. This process is workflowd: it grants the fixture run on the gateway's control socket,
+ * shares with the front container and with no other: the front runs the test front of
+ * test/helpers/loopback-tls.ts as the front's user and publishes one port, through which each
+ * client of this test reaches the gateway. This process is workflowd: it grants the fixture run on the gateway's control socket,
  * which the container serves for the runner's uid and group.
  */
 const image = "workflowd-gateway:local"
@@ -43,7 +42,12 @@ const volumeMount = "/run/workflowd-gateway"
 const listenSocket = `${volumeMount}/front/gateway.sock`
 /** The port of the front in its container, which it publishes on this host's loopback. */
 const frontPort = 8443
-const network = `workflowd-gateway-image-${process.pid}`
+/**
+ * Docker's default bridge. A network that a user makes has Docker's resolver in each container's
+ * namespace, with a TCP listener on 127.0.0.11; the default bridge has none, so each TCP listener
+ * in the gateway container's namespace is the gateway's.
+ */
+const network = "bridge"
 /** The listener's volume: a directory of this host, which Docker does not copy anything into. */
 const volume = join(tmpdir(), `workflowd-gateway-listener-${process.pid}`)
 let started = 0
@@ -523,8 +527,7 @@ walk(${JSON.stringify(f.root)}); fs.chmodSync(${JSON.stringify(f.root)}, 0o700)`
 
 const loginDirectory = (f: Fixture) => join(f.root, "login")
 
-// The gateway's bridge, and the address of this host on it, where the fixture servers listen.
-await docker(["network", "create", network])
+// The address of this host on the bridge, where the fixture servers listen.
 const bridge = await docker([
   "network",
   "inspect",
@@ -866,6 +869,5 @@ process.stdout.write(Buffer.concat(fs.readdirSync(root).filter((n) => /[.]db(-wa
 fs.chownSync(${JSON.stringify(volume)}, ${process.getuid!()}, ${process.getgid!()})`,
   )
   await rm(volume, { recursive: true, force: true })
-  await docker(["network", "rm", network])
   await rm(tlsDirectory, { recursive: true, force: true })
 }
