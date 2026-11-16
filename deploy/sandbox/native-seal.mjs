@@ -5,7 +5,7 @@ import { mkdir, rename, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { finalMessageText } from "./hidden-text.mjs"
-import { command } from "./native-docker.mjs"
+import { command } from "./command.mjs"
 
 const result = fileURLToPath(new URL("./result.py", import.meta.url))
 

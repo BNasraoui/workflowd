@@ -1,7 +1,7 @@
 import { expect, setSystemTime, test } from "bun:test"
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { join, resolve } from "node:path"
 import { Effect, Fiber } from "effect"
 import { boxReadyLine } from "../../deploy/sandbox/box-ready.mjs"
 import { AgentRunIngress, agentRunIdentifiers } from "../../src/kernel/agent-run-ingress"
@@ -63,15 +63,22 @@ async function until<A>(name: string, ready: () => Promise<A | undefined> | A | 
  * The harness of the run client in place of the box. It records its pid and, at SIGTERM, the
  * time, in files `fixture-<name>` of the run directory, and writes Claude's first two lines. Then by
  * `mode`: `stream` makes a model call through the relay, records when its stream ended and the
- * answer of one more call, and writes a line; `quiet` writes nothing more; `unchanged` leaves a
- * completion with no bundle, as a run that changed nothing does. `stream` and `quiet` then wait.
+ * answer of one more call, and writes a line; `quiet` writes nothing more; `unchanged` takes the
+ * source from the fixture remote `bare`, changes nothing and seals it with the harness's own seal,
+ * which leaves a completion with no bundle. `stream` and `quiet` then wait.
  */
-async function writeEndingHarness(directory: string, mode: "stream" | "quiet" | "unchanged") {
+async function writeEndingHarness(
+  directory: string,
+  mode: "stream" | "quiet" | "unchanged",
+  bare: string,
+) {
   const path = join(directory, `ending-${mode}.mjs`)
   await writeFile(
     path,
-    `import { mkdirSync, readFileSync, writeFileSync } from "node:fs"
+    `import { execFileSync } from "node:child_process"
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { request } from "node:http"
+import { sealRun } from ${JSON.stringify(resolve("deploy/sandbox/native-seal.mjs"))}
 import { boxReadyLine } from ${JSON.stringify(boxReadyModule)}
 const launch = JSON.parse(readFileSync(0, "utf8"))
 const directory = process.env.WORKFLOWD_RUN_DIRECTORY
@@ -121,16 +128,15 @@ if (${mode === "stream"}) {
 if (${mode === "unchanged"}) {
   line({ type: "assistant", message: { content: [{ type: "text", text: "Nothing to change." }] } })
   line({ type: "result", subtype: "success", is_error: false, result: "Nothing to change." })
-  mkdirSync(directory + "/result")
-  writeFileSync(
-    directory + "/result/result.json",
-    JSON.stringify({
-      sourceSha: launch.sourceSha,
-      title: "workflowd agent run",
-      body: "No change.",
-      finalMessage: "Nothing to change.",
-    }),
-  )
+  const native = directory + "/native"
+  const env = { PATH: "/usr/bin:/bin", HOME: "/nonexistent", GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" }
+  const run = (argv) => execFileSync(argv[0], argv.slice(1), { cwd: native, env, encoding: "utf8" })
+  mkdirSync(native + "/workspace", { recursive: true })
+  run(["git", "init", "--quiet", "--bare", "source.git"])
+  run(["git", "-C", "source.git", "fetch", "--quiet", "--no-tags", ${JSON.stringify(bare)}, launch.sourceSha])
+  run(["sh", "-c", 'git -C source.git archive "$1" | tar -x -C workspace', "sh", launch.sourceSha])
+  run(["tar", "-cf", "capture.tar", "-C", "workspace", "."])
+  await sealRun({ directory, native, sourceSha: launch.sourceSha, identity: launch.identity, reply: "Nothing to change." })
 } else setInterval(() => undefined, 60000)
 `,
   )
@@ -217,7 +223,7 @@ async function withEnding<A>(
       {
         directory,
         image,
-        harness: () => writeEndingHarness(directory, mode),
+        harness: (bare) => writeEndingHarness(directory, mode, bare),
       },
       async (daemon) => {
         try {

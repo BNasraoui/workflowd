@@ -1,8 +1,8 @@
 import { spawn } from "node:child_process"
 import { chmod, open } from "node:fs/promises"
 import { join } from "node:path"
+import { command, environment } from "./command.mjs"
 
-const environment = { PATH: "/usr/bin:/bin", HOME: "/nonexistent" }
 /** The port of the box's entry, on the box's own loopback; claude-interactive.py serves it. */
 export const boxPort = 31741
 /** The fixed local credential of the box's port: not an account or a provider credential. */
@@ -19,35 +19,6 @@ export function docker(step, args, { input = "", timeoutMs = 120000, binary = "/
   return command(step, binary, args, { input, timeoutMs })
 }
 
-/** Runs `binary` with `args`, as `docker` does. */
-export function command(step, binary, args, { input = "", timeoutMs = 120000, cwd } = {}) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(binary, args, { env: environment, cwd, stdio: ["pipe", "pipe", "pipe"] })
-    const output = []
-    let size = 0
-    let errors = ""
-    const timer = setTimeout(() => child.kill("SIGKILL"), timeoutMs)
-    child.stdout.on("data", (bytes) => {
-      size += bytes.length
-      if (size > 1048576) child.kill("SIGKILL")
-      else output.push(bytes)
-    })
-    child.stderr.on("data", (bytes) => {
-      errors = (errors + bytes.toString("utf8")).slice(-2000)
-    })
-    child.stdin.on("error", () => undefined)
-    child.stdin.end(input)
-    child.once("error", (error) => {
-      clearTimeout(timer)
-      reject(new Error(`${step}: ${error.message}`))
-    })
-    child.once("close", (code, signal) => {
-      clearTimeout(timer)
-      if (code === 0) resolve(Buffer.concat(output).toString("utf8"))
-      else reject(new Error(`${step}: exit ${code ?? signal}: ${errors.trim()}`))
-    })
-  })
-}
 
 /**
  * The box of one run: a container of the run's image, as the user 1000 with no capability, a

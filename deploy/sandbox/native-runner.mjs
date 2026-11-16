@@ -8,7 +8,8 @@ import { dirname, join } from "node:path"
 import { createInterface } from "node:readline"
 import { fileURLToPath, pathToFileURL } from "node:url"
 import { boxReadyLine } from "./box-ready.mjs"
-import { boxNetwork, boxPort, boxSentinel, command, docker, makeBox } from "./native-docker.mjs"
+import { command } from "./command.mjs"
+import { boxNetwork, boxPort, boxSentinel, docker, makeBox } from "./native-docker.mjs"
 import { sealRun } from "./native-seal.mjs"
 
 const tooling = dirname(fileURLToPath(import.meta.url))
