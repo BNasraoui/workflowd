@@ -33,6 +33,11 @@ import { Schema } from "effect"
 export const loginLimit = 16384
 /** The time limit of one request to the OAuth server. */
 const renewalLimitMs = 5000
+/**
+ * The longest a renewal takes once its request is sent: the request's limit, then the write of
+ * the answer. A gateway that stops waits this long for a renewal in flight.
+ */
+export const renewalWriteBoundMs = renewalLimitMs + 1000
 /** A login whose access value has this long or less to live is renewed before it is used. */
 const renewWithinMs = 60000
 /** How long a call waits for another call that holds the login. */

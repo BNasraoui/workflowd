@@ -2,6 +2,7 @@ import { expect, test } from "bun:test"
 import { randomUUID } from "node:crypto"
 import { readFile, readdir, writeFile } from "node:fs/promises"
 import { join } from "node:path"
+import { Schema } from "effect"
 import { claudeLogin, client, sse, storedAccess, syntheticValue } from "./gateway-process"
 import {
   imported,
@@ -19,7 +20,7 @@ import {
  * and the scope of a renewal answer.
  */
 
-test("a stop of the gateway while the OAuth server holds the renewal: after a start, the same refresh value is sent once more and the call works", async () => {
+test("a stop of the gateway while the OAuth server holds the renewal past custody's request limit: after a start and the wait, the same refresh value is sent once more and the call works", async () => {
   await withCustody(async (f, oauth, start) => {
     const old = claudeLogin(syntheticValue("access"), syntheticValue("refresh"), Date.now() - 1000)
     await imported(f, old)
@@ -30,20 +31,19 @@ test("a stop of the gateway while the OAuth server holds the renewal: after a st
       .call(token)
       .catch(() => "gone")
     await until(() => oauth.requests().length === 1)
+    // The stop waits for the renewal; custody's own limit ends its request with no answer.
     await gateway.terminate?.()
     await first
-    // The custody process ended with the gateway: the held answer is stored by no one.
     oauth.release()
-    await Bun.sleep(300)
     expect(storedAccess(await readFile(loginFile(f), "utf8"))).toBe(old.claudeAiOauth.accessToken)
+    const { retryAt } = Schema.decodeUnknownSync(
+      Schema.fromJsonString(Schema.Struct({ retryAt: Schema.Number })),
+    )(await readFile(join(loginDirectory(f), "claude.state"), "utf8"))
     oauth.mode("renew")
     const restarted = await start()
-    await works(
-      restarted,
-      await runToken(restarted, "jti-restart"),
-      oauth,
-      old.claudeAiOauth.refreshToken,
-    )
+    const restartedToken = await runToken(restarted, "jti-restart")
+    while (Date.now() <= retryAt) await Bun.sleep(retryAt - Date.now() + 1)
+    await works(restarted, restartedToken, oauth, old.claudeAiOauth.refreshToken)
     expect(oauth.requests()).toHaveLength(2)
     expect(storedAccess(await readFile(loginFile(f), "utf8"))).toBe(oauth.next().access)
   })
@@ -144,3 +144,30 @@ test("a renewal answer with no scope keeps the scope; one without user:inference
     expect(f.upstreamRequests()).toHaveLength(1)
   })
 }, 30000)
+
+test("a stop of the gateway while the OAuth server holds the renewal waits for its answer: the next start uses the renewed login and sends no request", async () => {
+  await withCustody(async (f, oauth, start) => {
+    const old = claudeLogin(syntheticValue("access"), syntheticValue("refresh"), Date.now() - 1000)
+    await imported(f, old)
+    oauth.mode("hold")
+    const gateway = await start()
+    const token = await runToken(gateway, "jti-stop-wait")
+    const first = client(gateway)
+      .call(token)
+      .catch(() => "gone")
+    await until(() => oauth.requests().length === 1)
+    const stopped = gateway.terminate!()
+    // The gateway's stop waits for the renewal in flight; then the OAuth server answers.
+    await until(() => gateway.output!().includes("the gateway waits for a renewal in flight"))
+    oauth.release()
+    await stopped
+    await first
+    expect(storedAccess(await readFile(loginFile(f), "utf8"))).toBe(oauth.next().access)
+    expect(await readdir(loginDirectory(f))).not.toContain("claude.state")
+    const restarted = await start()
+    const call = await client(restarted).call(await runToken(restarted, "jti-after-stop"))
+    expect(call.status).toBe(200)
+    expect(await call.text()).toBe(sse)
+    expect(oauth.requests()).toHaveLength(1)
+  })
+}, 40000)

@@ -2,7 +2,7 @@ import { Context, Effect, Option, Schema, Semaphore } from "effect"
 import { SqlClient } from "effect/unstable/sql"
 import { randomInt } from "node:crypto"
 import { mintCapability } from "./noscope"
-import { custodyProvider, loginFault } from "./custody"
+import { custodyProvider, loginFault, renewalWriteBoundMs } from "./custody"
 import { claudeRequest, readRequestBody, type ClaudeUpstream } from "./claude"
 import { CapabilityRefused, capabilityDigest, makeCapabilityStore } from "./store"
 import { githubJobKeys, verifyJobProof } from "../sandbox/bootstrap"
@@ -147,7 +147,6 @@ export const makeCapabilityGateway = (
     // The gateway's lifetime: a renewal of the provider login ends with the gateway, never with
     // the call that started it.
     const lifetime = new AbortController()
-    yield* Effect.addFinalizer(() => Effect.sync(() => lifetime.abort()))
     const custody = custodyProvider(config.credentialRole)
     const logged = new Map<string, number>()
     const logFault = (line: string) => {
@@ -184,6 +183,24 @@ export const makeCapabilityGateway = (
         })
       return waitFor(inFlight, AbortSignal.any([signal, AbortSignal.timeout(accessWaitMs)]))
     }
+    // A stop waits for a renewal in flight, up to the bound of its request and its write, before
+    // it ends the gateway's lifetime: an answer that the stop cut off would leave the stored
+    // refresh value one that the OAuth server has replaced.
+    yield* Effect.addFinalizer(() =>
+      Effect.gen(function* () {
+        const pending = inFlight
+        if (pending) {
+          console.error("the gateway waits for a renewal in flight before it stops")
+          yield* Effect.promise(() =>
+            pending.then(
+              () => undefined,
+              () => undefined,
+            ),
+          ).pipe(Effect.timeoutOption(renewalWriteBoundMs))
+        }
+        lifetime.abort()
+      }),
+    )
     // Each live stream, by run, with the session and the digest of the token that opened it.
     const active = new Map<
       string,
