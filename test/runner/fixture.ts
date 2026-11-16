@@ -44,6 +44,8 @@ import { githubApiStub } from "../sandbox/github-api-stub"
 
 /** The module of the line that a harness writes first, once its box is ready. */
 export const boxReadyModule = resolve("deploy/sandbox/box-ready.mjs")
+/** The module that reads a harness's workspace as its box's stopped workspace is read. */
+export const workspaceArchiveModule = resolve("test/helpers/workspace-archive.mjs")
 
 /**
  * A harness of the run client in place of the box: it reads the launch on its standard input,
@@ -690,6 +692,7 @@ export async function writeSealingHarness(directory: string, bare: string) {
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { boxReadyLine } from ${JSON.stringify(boxReadyModule)}
 import { sealRun } from ${JSON.stringify(resolve("deploy/sandbox/native-seal.mjs"))}
+import { directoryArchive } from ${JSON.stringify(workspaceArchiveModule)}
 const launch = JSON.parse(readFileSync(0, "utf8"))
 const directory = process.env.WORKFLOWD_RUN_DIRECTORY
 const native = directory + "/native"
@@ -707,8 +710,7 @@ run(["sh", "-c", 'git -C source.git archive "$1" | tar -x -C workspace', "sh", l
 writeFileSync(native + "/workspace/runner-proof.txt", "written by the runner run\\n")
 line({ type: "assistant", message: { content: [{ type: "text", text: reply }] } })
 line({ type: "result", subtype: "success", is_error: false, result: reply })
-run(["tar", "-cf", "capture.tar", "-C", "workspace", "."])
-await sealRun({ directory, native, sourceSha: launch.sourceSha, identity: launch.identity, reply })
+await sealRun({ directory, native, sourceSha: launch.sourceSha, identity: launch.identity, reply, workspace: () => directoryArchive(native + "/workspace") })
 `,
   )
   return path

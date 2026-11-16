@@ -344,11 +344,144 @@ def agent_identity(identity):
             'GIT_AUTHOR_DATE': '2000-01-01T00:00:00Z', 'GIT_COMMITTER_DATE': '2000-01-01T00:00:00Z'}
 
 
-def native_seal(source):
-    """Called only after the supervisor stops the container and exports its fixed workspace.
+def tree_entries(repo, commit):
+    """Each entry of the tree of `commit`, by its path as bytes: its mode, its object and its size
+    (None for an entry that is not a blob)."""
+    entries = {}
+    for line in git(repo, 'ls-tree', '-r', '-z', '-l', '--full-tree', commit).split(b'\0'):
+        if not line: continue
+        meta, path = line.split(b'\t', 1)
+        mode, _, oid, size = meta.split()
+        entries[path] = (mode, oid.decode('ascii'), None if size == b'-' else int(size))
+    return entries
 
-    source.git is controller-created and never mounted in the agent. repository is
-    an owned, offline export, not a live agent mount. No agent Git command is run.
+
+def source_repository(directory, source):
+    """A bare repository in `directory` with the objects of the source commit from source.git, which
+    no agent wrote, and the source tree as its index."""
+    if Path('source.git').is_symlink(): raise ValueError('Unsafe source path')
+    Path(directory).mkdir(mode=0o700, exist_ok=True)
+    repo = str(Path(directory).absolute())
+    git(repo, 'init', '--bare', '.')
+    git(repo, 'fetch', '--no-tags', '--', str(Path('source.git').absolute()), source)
+    git(repo, 'read-tree', source)
+    return repo
+
+
+def blob_id(data):
+    return hashlib.sha1(b'blob %d\0' % len(data) + data).hexdigest()
+
+
+class PathRefused(ValueError):
+    """A refusal of one path of the run's change, whose cause names the path."""
+    def __init__(self, reason, path):
+        super().__init__(reason)
+        self.reason, self.path = reason, path
+
+    def text(self):
+        shown = json.dumps(self.path.decode('utf8', errors='backslashreplace'), ensure_ascii=True)
+        return self.reason + ': ' + (shown if len(shown) <= 160 else shown[:156] + '..."')
+
+
+def workspace_entries(stream):
+    """The entries of the workspace archive on `stream`, in its order, with each name as bytes. No
+    entry is extracted by tar, and no name leaves the workspace."""
+    with tarfile.open(fileobj=stream, mode='r|') as archive:
+        for item in archive:
+            if item.size < 0: raise ValueError('Invalid export size')
+            name = item.name.removeprefix('./').rstrip('/')
+            if name in ['', '.']: continue
+            parts = name.split('/')
+            if name.startswith('/') or any(p in ['', '.', '..'] for p in parts): raise ValueError('Unsafe export path')
+            yield archive, item, os.fsencode(name), parts
+
+
+def native_select(source):
+    """The first read of the workspace archive on standard input: the paths that Git would commit on
+    the source commit, each tracked path and each new path that the workspace's ignore rules do not
+    ignore, written to `selection`. Git reads a skeleton of the archive, an empty file for each entry
+    and the content of each .gitignore, so no ignored entry is read or bounded."""
+    source = commit_id(source)
+    with tempfile.TemporaryDirectory(prefix='native-selection-', dir='.') as directory:
+        skeleton = Path(directory, 'tree')
+        skeleton.mkdir(mode=0o700)
+        for archive, item, _, parts in workspace_entries(sys.stdin.buffer):
+            if parts[0] == '.git': continue
+            path = skeleton.joinpath(*parts)
+            if item.isdir():
+                path.mkdir(parents=True, exist_ok=True, mode=0o700)
+                continue
+            path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            with path.open('xb') as output:
+                if item.isfile() and parts[-1] == '.gitignore':
+                    data = archive.extractfile(item)
+                    while chunk := data.read(1024**2): output.write(chunk)
+        repo = source_repository(Path(directory, 'index.git'), source)
+        selected = set(git(repo, '--work-tree=' + str(skeleton.absolute()),
+                           'ls-files', '--cached', '--others', '--exclude-standard', '-z').split(b'\0')) - {b''}
+        if len(selected - set(tree_entries(repo, source))) > 10000: raise ValueError('Native export capacity')
+    Path('selection').write_bytes(b'\0'.join(sorted(selected)))
+
+
+def native_export(source):
+    """The second read of the workspace archive on standard input. Of each selected path: an entry
+    that equals its entry of the source commit is listed in `present`; a regular file that the run
+    added or changed is written below `repository`; a link or a special file that the run added or
+    changed is refused by its path. Nothing that the run left as it is counts against a bound."""
+    source = commit_id(source)
+    selected = set(Path('selection').read_bytes().split(b'\0')) - {b''}
+    with tempfile.TemporaryDirectory(prefix='native-source-', dir='.') as directory:
+        tracked = tree_entries(source_repository(directory, source), source)
+    root = Path('repository')
+    root.mkdir(mode=0o700)
+    present, seen, count, total = set(), set(), 0, 0
+    for archive, item, name, parts in workspace_entries(sys.stdin.buffer):
+        if name not in selected: continue
+        if name in seen: raise ValueError('Duplicate export path')
+        seen.add(name)
+        entry = tracked.get(name)
+        if item.isdir():
+            # A submodule stays as it is; a tracked file that became a directory is removed.
+            if entry is not None and entry[0] == b'160000': present.add(name)
+        elif item.isfile():
+            mode = b'100755' if item.mode & 0o111 else b'100644'
+            data = archive.extractfile(item)
+            same = entry is not None and entry[0] == mode and entry[2] == item.size
+            if item.size > 1024**2:
+                digest = hashlib.sha1(b'blob %d\0' % item.size)
+                while same and (chunk := data.read(1024**2)): digest.update(chunk)
+                if not (same and digest.hexdigest() == entry[1]):
+                    raise PathRefused('Changed file over the bound of a blob', name)
+                present.add(name)
+                continue
+            content = data.read(1024**2 + 1)
+            if same and blob_id(content) == entry[1]:
+                present.add(name)
+                continue
+            count += 1
+            total += len(content)
+            if count > 10000 or total > 64 * 1024**2: raise ValueError('Native export capacity')
+            path = root.joinpath(*parts)
+            path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            with path.open('xb') as output: output.write(content)
+            path.chmod(0o700 if mode == b'100755' else 0o600)
+        elif item.issym():
+            if entry is not None and entry[0] == b'120000' and entry[1] == blob_id(os.fsencode(item.linkname)):
+                present.add(name)
+                continue
+            raise PathRefused('Symbolic link in the change', name)
+        else: raise PathRefused('Special file in the change', name)
+    Path('present').write_bytes(b'\0'.join(sorted(present)))
+
+
+def native_seal(source):
+    """Called only after the supervisor stops the container and reads its workspace (native_select,
+    native_export).
+
+    source.git is controller-created and never mounted in the agent. The result is the source tree
+    with the run's change: each tracked path that `present` lists stays as the source holds it, each
+    file below `repository` is added or replaces its path, and each other tracked path is removed.
+    The rules of a result apply to that change alone (inspect_changes). No agent Git command is run.
     The run names no branch: the daemon chooses the target ref after its own checks.
     """
     source = commit_id(source)
@@ -368,34 +501,25 @@ def native_seal(source):
     publication_body(completion['body'])
     final_message(completion['finalMessage'])
     content_check(json.dumps(completion, ensure_ascii=False).encode(), sensitive)
-    if Path('repository').is_symlink() or Path('source.git').is_symlink(): raise ValueError('Unsafe source path')
+    root = Path('repository')
+    if root.is_symlink(): raise ValueError('Unsafe source path')
+    present = set(Path('present').read_bytes().split(b'\0')) - {b''}
+    written = {}
+    for base, _, files in os.walk(root):
+        for name in files:
+            path = Path(base, name)
+            written[os.fsencode(path.relative_to(root))] = path
     with tempfile.TemporaryDirectory(prefix='native-capture-', dir='.') as directory:
-        repo = str(Path(directory).absolute())
-        git(repo, 'init', '--bare', '.')
-        git(repo, 'fetch', '--no-tags', '--', str(Path('source.git').absolute()), source)
-        git(repo, 'read-tree', source)
-        selected = git(repo, '--work-tree=' + str(Path('repository').absolute()),
-                       'ls-files', '--cached', '--others', '--exclude-standard', '-z').split(b'\0')
-        git(repo, 'read-tree', '--empty')
-        index, total, count = [], 0, 0
-        for relative in sorted(set(selected) - {b''}):
-            content_check(relative, sensitive)
-            parts = relative.decode('utf8').split('/')
-            if any(part in ['', '.', '..', '.git'] for part in parts): raise ValueError('Unsafe native path')
-            path = Path('repository', *parts)
-            if any(parent.is_symlink() for parent in path.parents): raise ValueError('Linked directory')
-            try: info = path.lstat()
-            except FileNotFoundError: continue
-            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > 1024**2:
-                raise ValueError('Unsafe native file')
-            total += info.st_size
-            count += 1
-            if count > 10000 or total > 64 * 1024**2: raise ValueError('Native workspace exceeded bound')
-            data = path.read_bytes()
-            content_check(data, sensitive)
-            blob = git(repo, 'hash-object', '-w', '--no-filters', '--stdin', input=data).strip()
+        repo = source_repository(directory, source)
+        # Removals first, so a path may turn from a file into a directory or back.
+        index = [b'0 ' + b'0' * 40 + b'\t' + path + b'\0'
+                 for path in sorted(set(tree_entries(repo, source)) - present - set(written))]
+        for relative in sorted(written):
+            info = written[relative].lstat()
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1: raise ValueError('Unsafe native file')
+            blob = git(repo, 'hash-object', '-w', '--no-filters', '--stdin', input=written[relative].read_bytes()).strip()
             mode = b'100755' if info.st_mode & 0o111 else b'100644'
-            index.append(mode + b' blob ' + blob + b'\t' + relative + b'\0')
+            index.append(mode + b' ' + blob + b'\t' + relative + b'\0')
         git(repo, 'update-index', '-z', '--index-info', input=b''.join(index))
         tree = git(repo, 'write-tree').decode().strip()
         if tree == git(repo, 'rev-parse', source + '^{tree}').decode().strip():
@@ -406,9 +530,9 @@ def native_seal(source):
                      input=completion['commitMessage'].encode('utf8'), identity=author).decode().strip()
         inspect_changes(repo, source, result, sensitive)
         # Only validated, source-relative objects become an intended-public artifact.
-        root = Path('result')
-        root.mkdir(mode=0o700)
-        bundle = root / 'result.bundle'
+        output = Path('result')
+        output.mkdir(mode=0o700)
+        bundle = output / 'result.bundle'
         git(repo, 'update-ref', 'refs/workflowd/result', result)
         git(repo, 'bundle', 'create', str(bundle.absolute()), 'refs/workflowd/result', '^' + source)
         if bundle.stat().st_size > 16 * 1024**2: raise ValueError('Bundle exceeded bound')
@@ -417,57 +541,9 @@ def native_seal(source):
         manifest = {'sourceSha': source, 'title': completion['title'], 'body': completion['body'],
                     'finalMessage': completion['finalMessage']}
         encoded = json.dumps(manifest, ensure_ascii=True, separators=(',', ':')).encode()
-        (root / 'result.json').write_bytes(encoded)
+        (output / 'result.json').write_bytes(encoded)
         print(json.dumps({'sourceSha': source, 'resultSha': result, 'bundleSha256': sha(bundle.read_bytes()),
                           'manifestSha256': sha(encoded)}, separators=(',', ':')))
-
-
-def native_export(archive, source=None):
-    # Never ask Docker/tar to extract agent-owned paths on the runner host.
-    # Even .git is discarded rather than loaded as a repository configuration.
-    if Path(archive).stat().st_size > 96 * 1024**2: raise ValueError('Native export capacity')
-    root = Path('repository')
-    root.mkdir(mode=0o700)
-    if source is not None: source = commit_id(source)
-    count, total, seen, links = 0, 0, set(), set()
-    with tarfile.open(archive, 'r:') as stream:
-        for item in stream:
-            if item.size < 0: raise ValueError('Invalid export size')
-            name = item.name.removeprefix('./').rstrip('/')
-            if name in ['', '.']: continue
-            parts = name.split('/')
-            if name.startswith('/') or any(p in ['', '.', '..'] for p in parts): raise ValueError('Unsafe export path')
-            if parts[0] == '.git': continue
-            count += 1
-            total += item.size
-            if count > 10000 or total > 64 * 1024**2 or item.size > 1024**2: raise ValueError('Native export capacity')
-            if name in seen: raise ValueError('Duplicate export path')
-            seen.add(name)
-            path = root.joinpath(*parts)
-            if item.isdir(): path.mkdir(parents=True, exist_ok=True, mode=0o700)
-            elif item.isfile():
-                path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-                with path.open('xb') as output, stream.extractfile(item) as data:
-                    output.write(data.read(1024**2 + 1))
-                path.chmod(0o700 if item.mode & 0o111 else 0o600)
-            elif item.issym() and source is not None:
-                # A regular empty placeholder lets Git apply ignore rules without
-                # ever creating/following an agent link or reading its destination.
-                path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-                path.touch(mode=0o600, exist_ok=False)
-                links.add(name.encode('utf8'))
-            else: raise ValueError('Unsafe export entry')
-    if links:
-        if Path('source.git').is_symlink(): raise ValueError('Unsafe source path')
-        with tempfile.TemporaryDirectory(prefix='native-selection-', dir='.') as directory:
-            repo = str(Path(directory).absolute())
-            git(repo, 'init', '--bare', '.')
-            git(repo, 'fetch', '--no-tags', '--', str(Path('source.git').absolute()), source)
-            git(repo, 'read-tree', source)
-            selected = set(git(repo, '--work-tree=' + str(root.absolute()),
-                               'ls-files', '--cached', '--others', '--exclude-standard', '-z').split(b'\0'))
-            if links & selected: raise ValueError('Selected export link')
-        for name in links: root.joinpath(name.decode('utf8')).unlink()
 
 
 def inspect_changes(repo, source, result, sensitive=()):
@@ -478,11 +554,16 @@ def inspect_changes(repo, source, result, sensitive=()):
     if len(objects) > 10000:
         raise ValueError('Object count exceeded bound')
     total = 0
-    for obj in objects:
-        total += int(git(repo, 'cat-file', '-s', obj.split(b' ')[0].decode()))
+    ids = b''.join(obj.split(b' ')[0] + b'\n' for obj in objects)
+    for line in git(repo, 'cat-file', '--batch-check=%(objectname) %(objecttype) %(objectsize)', input=ids).splitlines():
+        oid, kind, size = line.decode('ascii').split()
+        total += int(size)
         if total > 64 * 1024 * 1024:
             raise ValueError('Object bytes exceeded bound')
-        content_check(git(repo, 'cat-file', '-p', obj.split(b' ')[0].decode()), sensitive)
+        # The content of each new file and commit. A tree holds the names of the paths beside a
+        # changed one, which the run did not change; each changed path is checked below.
+        if kind != 'tree':
+            content_check(git(repo, 'cat-file', '-p', oid), sensitive)
     parent = source
     content = 0
     changed = set()
@@ -634,10 +715,14 @@ if __name__ == '__main__':
         signal.alarm(180)
         if sys.argv[1] == 'seal': seal(*sys.argv[2:])
         elif sys.argv[1] == 'native-seal': native_seal(*sys.argv[2:])
+        elif sys.argv[1] == 'native-select': native_select(*sys.argv[2:])
         elif sys.argv[1] == 'native-export': native_export(*sys.argv[2:])
         elif sys.argv[1] == 'validate': validate(*sys.argv[2:])
         elif sys.argv[1] == 'tree': tree(*sys.argv[2:])
         else: raise ValueError('Unknown operation')
+    except PathRefused as error:
+        # The path of the change, as printable ASCII of a bounded length.
+        sys.exit('Sandbox result sealing failed: ' + error.text())
     except ValueError as error:
         # Only the fixed reasons of this script are printed: a reason of Python itself
         # (lower case, quoted) or of a ValueError subclass may hold input text.

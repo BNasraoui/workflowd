@@ -2,7 +2,7 @@
 // Its standard output is the box's ready line, then Claude Code's stream-json lines and nothing
 // else: the run client posts each of them as an event. It leaves the run's sealed result in <run directory>/result.
 import { randomBytes } from "node:crypto"
-import { appendFileSync } from "node:fs"
+import { appendFileSync, createReadStream } from "node:fs"
 import { mkdir } from "node:fs/promises"
 import { dirname, join } from "node:path"
 import { createInterface } from "node:readline"
@@ -165,7 +165,14 @@ async function runBox(directory, launch) {
     await step("stop", () => box.stop())
     await step("export", () => box.exportWorkspace(join(native, "capture.tar")))
     await step("seal", () =>
-      sealRun({ directory, native, sourceSha: launch.sourceSha, identity: launch.identity, reply: result }),
+      sealRun({
+        directory,
+        native,
+        sourceSha: launch.sourceSha,
+        identity: launch.identity,
+        reply: result,
+        workspace: () => ({ stream: createReadStream(join(native, "capture.tar")), done: Promise.resolve() }),
+      }),
     )
   } finally {
     await box.remove()

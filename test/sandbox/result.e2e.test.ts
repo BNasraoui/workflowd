@@ -527,14 +527,37 @@ const nativeSeal = async (root: string, source: string, request: unknown) => {
   return { status, stdout, stderr: stderr.trim() }
 }
 
-test("native export restores only bounded regular files and drops .git", async () => {
+/**
+ * The seal's two reads of the workspace archive `archive` in `root` on the source commit `source`:
+ * what Git would commit, then what the run added or changed.
+ */
+async function exportArchive(root: string, archive: string, source: string) {
+  for (const operation of ["native-select", "native-export"]) {
+    const child = Bun.spawn(["python3", "-I", script, operation, source], {
+      cwd: root,
+      stdin: Bun.file(join(root, archive)),
+      stdout: "pipe",
+      stderr: "pipe",
+    })
+    const [status, stderr] = await Promise.all([child.exited, new Response(child.stderr).text()])
+    if (status !== 0) throw new Error(`${operation} exited ${status}: ${stderr.trim()}`)
+  }
+}
+
+test("native export writes only what the run added or changed, lists what it left, and drops .git", async () => {
   const root = await mkdtemp(join(tmpdir(), "native-export-"))
   try {
-    const { work } = await nativeSource(root)
+    const { work, source } = await nativeSource(root)
+    await writeFile(join(work, "added.txt"), "added\n")
     await command(["tar", "-cf", join(root, "workspace.tar"), "-C", work, "."])
-    await command(["python3", "-I", script, "native-export", "workspace.tar"], root)
-    expect(await Bun.file(join(root, "repository/base.txt")).text()).toBe("base\n")
+    await exportArchive(root, "workspace.tar", source)
+    expect(await Bun.file(join(root, "repository/added.txt")).text()).toBe("added\n")
+    expect(await Bun.file(join(root, "repository/base.txt")).exists()).toBe(false)
     expect(await Bun.file(join(root, "repository/.git/HEAD")).exists()).toBe(false)
+    expect((await Bun.file(join(root, "present")).text()).split("\0")).toEqual([
+      ".gitignore",
+      "base.txt",
+    ])
     await rm(join(root, "repository"), { recursive: true, force: true })
     await command(
       [
@@ -545,9 +568,7 @@ test("native export restores only bounded regular files and drops .git", async (
       ],
       root,
     )
-    await expect(
-      command(["python3", "-I", script, "native-export", "bad.tar"], root),
-    ).rejects.toThrow()
+    await expect(exportArchive(root, "bad.tar", source)).rejects.toThrow("Unsafe export path")
     expect(await Bun.file(join(root, "escaped")).exists()).toBe(false)
   } finally {
     await rm(root, { recursive: true, force: true })
@@ -577,12 +598,15 @@ for (const variant of ["ignored", "selected", "negative size"] as const)
           root,
         )
       const archive = variant === "negative size" ? "malformed.tar" : "workspace.tar"
-      const exported = command(["python3", "-I", script, "native-export", archive, source], root)
+      const exported = exportArchive(root, archive, source)
       if (variant === "ignored") {
         await exported
-        expect(await Bun.file(join(root, "repository/base.txt")).text()).toBe("base\n")
         expect(await Bun.file(join(root, "repository/build-cache/link")).exists()).toBe(false)
-      } else await expect(exported).rejects.toThrow()
+      } else if (variant === "selected")
+        await expect(exported).rejects.toThrow(
+          'Sandbox result sealing failed: Symbolic link in the change: "link"',
+        )
+      else await expect(exported).rejects.toThrow("Invalid export size")
       expect(await Bun.file(join(root, "outside")).text()).toBe("untouched\n")
     } finally {
       await rm(root, { recursive: true, force: true })
@@ -593,7 +617,7 @@ for (const variant of ["ignored", "selected", "negative size"] as const)
 const refusedSeals = new Map([
   ["encoded canary", "Sensitive public content"],
   ["metadata canary", "Sensitive public content"],
-  ["symlink", "Selected export link"],
+  ["symlink", 'Symbolic link in the change: "link"'],
   ["forbidden path", "Unsafe path component"],
   ["branch key", "Invalid native metadata"],
   ["missing final message", "Invalid native metadata"],
@@ -632,10 +656,7 @@ for (const variant of sealVariants)
         await writeFile(join(work, ".github", "bad.yml"), "bad")
       }
       await command(["tar", "--exclude=.git", "-cf", join(root, "workspace.tar"), "-C", work, "."])
-      const exported = command(
-        ["python3", "-I", script, "native-export", "workspace.tar", source],
-        root,
-      )
+      const exported = exportArchive(root, "workspace.tar", source)
       if (variant === "symlink") {
         // A selected link is refused at export, before any seal.
         await expect(exported).rejects.toThrow(

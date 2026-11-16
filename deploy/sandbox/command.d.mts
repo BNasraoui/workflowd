@@ -3,5 +3,10 @@ export function command(
   step: string,
   binary: string,
   args: ReadonlyArray<string>,
-  options?: { readonly input?: string; readonly timeoutMs?: number; readonly cwd?: string },
+  options?: {
+    readonly input?: string
+    readonly stdin?: NodeJS.ReadableStream
+    readonly timeoutMs?: number
+    readonly cwd?: string
+  },
 ): Promise<string>

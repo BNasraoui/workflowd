@@ -6,6 +6,7 @@ import { dirname, join } from "node:path"
 import { Effect } from "effect"
 import { boxReadyLine } from "../../deploy/sandbox/box-ready.mjs"
 import { sealRun } from "../../deploy/sandbox/native-seal.mjs"
+import { directoryArchive } from "../helpers/workspace-archive.mjs"
 import type { GatewayEnd } from "../../src/capability-control/protocol"
 import { AgentRunIngress, agentRunIdentifiers } from "../../src/kernel/agent-run-ingress"
 import { AgentRunStore } from "../../src/kernel/agent-run-store"
@@ -82,13 +83,13 @@ async function seal(
     await mkdir(dirname(join(directory, "workspace", path)), { recursive: true })
     await writeFile(join(directory, "workspace", path), text)
   }
-  run("seal", ["tar", "-cf", "capture.tar", "-C", "workspace", "."], directory)
   await sealRun({
     directory,
     native: directory,
     sourceSha: base,
     identity: options.identity ?? runnerIdentity,
     reply: "Done.",
+    workspace: () => directoryArchive(join(directory, "workspace")),
   })
   const manifest: unknown = JSON.parse(
     await readFile(join(directory, "result/result.json"), "utf8"),

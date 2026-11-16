@@ -21,26 +21,41 @@ const completion = {
 
 /**
  * Seals the run's workspace with result.py. `native` holds `source.git`, the objects of the
- * source commit `sourceSha` that no agent wrote, and `capture.tar`, the stopped workspace. The
- * final message is the run's `reply` without what the seal refuses in a final message. Leaves
- * `<directory>/result`: result.json and result.bundle, or result.json alone, with the four keys
- * of a sealed result, when the run changed nothing.
+ * source commit `sourceSha` that no agent wrote. `workspace()` gives one read of the stopped
+ * workspace as a tar archive: `stream`, and `done`, which fails when the read fails. The seal reads
+ * it twice: once to learn what Git would commit (each tracked path and each new path that is not
+ * ignored), once to take what the run added or changed. The final message is the run's `reply`
+ * without what the seal refuses in a final message. Leaves `<directory>/result`: result.json and
+ * result.bundle, or result.json alone, with the four keys of a sealed result, when the run changed
+ * nothing.
  */
-export async function sealRun({ directory, native, sourceSha, identity, reply }) {
-  const python = (operation, input) =>
+export async function sealRun({ directory, native, sourceSha, identity, reply, workspace }) {
+  const python = (operation, options) =>
     command(operation, "/usr/bin/python3", ["-I", result, ...operation.split(" "), sourceSha], {
       cwd: native,
-      input,
-      timeoutMs: 300000,
+      timeoutMs: 600000,
+      ...options,
     })
+  const read = async (operation) => {
+    const archive = workspace()
+    const done = archive.done.then(() => undefined)
+    done.catch(() => undefined)
+    try {
+      await python(operation, { stdin: archive.stream })
+      await done
+    } finally {
+      // A seal that failed stops the read, whose writer then ends.
+      archive.stream.destroy()
+    }
+  }
   const finalMessage = finalMessageText(reply)
   // The workspace archive, read by the seal; the run's own .git is never read.
-  await python("native-export capture.tar")
+  await read("native-select")
+  await read("native-export")
   const sealed = JSON.parse(
-    await python(
-      "native-seal",
-      JSON.stringify({ completion: { ...completion, finalMessage }, sensitiveValues: [], identity }),
-    ),
+    await python("native-seal", {
+      input: JSON.stringify({ completion: { ...completion, finalMessage }, sensitiveValues: [], identity }),
+    }),
   )
   if (sealed.empty === true) {
     // A run that changed nothing: its completion with no bundle, so its caller hears its end.

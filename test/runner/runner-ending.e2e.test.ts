@@ -12,6 +12,7 @@ import { client } from "../capability-gateway/gateway-process"
 import { fixtureExecutable } from "../helpers/fixture-executable.mjs"
 import {
   boxReadyModule,
+  workspaceArchiveModule,
   daemonRuntime,
   githubStub,
   gitRemote,
@@ -79,6 +80,7 @@ async function writeEndingHarness(
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { request } from "node:http"
 import { sealRun } from ${JSON.stringify(resolve("deploy/sandbox/native-seal.mjs"))}
+import { directoryArchive } from ${JSON.stringify(workspaceArchiveModule)}
 import { boxReadyLine } from ${JSON.stringify(boxReadyModule)}
 const launch = JSON.parse(readFileSync(0, "utf8"))
 const directory = process.env.WORKFLOWD_RUN_DIRECTORY
@@ -135,8 +137,7 @@ if (${mode === "unchanged"}) {
   run(["git", "init", "--quiet", "--bare", "source.git"])
   run(["git", "-C", "source.git", "fetch", "--quiet", "--no-tags", ${JSON.stringify(bare)}, launch.sourceSha])
   run(["sh", "-c", 'git -C source.git archive "$1" | tar -x -C workspace', "sh", launch.sourceSha])
-  run(["tar", "-cf", "capture.tar", "-C", "workspace", "."])
-  await sealRun({ directory, native, sourceSha: launch.sourceSha, identity: launch.identity, reply: "Nothing to change." })
+  await sealRun({ directory, native, sourceSha: launch.sourceSha, identity: launch.identity, reply: "Nothing to change.", workspace: () => directoryArchive(native + "/workspace") })
 } else setInterval(() => undefined, 60000)
 `,
   )

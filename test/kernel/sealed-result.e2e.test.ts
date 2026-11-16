@@ -181,7 +181,16 @@ async function sealWithResultPy(
   await mkdir(seal)
   await command(["tar", "--exclude=.git", "-cf", join(seal, "workspace.tar"), "-C", workspace, "."])
   await command(["git", "clone", "-q", "--bare", f.work, join(seal, "source.git")])
-  await command(["python3", "-I", script, "native-export", "workspace.tar", f.sourceSha], seal)
+  for (const operation of ["native-select", "native-export"]) {
+    const read = Bun.spawn(["python3", "-I", script, operation, f.sourceSha], {
+      cwd: seal,
+      stdin: Bun.file(join(seal, "workspace.tar")),
+      stdout: "ignore",
+      stderr: "pipe",
+    })
+    const [code, errors] = await Promise.all([read.exited, new Response(read.stderr).text()])
+    if (code !== 0) throw new Error(`${operation} exited ${code}: ${errors}`)
+  }
   const child = Bun.spawn(["python3", "-I", script, "native-seal", f.sourceSha], {
     cwd: seal,
     stdin: new Blob([
