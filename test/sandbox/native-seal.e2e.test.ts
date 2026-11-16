@@ -13,7 +13,7 @@ import {
 } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
-import { claudeCommand } from "../../deploy/sandbox/native-runner.mjs"
+import { claudeCommand } from "../../deploy/sandbox/claude-command.mjs"
 import { sealRun } from "../../deploy/sandbox/native-seal.mjs"
 import { resultBounds, resultRules } from "../../deploy/sandbox/result-rules.mjs"
 import { directoryArchive } from "../helpers/workspace-archive.mjs"
