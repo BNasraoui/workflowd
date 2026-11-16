@@ -121,7 +121,7 @@ const cachedJobKeys = (keys: typeof githubJobKeys) => {
   }
 }
 /** At most this many run token mints run at once; a request above it is answered 503. */
-const maxMints = 4
+export const maxMints = 4
 class MintsBusy extends Schema.TaggedError<MintsBusy>()("MintsBusy", {}) {}
 /** A run token lives at most 15 minutes. */
 const tokenLifeMs = 900000

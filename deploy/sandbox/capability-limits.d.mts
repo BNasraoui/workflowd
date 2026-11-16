@@ -1,4 +1,5 @@
 export const maxStreamsPerRun: number
+export const maxRelaySockets: number
 export const providerIdPattern: RegExp
 export const maxProofLength: number
 export const maxJtiLength: number

@@ -8,6 +8,7 @@ import { gatewayOrigin } from "./bootstrap-helper.mjs"
 import { maxRenewalAttempt, renewalRequests, renewalTryMs, signRenewal } from "./renewal.mjs"
 import {
   maxHeaderBytes,
+  maxRelaySockets,
   maxStreamIdleMs,
   maxStreamsPerRun,
   providerIdPattern,
@@ -85,7 +86,7 @@ export async function serveRunnerRelay(config, directory = root) {
   )
     throw new Error("relay configuration refused")
   const origin = gatewayOrigin(config.gateway)
-  const agent = new Agent({ keepAlive: true, maxSockets: 8 })
+  const agent = new Agent({ keepAlive: true, maxSockets: maxRelaySockets })
   let credential = config
   let renewal
   let streams = 0

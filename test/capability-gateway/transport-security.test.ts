@@ -224,6 +224,7 @@ test("bound streaming preserves native bytes, renews with noscope, and denies cr
               front: { uid: process.getuid!(), gid: process.getgid!() },
               service: front.service,
             },
+            8,
             capabilityApi(gateway),
           ),
         )
@@ -289,6 +290,7 @@ for (const attack of ["resets", "preface", "h2-preface", "truncated"] as const)
         front: { uid: process.getuid!(), gid: process.getgid!() },
         service: front.service,
       },
+      8,
       async (request) => {
         if (new URL(request.url).pathname !== "/valid") {
           partial++
