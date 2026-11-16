@@ -259,6 +259,12 @@ export const sealedTextCases: ReadonlyArray<SealedTextCase> = [
     "docs/cafe\u0301.md",
   ]),
   ...cases("path", false, [`ghp_${"A".repeat(36)}.txt`]),
+  // A hidden code point after a code unit in U+F800–U+FBFF, which the engine of Bun 1.3 reads as
+  // one pair with it when a class tests a whole text.
+  ...cases("path", false, ["src/a\uf8ff\ufe0fb.txt", "src/a\uf8ff\uffa0b.txt"]),
+  ...cases("commitMessage", false, ["Fix a\uf8ff\ufeffb\n", "Fix a\ufb01\ufe0fb\n"]),
+  ...cases("finalMessage", false, ["a\uf8ff\ufe00b", "a\ufb01\ufeffb", "a\uf8ff\ufffbb"]),
+  ...cases("finalMessage", true, ["private \uf8ff use"]),
   ...cases("path", true, [
     "docs/a b.md",
     "src/.eslintrc.json",

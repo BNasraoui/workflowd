@@ -13,10 +13,25 @@
  */
 export const invisible = String.raw`\p{Cf}\p{Default_Ignorable_Code_Point}`
 
+// Each rule tests one code point at a time: the engine of Bun 1.3 reads a code unit in
+// U+F800–U+FBFF and the next in U+FC00–U+FFFF as one pair, so a class tested on a whole text
+// misses the second of them.
 const invisibleCharacter = new RegExp(String.raw`^[${invisible}]$`, "u")
+const controlCharacter = /^\p{Cc}$/u
 
 /** Whether the one code point `character` is invisible (`invisible`). */
 export const isInvisible = (character) => invisibleCharacter.test(character)
+
+/**
+ * Whether `value` holds a control or an invisible code point that is not one of `allowed`; each
+ * code point is tested alone.
+ */
+export const holdsHidden = (value, allowed = "") => {
+  for (const character of value)
+    if (!allowed.includes(character) && (controlCharacter.test(character) || isInvisible(character)))
+      return true
+  return false
+}
 
 /**
  * U+FE0F where it selects the emoji form: directly after a code point with the Emoji property
@@ -24,18 +39,22 @@ export const isInvisible = (character) => invisibleCharacter.test(character)
  * hold one there and nowhere else, so U+FE0F after a letter, after another U+FE0F or at the start
  * stays refused as each invisible code point is. A path holds no U+FE0F.
  */
-// A capture and not a lookbehind: the engine of Bun 1.3 does not match a code point above
-// U+FFFF with a property class in a lookbehind.
-const emojiPresentation = new RegExp(String.raw`([\p{Emoji}--\p{ASCII}])️`, "gv")
 const emoji = new RegExp(String.raw`^[\p{Emoji}--\p{ASCII}]$`, "v")
 
 /** The text with each U+FE0F that selects the emoji form left out. */
-export const withoutPresentation = (value) => value.replace(emojiPresentation, "$1")
+export const withoutPresentation = (value) => {
+  let kept = ""
+  let last = ""
+  for (const character of value) {
+    if (character !== "\uFE0F" || !emoji.test(last)) kept += character
+    last = character
+  }
+  return kept
+}
 
 /** The most UTF-8 bytes of a final message. */
 export const finalMessageBytes = 64 * 1024
 
-const refusedInFinalMessage = new RegExp(String.raw`(?![\n\t])[\p{Cc}${invisible}]`, "u")
 const refusedCharacter = new RegExp(String.raw`^(?![\n\t])[\p{Cc}${invisible}]$`, "u")
 
 /**
@@ -46,7 +65,7 @@ const refusedCharacter = new RegExp(String.raw`^(?![\n\t])[\p{Cc}${invisible}]$`
 export const isFinalMessage = (value) =>
   value.isWellFormed() &&
   Buffer.byteLength(value, "utf8") <= finalMessageBytes &&
-  !refusedInFinalMessage.test(withoutPresentation(value))
+  !holdsHidden(withoutPresentation(value), "\n\t")
 
 /**
  * The text that the seal admits as a final message: `text` without each code point that

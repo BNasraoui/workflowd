@@ -1,5 +1,6 @@
 export const invisible: string
 export function isInvisible(character: string): boolean
+export function holdsHidden(value: string, allowed?: string): boolean
 export function withoutPresentation(value: string): string
 export const finalMessageBytes: number
 export function isFinalMessage(value: string): boolean

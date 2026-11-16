@@ -4,7 +4,7 @@ import { inflateSync } from "node:zlib"
 import { Context, Data, Effect, Layer, Redacted, Schema, Semaphore, type Scope } from "effect"
 import {
   finalMessageBytes,
-  invisible,
+  holdsHidden,
   isFinalMessage,
   withoutPresentation,
 } from "../../deploy/sandbox/hidden-text.mjs"
@@ -199,15 +199,13 @@ const quoted = (value: string) => `"${printable(value, 120)}"`
 const decoder = new TextDecoder("utf-8", { fatal: true })
 const utf8Bytes = (value: string) => new TextEncoder().encode(value).byteLength
 const commitId = /^[0-9a-f]{40}$/
-// The code points that a reader cannot see (`invisible`), U+FE0F where it selects the emoji
-// form (`withoutPresentation`) and the final message's rule (`isFinalMessage`) are one rule with
-// the final message that a runner's harness seals (hidden-text.mjs). The seal writes the
-// default-ignorable property out as ranges (result.py DEFAULT_IGNORABLE); a test compares them.
-// A title is one line; a body or a commit message may hold newlines and no other control; a
-// final message may hold newlines and tabs and no other control. None holds an invisible code
-// point.
-const controlOrInvisible = new RegExp(String.raw`[\p{Cc}${invisible}\u2028\u2029]`, "u")
-const controlButNewline = new RegExp(String.raw`(?![\n])[\p{Cc}${invisible}]`, "u")
+// The code points that a reader cannot see (`holdsHidden`, each code point tested alone), U+FE0F
+// where it selects the emoji form (`withoutPresentation`) and the final message's rule
+// (`isFinalMessage`) are one rule with the final message that a runner's harness seals
+// (hidden-text.mjs). The seal writes the default-ignorable property out as ranges (result.py
+// DEFAULT_IGNORABLE); a test compares them. A title is one line; a body or a commit message may
+// hold newlines and no other control; a final message may hold newlines and tabs and no other
+// control. None holds an invisible code point.
 // The publication rules of the seal (result.py safe_publication), with the same
 // Unicode data: no mention, HTML, math, backslash, character reference, closing
 // issue reference, link reference definition, stacked marks or ambiguous fence.
@@ -226,7 +224,9 @@ const textChecks: ReadonlyArray<
     (value) =>
       value.length > 0 &&
       [...value].length <= sealedResultLimits.titleCharacters &&
-      !controlOrInvisible.test(value) &&
+      !holdsHidden(value) &&
+      !value.includes("\u2028") &&
+      !value.includes("\u2029") &&
       isTitle(value),
   ],
   [
@@ -235,7 +235,7 @@ const textChecks: ReadonlyArray<
     (value) =>
       value.trim().length > 0 &&
       utf8Bytes(value) <= sealedResultLimits.bodyBytes &&
-      !controlButNewline.test(value) &&
+      !holdsHidden(value, "\n") &&
       isBody(value),
   ],
   ["finalMessage", "final_message", isFinalMessage],
@@ -994,6 +994,16 @@ const checkHistory = (context: GitContext, base: string, resultSha: string) =>
   })
 
 const isCommitMessage = Schema.is(PublicationMessage)
+
+/**
+ * Whether the check admits `message` as the message of a commit of a result: U+FE0F only where it
+ * selects the emoji form, newlines and no other control or invisible code point, and the
+ * publication rules of a commit message. The blocked addresses are the check's own (`checkCommit`).
+ */
+export const isAgentCommitMessage = (message: string) => {
+  const shown = withoutPresentation(message)
+  return !holdsHidden(shown, "\n") && isCommitMessage(shown)
+}
 const commitHeaders = "tree parent author committer"
 const identityLine = /^(?:author|committer) (.*) <([^<>]*)> [0-9]+ [+-][0-9]{4}$/
 
@@ -1028,8 +1038,7 @@ const checkCommit = (
   const folded = message.toLowerCase()
   if (agentGit.blockedEmails.some((email) => folded.includes(email.toLowerCase())))
     return refused("commit_message", `${sha} names a blocked address`)
-  const shown = withoutPresentation(message)
-  if (controlButNewline.test(shown) || !isCommitMessage(shown))
+  if (!isAgentCommitMessage(message))
     return refused("commit_message", `${sha} breaks the text rules of a commit message`)
   return undefined
 }
