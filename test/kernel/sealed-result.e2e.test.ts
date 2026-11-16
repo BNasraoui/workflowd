@@ -2170,9 +2170,6 @@ const refusals: ReadonlyArray<
     "GITHUB~1",
     "github~2",
     "GI3F2A~1",
-    ".git\u200chub",
-    ".github\u200d",
-    "\u2060.github",
     ".g\u0131thub",
     "\uff0egithub",
     ".github::$INDEX_ALLOCATION",
@@ -2181,6 +2178,20 @@ const refusals: ReadonlyArray<
       [
         `a path below ${shown(name)}`,
         "github_path",
+        async (f: Fixture) => ({
+          bundle: await handBundle(f, (git, dir) =>
+            commitFile(git, dir, `${name}/workflows/x.yml`, "on: push\n"),
+          ),
+        }),
+      ] as const,
+  ),
+  // A name that is .github once an invisible code point is dropped: refused by the
+  // path rule, before the rule of .github.
+  ...[".git\u200chub", ".github\u200d", "\u2060.github"].map(
+    (name) =>
+      [
+        `a path below ${shown(name)}`,
+        "path_name",
         async (f: Fixture) => ({
           bundle: await handBundle(f, (git, dir) =>
             commitFile(git, dir, `${name}/workflows/x.yml`, "on: push\n"),
@@ -2460,8 +2471,46 @@ for (const item of sealedTextCases)
     30_000,
   )
 
-// A long path with format characters that the path rule accepts, as a refusal shows it.
-const longPath = `\u00ad\u200d${"x".repeat(3000)}.txt`
+test("the seal's ranges of default-ignorable code points are the property class of the daemon's engine", async () => {
+  const child = Bun.spawn(
+    [
+      "python3",
+      "-I",
+      "-B",
+      "-c",
+      `
+import importlib.util, json, sys
+spec = importlib.util.spec_from_file_location('result', sys.argv[1])
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+print(json.dumps(m.DEFAULT_IGNORABLE))
+`,
+      script,
+    ],
+    { stdout: "pipe", stderr: "pipe" },
+  )
+  const [status, stdout, stderr] = await Promise.all([
+    child.exited,
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+  ])
+  expect({ status, stderr }).toEqual({ status: 0, stderr: "" })
+  const seal = Schema.decodeUnknownSync(Schema.Array(Schema.Tuple([Schema.Number, Schema.Number])))(
+    JSON.parse(stdout),
+  )
+  const property = /\p{Default_Ignorable_Code_Point}/u
+  const engine: Array<readonly [number, number]> = []
+  for (let code = 0; code <= 0x10ffff; code++) {
+    if (!property.test(String.fromCodePoint(code))) continue
+    const last = engine.at(-1)
+    if (last !== undefined && last[1] === code - 1) engine[engine.length - 1] = [last[0], code]
+    else engine.push([code, code])
+  }
+  expect(seal).toEqual(engine)
+})
+
+// A long path with characters that the path rule accepts and a refusal escapes.
+const longPath = `\u00e9\u96ea${"x".repeat(3000)}.txt`
 
 const pathRefusals: ReadonlyArray<
   readonly [SealedResultCheck, (f: Fixture, dir: string) => Promise<void>]
@@ -2496,7 +2545,7 @@ for (const [check, build] of pathRefusals)
       const exit = await publish(await decode(manifest(f.sourceSha), bundle), options(f))
       expect(refusedCheck(exit)).toBe(check)
       expectPrintable(refusal(exit))
-      expect(refusal(exit).detail).toContain("\\u{ad}\\u{200d}")
+      expect(refusal(exit).detail).toContain("\\u{e9}\\u{96ea}")
     }),
     30_000,
   )

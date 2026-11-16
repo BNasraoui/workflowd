@@ -62,6 +62,24 @@ if UNICODE['version'] != '15.0.0' or unicodedata.unidata_version != UNICODE['ver
     raise RuntimeError('Unsupported publication Unicode runtime')
 CASEFOLD = json.loads(Path(__file__).with_name('casefold.json').read_text())
 INVISIBLE = re.compile('[' + UNICODE['forbidden'] + ']')
+# Default_Ignorable_Code_Point, written once from DerivedCoreProperties.txt of Unicode
+# 15.0.0 (Python has no table of this property). A test of the daemon compares each
+# range with the regular expression class \p{Default_Ignorable_Code_Point} of Bun.
+DEFAULT_IGNORABLE = (
+    (0x00AD, 0x00AD), (0x034F, 0x034F), (0x061C, 0x061C), (0x115F, 0x1160),
+    (0x17B4, 0x17B5), (0x180B, 0x180F), (0x200B, 0x200F), (0x202A, 0x202E),
+    (0x2060, 0x206F), (0x3164, 0x3164), (0xFE00, 0xFE0F), (0xFEFF, 0xFEFF),
+    (0xFFA0, 0xFFA0), (0xFFF0, 0xFFF8), (0x1BCA0, 0x1BCA3), (0x1D173, 0x1D17A),
+    (0xE0000, 0xE0FFF),
+)
+IGNORABLE = re.compile('[' + ''.join(f'{chr(a)}-{chr(b)}' for a, b in DEFAULT_IGNORABLE) + ']')
+
+
+def invisible(c):
+    """A code point that a reader cannot see: a format character (Cf) or a default-ignorable code point."""
+    return unicodedata.category(c) == 'Cf' or IGNORABLE.match(c) is not None
+
+
 LETTERS = re.compile('[' + UNICODE['letters'] + ']')
 STACKED_MARKS = re.compile('[' + UNICODE['marks'] + ']{3}')
 LANGUAGES = {'', 'text', 'diff', 'ts', 'typescript', 'tsx', 'js', 'json', 'sh', 'bash', 'python', 'rust', 'go', 'sql', 'yaml', 'toml'}
@@ -97,7 +115,7 @@ def closes_github_path(text):
 def safe_publication(value):
     if INVISIBLE.search(value):
         raise ValueError('Invisible publication content')
-    if not all(unicodedata.category(c) not in ('Cc', 'Cf') or c == '\n' for c in value):
+    if any((unicodedata.category(c) == 'Cc' and c != '\n') or invisible(c) for c in value):
         raise ValueError('Invalid publication text')
     if re.search(r'&(#[0-9]+|#[xX][0-9a-fA-F]+|[A-Za-z][A-Za-z0-9]*);', value):
         raise ValueError('Character reference')
@@ -140,7 +158,7 @@ def publication_text(value, message=False):
     encoded = value.encode('utf8', errors='strict')
     if (len(encoded) > 10240) if message else (len(value) > 200):
         raise ValueError('Invalid publication text')
-    if not all(unicodedata.category(c) not in ('Cc', 'Cf') or (message and c == '\n') for c in value):
+    if any((unicodedata.category(c) == 'Cc' and not (message and c == '\n')) or invisible(c) for c in value):
         raise ValueError('Invalid publication text')
     if not message and any(c in value for c in ('\u2028', '\u2029')):
         raise ValueError('Invalid publication text')
@@ -158,9 +176,9 @@ def publication_body(value):
 
 
 def final_message(value):
-    # Data to the caller: newlines and tabs, and no other control or format character.
+    # Data to the caller: newlines and tabs, and no other control or invisible character.
     if not isinstance(value, str) or len(value.encode('utf8', errors='strict')) > 65536 or any(
-            unicodedata.category(c) in ('Cc', 'Cf') and c not in '\n\t' for c in value):
+            (unicodedata.category(c) == 'Cc' and c not in '\n\t') or invisible(c) for c in value):
         raise ValueError('Invalid final message')
 
 
@@ -218,9 +236,10 @@ def seal(source):
     print(json.dumps({**manifest, 'manifestSha256': sha(encoded)}, separators=(',', ':')))
 
 
-# Characters that change what a reviewer of a pushed path sees: the bidi controls,
-# the line and paragraph separators and the byte order mark (as the daemon's check).
-PATH_MARKS = re.compile('[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069\u2028\u2029\ufeff]')
+# Characters that change what a reviewer of a pushed path sees: each invisible code
+# point (the bidi controls, the joiners, the variation selectors and the tags among
+# them) and the line and paragraph separators (as the daemon's check).
+PATH_MARKS = re.compile('[\u2028\u2029]')
 
 
 def safe_path(raw):
@@ -230,7 +249,7 @@ def safe_path(raw):
         raise ValueError('Unsafe path component')
     if name.startswith('deploy/sandbox/') or name == 'deploy/sandbox':
         raise ValueError('Sandbox tooling path is forbidden')
-    if '\\' in name or PATH_MARKS.search(name) or any(unicodedata.category(c) == 'Cc' for c in name):
+    if '\\' in name or PATH_MARKS.search(name) or any(unicodedata.category(c) == 'Cc' or invisible(c) for c in name):
         raise ValueError('Invalid path characters')
     if unicodedata.normalize('NFC', name) != name:
         raise ValueError('Path must be NFC normalized')
@@ -255,7 +274,8 @@ def agent_identity(identity):
     if not isinstance(identity, dict) or set(identity) != {'name', 'email'}:
         raise ValueError('Invalid identity')
     name, email = identity['name'], identity['email']
-    if not isinstance(name, str) or not name.strip() or re.search(r'[\r\n\0<>]', name) or len(name) > 200:
+    if not isinstance(name, str) or not name.strip() or re.search(r'[\r\n\0<>]', name) or len(name) > 200 or any(
+            invisible(c) for c in name):
         raise ValueError('Invalid identity')
     if not isinstance(email, str) or not re.fullmatch(r'[^\s<>@\0]+@[^\s<>@\0]+', email) or len(email) > 200:
         raise ValueError('Invalid identity')

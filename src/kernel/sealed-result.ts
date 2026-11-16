@@ -179,11 +179,21 @@ const quoted = (value: string) => `"${printable(value, 120)}"`
 const decoder = new TextDecoder("utf-8", { fatal: true })
 const utf8Bytes = (value: string) => new TextEncoder().encode(value).byteLength
 const commitId = /^[0-9a-f]{40}$/
-// A title is one line; a body may hold newlines and no other control; a final message
-// may hold newlines and tabs and no other control or format character.
-const controlOrFormat = /[\p{Cc}\p{Cf}\u2028\u2029]/u
-const controlButNewline = /(?![\n])[\p{Cc}\p{Cf}]/u
-const controlButNewlineOrTab = /(?![\n\t])[\p{Cc}\p{Cf}]/u
+/**
+ * The code points that a reader cannot see, as a class of the regular expression
+ * engine: each format character (Cf: the bidi controls, the joiners, the byte order
+ * mark and the tags among them) and each default-ignorable code point (the variation
+ * selectors, the Hangul fillers and the reserved code points of that property among
+ * them). No text and no path of a result holds one. The seal writes the second
+ * property out as ranges (result.py DEFAULT_IGNORABLE); a test compares them.
+ */
+const invisible = String.raw`\p{Cf}\p{Default_Ignorable_Code_Point}`
+// A title is one line; a body or a commit message may hold newlines and no other
+// control; a final message may hold newlines and tabs and no other control. None
+// holds an invisible code point.
+const controlOrInvisible = new RegExp(String.raw`[\p{Cc}${invisible}\u2028\u2029]`, "u")
+const controlButNewline = new RegExp(String.raw`(?![\n])[\p{Cc}${invisible}]`, "u")
+const controlButNewlineOrTab = new RegExp(String.raw`(?![\n\t])[\p{Cc}${invisible}]`, "u")
 // The publication rules of the seal (result.py safe_publication), with the same
 // Unicode data: no mention, HTML, math, backslash, character reference, closing
 // issue reference, link reference definition, stacked marks or ambiguous fence.
@@ -202,7 +212,7 @@ const textChecks: ReadonlyArray<
     (value) =>
       value.length > 0 &&
       [...value].length <= sealedResultLimits.titleCharacters &&
-      !controlOrFormat.test(value) &&
+      !controlOrInvisible.test(value) &&
       isTitle(value),
   ],
   [
@@ -813,13 +823,14 @@ const parseDiff = (raw: Uint8Array): ReadonlyArray<DiffEntry> => {
 /**
  * What a path may not hold: a control character (C0, DEL and C1, so also no newline or
  * tab), a backslash in any component, and the characters that change what a reviewer
- * of the pushed result sees: the bidi controls, U+2028, U+2029 and U+FEFF. The seal
- * has the same rule (result.py safe_path).
+ * of the pushed result sees: each invisible code point (`invisible`), U+2028 and
+ * U+2029. So a file name with an emoji sequence that needs a joiner or a variation
+ * selector is refused. The seal has the same rule (result.py safe_path).
  */
-const unsafePathCharacter =
-  /[\p{Cc}\\\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069\u2028\u2029\ufeff]/u
+const unsafePathCharacter = new RegExp(String.raw`[\p{Cc}\\${invisible}\u2028\u2029]`, "u")
 
 const regularModes = new Set(["000000", "100644", "100755"])
+const invisibleCharacters = new RegExp(`[${invisible}]`, "gu")
 
 /**
  * Whether a first path component is `.github` or a name that a checkout on Windows
@@ -834,7 +845,7 @@ const isGithubName = (component: string) => {
   if (/[~:]/.test(component)) return true
   const name = component
     .normalize("NFKC")
-    .replace(/[\p{Cf}\p{Default_Ignorable_Code_Point}]/gu, "")
+    .replace(invisibleCharacters, "")
     .replace(/[. ]+$/, "")
   return name.toLowerCase() === ".github" || name.toUpperCase() === ".GITHUB"
 }
@@ -952,7 +963,7 @@ const checkCommit = (
   const folded = message.toLowerCase()
   if (agentGit.blockedEmails.some((email) => folded.includes(email.toLowerCase())))
     return refused("commit_message", `${sha} names a blocked address`)
-  if (!isCommitMessage(message))
+  if (controlButNewline.test(message) || !isCommitMessage(message))
     return refused("commit_message", `${sha} breaks the text rules of a commit message`)
   return undefined
 }

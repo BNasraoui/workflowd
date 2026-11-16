@@ -55,6 +55,42 @@ export const hostileCharacters: ReadonlyArray<string> = [
   "\ufeff",
 ]
 
+/**
+ * Code points that a reader cannot see and that are not controls: the joiners, the
+ * word joiner and the invisible operators, U+180E, the soft hyphen, the interlinear
+ * annotation marks, each variation selector of the first block and the ends of the
+ * second, the tags, the Hangul fillers, U+034F, U+17B4, U+17B5, the Mongolian free
+ * variation selectors and reserved default-ignorable code points.
+ */
+export const invisibleCharacters: ReadonlyArray<string> = [
+  "\u200b",
+  "\u200c",
+  "\u200d",
+  ...codePoints(0x2060, 0x2064),
+  "\u180e",
+  "\u00ad",
+  ...codePoints(0xfff9, 0xfffb),
+  ...codePoints(0xfe00, 0xfe0f),
+  "\u{e0100}",
+  "\u{e01ef}",
+  "\u{e0001}",
+  "\u{e0020}",
+  "\u{e007f}",
+  "\u034f",
+  "\u115f",
+  "\u1160",
+  "\u17b4",
+  "\u17b5",
+  ...codePoints(0x180b, 0x180d),
+  "\u180f",
+  "\u3164",
+  "\uffa0",
+  "\u2065",
+  "\ufff0",
+  "\u{e0000}",
+  "\u{e0fff}",
+]
+
 /** The values of a run that a refusal must show as printable ASCII of a bounded length. */
 export const hostileValues: ReadonlyArray<string> = [
   ...hostileCharacters.map((character) => `a${character}b`),
@@ -154,8 +190,21 @@ export const sealedTextCases: ReadonlyArray<SealedTextCase> = [
     "src/a\\b.txt",
     "x/..\\.github\\workflows\\y.yml",
   ]),
-  // A joiner is no such character: a name with an emoji sequence holds it.
-  ...cases("path", true, ["docs/\u{1f469}\u200d\u{1f4bb}.md"]),
+  // A code point that a reader cannot see: a format character or a default-ignorable
+  // code point, in a path as in a text. A file name with an emoji sequence that needs a
+  // joiner or a variation selector is refused; an emoji of one code point is not.
+  ...cases("path", false, [
+    "src/in\u200bdex.ts",
+    "src/in\u200ddex.ts",
+    "docs/\u{1f469}\u200d\u{1f4bb}.md",
+    ...invisibleCharacters.map((character) => hostilePath(character)),
+  ]),
+  ...cases("path", true, ["docs/\u{1f680}.md"]),
+  ...cases(
+    "finalMessage",
+    false,
+    invisibleCharacters.map((character) => `a${character}b`),
+  ),
   {
     field: "path",
     value: "not UTF-8 (an encoded surrogate)",

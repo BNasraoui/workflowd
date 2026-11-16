@@ -601,6 +601,7 @@ const refusedSeals = new Map([
   ["bidirectional control in the final message", "Invalid final message"],
   ["newline in the title", "Invalid publication text"],
   ["an identity with an angle bracket", "Invalid identity"],
+  ["an identity with an invisible character", "Invalid identity"],
   ["no identity", "Invalid native request"],
 ])
 const sealVariants = ["ordinary", ...refusedSeals.keys()]
@@ -661,6 +662,10 @@ for (const variant of sealVariants)
       }
       const identities: Record<string, unknown> = {
         "an identity with an angle bracket": { name: "Fixture <Agent>", email: identity.email },
+        "an identity with an invisible character": {
+          name: "Fixture\u200bAgent",
+          email: identity.email,
+        },
       }
       const sealed = await nativeSeal(root, source, {
         completion: completions[variant] ?? native,
