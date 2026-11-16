@@ -1,5 +1,16 @@
 import { expect, test } from "bun:test"
-import { Cause, Effect, Exit, Fiber, Layer, Logger, Redacted, Scheduler, Schema } from "effect"
+import {
+  Cause,
+  Effect,
+  Exit,
+  Fiber,
+  Layer,
+  Logger,
+  Redacted,
+  Scheduler,
+  Schema,
+  Scope,
+} from "effect"
 import {
   chmod,
   lstat,
@@ -282,6 +293,23 @@ const expectPrintable = (error: SealedResultRefused) => {
 
 const remoteRef = (f: Fixture, ref = target.ref) =>
   command(["git", "for-each-ref", "--format=%(objectname)", ref], f.remote)
+
+/** Builds a runner that holds its scratch root until it is closed. */
+const openRunner = async (settings: SealedResultGitSettings) => {
+  const scope = await Effect.runPromise(Scope.make())
+  const close = () => Effect.runPromise(Scope.close(scope, Exit.void))
+  try {
+    const runner = await Effect.runPromise(Scope.provide(makeSealedResultGit(settings), scope))
+    return { runner, close }
+  } catch (error) {
+    await close()
+    throw error
+  }
+}
+
+/** The exit of a build of a runner, which is closed at once. */
+const built = (settings: SealedResultGitSettings) =>
+  Effect.runPromiseExit(Effect.scoped(Effect.asVoid(makeSealedResultGit(settings))))
 
 const withFixture = (body: (f: Fixture) => Promise<void>) => async () => {
   const f = await fixture()
@@ -1363,7 +1391,7 @@ test(
       }
     })()
     const opts = options(f, { binary: slow })
-    const runner = await Effect.runPromise(makeSealedResultGit(opts.git))
+    const { runner, close } = await openRunner(opts.git)
     const runs = Array.from({ length: sealedResultLimits.concurrentChecks + 1 }, (_, index) =>
       publish(
         result,
@@ -1376,6 +1404,7 @@ test(
     const exits = await Promise.all(runs)
     sampling = false
     await sampler
+    await close()
     for (const exit of exits) expect(Exit.isSuccess(exit)).toBe(true)
     expect(most).toBe(sealedResultLimits.concurrentChecks)
   }),
@@ -1408,7 +1437,7 @@ async function gatedRunner(f: Fixture, sealed: SealedResult, waitLimitMs: number
       () => Effect.sync(() => (tokens.revoked += 1)),
     ),
   })
-  const runner = await Effect.runPromise(makeSealedResultGit(opts.git))
+  const { runner, close } = await openRunner(opts.git)
   const targetOf = (index: number) => ({
     ref: `refs/heads/agent-run/run-${index}`,
     expectedHead: null,
@@ -1427,6 +1456,7 @@ async function gatedRunner(f: Fixture, sealed: SealedResult, waitLimitMs: number
         else latches.push({ count, open })
       }),
     open: () => writeFile(gate, ""),
+    close,
   }
 }
 
@@ -1474,6 +1504,7 @@ test(
       ),
     )
     for (const exit of exits) expect(Exit.isSuccess(exit)).toBe(true)
+    await gated.close()
   }),
   30_000,
 )
@@ -1551,6 +1582,7 @@ test(
     for (const exit of await Promise.all([...holding, ...waiting]))
       expect(Exit.isSuccess(exit)).toBe(true)
     expect(gated.tokens.revoked).toBe(gated.tokens.minted)
+    await gated.close()
     // Each sweep reached its check's own suspension.
     expect({ taking: taking > 10, waited: waited > 10 }).toEqual({ taking: true, waited: true })
   }),
@@ -1619,6 +1651,59 @@ test(
   }),
 )
 
+const scratchRootHeld = (exit: Exit.Exit<unknown, unknown>) => {
+  const error = failure(exit)
+  if (!(error instanceof SealedResultFault)) throw error
+  return error.operation
+}
+
+test(
+  "a second git runner on a scratch root that a live runner holds is refused scratch_root_held when it is built, and is built once the first is closed",
+  withFixture(async (f) => {
+    const first = await openRunner(options(f).git)
+    const second = await built(options(f).git)
+    expect(scratchRootHeld(second)).toBe("scratch_root_held")
+    // The refused build removed nothing and holds nothing.
+    expect(scratchRootHeld(await built(options(f).git))).toBe("scratch_root_held")
+    await first.close()
+    expect(Exit.isSuccess(await built(options(f).git))).toBe(true)
+  }),
+)
+
+test(
+  "a git runner is built on a scratch root whose holder was killed",
+  withFixture(async (f) => {
+    const holder = Bun.spawn(
+      [
+        process.execPath,
+        "-e",
+        `import { Effect } from "effect"
+import { makeSealedResultGit } from "./src/kernel/sealed-result"
+const settings = JSON.parse(process.env.SEALED_RESULT_SETTINGS)
+await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
+  yield* makeSealedResultGit(settings)
+  console.log("held")
+  yield* Effect.never
+})))`,
+      ],
+      {
+        cwd: resolve("."),
+        env: { ...process.env, SEALED_RESULT_SETTINGS: JSON.stringify(options(f).git) },
+        stdout: "pipe",
+        stderr: "inherit",
+      },
+    )
+    const reader = holder.stdout.getReader()
+    const { value } = await reader.read()
+    expect(new TextDecoder().decode(value)).toBe("held\n")
+    expect(scratchRootHeld(await built(options(f).git))).toBe("scratch_root_held")
+    holder.kill("SIGKILL")
+    expect(await holder.exited).not.toBe(0)
+    expect(Exit.isSuccess(await built(options(f).git))).toBe(true)
+  }),
+  30_000,
+)
+
 test(
   "the runner removes what an earlier process left below its scratch root when it is built, and only below its own root",
   withFixture(async (f) => {
@@ -1628,12 +1713,12 @@ test(
       await writeFile(join(stale, "repository.git", "pack"), "left by a process that ended\n")
     }
     await leave(f.scratchRoot)
-    await Effect.runPromise(makeSealedResultGit(options(f).git))
+    expect(Exit.isSuccess(await built(options(f).git))).toBe(true)
     expect(await readdir(f.scratchRoot)).toEqual([])
     // A second runner of another root, built later, leaves the first root alone.
     await leave(f.scratchRoot)
     const other = join(f.root, "other-root")
-    await Effect.runPromise(makeSealedResultGit(options(f, { scratchRoot: other }).git))
+    expect(Exit.isSuccess(await built(options(f, { scratchRoot: other }).git))).toBe(true)
     expect(await readdir(f.scratchRoot)).toEqual(["sealed-result-earlier"])
     await rm(join(f.scratchRoot, "sealed-result-earlier"), { recursive: true })
     const sealed = await sealWithResultPy(f, async (workspace) => {

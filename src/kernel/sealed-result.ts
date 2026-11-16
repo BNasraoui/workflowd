@@ -4,6 +4,7 @@ import { inflateSync } from "node:zlib"
 import { Context, Data, Effect, Layer, Redacted, Schema, Semaphore, type Scope } from "effect"
 import type { AgentGitConfig } from "../agent-git/config"
 import { PublicationBody, PublicationMessage, PublicationTitle } from "../sandbox/config"
+import { tryFileLock } from "../file-lock"
 
 /**
  * The daemon's check of a sealed result from a run placed off the host, and its
@@ -697,6 +698,46 @@ const scratchRootReady = (root: string) =>
       }),
   })
 
+/**
+ * Holds an exclusive flock(2) on `<root>.lock` for the scope of the runner, so one
+ * runner at a time removes and bounds the scratch below a root, also in one process.
+ * The kernel releases the lock when the process ends, SIGKILL included, so a lock that
+ * a dead process left does not stop the next start.
+ */
+const holdScratchRoot = (root: string) =>
+  Effect.acquireRelease(
+    Effect.tryPromise({
+      try: () => tryFileLock(`${root}.lock`, process.getuid!(), true),
+      catch: () =>
+        new SealedResultFault({
+          operation: "scratch",
+          message: "Scratch root lock is not a private lock file",
+        }),
+    }).pipe(
+      Effect.flatMap((release) =>
+        release === undefined
+          ? Effect.fail(
+              new SealedResultFault({
+                operation: "scratch_root_held",
+                message: "Scratch root is held by another git runner",
+              }),
+            )
+          : Effect.succeed(release),
+      ),
+    ),
+    (release) =>
+      Effect.promise(() =>
+        release().then(
+          () => true,
+          () => false,
+        ),
+      ).pipe(
+        Effect.flatMap((closed) =>
+          closed ? Effect.void : Effect.logWarning("Sealed result scratch root lock remains"),
+        ),
+      ),
+  )
+
 /** Removes the scratch directories an earlier process of the daemon left below the root. */
 const removeEarlierScratch = (root: string) =>
   Effect.tryPromise({
@@ -989,14 +1030,17 @@ export type SealedResultGitPort = {
 export const SealedResultGit = Context.Service<SealedResultGitPort>("workflowd/SealedResultGit")
 
 /**
- * Builds the git runner of the checks. It removes, once, what an earlier process
- * left below the scratch root, before any check of this runner can run.
+ * Builds the git runner of the checks, which holds its scratch root for its scope: a
+ * second runner on a root that a live runner holds is refused `scratch_root_held`.
+ * It removes, once, what an earlier process left below the root, before any check of
+ * this runner can run.
  */
 export const makeSealedResultGit = (
   settings: SealedResultGitSettings,
-): Effect.Effect<SealedResultGitPort, SealedResultFault> =>
+): Effect.Effect<SealedResultGitPort, SealedResultFault, Scope.Scope> =>
   Effect.gen(function* () {
     yield* scratchRootReady(settings.scratchRoot)
+    yield* holdScratchRoot(settings.scratchRoot)
     yield* removeEarlierScratch(settings.scratchRoot)
     const permits = yield* Semaphore.make(sealedResultLimits.concurrentChecks)
     // A permit is a resource of the scope of the check, held until the scratch
