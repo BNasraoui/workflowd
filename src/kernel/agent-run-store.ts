@@ -173,7 +173,11 @@ export type AgentRunStorePort = {
     input: Authority & { readonly attempt: number; readonly diagnostic: string },
   ) => Effect.Effect<void, AgentRunStoreError>
   readonly complete: (
-    input: Authority & { readonly finalMessage?: string | null },
+    input: Authority & {
+      readonly finalMessage?: string | null
+      /** The end the caller's message names: `completed`, or `unchanged` for no change. */
+      readonly endReason?: "completed" | "unchanged"
+    },
   ) => Effect.Effect<void, AgentRunStoreError>
   readonly fail: (
     input: Authority & { readonly diagnostic: string; readonly finalMessage?: string | null },
@@ -475,7 +479,7 @@ const make = Effect.gen(function* () {
     terminal(
       input.runId,
       input.now,
-      "completed",
+      input.endReason ?? "completed",
       input.finalMessage ?? null,
       transition(
         input.runId,

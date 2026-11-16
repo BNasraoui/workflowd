@@ -198,7 +198,12 @@ export async function githubStub(
   workflows = true,
 ) {
   const leases = new Set<string>()
-  const ended = new Set<string>()
+  /** The conclusion of each lease's Actions run that ended; a cancel ends it `cancelled`. */
+  const ended = new Map<string, string>()
+  /** The lease refs that the daemon created, also once deleted. */
+  const created = new Set<string>()
+  /** The Actions runs whose cancel the daemon asked for. */
+  const cancels: Array<number> = []
   const repository = "/repos/fixture/repo"
   const runOf = (leaseId: string) => ({
     id: actionsRunId,
@@ -212,7 +217,7 @@ export async function githubStub(
     actor: { id: 56 },
     triggering_actor: { id: 56 },
     status: ended.has(leaseId) ? "completed" : "in_progress",
-    conclusion: ended.has(leaseId) ? "success" : null,
+    conclusion: ended.get(leaseId) ?? null,
   })
   let stub: Awaited<ReturnType<typeof githubApiStub>> | undefined = undefined
   const runs = () => [...leases].map(runOf)
@@ -234,6 +239,7 @@ export async function githubStub(
       const leaseId = /^refs\/heads\/workflowd\/leases\/([a-zA-Z0-9-]+)$/.exec(String(ref))?.[1]
       if (leaseId === undefined) return new Response(null, { status: 422 })
       leases.add(leaseId)
+      created.add(leaseId)
       started(leaseId)
       return Response.json({ ref, object: { sha: workflowSha } }, { status: 201 })
     }
@@ -255,14 +261,28 @@ export async function githubStub(
     if (path === `${repository}/actions/runs`)
       return Response.json({ total_count: runs().length, workflow_runs: runs() })
     if (path === `${repository}/actions/runs/${actionsRunId}`) {
-      const [first] = runs()
+      // The Actions run stays readable once its lease ref is deleted, as on GitHub.
+      const [first] = [...created].map(runOf)
       return first === undefined ? new Response(null, { status: 404 }) : Response.json(first)
     }
-    if (path === `${repository}/actions/runs/${actionsRunId}/cancel`)
+    if (method === "POST" && path === `${repository}/actions/runs/${actionsRunId}/cancel`) {
+      cancels.push(actionsRunId)
+      for (const leaseId of created) if (!ended.has(leaseId)) ended.set(leaseId, "cancelled")
       return new Response(null, { status: 202 })
+    }
     return undefined
   })
-  return { ...stub, endRun: (leaseId: string) => ended.add(leaseId) }
+  return {
+    ...stub,
+    /** Ends the Actions run of `leaseId` with `conclusion`, as GitHub reports a job's end. */
+    endRun: (leaseId: string, conclusion = "success") => {
+      ended.set(leaseId, conclusion)
+    },
+    /** The lease refs that exist now. */
+    leaseRefs: (): ReadonlyArray<string> => [...leases],
+    /** The Actions runs whose cancel the daemon asked for, in order. */
+    cancels: (): ReadonlyArray<number> => cancels,
+  }
 }
 
 /** The policy of the runner repository: public, actions-native, with the job's own image. */
@@ -303,6 +323,8 @@ export interface RunnerJob {
   readonly harness?: (bare: string) => Promise<ReadonlyArray<string>>
   /** The job's agent image. */
   readonly image: string
+  /** The time with no post after which the daemon ends the run lost; 120 s when not named. */
+  readonly lostAfterMs?: number
 }
 
 /**
@@ -383,6 +405,8 @@ export function daemonRuntime(
   policy: ReturnType<typeof runnerPolicy>,
   /** workflowd's side of the gateway: its control client, or a test's script of the gateway. */
   gateway: Effect.Effect<RunnerControl, never, SqlClient.SqlClient | Scope.Scope>,
+  /** The time with no post after which a run is lost; 120 s when not named. */
+  lostAfterMs?: number,
 ) {
   const stores = Layer.mergeAll(KernelSessionStoreLive, AgentRunStoreLive).pipe(
     Layer.provideMerge(
@@ -414,6 +438,8 @@ export function daemonRuntime(
       return port
     }),
   )
+  // The daemon's lease service, for a test that runs its cleanup as the daemon's reconcile does.
+  let leaseService: Effect.Success<ReturnType<typeof makeSandboxLeaseService>> | undefined
   const sandbox = Layer.effect(
     SandboxDispatch,
     Effect.gen(function* () {
@@ -424,6 +450,7 @@ export function daemonRuntime(
         undefined,
         { native: { gateway: control } },
       )
+      leaseService = leases
       const client = yield* OpenCode.make({ baseUrl: "http://127.0.0.1:1" }).pipe(
         Effect.provide(FetchHttpClient.layer),
       )
@@ -442,6 +469,9 @@ export function daemonRuntime(
           sealed: yield* SealedResultGit,
           agentGit: { ...runnerIdentity, blockedEmails: [] },
           pollMs: 200,
+          // The Actions run of a quiet run is read each half second, so its end is seen at once.
+          jobEveryMs: 500,
+          ...(lostAfterMs === undefined ? {} : { lostAfterMs }),
         },
       })
     }),
@@ -490,7 +520,14 @@ export function daemonRuntime(
       }),
     ),
   )
-  return ManagedRuntime.make(ingress)
+  return Object.assign(ManagedRuntime.make(ingress), {
+    /**
+     * Runs the release cleanup of the lease of `runId` again, as the daemon's reconcile does once
+     * GitHub reports its Actions run completed: the ref of an ended run is removed then.
+     */
+    cleanup: (runId: string) =>
+      leaseService === undefined ? Effect.void : Effect.ignore(leaseService.release(runId)),
+  })
 }
 
 /**
@@ -507,6 +544,12 @@ export async function withRunnerDaemon<A>(
     readonly remote: Awaited<ReturnType<typeof gitRemote>>
     /** Settles once the job's run client ended; fails with the job's failure. */
     readonly jobEnded: () => Promise<void>
+    /** The GitHub API stub: the lease refs, the Actions run's end and the cancels asked. */
+    readonly github: Awaited<ReturnType<typeof githubStub>>
+    /** The lease id of the run, once the daemon created its ref. */
+    readonly leaseId: () => string
+    /** The process id of the job's run client, once bootstrap started it. */
+    readonly runClient: () => Promise<number | undefined>
     /**
      * The job's record: the files of its run directory, its harness's record of its steps, the
      * model calls that reached the fixture model and the end of the gateway's output.
@@ -552,6 +595,7 @@ export async function withRunnerDaemon<A>(
         budget: defaultRunBudget,
         runner: { aliases: ["runner"], identity: runnerIdentity },
       }),
+      job.lostAfterMs,
     )
     const jobEnded = async () => {
       for (let tries = 0; jobStart === undefined; tries++) {
@@ -568,6 +612,9 @@ export async function withRunnerDaemon<A>(
       runtime,
       remote,
       jobEnded,
+      github,
+      leaseId: () => lease.id,
+      runClient: () => runClientPid(job.directory),
       record: async () =>
         [
           `run directory: ${(await readdir(job.directory).catch(() => [])).sort().join(" ")}`,

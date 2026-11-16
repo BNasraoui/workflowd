@@ -3,13 +3,15 @@
 // each of them as an event. It leaves the run's sealed result in <run directory>/result.
 import { randomBytes } from "node:crypto"
 import { appendFileSync } from "node:fs"
-import { mkdir, rename } from "node:fs/promises"
+import { mkdir, rename, writeFile } from "node:fs/promises"
 import { dirname, join } from "node:path"
 import { createInterface } from "node:readline"
 import { fileURLToPath, pathToFileURL } from "node:url"
 import { boxNetwork, boxPort, boxSentinel, command, docker, makeBox } from "./native-docker.mjs"
 
 const tooling = dirname(fileURLToPath(import.meta.url))
+/** What the run's stop (SIGTERM from the run client) does: the box, once made, is removed. */
+let onStop = () => process.exit(1)
 
 /**
  * The completion of the sealed result. A run in print mode names no title of its own, so the
@@ -134,6 +136,11 @@ async function runBox(directory, launch) {
     image: launch.image,
     name: `workflowd-native-${randomBytes(16).toString("hex")}`,
   })
+  onStop = async () => {
+    log("stopped")
+    await box.remove()
+    process.exit(1)
+  }
   try {
     await step("network", async () => {
       await docker("network", [
@@ -188,7 +195,21 @@ async function runBox(directory, launch) {
           }),
         ),
       )
-      if (sealed.empty === true) throw new Error("seal: the run changed nothing")
+      if (sealed.empty === true) {
+        // A run that changed nothing: its completion with no bundle, so its caller hears its end.
+        const manifest = {
+          sourceSha: launch.sourceSha,
+          title: completion.title,
+          body: completion.body,
+          finalMessage: finalText(result),
+        }
+        await mkdir(join(directory, "result"), { mode: 0o700 })
+        await writeFile(join(directory, "result", "result.json"), JSON.stringify(manifest), {
+          mode: 0o600,
+          flag: "wx",
+        })
+        return
+      }
       await rename(join(native, "result"), join(directory, "result"))
     })
   } finally {
@@ -197,6 +218,7 @@ async function runBox(directory, launch) {
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  process.once("SIGTERM", () => void onStop())
   try {
     const directory = process.env.WORKFLOWD_RUN_DIRECTORY
     if (directory === undefined || process.argv.length !== 2) throw new Error("harness refused")

@@ -73,7 +73,10 @@ const boundedBody = (request: Request, limit: number) => {
   )
 }
 
-/** True when a result body is framed as the run routes say: a length, result.json, the bundle. */
+/**
+ * True when a result body is framed as the run routes say: a length, result.json, the bundle. The
+ * bundle of a run that changed nothing is empty.
+ */
 const framedResult = (body: Uint8Array) => {
   if (body.length < 4) return false
   const manifest = Buffer.from(body.buffer, body.byteOffset, body.byteLength).readUInt32BE(0)
@@ -81,7 +84,7 @@ const framedResult = (body: Uint8Array) => {
   return (
     manifest > 0 &&
     manifest <= maxResultManifestBytes &&
-    bundle > 0 &&
+    bundle >= 0 &&
     bundle <= maxResultBundleBytes
   )
 }

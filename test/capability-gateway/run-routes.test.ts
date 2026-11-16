@@ -264,8 +264,9 @@ test("the one result is held once, as its exact bytes, and read back in parts", 
   const body = framed('{"sourceSha":"d"}', bundle)
   expect((await call("result", { body, signature: null })).status).toBe(403)
   expect((await call("result", { body, signature: signed("events", body) })).status).toBe(403)
-  const empty = framed('{"sourceSha":"d"}', new Uint8Array())
-  expect((await call("result", { body: empty, signature: signed("result", empty) })).status).toBe(
+  // A manifest whose length passes the end of the body.
+  const short = framed('{"sourceSha":"d"}', new Uint8Array()).subarray(0, 10)
+  expect((await call("result", { body: short, signature: signed("result", short) })).status).toBe(
     403,
   )
   const large = framed("x".repeat(maxResultManifestBytes + 1), bundle)

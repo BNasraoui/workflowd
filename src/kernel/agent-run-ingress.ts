@@ -1067,9 +1067,10 @@ const make = (options: AgentRunIngressOptions) =>
         if (run.state === "completed" || run.state === "cancelled" || run.state === "failed") {
           return yield* refuse("run_conflict", `run ${runId} is already ${run.state}`)
         }
-        // A runner run is stopped by its own deadline until the stop of a runner run exists.
-        if (run.resolvedSelection?.host === "github-actions")
-          return yield* refuse("run_conflict", "Actions controller custody unavailable")
+        // A runner run's end releases its lease, so one that ended operator_required has nothing
+        // left to stop. Any other runner run is stopped through the sandbox dispatch below.
+        if (run.resolvedSelection?.host === "github-actions" && run.state === "operator_required")
+          return yield* refuse("run_conflict", `run ${runId} is already ${run.state}`)
         if (
           sandbox !== undefined &&
           (yield* sandbox.owns(runId).pipe(Effect.mapError(sandboxFailure)))

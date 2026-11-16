@@ -109,6 +109,10 @@ export const makeSandboxDispatch = (options: {
     readonly sealed: SealedResultGitPort
     readonly agentGit: AgentGitConfig
     readonly pollMs?: number
+    /** The time with no post after which a run whose Actions run goes on is lost. */
+    readonly lostAfterMs?: number
+    /** The pause between two reads of a quiet run's Actions run. */
+    readonly jobEveryMs?: number
   }
 }) =>
   Effect.gen(function* () {
@@ -354,8 +358,37 @@ export const makeSandboxDispatch = (options: {
         (effect) => sandboxStage("dispatch.settle", effect),
         Effect.tapError((cause) => retainSandboxFailure(run.directory, "dispatch.settle", cause)),
       )
+    /**
+     * The stop of a runner run. A run whose events this daemon reads ends `cancelled` from them; the
+     * gateway revokes it at once. A run that no executor holds (a start of the daemon came between)
+     * is settled here: its lease is released and it ends `cancelled`.
+     */
+    const stopRunner = (run: AgentRunRecord) =>
+      Effect.gen(function* () {
+        const held =
+          runnerExecutor === undefined
+            ? false
+            : yield* runnerExecutor.stopRun(run.runId).pipe(
+                Effect.tapError((error) =>
+                  Effect.logWarning(
+                    "Runner run revoke at its stop failed; its release revokes it",
+                    {
+                      runId: run.runId,
+                      reason: error.reason,
+                    },
+                  ),
+                ),
+                Effect.orElseSucceed(() => true),
+              )
+        if (held) return
+        if ((yield* store.read(run.runId)) !== null) yield* leases.release(run.runId)
+        yield* runs
+          .cancel({ runId: run.runId, now: new Date(), diagnostic: "cancelled" })
+          .pipe(Effect.catchTag("AgentRunStoreConflictError", () => Effect.void))
+      }).pipe((effect) => sandboxStage("dispatch.stopRunner", effect))
     const cancel = (run: AgentRunRecord) =>
       Effect.suspend(() => {
+        if (runnerPolicy(run.repository) !== undefined) return stopRunner(run)
         cancelling.add(run.runId)
         return settle(run, {
           state: "cancelled",
@@ -380,7 +413,12 @@ export const makeSandboxDispatch = (options: {
      * `agent-run/<id>`. What ended the run, other than a completion, is kept for its settlement.
      */
     const runnerOptions = options.runner
-    const runnerEnds = new Map<string, { diagnostic: string; ended: GatewayEnd | null }>()
+    const runnerEnds = new Map<
+      string,
+      | { readonly kind: "ended"; readonly diagnostic: string; readonly ended: GatewayEnd | null }
+      | { readonly kind: "cancelled" }
+      | { readonly kind: "unchanged" }
+    >()
     const runnerPolicy = (alias: string) =>
       runnerOptions?.aliases.includes(alias) === true
         ? options.policies.find(
@@ -394,7 +432,27 @@ export const makeSandboxDispatch = (options: {
             gateway: runnerOptions.gateway,
             maxRuns: runnerOptions.maxRuns,
             ...(runnerOptions.pollMs === undefined ? {} : { pollMs: runnerOptions.pollMs }),
-            begin: (launch) =>
+            ...(runnerOptions.lostAfterMs === undefined
+              ? {}
+              : { lostAfterMs: runnerOptions.lostAfterMs }),
+            ...(runnerOptions.jobEveryMs === undefined
+              ? {}
+              : { jobEveryMs: runnerOptions.jobEveryMs }),
+            // The Actions run of the lease, once the lease holds one. A failed read is no news:
+            // the run goes on to its deadline.
+            job: (runId) =>
+              Effect.gen(function* () {
+                const lease = yield* store.read(runId)
+                if (lease?.actions_run_id == null || lease.actions_attempt == null) return null
+                const run = yield* github.savedRun(
+                  lease.policy,
+                  lease.lease_id,
+                  lease.actions_run_id,
+                  lease.actions_attempt,
+                )
+                return { status: run.status, conclusion: run.conclusion }
+              }).pipe(Effect.orElseSucceed(() => null)),
+            begin: (launch, stopped) =>
               Effect.gen(function* () {
                 const policy = runnerPolicy(launch.repository)
                 if (policy === undefined) return yield* Effect.fail(failure())
@@ -410,7 +468,8 @@ export const makeSandboxDispatch = (options: {
                 // image before it opens the session, so the session opens close to the start.
                 yield* leases.acquire(launch.runId).pipe(
                   Effect.repeat({
-                    until: (lease) => lease.state === "ready",
+                    // A stop before the session ends the wait; the run's events then end it.
+                    until: (lease) => lease.state === "ready" || stopped(),
                     schedule: Schedule.spaced("2 seconds"),
                   }),
                   Effect.timeout("30 minutes"),
@@ -427,8 +486,14 @@ export const makeSandboxDispatch = (options: {
           })
     const runnerExit = (runId: string, diagnostic: string, ended: GatewayEnd | null = null) =>
       Effect.sync(() => {
-        runnerEnds.set(runId, { diagnostic, ended })
+        runnerEnds.set(runId, { kind: "ended", diagnostic, ended })
         return { exitCode: 1, stderr: diagnostic }
+      })
+    /** The end of a run whose stop came: it pushes nothing, whatever else ended it. */
+    const runnerCancelled = (runId: string) =>
+      Effect.sync(() => {
+        runnerEnds.set(runId, { kind: "cancelled" })
+        return { exitCode: 1, stderr: "cancelled" }
       })
     /** Checks the run's sealed result and pushes it to `agent-run/<id>`, which must be new. */
     const publishRunner = (run: AgentRunRecord, handle: RunnerHandle, policy: SandboxPolicy) =>
@@ -438,6 +503,21 @@ export const makeSandboxDispatch = (options: {
           if (lease === null || runnerExecutor === undefined || runnerOptions === undefined)
             return yield* Effect.fail(failure())
           const result = yield* runnerExecutor.result(handle)
+          if (handle.stopping) return yield* runnerCancelled(run.runId)
+          // A run that changed nothing posts its completion with an empty bundle: it ends with its
+          // final message, and nothing is pushed.
+          if (result.bundle.length === 0) {
+            if (result.sourceSha !== lease.source_sha)
+              return yield* Effect.fail(
+                new SealedResultRefused({
+                  check: "source",
+                  detail: "",
+                  message: "result_refused: source",
+                }),
+              )
+            runnerEnds.set(run.runId, { kind: "unchanged" })
+            return { exitCode: 0, stderr: "" }
+          }
           const checked = yield* runnerOptions.sealed.check(
             result,
             {
@@ -456,14 +536,16 @@ export const makeSandboxDispatch = (options: {
         }),
       ).pipe(
         Effect.catch((error) =>
-          runnerExit(
-            run.runId,
-            error instanceof SealedResultRefused
-              ? `result_refused: ${error.check}`
-              : error instanceof RunnerRunFailed
-                ? `${error.reason}: ${error.message}`
-                : sandboxDiagnostic("runner.result", error).message,
-          ),
+          handle.stopping
+            ? runnerCancelled(run.runId)
+            : runnerExit(
+                run.runId,
+                error instanceof SealedResultRefused
+                  ? `result_refused: ${error.check}`
+                  : error instanceof RunnerRunFailed
+                    ? `${error.reason}: ${error.message}`
+                    : sandboxDiagnostic("runner.result", error).message,
+              ),
         ),
       )
     /** The CLI of one runner run: its events from the gateway, its exit once its result is pushed. */
@@ -487,6 +569,8 @@ export const makeSandboxDispatch = (options: {
             })
             .pipe(Effect.mapError((error) => workspaceFailure(`${error.reason}: ${error.message}`)))
           const eventsEnded = yield* Deferred.make<RunnerRunFailed | null>()
+          // The observer's stop of a run whose events stalled: the run ends with its diagnostic.
+          const halted = yield* Deferred.make<void>()
           const events = runnerExecutor.events(handle).pipe(
             Stream.catch((error) =>
               Stream.fromEffect(Deferred.succeed(eventsEnded, error)).pipe(Stream.drain),
@@ -496,16 +580,24 @@ export const makeSandboxDispatch = (options: {
           return {
             executionId: run.runId,
             events: Stream.toAsyncIterable(events),
-            exited: Deferred.await(eventsEnded).pipe(
-              Effect.flatMap((ended) =>
-                ended === null
-                  ? publishRunner(run, handle, policy)
-                  : runnerExit(run.runId, `${ended.reason}: ${ended.message}`, handle.ended),
+            exited: Effect.raceFirst(
+              Deferred.await(eventsEnded).pipe(
+                Effect.flatMap((ended) =>
+                  ended === null
+                    ? publishRunner(run, handle, policy)
+                    : ended.reason === "cancelled" || handle.stopping
+                      ? runnerCancelled(run.runId)
+                      : runnerExit(run.runId, `${ended.reason}: ${ended.message}`, handle.ended),
+                ),
+              ),
+              Deferred.await(halted).pipe(
+                Effect.as({ exitCode: 1, stderr: "the run's events stalled" }),
               ),
             ),
-            cancel: runnerExecutor
-              .stop(handle)
-              .pipe(Effect.mapError(() => workspaceFailure("stop"))),
+            cancel: runnerExecutor.stop(handle).pipe(
+              Effect.mapError(() => workspaceFailure("stop")),
+              Effect.ensuring(Deferred.succeed(halted, undefined)),
+            ),
           }
         }),
     })
@@ -541,15 +633,22 @@ export const makeSandboxDispatch = (options: {
         if ((yield* store.read(run.runId)) !== null)
           yield* leases.release(run.runId).pipe(Effect.ignore)
         const now = new Date()
-        if (terminal.state === "completed" && end === undefined)
-          yield* runs.complete({ runId: run.runId, now, finalMessage: terminal.finalMessage })
+        if (end?.kind === "cancelled")
+          yield* runs.cancel({ runId: run.runId, now, diagnostic: "cancelled" })
+        else if (terminal.state === "completed" && end?.kind !== "ended")
+          yield* runs.complete({
+            runId: run.runId,
+            now,
+            finalMessage: terminal.finalMessage,
+            ...(end?.kind === "unchanged" ? { endReason: "unchanged" } : {}),
+          })
         else
           yield* runs.operatorRequired({
             runId: run.runId,
             now,
-            diagnostic: end?.diagnostic ?? terminal.diagnostic,
+            diagnostic: end?.kind === "ended" ? end.diagnostic : terminal.diagnostic,
             finalMessage: terminal.finalMessage,
-            ended: end?.ended ?? null,
+            ended: end?.kind === "ended" ? end.ended : null,
           })
       }).pipe(
         Effect.catchTag("AgentRunStoreConflictError", () => Effect.void),
