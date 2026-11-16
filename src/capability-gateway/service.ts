@@ -194,8 +194,10 @@ export const makeCapabilityGateway = (
     }
     // A stop waits for a renewal of the login in flight (custody's mint), up to the bound of its
     // request and its write, before it ends the gateway's lifetime: an answer that the stop cut
-    // off would leave the stored refresh value one that the OAuth server has replaced. A mint of
-    // another provider renews no login, and ends at once.
+    // off would leave the stored refresh value one that the OAuth server has replaced. Custody
+    // finishes such a renewal on SIGTERM itself, but where the end of the gateway kills each
+    // process it leaves (the first process of a container, or a unit's main process with
+    // `KillMode=mixed`), custody would end with it. A mint of another provider renews no login, and ends at once.
     yield* Effect.addFinalizer(() =>
       Effect.gen(function* () {
         const pending = inFlight

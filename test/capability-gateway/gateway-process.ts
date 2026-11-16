@@ -428,6 +428,8 @@ export interface Gateway extends Origin {
   readonly socket?: string
   /** The id of the process. */
   readonly pid?: number
+  /** The exit status of the process, once it has ended. */
+  readonly exited?: Promise<number>
   /** Each byte the process wrote to standard output and standard error so far. */
   readonly output?: () => string
 }
@@ -519,6 +521,7 @@ export async function startGatewayProcess(
     stop,
     terminate,
     pid: child.pid,
+    exited: child.exited,
     output: () => text + errors,
   }
 }

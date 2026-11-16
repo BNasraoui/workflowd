@@ -18,6 +18,7 @@ import { Schema } from "effect"
 import { checkLogin, CustodyRefused, loginFault } from "../../src/capability-gateway/custody"
 import { custodyCommand } from "../../src/capability-gateway/custody-process"
 import { importLoginCommand } from "../../src/capability-gateway-server"
+import { until } from "./custody-fixture"
 import {
   claudeLogin,
   importLogin,
@@ -240,11 +241,14 @@ test("the custody command refuses a token URL that is plain HTTP off loopback, a
     expect((await importLogin(env, JSON.stringify(login))).code).toBe(0)
     const run = (args: ReadonlyArray<string>) =>
       finished(
-        Bun.spawn([process.execPath, resolve("src/capability-gateway/custody-process.ts"), ...args], {
-          env: { PATH: "/usr/bin:/bin" },
-          stdout: "pipe",
-          stderr: "pipe",
-        }),
+        Bun.spawn(
+          [process.execPath, resolve("src/capability-gateway/custody-process.ts"), ...args],
+          {
+            env: { PATH: "/usr/bin:/bin" },
+            stdout: "pipe",
+            stderr: "pipe",
+          },
+        ),
       )
     const directory = join(root, "login")
     expect(
@@ -275,6 +279,9 @@ test("the provider-access template runs custody's access command from the image,
 // The command surfaces of custody in this process (`importLoginCommand` of the gateway's entry,
 // `custodyCommand` that noscope's provider runs, and `checkLogin` and `loginFault` that the
 // gateway calls), so that their code counts toward coverage: a process's run does not.
+
+/** The stop signal of a custody command that is not stopped. */
+const running = new AbortController().signal
 
 /** A reader of standard input that holds `text`, and records the limit it was asked for. */
 const input =
@@ -370,7 +377,7 @@ test("in this process, custody renews, refuses only invalid_grant, waits between
     const load = async (login: object) =>
       expect((await importLoginCommand(env, ["claude"], input(JSON.stringify(login)))).code).toBe(0)
     const command = (url = oauth.url) =>
-      custodyCommand(["access", directory, "--token-url", url, "claude", "60"])
+      custodyCommand(["access", directory, "--token-url", url, "claude", "60"], running)
     /** A later try: the wait of the last failed try is over. */
     const waited = async () => {
       const state = JSON.parse(await readFile(statePath, "utf8"))
@@ -481,7 +488,7 @@ test("in this process, custody renews, refuses only invalid_grant, waits between
       { preconnect: network.preconnect },
     )
     try {
-      await expect(custodyCommand(["access", directory, "claude", "60"])).rejects.toThrow(
+      await expect(custodyCommand(["access", directory, "claude", "60"], running)).rejects.toThrow(
         "refused its renewal value",
       )
     } finally {
@@ -533,8 +540,42 @@ test("in this process, the custody command refuses what its grammar does not hol
       ["access", directory, "--token-url", "http://example.com/token", "claude", "60"],
       ["access", directory, "--token-url", "ftp://127.0.0.1/token", "claude", "60"],
     ])
-      await expect(custodyCommand(args)).rejects.toThrow(CustodyRefused)
+      await expect(custodyCommand(args, running)).rejects.toThrow(CustodyRefused)
     expect(oauth.requests()).toHaveLength(0)
+  })
+})
+
+test("in this process, a stopped custody call ends before it holds the login or sends a request, and a renewal in flight that is stopped stores its answer", async () => {
+  await withLogin(async (root, oauth, env) => {
+    const directory = join(root, "login")
+    const command = (stop: AbortSignal) =>
+      custodyCommand(["access", directory, "--token-url", oauth.url, "claude", "60"], stop)
+    const old = claudeLogin(syntheticValue("access"), syntheticValue("refresh"), Date.now() - 1000)
+    expect((await importLoginCommand(env, ["claude"], input(JSON.stringify(old)))).code).toBe(0)
+
+    // A stopped call sends no request.
+    await expect(command(AbortSignal.abort())).rejects.toThrow(
+      "custody stopped before it renewed the claude login",
+    )
+    expect(oauth.requests()).toHaveLength(0)
+
+    // A call holds the login while the OAuth server holds its request; a stop then changes
+    // nothing for it. A stopped call that waits for the login ends with no request.
+    oauth.mode("hold")
+    const stop = new AbortController()
+    const inFlight = command(stop.signal)
+    await until(() => oauth.requests().length === 1)
+    stop.abort()
+    await expect(command(AbortSignal.abort())).rejects.toThrow(
+      "custody stopped before it held the claude login",
+    )
+    oauth.release()
+    expect((await inFlight).token).toBe(oauth.next().access)
+    expect(oauth.requests()).toHaveLength(1)
+    expect(storedAccess(await readFile(join(directory, "claude.json"), "utf8"))).toBe(
+      oauth.next().access,
+    )
+    expect(await readdir(directory)).not.toContain("claude.state")
   })
 })
 
@@ -548,7 +589,7 @@ test("in this process, custody stores the renewal value of a 200 whose other fie
     const load = async (login: object) =>
       expect((await importLoginCommand(env, ["claude"], input(JSON.stringify(login)))).code).toBe(0)
     const command = () =>
-      custodyCommand(["access", directory, "--token-url", oauth.url, "claude", "60"])
+      custodyCommand(["access", directory, "--token-url", oauth.url, "claude", "60"], running)
     const Login = Schema.fromJsonString(
       Schema.Struct({
         claudeAiOauth: Schema.Struct({ refreshToken: Schema.String, expiresAt: Schema.Number }),
@@ -619,7 +660,7 @@ test("in this process, a wait on disk past the cap from now is read as the cap, 
         (await importLoginCommand(env, ["claude"], input(JSON.stringify(expired())))).code,
       ).toBe(0)
     const command = () =>
-      custodyCommand(["access", directory, "--token-url", oauth.url, "claude", "60"])
+      custodyCommand(["access", directory, "--token-url", oauth.url, "claude", "60"], running)
     const State = Schema.fromJsonString(Schema.Struct({ retryAt: Schema.Number }))
     const retryAt = async () =>
       Schema.decodeUnknownSync(State)(await readFile(statePath, "utf8")).retryAt

@@ -18,6 +18,10 @@ import { Schema } from "effect"
  * custody stores the new one before it judges the answer's other fields. After a renewal, no
  * renewal request goes out before `firstRetryWaitMs` has passed, even when the new access value
  * ends within `renewWithinMs`.
+ *
+ * A stop (the `stop` signal of `loginAccess`) ends a call at once, except a renewal whose request
+ * has gone out: it gets its answer or reaches its limit, and its result is stored, within
+ * `renewalWriteBoundMs`. The OAuth server may have replaced the stored refresh value by then.
  */
 
 /** The largest login that custody imports or reads, in bytes. */
@@ -26,7 +30,7 @@ export const loginLimit = 16384
 const renewalLimitMs = 5000
 /**
  * The longest a renewal takes once its request is sent: the request's limit, then the write of
- * the answer. A gateway that stops waits this long for a renewal in flight.
+ * the answer. A stopped custody, and a gateway that stops, wait this long for a renewal in flight.
  */
 export const renewalWriteBoundMs = renewalLimitMs + 1000
 /** A login whose access value has this long or less to live is renewed before it is used. */
@@ -374,12 +378,13 @@ export async function loginFault(path: string, provider: CustodyProvider) {
 
 /**
  * Runs `body` while this process holds the login of `provider`, in its open directory. The lock
- * is an advisory lock on a file of its own.
+ * is an advisory lock on a file of its own. A wait for it ends once `stop` is aborted.
  */
 async function holding<A>(
   path: string,
   provider: CustodyProvider,
   body: (directory: Directory) => Promise<A>,
+  stop?: AbortSignal,
 ) {
   return await withDirectory(path, async (directory) => {
     const name = `${provider}.lock`
@@ -396,6 +401,8 @@ async function holding<A>(
       const until = Date.now() + lockWaitMs
       // LOCK_EX | LOCK_NB, so that a wait never blocks the process past its limit.
       while (libc.symbols.flock(lock.fd, 2 | 4) !== 0) {
+        if (stop?.aborted)
+          throw new CustodyUnavailable(`custody stopped before it held the ${provider} login`)
         if (Date.now() > until) throw new CustodyUnavailable(`the ${provider} login is busy`)
         await Bun.sleep(25)
       }
@@ -614,38 +621,51 @@ function usable(provider: CustodyProvider, oauth: OAuth) {
  * The access value of the login of `provider` in the directory `path`, renewed first when it ends
  * within a minute or a renewal was not finished. `tokenUrlOverride` replaces the OAuth server's
  * token URL; only a fixture names one. Calls at one time wait for each other, so one renewal
- * serves them all. The renewed login is on disk before its access value is returned.
+ * serves them all. The renewed login is on disk before its access value is returned. Once `stop`
+ * is aborted, the call ends before it holds the login or sends a request; a request sent already
+ * gets its answer or reaches its limit, and its result is stored.
  */
 export async function loginAccess(
   path: string,
   provider: CustodyProvider,
+  stop: AbortSignal,
   tokenUrlOverride?: string,
 ) {
   const url = tokenUrl(provider, tokenUrlOverride)
-  return await holding(path, provider, async (directory) => {
-    try {
-      const value = await renewedAccess(directory, provider, url)
-      await remove(directory, faultName(provider))
-      return value
-    } catch (error) {
-      // The cause of a failed call, for the gateway's log. A call within a wait keeps the line of
-      // the try that set the wait.
-      const line =
-        error instanceof RenewalFailed
-          ? error.line
-          : error instanceof CustodyRefused
-            ? error.message
-            : error instanceof LoginImportRequired || error instanceof LoginScopeMissing
-              ? `custody: ${error.message}`
-              : undefined
-      if (line !== undefined) await persist(directory, faultName(provider), `${line}\n`)
-      throw error
-    }
-  })
+  return await holding(
+    path,
+    provider,
+    async (directory) => {
+      try {
+        const value = await renewedAccess(directory, provider, url, stop)
+        await remove(directory, faultName(provider))
+        return value
+      } catch (error) {
+        // The cause of a failed call, for the gateway's log. A call within a wait keeps the line of
+        // the try that set the wait.
+        const line =
+          error instanceof RenewalFailed
+            ? error.line
+            : error instanceof CustodyRefused
+              ? error.message
+              : error instanceof LoginImportRequired || error instanceof LoginScopeMissing
+                ? `custody: ${error.message}`
+                : undefined
+        if (line !== undefined) await persist(directory, faultName(provider), `${line}\n`)
+        throw error
+      }
+    },
+    stop,
+  )
 }
 
-/** `access` while this process holds the login, in its open directory. */
-async function renewedAccess(directory: Directory, provider: CustodyProvider, url: string) {
+/** `loginAccess` while this process holds the login, in its open directory. */
+async function renewedAccess(
+  directory: Directory,
+  provider: CustodyProvider,
+  url: string,
+  stop: AbortSignal,
+) {
   let state = await readState(directory, provider)
   if (state?.state === "import-required") throw new LoginImportRequired(provider)
   // A wait on disk longer from now than it can be (a clock set back) is read as its longest.
@@ -675,7 +695,10 @@ async function renewedAccess(directory: Directory, provider: CustodyProvider, ur
       `the ${provider} login waits to renew until ${new Date(state.retryAt).toISOString()}`,
     )
   const failures = state?.failures ?? 0
-  // From here the OAuth server may take the refresh value: a stop leaves `renewing`.
+  if (stop.aborted)
+    throw new CustodyUnavailable(`custody stopped before it renewed the ${provider} login`)
+  // From here the OAuth server may take the refresh value: a kill leaves `renewing`, and a stop
+  // waits for the answer and stores it.
   await writeState(directory, provider, { state: "renewing", failures, retryAt: 0 })
   const outcome = await renew(provider, url, oauth)
   if (outcome.kind === "refused") {
