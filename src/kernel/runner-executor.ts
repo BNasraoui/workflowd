@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto"
-import { Data, Effect, Option, Stream } from "effect"
+import { Data, Deferred, Effect, Option, Stream } from "effect"
+import { boxReadyLine } from "../../deploy/sandbox/box-ready.mjs"
 import type { EventBatch, GatewayEnd } from "../capability-control/protocol"
 import { parseClaudeDispatchEvent } from "./claude-dispatch"
 import type { CliEvent } from "./cli-process-contract"
@@ -73,6 +74,8 @@ export type RunnerHandle = {
   lastPost: number
   /** When the daemon last read the run's Actions run. */
   jobReadAt: number
+  /** Done once the run's first event line, the line of its ready box, is read. */
+  readonly boxReady: Deferred.Deferred<void>
 }
 
 /** The text of the gateway's end of a run, with the counts that it used. */
@@ -146,6 +149,7 @@ export const makeRunnerExecutor = (options: {
               stopping: stopped.has(launch.runId),
               lastPost: started,
               jobReadAt: started,
+              boxReady: Deferred.makeUnsafe<void>(),
             }
             handles.set(launch.runId, handle)
             return handle
@@ -166,7 +170,9 @@ export const makeRunnerExecutor = (options: {
   const ending = (reason: RunnerFailure, message: string) =>
     Effect.fail(new RunnerRunFailed({ reason, message }))
   /**
-   * The run's events in order: each line of each batch as a Claude stream-json line. The stream
+   * The run's events in order: its first line, which must be the line of its ready box
+   * (`boxReadyLine`; another first line ends the run `runner_start`), marks `boxReady` done; each
+   * later line of each batch is a Claude stream-json line. The stream
    * ends once the gateway holds the result and every batch is read, or with the run's end. When
    * two ends come at one read, the first of this order wins: the stop (`cancelled`), the gateway's
    * own end, the run's deadline, its Actions run's conclusion (`runner_cancelled`,
@@ -186,10 +192,19 @@ export const makeRunnerExecutor = (options: {
         )
         if (handle.stopping) return yield* ending("cancelled", "the run was stopped")
         const last = read.batches.at(-1)?.sequence ?? after
-        const parsed = read.batches.flatMap((batch) => batch.lines).map(parseClaudeDispatchEvent)
         if (read.batches.length > 0) {
           handle.lastPost = now()
-          return [parsed, Option.some(last)] as const
+          const lines = read.batches.flatMap((batch) => batch.lines)
+          if (!Deferred.isDoneUnsafe(handle.boxReady) && lines.length > 0) {
+            if (lines[0] !== boxReadyLine)
+              return yield* ending(
+                "runner_start",
+                "the run's first event is not its box's ready line",
+              )
+            Deferred.doneUnsafe(handle.boxReady, Effect.void)
+            lines.shift()
+          }
+          return [lines.map(parseClaudeDispatchEvent), Option.some(last)] as const
         }
         if (read.ended !== null) {
           handle.ended = read.ended

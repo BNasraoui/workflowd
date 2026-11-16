@@ -238,11 +238,14 @@ const observeFirstToken = (
         }
       }
     })
-    const timedOut: Effect.Effect<FirstToken> = Effect.as(Effect.sleep(timeoutMs), {
-      outcome: "refused" as const,
-      reason: "no_first_token" as const,
-      detail: `${cliName} produced no model output within ${timeoutMs}ms of spawn`,
-    })
+    const timedOut: Effect.Effect<FirstToken> = (initial.ready ?? Effect.void).pipe(
+      Effect.andThen(Effect.sleep(timeoutMs)),
+      Effect.as({
+        outcome: "refused" as const,
+        reason: "no_first_token" as const,
+        detail: `${cliName} produced no model output within ${timeoutMs}ms of ${initial.ready === undefined ? "spawn" : "being ready"}`,
+      }),
+    )
     const result = yield* Effect.race(streamed, timedOut)
     if (result.outcome === "generating") {
       return {

@@ -42,9 +42,12 @@ import { fixtureExecutable } from "../helpers/fixture-executable.mjs"
 import { makeCodexCli } from "../kernel/agent-run-ingress-harness"
 import { githubApiStub } from "../sandbox/github-api-stub"
 
+/** The module of the line that a harness writes first, once its box is ready. */
+export const boxReadyModule = resolve("deploy/sandbox/box-ready.mjs")
+
 /**
  * A harness of the run client in place of the box: it reads the launch on its standard input,
- * writes Claude's stream-json lines for it, and leaves `result` (its result.json and its bundle)
+ * writes the line of its ready box and Claude's stream-json lines for it, and leaves `result` (its result.json and its bundle)
  * in the run directory. It names the launch's prompt and model in its lines, so a test sees that
  * the launch reached it.
  */
@@ -62,9 +65,11 @@ export async function writeHarness(
   await writeFile(
     path,
     `import { copyFileSync, readFileSync } from "node:fs"
+import { boxReadyLine } from ${JSON.stringify(boxReadyModule)}
 const launch = JSON.parse(readFileSync(0, "utf8"))
 const directory = ${JSON.stringify(directory)}
 const line = (value) => process.stdout.write(JSON.stringify(value) + "\\n")
+process.stdout.write(boxReadyLine + "\\n")
 line({ type: "system", subtype: "init", session_id: "fixture-session", model: launch.model })
 for (let index = 0; index < ${options.extraLines ?? 0}; index++)
   line({ type: "assistant", message: { content: [{ type: "text", text: "x".repeat(1000) }] } })
@@ -405,8 +410,12 @@ export function daemonRuntime(
   policy: ReturnType<typeof runnerPolicy>,
   /** workflowd's side of the gateway: its control client, or a test's script of the gateway. */
   gateway: Effect.Effect<RunnerControl, never, SqlClient.SqlClient | Scope.Scope>,
-  /** The time with no post after which a run is lost; 120 s when not named. */
-  lostAfterMs?: number,
+  options: {
+    /** The time with no post after which a run is lost; 120 s when not named. */
+    readonly lostAfterMs?: number
+    /** The window for a run's first model output from its box's ready line; 120 s, as configured by default. */
+    readonly verifyTimeoutMs?: number
+  } = {},
 ) {
   const stores = Layer.mergeAll(KernelSessionStoreLive, AgentRunStoreLive).pipe(
     Layer.provideMerge(
@@ -471,7 +480,7 @@ export function daemonRuntime(
           pollMs: 200,
           // The Actions run of a quiet run is read each half second, so its end is seen at once.
           jobEveryMs: 500,
-          ...(lostAfterMs === undefined ? {} : { lostAfterMs }),
+          ...(options.lostAfterMs === undefined ? {} : { lostAfterMs: options.lostAfterMs }),
         },
       })
     }),
@@ -486,8 +495,7 @@ export function daemonRuntime(
     sandboxRepositories: [policy],
     agent: "sandbox",
     worktreeRoot: join(f.root, "worktrees"),
-    // A runner run's first event comes once its job holds its session and its box runs Claude.
-    verifyTimeoutMs: 900000,
+    verifyTimeoutMs: options.verifyTimeoutMs ?? 120000,
     verifyPollIntervalMs: 50,
     progressWindowMs: 900000,
     maxAttempts: 1,
@@ -595,7 +603,7 @@ export async function withRunnerDaemon<A>(
         budget: defaultRunBudget,
         runner: { aliases: ["runner"], identity: runnerIdentity },
       }),
-      job.lostAfterMs,
+      job.lostAfterMs === undefined ? {} : { lostAfterMs: job.lostAfterMs },
     )
     const jobEnded = async () => {
       for (let tries = 0; jobStart === undefined; tries++) {
@@ -670,6 +678,7 @@ export async function writeSealingHarness(directory: string, bare: string) {
     path,
     `import { execFileSync } from "node:child_process"
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs"
+import { boxReadyLine } from ${JSON.stringify(boxReadyModule)}
 import { sealRun } from ${JSON.stringify(resolve("deploy/sandbox/native-seal.mjs"))}
 const launch = JSON.parse(readFileSync(0, "utf8"))
 const directory = process.env.WORKFLOWD_RUN_DIRECTORY
@@ -678,6 +687,7 @@ const env = { PATH: "/usr/bin:/bin", HOME: "/nonexistent", GIT_CONFIG_NOSYSTEM: 
 const run = (argv) => execFileSync(argv[0], argv.slice(1), { cwd: native, env, encoding: "utf8" })
 const line = (value) => process.stdout.write(JSON.stringify(value) + "\\n")
 const reply = ${JSON.stringify(sealingReply)}
+process.stdout.write(boxReadyLine + "\\n")
 line({ type: "system", subtype: "init", session_id: "fixture-session", model: launch.model })
 line({ type: "assistant", message: { content: [{ type: "text", text: "prompt: " + launch.prompt }] } })
 mkdirSync(native + "/workspace", { recursive: true })

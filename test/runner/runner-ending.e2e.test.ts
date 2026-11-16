@@ -3,12 +3,14 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { Effect } from "effect"
+import { boxReadyLine } from "../../deploy/sandbox/box-ready.mjs"
 import { AgentRunIngress, agentRunIdentifiers } from "../../src/kernel/agent-run-ingress"
 import { AgentRunStore } from "../../src/kernel/agent-run-store"
 import { controlClient } from "../../src/sandbox/capability-control"
 import { client } from "../capability-gateway/gateway-process"
 import { fixtureExecutable } from "../helpers/fixture-executable.mjs"
 import {
+  boxReadyModule,
   daemonRuntime,
   githubStub,
   gitRemote,
@@ -68,6 +70,7 @@ async function writeEndingHarness(directory: string, mode: "stream" | "quiet" | 
     path,
     `import { mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { request } from "node:http"
+import { boxReadyLine } from ${JSON.stringify(boxReadyModule)}
 const launch = JSON.parse(readFileSync(0, "utf8"))
 const directory = process.env.WORKFLOWD_RUN_DIRECTORY
 const record = (name, value) => writeFileSync(directory + "/fixture-" + name, String(value))
@@ -77,6 +80,7 @@ process.on("SIGTERM", () => {
   process.exit(143)
 })
 const line = (value) => process.stdout.write(JSON.stringify(value) + "\\n")
+process.stdout.write(boxReadyLine + "\\n")
 line({ type: "system", subtype: "init", session_id: "fixture-session", model: launch.model })
 // The first model output, which the dispatch waits for.
 line({ type: "assistant", message: { content: [{ type: "text", text: "Working." }] } })
@@ -376,9 +380,12 @@ test("a run that changed nothing ends at once with its final message, end reason
 const scripted = (reading: () => Promise<void>) => {
   const revokes: Array<string> = []
   const lines = [
-    { type: "system", subtype: "init", session_id: "fixture-session", model: runnerModel },
-    { type: "assistant", message: { content: [{ type: "text", text: "Working." }] } },
-  ].map((line) => JSON.stringify(line))
+    boxReadyLine,
+    ...[
+      { type: "system", subtype: "init", session_id: "fixture-session", model: runnerModel },
+      { type: "assistant", message: { content: [{ type: "text", text: "Working." }] } },
+    ].map((line) => JSON.stringify(line)),
+  ]
   const control: RunnerControl = {
     authorize: () => Effect.succeed(undefined),
     revoke: (id) => Effect.sync(() => void revokes.push(id)).pipe(Effect.as(null)),
@@ -419,7 +426,7 @@ async function scriptedEnd(
     remote.bare,
     runnerPolicy(image),
     Effect.succeed(gateway.control),
-    lostAfterMs,
+    lostAfterMs === undefined ? {} : { lostAfterMs },
   )
   daemon.runtime = runtime
   try {

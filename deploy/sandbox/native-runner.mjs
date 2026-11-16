@@ -1,12 +1,13 @@
 // The harness of a runner run, which the run client starts with the launch on its standard input.
-// Its standard output is Claude Code's stream-json lines and nothing else: the run client posts
-// each of them as an event. It leaves the run's sealed result in <run directory>/result.
+// Its standard output is the box's ready line, then Claude Code's stream-json lines and nothing
+// else: the run client posts each of them as an event. It leaves the run's sealed result in <run directory>/result.
 import { randomBytes } from "node:crypto"
 import { appendFileSync } from "node:fs"
 import { mkdir } from "node:fs/promises"
 import { dirname, join } from "node:path"
 import { createInterface } from "node:readline"
 import { fileURLToPath, pathToFileURL } from "node:url"
+import { boxReadyLine } from "./box-ready.mjs"
 import { boxNetwork, boxPort, boxSentinel, command, docker, makeBox } from "./native-docker.mjs"
 import { sealRun } from "./native-seal.mjs"
 
@@ -157,6 +158,8 @@ async function runBox(directory, launch) {
       // The source objects for the seal, copied before the agent runs: no agent wrote them.
       await box.copyOut("source copy", "/workdir/.git", join(native, "source.git"))
     })
+    // The box runs with the source: the daemon's window for the first model output starts here.
+    process.stdout.write(`${boxReadyLine}\n`)
     const result = await step("claude", () => runClaude(box, launch, log))
     await step("stop", () => box.stop())
     await step("export", () => box.exportWorkspace(join(native, "capture.tar")))

@@ -50,6 +50,12 @@ export type CliRunProcess = {
   readonly executionId: string
   readonly launch?: CliLaunch
   readonly events: AsyncIterable<CliEvent>
+  /**
+   * Done once the process can give its first model output, when that comes after its spawn: a
+   * runner run's box, once its image is pulled, it runs and the source is checked out. The
+   * window for the first model output starts then; at the spawn when absent.
+   */
+  readonly ready?: Effect.Effect<void>
   readonly exited: Effect.Effect<CliExit, WorkspaceError>
   readonly cancel: Effect.Effect<void, WorkspaceError>
 }

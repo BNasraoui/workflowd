@@ -4,6 +4,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { Effect } from "effect"
+import { boxReadyLine } from "../../deploy/sandbox/box-ready.mjs"
 import { sealRun } from "../../deploy/sandbox/native-seal.mjs"
 import type { GatewayEnd } from "../../src/capability-control/protocol"
 import { AgentRunIngress, agentRunIdentifiers } from "../../src/kernel/agent-run-ingress"
@@ -37,10 +38,13 @@ const runId = agentRunIdentifiers({
 }).runId
 const branch = `refs/heads/agent-run/${runId.replace(/^agent-run-/, "").slice(0, 16)}`
 const lines = [
-  { type: "system", subtype: "init", session_id: "fixture-session", model: runnerModel },
-  { type: "assistant", message: { content: [{ type: "text", text: "Done." }] } },
-  { type: "result", subtype: "success", is_error: false, result: "Done." },
-].map((line) => JSON.stringify(line))
+  boxReadyLine,
+  ...[
+    { type: "system", subtype: "init", session_id: "fixture-session", model: runnerModel },
+    { type: "assistant", message: { content: [{ type: "text", text: "Done." }] } },
+    { type: "result", subtype: "success", is_error: false, result: "Done." },
+  ].map((line) => JSON.stringify(line)),
+]
 
 type Remote = Awaited<ReturnType<typeof gitRemote>>
 type Sealed = { readonly manifest: Record<string, unknown>; readonly bundle: Buffer }
@@ -151,11 +155,14 @@ const bodyOf = (sealed: Sealed) =>
 const sha256 = (bytes: Buffer) => createHash("sha256").update(bytes).digest("hex")
 
 /**
- * The gateway as a script: the run's lease has its session at once; its events are `lines` in one
- * batch, then its result `body` (none when undefined) or its own end `ended`. `parts` cuts the
- * stored result as `readResult` answers it, the whole body from its offset unless named.
+ * The gateway as a script: the run's lease has its session at once; its events are `first` (`lines`
+ * unless named) in one batch, `readyAfterMs` after the first read (at once unless named), then its
+ * result `body` (none when undefined) or its own end `ended`. `parts` cuts the stored result as
+ * `readResult` answers it, the whole body from its offset unless named.
  */
 const scripted = (script: {
+  readonly first?: ReadonlyArray<string>
+  readonly readyAfterMs?: number
   readonly body?: Buffer
   readonly ended?: GatewayEnd
   /** What the gateway answers after the first batch: its fault, or nothing yet, ever. */
@@ -163,34 +170,45 @@ const scripted = (script: {
   /** Runs at each read after the first batch. */
   readonly reading?: () => void
   readonly parts?: (offset: number) => { size: number; sha256: string; part: string }
-}): RunnerControl => ({
-  authorize: () => Effect.succeed(undefined),
-  revoke: () => Effect.succeed(null),
-  startRevoke: () => Effect.void,
-  sessionBound: () => Effect.succeed(true),
-  readEvents: (_runId, after) => {
-    if (after === 0)
-      return Effect.succeed({ batches: [{ sequence: 1, lines }], result: false, ended: null })
-    script.reading?.()
-    if (script.later === "unavailable")
-      return Effect.fail(new CapabilityGatewayUnavailable({ reason: "fixture fault" }))
-    return Effect.succeed({
-      batches: [],
-      result: script.later !== "nothing" && script.body !== undefined,
-      ended: script.later === "nothing" ? null : (script.ended ?? null),
-    })
-  },
-  readResult: (_runId, offset) =>
-    Effect.sync(() => {
-      if (script.parts !== undefined) return script.parts(offset)
-      const body = script.body ?? Buffer.alloc(0)
-      return {
-        size: body.length,
-        sha256: sha256(body),
-        part: body.subarray(offset).toString("base64"),
-      }
-    }),
-})
+}): RunnerControl => {
+  let firstRead: number | undefined
+  return {
+    authorize: () => Effect.succeed(undefined),
+    revoke: () => Effect.succeed(null),
+    startRevoke: () => Effect.void,
+    sessionBound: () => Effect.succeed(true),
+    readEvents: (_runId, after) => {
+      firstRead ??= Date.now()
+      if (after === 0)
+        return Effect.succeed({
+          batches:
+            Date.now() - firstRead >= (script.readyAfterMs ?? 0)
+              ? [{ sequence: 1, lines: script.first ?? lines }]
+              : [],
+          result: false,
+          ended: null,
+        })
+      script.reading?.()
+      if (script.later === "unavailable")
+        return Effect.fail(new CapabilityGatewayUnavailable({ reason: "fixture fault" }))
+      return Effect.succeed({
+        batches: [],
+        result: script.later !== "nothing" && script.body !== undefined,
+        ended: script.later === "nothing" ? null : (script.ended ?? null),
+      })
+    },
+    readResult: (_runId, offset) =>
+      Effect.sync(() => {
+        if (script.parts !== undefined) return script.parts(offset)
+        const body = script.body ?? Buffer.alloc(0)
+        return {
+          size: body.length,
+          sha256: sha256(body),
+          part: body.subarray(offset).toString("base64"),
+        }
+      }),
+  }
+}
 
 /**
  * The daemon with the gateway that `gateway` scripts, given the fixture remote: its runtime and
@@ -204,6 +222,8 @@ async function withDispatch<A>(
     readonly prepare?: (remote: Remote) => void
     readonly workflows?: boolean
     readonly pushTo?: string
+    /** The window for the run's first model output, 120 s unless named. */
+    readonly verifyTimeoutMs?: number
   } = {},
 ) {
   const root = await mkdtemp(join(tmpdir(), "runner-dispatch-"))
@@ -216,6 +236,7 @@ async function withDispatch<A>(
     options.pushTo ?? remote.bare,
     runnerPolicy(image),
     Effect.succeed(await gateway(remote, root)),
+    options.verifyTimeoutMs === undefined ? {} : { verifyTimeoutMs: options.verifyTimeoutMs },
   )
   try {
     return await use(runtime, remote)
@@ -480,6 +501,38 @@ for (const [name, parts, reason] of [
     })
     expect(end.branch).toBeNull()
   }, 30000)
+
+test("the window for a run's first model output starts at its box's ready line: a box ready after a window's length still gives its first output in time", async () => {
+  // The image pull, the box's start and the clone take 3 s; the window is 2 s.
+  const end = await dispatch(
+    async (remote, root) =>
+      scripted({ readyAfterMs: 3000, body: bodyOf(await seal(root, remote)) }),
+    { verifyTimeoutMs: 2000 },
+  )
+  expect({ state: end.run.state, diagnostic: end.run.diagnostic }).toEqual({
+    state: "completed",
+    diagnostic: null,
+  })
+}, 30000)
+
+test("a run whose first event is not its box's ready line is refused and ends runner_start, and nothing is pushed", async () => {
+  const end = await withDispatch(
+    async () => scripted({ first: lines.slice(1), later: "nothing" }),
+    async (runtime, remote) => {
+      const refusal = await register(runtime)
+      expect(refusal._tag).toBe("Failure")
+      expect(refusalText(refusal)).toContain(
+        "runner_start: the run's first event is not its box's ready line",
+      )
+      return ended(runtime, remote, runId)
+    },
+  )
+  expect({ state: end.run.state, diagnostic: end.run.diagnostic }).toEqual({
+    state: "operator_required",
+    diagnostic: "runner_start: the run's first event is not its box's ready line",
+  })
+  expect(end.branch).toBeNull()
+})
 
 test("a runner run whose job's workflows the repository lacks is refused at its start", async () => {
   const refusal = await withDispatch(

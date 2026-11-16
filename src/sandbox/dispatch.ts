@@ -82,6 +82,8 @@ export const SandboxDispatch = Context.Service<SandboxDispatchPort>("workflowd/S
 
 /** A runner run's time from its start: the deadline of its lease (`store.request`). */
 const runnerDeadlineMs = 285 * 60000
+/** The states of a runner run that has not ended. */
+const activeRunStates = new Set(["accepted", "spawning", "spawned", "verified"])
 const workspaceFailure = (detail: string) =>
   new WorkspaceError({ operation: "runner", cause: new Error(`Runner run failed: ${detail}`) })
 const failure = (cause?: unknown) =>
@@ -579,6 +581,7 @@ export const makeSandboxDispatch = (options: {
           return {
             executionId: run.runId,
             events: Stream.toAsyncIterable(events),
+            ready: Deferred.await(handle.boxReady),
             exited: Effect.raceFirst(
               Deferred.await(eventsEnded).pipe(
                 Effect.flatMap((ended) =>
@@ -633,6 +636,10 @@ export const makeSandboxDispatch = (options: {
         runnerExecutor?.release(run.runId)
         if ((yield* store.read(run.runId)) !== null)
           yield* leases.release(run.runId).pipe(Effect.ignore)
+        // A run ends once: a second settlement of a run that ended (the dispatch settles a start
+        // that it refused, then its error) keeps the first end.
+        const current = yield* runs.read(run.runId)
+        if (current === null || !activeRunStates.has(current.state)) return
         const now = new Date()
         if (end?.kind === "cancelled")
           yield* runs.cancel({ runId: run.runId, now, diagnostic: "cancelled" })
