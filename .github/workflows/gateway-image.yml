@@ -6,6 +6,9 @@ on:
       changed:
         description: Whether the image builds, as for a push or a pull request that changes an input
         value: ${{ jobs.inputs.outputs.changed }}
+      archive:
+        description: The SHA-256 of the compressed archive that the build step wrote
+        value: ${{ jobs.build.outputs.archive }}
 
 permissions: {}
 
@@ -63,6 +66,7 @@ jobs:
     outputs:
       digest: ${{ steps.build.outputs.digest }}
       parts: ${{ steps.build.outputs.parts }}
+      archive: ${{ steps.build.outputs.archive }}
     steps:
       - name: Anonymous checkout
         env:
@@ -89,6 +93,8 @@ jobs:
           curl --proto '=https' --proto-redir '=https' -fsSL https://raw.githubusercontent.com/cachix/install-nix-action/13d8dd58da0234aa297dedd986986ccb8e7f3e24/install-nix.sh -o "$installer"
           echo "836671507d9b4ea84252f968bd0622c5c2fa72f5deea93f5764f1c60821062f6  $installer" | sha256sum -c -
           env -u GITHUB_TOKEN -u INPUT_GITHUB_ACCESS_TOKEN bash "$installer"
+      # The archive that the publish job pushes is the one this step writes, before any test code
+      # runs; its digest is this step's output, which no later step can change.
       - name: Build locked image
         id: build
         run: |
@@ -103,20 +109,31 @@ jobs:
             path=$(nix build ".#gateway-$part" --no-update-lock-file --no-link --print-out-paths)
             parts+="$part=$(nix hash path "$path") "
           done
+          gzip -n gateway-image.tar
+          archive=$(sha256sum gateway-image.tar.gz | cut -d' ' -f1)
           {
             echo "digest=$digest"
             echo "parts=$parts"
+            echo "archive=$archive"
           } >> "$GITHUB_OUTPUT"
           {
             printf 'Build: %s seconds\n' "$seconds"
-            printf 'Archive sha256: %s\n' "$digest"
+            printf 'Image sha256: %s\n' "$digest"
             printf 'Parts: %s\n' "$parts"
+            printf 'Archive sha256: %s\n' "$archive"
           } | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Save the built image for publication
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: gateway-image
+          path: gateway-image.tar.gz
+          compression-level: 0
+          retention-days: 1
       - name: Load image and record its size
         run: |
           set -euo pipefail
-          docker load -i gateway-image.tar
-          gzip -n gateway-image.tar
+          docker load -i gateway-image.tar.gz
           {
             printf 'Image id: %s\n' "$(docker image inspect --format '{{.Id}}' workflowd-gateway:local)"
             printf 'Uncompressed image: %s bytes\n' "$(docker image inspect --format '{{.Size}}' workflowd-gateway:local)"
@@ -137,14 +154,6 @@ jobs:
       - name: Run the image against the session fixtures
         timeout-minutes: 15
         run: bun test/gateway-image/drive.ts
-      - name: Save tested image for publication
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: gateway-image
-          path: gateway-image.tar.gz
-          compression-level: 0
-          retention-days: 1
 
   rebuild:
     name: Gateway image second build
