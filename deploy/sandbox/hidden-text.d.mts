@@ -5,3 +5,4 @@ export function withoutPresentation(value: string): string
 export const finalMessageBytes: number
 export function isFinalMessage(value: string): boolean
 export function finalMessageText(text: string): string
+export function visibleText(text: string, limit: number): string

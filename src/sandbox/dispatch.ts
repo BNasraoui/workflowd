@@ -1,4 +1,5 @@
 import { sandboxDiagnostic, retainSandboxFailure } from "./diagnostics"
+import { visibleText } from "../../deploy/sandbox/hidden-text.mjs"
 import { Context, Deferred, Effect, Schedule, Schema, Stream } from "effect"
 import type { AgentGitConfig } from "../agent-git/config"
 import type { GatewayEnd } from "../capability-control/protocol"
@@ -86,6 +87,8 @@ const runnerDeadlineMs = 285 * 60000
 const activeRunStates = new Set(["accepted", "spawning", "spawned", "verified"])
 /** The time from a runner run's lease to the session of its job, after which its start fails. */
 const runnerSessionWaitMs = 30 * 60000
+/** The most code points of a runner run's diagnostic that reach its caller. */
+const runnerTextCharacters = 1000
 const workspaceFailure = (detail: string) =>
   new WorkspaceError({ operation: "runner", cause: new Error(`Runner run failed: ${detail}`) })
 const failure = (cause?: unknown) =>
@@ -601,7 +604,7 @@ export const makeSandboxDispatch = (options: {
                 ),
               ),
               Deferred.await(halted).pipe(
-                Effect.as({ exitCode: 1, stderr: "the run's events stalled" }),
+                Effect.andThen(runnerExit(run.runId, "runner_stalled: the run's events stalled")),
               ),
             ),
             cancel: runnerExecutor.stop(handle).pipe(
@@ -631,8 +634,12 @@ export const makeSandboxDispatch = (options: {
     /**
      * Settles a runner run: its lease is released (the gateway's run revoked, the lease ref
      * removed), then the run ends as a host run does, with the gateway's own end when there is one.
-     * Only a run whose sealed result was checked completes, with that result's final message; a
-     * run that ends otherwise has no final message, as its event lines are the agent's own.
+     * The end is what the run's executor recorded (`runnerEnds`): its stop, its checked sealed
+     * result, or the cause of its end (the deadline, the gateway, the Actions run, the lost runner,
+     * the check). An event line, which the agent can write, decides neither the end nor its text:
+     * a run whose sealed result was checked completes with that result's final message, whatever
+     * its events said; a run that ends otherwise has no final message. Each diagnostic reaches the
+     * caller without control or invisible code points and at most `runnerTextCharacters` long.
      */
     const finishRunner = (
       run: AgentRunRecord,
@@ -651,7 +658,7 @@ export const makeSandboxDispatch = (options: {
         const now = new Date()
         if (end?.kind === "cancelled")
           yield* runs.cancel({ runId: run.runId, now, diagnostic: "cancelled" })
-        else if (terminal.state === "completed" && end?.kind === "sealed")
+        else if (end?.kind === "sealed")
           yield* runs.complete({
             runId: run.runId,
             now,
@@ -662,7 +669,12 @@ export const makeSandboxDispatch = (options: {
           yield* runs.operatorRequired({
             runId: run.runId,
             now,
-            diagnostic: end?.kind === "ended" ? end.diagnostic : terminal.diagnostic,
+            // With no end of the executor, the settlement is the daemon's own (a restart, a
+            // start that failed before the executor held the run).
+            diagnostic: visibleText(
+              end?.kind === "ended" ? end.diagnostic : terminal.diagnostic,
+              runnerTextCharacters,
+            ),
             finalMessage: null,
             ended: end?.kind === "ended" ? end.ended : null,
           })

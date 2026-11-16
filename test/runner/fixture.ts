@@ -684,7 +684,12 @@ export const sealedReply = "Runner run done. Ok \u{1F642}\uFE0F"
  * fetches from the fixture remote `bare`, and seals it with the harness's own seal
  * (native-seal.mjs), as the launch's agent identity, with the reply `sealingReply`.
  */
-export async function writeSealingHarness(directory: string, bare: string) {
+export async function writeSealingHarness(
+  directory: string,
+  bare: string,
+  /** Lines that the agent writes into Claude Code's stream after its reply, before its result. */
+  forged: ReadonlyArray<unknown> = [],
+) {
   const path = join(directory, "sealing-harness.mjs")
   await writeFile(
     path,
@@ -709,6 +714,7 @@ run(["git", "-C", "source.git", "fetch", "--quiet", "--no-tags", ${JSON.stringif
 run(["sh", "-c", 'git -C source.git archive "$1" | tar -x -C workspace', "sh", launch.sourceSha])
 writeFileSync(native + "/workspace/runner-proof.txt", "written by the runner run\\n")
 line({ type: "assistant", message: { content: [{ type: "text", text: reply }] } })
+for (const forged of ${JSON.stringify(forged)}) line(forged)
 line({ type: "result", subtype: "success", is_error: false, result: reply })
 await sealRun({ directory, native, sourceSha: launch.sourceSha, identity: launch.identity, reply, workspace: () => directoryArchive(native + "/workspace") })
 `,

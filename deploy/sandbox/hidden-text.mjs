@@ -87,3 +87,18 @@ export const finalMessageText = (text) => {
   }
   return kept
 }
+
+/**
+ * `text` as a reader of a diagnostic may see it: without each control and invisible code point,
+ * each tested alone, and cut at `limit` code points, with `...` after a cut.
+ */
+export const visibleText = (text, limit) => {
+  let kept = ""
+  let count = 0
+  for (const character of text.toWellFormed()) {
+    if (holdsHidden(character)) continue
+    if (++count > limit) return `${kept}...`
+    kept += character
+  }
+  return kept
+}
