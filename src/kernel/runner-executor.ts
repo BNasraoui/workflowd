@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto"
 import { Data, Deferred, Effect, Option, Stream } from "effect"
 import { boxReadyLine } from "../../deploy/sandbox/box-ready.mjs"
+import { parseRunFailure } from "../../deploy/sandbox/run-failure.mjs"
 import type { EventBatch, GatewayEnd } from "../capability-control/protocol"
 import { parseClaudeDispatchEvent } from "./claude-dispatch"
 import type { CliEvent } from "./cli-process-contract"
@@ -17,7 +18,8 @@ import { decodeSealedResult, type SealedResult, type SealedResultRefused } from 
  * Why a runner run ended without a result that the daemon can check. The ends of a live run are
  * `cancelled` (its stop), `runner_deadline`, `runner_lost` (no post for `lostAfterMs` while its
  * Actions run goes on or cannot be read), `runner_cancelled` and `runner_failed` (its Actions run
- * ended with no result, by its conclusion), `runner_start` (its first line is not its box's ready
+ * ended with no result, by its conclusion, or its run client posted the cause of its failure),
+ * `runner_start` (its first line is not its box's ready
  * line), and `gateway_ended`.
  */
 export type RunnerFailure =
@@ -77,6 +79,8 @@ export type RunnerHandle = {
   jobReadAt: number
   /** Done once the run's first event line, the line of its ready box, is read. */
   readonly boxReady: Deferred.Deferred<void>
+  /** The cause of the run's failure, once its run client posted it (run-failure.mjs). */
+  failure: { readonly cause: string; readonly detail: string } | null
 }
 
 /** The text of the gateway's end of a run, with the counts that it used. */
@@ -169,6 +173,7 @@ export const makeRunnerExecutor = (options: {
               lastPost: started,
               jobReadAt: started,
               boxReady: Deferred.makeUnsafe<void>(),
+              failure: null,
             }
             handles.set(launch.runId, handle)
             return handle
@@ -202,6 +207,11 @@ export const makeRunnerExecutor = (options: {
     Stream.paginate(0, (after: number) =>
       Effect.gen(function* () {
         if (handle.stopping) return yield* ending("cancelled", "the run was stopped")
+        if (handle.failure !== null)
+          return yield* ending(
+            "runner_failed",
+            `the run's job failed at ${handle.failure.cause}${handle.failure.detail === "" ? "" : `: ${handle.failure.detail}`}`,
+          )
         const read = yield* options.gateway.readEvents(handle.runId, after).pipe(
           Effect.mapError(gatewayUnavailable),
           // A stop during the read revokes the run, so the read may fail: the stop still wins.
@@ -213,7 +223,11 @@ export const makeRunnerExecutor = (options: {
         const last = read.batches.at(-1)?.sequence ?? after
         if (read.batches.length > 0) {
           handle.lastPost = Date.now()
-          const lines = read.batches.flatMap((batch) => batch.lines)
+          const all = read.batches.flatMap((batch) => batch.lines)
+          // The run client's failure line, which the agent cannot write, ends the run at the
+          // next read, after the lines before it; it is no event of the run.
+          handle.failure = all.map(parseRunFailure).find((failure) => failure !== undefined) ?? null
+          const lines = all.filter((line) => parseRunFailure(line) === undefined)
           if (!Deferred.isDoneUnsafe(handle.boxReady) && lines.length > 0) {
             if (lines[0] !== boxReadyLine)
               return yield* ending(

@@ -56,7 +56,14 @@ export const workspaceArchiveModule = resolve("test/helpers/workspace-archive.mj
 export async function writeHarness(
   directory: string,
   result: { readonly manifest: string; readonly bundle: Uint8Array } | null,
-  options: { readonly extraLines?: number; readonly exitCode?: number } = {},
+  options: {
+    readonly extraLines?: number
+    readonly exitCode?: number
+    /** The cause that the harness leaves in the run directory, as the box's harness does when it fails. */
+    readonly failure?: { readonly cause: string; readonly detail: string }
+    /** A line of the agent, written into the stream, that starts as the run client's failure line. */
+    readonly forgedFailure?: string
+  } = {},
 ) {
   const path = join(directory, "harness.mjs")
   if (result !== null) {
@@ -66,7 +73,7 @@ export async function writeHarness(
   }
   await writeFile(
     path,
-    `import { copyFileSync, readFileSync } from "node:fs"
+    `import { copyFileSync, readFileSync, writeFileSync } from "node:fs"
 import { boxReadyLine } from ${JSON.stringify(boxReadyModule)}
 const launch = JSON.parse(readFileSync(0, "utf8"))
 const directory = ${JSON.stringify(directory)}
@@ -76,7 +83,9 @@ line({ type: "system", subtype: "init", session_id: "fixture-session", model: la
 for (let index = 0; index < ${options.extraLines ?? 0}; index++)
   line({ type: "assistant", message: { content: [{ type: "text", text: "x".repeat(1000) }] } })
 line({ type: "assistant", message: { content: [{ type: "text", text: "prompt: " + launch.prompt + " at " + launch.sourceSha }] } })
+${options.forgedFailure === undefined ? "" : `process.stdout.write(${JSON.stringify(options.forgedFailure)} + "\\n")`}
 line({ type: "result", subtype: "success", is_error: false, result: "Done for " + launch.sourceSha })
+${options.failure === undefined ? "" : `writeFileSync(directory + "/harness-failure.json", ${JSON.stringify(JSON.stringify(options.failure))})`}
 ${
   result === null
     ? ""

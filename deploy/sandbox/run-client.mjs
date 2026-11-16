@@ -8,6 +8,7 @@ import {
   maxResultBundleBytes,
   maxResultManifestBytes,
 } from "./capability-limits.mjs"
+import { runFailureLine, runFailurePrefix } from "./run-failure.mjs"
 
 /**
  * The run client of a runner job. It holds the relay in its own process, so the run token and the
@@ -168,11 +169,26 @@ export async function postResult(relay, directory) {
 }
 
 /**
+ * The cause that a failed harness left in `directory`/harness-failure.json, which the box cannot
+ * write: its failed step and a detail. A harness that left none names no step (`harness`).
+ */
+async function harnessFailure(directory) {
+  try {
+    const failure = JSON.parse(await resultFile(`${directory}/harness-failure.json`, 16384))
+    return { cause: String(failure?.cause), detail: failure?.detail }
+  } catch {
+    return { cause: "harness", detail: "" }
+  }
+}
+
+/**
  * Runs the harness `command` with the launch on its standard input. Each line of its standard
- * output is an event line; it leaves its sealed result below `directory`/result. Resolves to the
- * harness's exit code once every line it wrote is posted. When the gateway refuses a batch (the
- * run's stop revoked it), the harness gets SIGTERM, removes its box and ends; one that has not
- * ended after `stopGraceMs` is killed. The run then fails as stopped.
+ * output is an event line, but a line that starts as a failure line, which the run client alone
+ * writes; it leaves its sealed result below `directory`/result. Resolves, once every line it wrote
+ * is posted, to its exit code and `report`, which posts the run's one failure line (run-failure.mjs)
+ * after them: a harness that failed reports the cause it left. When the gateway refuses a batch
+ * (the run's stop revoked it), the harness gets SIGTERM, removes its box and ends; one that has
+ * not ended after `stopGraceMs` is killed. The run then fails as stopped.
  */
 export async function runHarness(relay, directory, command, launch) {
   let stopped = false
@@ -198,11 +214,18 @@ export async function runHarness(relay, directory, command, launch) {
   }, 2000)
   try {
     for await (const line of createInterface({ input: child.stdout, crlfDelay: Infinity }))
-      if (line.length > 0) poster.add(line)
+      if (line.length > 0 && !line.startsWith(runFailurePrefix)) poster.add(line)
     const code = await exited
     if (stopped) throw new Error("run stopped")
-    await poster.flush()
-    return code
+    const report = async (cause, detail) => {
+      poster.add(runFailureLine(cause, detail))
+      await poster.flush()
+    }
+    if (code !== 0) {
+      const failure = await harnessFailure(directory)
+      await report(failure.cause, failure.detail)
+    } else await poster.flush()
+    return { code, report }
   } finally {
     clearInterval(timer)
     clearTimeout(killer)
@@ -217,9 +240,12 @@ export async function runJob(config, directory, command) {
     process.stdout.write("ready\n")
     const jobImage = (await readFile(`${directory}/agent-image`, "utf8")).trim()
     const launch = await readLaunch(relay, jobImage)
-    const code = await runHarness(relay, directory, command, launch)
+    const { code, report } = await runHarness(relay, directory, command, launch)
     if (code !== 0) throw new Error("harness failed")
-    await postResult(relay, directory)
+    await postResult(relay, directory).catch(async (error) => {
+      await report("result", "the gateway refused the run's result").catch(() => undefined)
+      throw error
+    })
     // The job's hold step reads this end: the run's one result is posted.
     await writeFile(`${directory}/relay-ended`, "result\n", { mode: 0o600 })
   } finally {

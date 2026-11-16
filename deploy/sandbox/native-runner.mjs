@@ -2,7 +2,7 @@
 // Its standard output is the box's ready line, then Claude Code's stream-json lines and nothing
 // else: the run client posts each of them as an event. It leaves the run's sealed result in <run directory>/result.
 import { randomBytes } from "node:crypto"
-import { appendFileSync } from "node:fs"
+import { appendFileSync, writeFileSync } from "node:fs"
 import { mkdir } from "node:fs/promises"
 import { dirname, join } from "node:path"
 import { createInterface } from "node:readline"
@@ -16,6 +16,8 @@ import { resultRules } from "./result-rules.mjs"
 const tooling = dirname(fileURLToPath(import.meta.url))
 /** What the run's stop (SIGTERM from the run client) does: the box, once made, is removed. */
 let onStop = () => process.exit(1)
+/** The first step of the run that failed, and its cause. */
+let failure
 
 /** The launch on standard input: at most 64 KiB, with the keys that the run client checked. */
 async function readLaunch() {
@@ -122,7 +124,10 @@ async function runBox(directory, launch) {
     try {
       return await operation()
     } catch (error) {
-      log(`failed ${name}: ${error instanceof Error ? error.message : "unknown"}`)
+      const detail = error instanceof Error ? error.message : "unknown"
+      log(`failed ${name}: ${detail}`)
+      // The run client posts this cause to the daemon; the box cannot write the run directory.
+      failure ??= { cause: name, detail }
       throw error
     }
   }
@@ -192,9 +197,17 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   try {
     const directory = process.env.WORKFLOWD_RUN_DIRECTORY
     if (directory === undefined || process.argv.length !== 2) throw new Error("harness refused")
-    await runBox(directory, await readLaunch())
+    const launch = await readLaunch().catch((error) => {
+      failure = { cause: "launch", detail: error instanceof Error ? error.message : "unknown" }
+      throw error
+    })
+    await runBox(directory, launch)
   } catch {
-    // The run client reads only the exit code; the cause is in the run directory's harness.log.
+    // The run client posts the cause of the failed step to the daemon; the whole record is in the
+    // run directory's harness.log.
+    const directory = process.env.WORKFLOWD_RUN_DIRECTORY
+    if (directory !== undefined)
+      writeFileSync(`${directory}/harness-failure.json`, JSON.stringify(failure ?? { cause: "harness", detail: "" }), { mode: 0o600 })
     process.exitCode = 1
   }
 }
