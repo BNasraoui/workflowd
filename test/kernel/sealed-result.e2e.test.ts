@@ -32,7 +32,6 @@ import {
   githubRemote,
   decodeSealedResult,
   makeSealedResultGit,
-  printable,
   pushSealedResult,
   SealedResultFault,
   SealedResultGit,
@@ -491,16 +490,18 @@ test("a key of result.json is shown in its refusal as printable ASCII of a bound
   expect(shownKey.detail).toBe('"\\u{9b}2J\\u{202e}\\\\\\""')
 })
 
-test("printable writes each code point outside printable ASCII as an escape and bounds the length", () => {
-  for (const value of hostileValues) {
-    const shown = printable(value, 120)
-    expect(shown).toMatch(printableAscii)
-    expect(shown.length).toBeLessThanOrEqual(120)
-  }
-  expect(printable("a\u0000\u{1f600}\ud800z", 120)).toBe("a\\u{0}\\u{1f600}\\u{d800}z")
-  expect(printable("x".repeat(200), 10)).toBe("xxxxxxx...")
+test("a refusal writes each code point of a value outside printable ASCII as an escape and cuts the value before an escape", async () => {
+  const shownKey = async (key: string) =>
+    (
+      await Effect.runPromise(
+        Effect.flip(decodeSealedResult(manifest("a".repeat(40), { [key]: 1 }), new Uint8Array())),
+      )
+    ).detail
+  expect(await shownKey("a\u0000\u{1f600}\ud800z")).toBe('"a\\u{0}\\u{1f600}\\u{d800}z"')
+  // The value inside the quotes is at most 120 characters, the last three `...`.
+  expect(await shownKey("x".repeat(200))).toBe(`"${"x".repeat(117)}..."`)
   // An escape is not cut: the text ends before it.
-  expect(printable("xxxxxx\u009b", 10)).toBe("xxxxxx...")
+  expect(await shownKey(`${"x".repeat(116)}\u009b`)).toBe(`"${"x".repeat(116)}..."`)
 })
 
 test(

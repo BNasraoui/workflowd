@@ -157,7 +157,7 @@ const refused = (check: SealedResultCheck, detail = "") =>
  * `\` and `"`, is an escape, so no control, format or bidi character of the run
  * reaches a reader. A longer text ends in `...`.
  */
-export const printable = (value: string, limit: number) => {
+const printable = (value: string, limit: number) => {
   let text = ""
   for (const character of value) {
     const code = character.codePointAt(0)!
