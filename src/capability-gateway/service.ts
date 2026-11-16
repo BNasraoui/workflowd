@@ -25,6 +25,7 @@ import {
 import { githubJobKeys, verifyJobProof } from "../sandbox/bootstrap"
 import { runLifetime } from "../store/run-lifetime"
 import { ownedPromise } from "./owned"
+import { makeRunRoutes, runRoutePrefix } from "./run-routes"
 import { gitReadRequest, type GitUpstream } from "./git"
 import type { ControlTarget } from "./control"
 import {
@@ -173,6 +174,7 @@ export const makeCapabilityGateway = (
   Effect.gen(function* () {
     const streamIdleMs = config.streamIdleMs ?? defaultStreamIdleMs
     const store = yield* makeCapabilityStore
+    const runRoute = (yield* makeRunRoutes)(store)
     // A reservation that an earlier process left open is charged in full before any call starts.
     yield* store.chargeOpenReservations()
     const sql = yield* SqlClient.SqlClient
@@ -779,6 +781,8 @@ export const makeCapabilityGateway = (
         const { session, binding, grant } = checked.success
         if (grant.providerId !== config.providerId) return denied()
         if (target === "/capabilities/v1/renew") return yield* renewRoute(request, binding, digest)
+        // A runner run's own routes: outside its budget, and never a stream.
+        if (target.startsWith(runRoutePrefix)) return yield* runRoute(request, target, binding, grant)
         const prefix = `/capabilities/v1/providers/${config.providerId}`
         const isGit = config.gitRead === true && target.startsWith("/capabilities/v1/git/")
         if (!isGit && !target.startsWith(`${prefix}/`)) return denied()
@@ -843,6 +847,8 @@ export const makeCapabilityGateway = (
           Effect.asVoid,
         ),
       sessionBound: store.sessionBound,
+      readEvents: store.readEvents,
+      readResult: store.readResult,
     }
     return { sessionChallenge, session, revoke, control, handle }
   })

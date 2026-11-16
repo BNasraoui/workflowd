@@ -22,3 +22,14 @@ export const maxHeaderValueBytes = 2048
  * this long, so a larger idle limit could never take effect.
  */
 export const maxStreamIdleMs = 120000
+/**
+ * The run routes of a runner run. A batch of event lines is at most `maxEventBatchBytes` as the
+ * runner posts it. A result is one body: the 4-byte big-endian length of result.json, result.json
+ * of at most `maxResultManifestBytes`, and result.bundle of at most `maxResultBundleBytes`. The
+ * gateway reads at most `maxRunUploads` results at once.
+ */
+export const maxEventBatchBytes = 64 * 1024
+export const maxResultManifestBytes = 256 * 1024
+export const maxResultBundleBytes = 16 * 1024 * 1024
+export const maxResultBody = 4 + maxResultManifestBytes + maxResultBundleBytes
+export const maxRunUploads = 4

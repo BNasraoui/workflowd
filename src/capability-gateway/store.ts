@@ -7,8 +7,17 @@ import {
   renewalReplacements,
   renewalWindowMs,
   verifyRenewal,
+  verifyRunBody,
 } from "../../deploy/sandbox/renewal.mjs"
-import { CapabilityGrant, SessionPolicy } from "../capability-control/protocol"
+import {
+  CapabilityGrant,
+  EventBatch,
+  type GatewayEnd,
+  maxEventsAnswerBytes,
+  maxRunEventBytes,
+  resultPartBytes,
+  SessionPolicy,
+} from "../capability-control/protocol"
 import type { ReportedUsage } from "./claude"
 
 export class CapabilityRefused extends Schema.TaggedError<CapabilityRefused>()(
@@ -65,6 +74,8 @@ const SessionBinding = Schema.Struct({ ...Binding.fields, session: Schema.Int })
 const maxSessions = 8
 /** A renewal asked again replaces the successor of one token at most this many times. */
 const maxReplacements = renewalReplacements
+/** A runner run's events and result are deleted this long after its deadline. */
+const runRecordsKeptMs = 86400000
 /** A successor must outlive its predecessor by this much, so renewals near the deadline end. */
 const minimumExtensionMs = 60000
 type CapabilityBinding = typeof Binding.Type
@@ -203,7 +214,12 @@ export const makeCapabilityStore = Effect.gen(function* () {
     const { row, value } = yield* read(binding, now)
     // Only a runner's session opens a binding; the lease must still be live (read() checks it).
     return row.session > 0
-      ? { ...row.authority, session: row.session, budget: value.budget }
+      ? {
+          ...row.authority,
+          session: row.session,
+          budget: value.budget,
+          ...(value.launch === undefined ? {} : { launch: value.launch }),
+        }
       : yield* Effect.fail(new CapabilityRefused())
   })
   const authorize = Effect.fn("CapabilityStore.authorize")(function* (
@@ -286,6 +302,25 @@ export const makeCapabilityStore = Effect.gen(function* () {
     }
   })
   /**
+   * Whether the binding's session key signed `signature` over the body whose SHA-256 hex is
+   * `digest`, for run route `route`: as a renewal, a binding with no session key signs nothing.
+   */
+  const runSigned = Effect.fn("CapabilityStore.runSigned")(function* (
+    binding: CapabilityBinding,
+    route: string,
+    digest: string,
+    signature: string | null,
+  ) {
+    const keys = yield* sql<{
+      readonly session_key: string | null
+    }>`SELECT session_key FROM capability_bindings WHERE run_id=${binding.runId} AND revoked=0`
+    const key = keys[0]?.session_key
+    return (
+      typeof key === "string" &&
+      verifyRunBody(key, binding.channel, route, digest, signature ?? undefined)
+    )
+  })
+  /**
    * Renews a run token by `renewal`, as `renewable` permits, and records its attempt number as
    * the binding's highest in the same transaction. A renewal asked again for the same predecessor
    * (its answer was lost), with a higher number, replaces the successor that has not renewed
@@ -323,7 +358,10 @@ export const makeCapabilityStore = Effect.gen(function* () {
       }),
     )
   })
-  /** Deletes expired run tokens, unlinking their successors first, and expired used proofs. */
+  /**
+   * Deletes expired run tokens, unlinking their successors first, expired used proofs, and the
+   * records of runner runs a day past their deadline.
+   */
   const sweep = Effect.fn("CapabilityStore.sweep")((now: number) =>
     sql.withTransaction(
       Effect.gen(function* () {
@@ -331,6 +369,12 @@ export const makeCapabilityStore = Effect.gen(function* () {
           (SELECT digest FROM capability_tokens WHERE expires_at<=${now})`
         yield* sql`DELETE FROM capability_tokens WHERE expires_at<=${now}`
         yield* sql`DELETE FROM capability_proofs WHERE expires_at<=${now}`
+        // A runner run's records stay a day after its deadline, for the daemon to read them.
+        const kept = now - runRecordsKeptMs
+        yield* sql`DELETE FROM capability_run_events WHERE run_id IN (SELECT run_id
+          FROM capability_grants WHERE json_extract(grant_json,'$.deadline')<=${kept})`
+        yield* sql`DELETE FROM capability_run_results WHERE run_id IN (SELECT run_id
+          FROM capability_grants WHERE json_extract(grant_json,'$.deadline')<=${kept})`
       }),
     ),
   )
@@ -607,7 +651,140 @@ export const makeCapabilityStore = Effect.gen(function* () {
       }),
     ),
   )
+  /**
+   * Holds a run's event batch `sequence`: the batch after the last one held, within the run's
+   * bound of event bytes. The batch held last, sent again with the same lines (its answer was
+   * lost), changes nothing; each other batch is refused and changes nothing.
+   */
+  const appendEvents = Effect.fn("CapabilityStore.appendEvents")(function* (
+    runId: string,
+    sequence: number,
+    lines: string,
+    bytes: number,
+  ) {
+    return yield* sql.withTransaction(
+      Effect.gen(function* () {
+        const rows = yield* sql<{
+          readonly last: number
+          readonly total: number
+          readonly held: string | null
+        }>`SELECT coalesce(max(sequence),0) AS last,coalesce(sum(bytes),0) AS total,
+          (SELECT lines FROM capability_run_events WHERE run_id=${runId} AND sequence=${sequence}) AS held
+          FROM capability_run_events WHERE run_id=${runId}`
+        const row = rows[0]
+        if (row === undefined) return yield* Effect.fail(new CapabilityRefused())
+        if (sequence === row.last && row.held === lines) return
+        if (sequence !== row.last + 1 || row.total + bytes > maxRunEventBytes)
+          return yield* Effect.fail(new CapabilityRefused())
+        yield* sql`INSERT INTO capability_run_events(run_id,sequence,lines,bytes)
+          VALUES(${runId},${sequence},${lines},${bytes})`
+      }),
+    )
+  })
+  /**
+   * Holds a run's one result, the exact bytes that it posted. The same bytes again change
+   * nothing; other bytes are refused and change nothing.
+   */
+  const holdResult = Effect.fn("CapabilityStore.holdResult")(function* (
+    runId: string,
+    sha256: string,
+    body: Uint8Array,
+  ) {
+    return yield* sql.withTransaction(
+      Effect.gen(function* () {
+        const rows = yield* sql<{
+          readonly sha256: string
+        }>`SELECT sha256 FROM capability_run_results WHERE run_id=${runId}`
+        if (rows[0] !== undefined) {
+          if (rows[0].sha256 === sha256) return
+          return yield* Effect.fail(new CapabilityRefused())
+        }
+        yield* sql`INSERT INTO capability_run_results(run_id,sha256,body)
+          VALUES(${runId},${sha256},${body})`
+      }),
+    )
+  })
+  /** The grant held for `runId`, revoked or not; refused when the gateway holds none. */
+  const heldGrant = Effect.fn("CapabilityStore.heldGrant")(function* (runId: string) {
+    const rows = yield* sql<{
+      readonly grant_json: string
+    }>`SELECT grant_json FROM capability_grants WHERE run_id=${runId}`
+    if (rows[0] === undefined) return yield* Effect.fail(new CapabilityRefused())
+    return yield* Schema.decodeUnknownEffect(StoredGrant)(rows[0].grant_json)
+  })
+  /**
+   * The event batches of a runner run after `after`, whether its result is held, and the
+   * gateway's own end of the run. Refused for a run with no launch, revoked or not.
+   */
+  const readEvents = Effect.fn("CapabilityStore.readEvents")(function* (
+    runId: string,
+    after: number,
+  ) {
+    const grant = yield* heldGrant(runId)
+    if (grant.launch === undefined) return yield* Effect.fail(new CapabilityRefused())
+    const rows = yield* sql<{
+      readonly sequence: number
+      readonly lines: string
+      readonly bytes: number
+    }>`SELECT sequence,lines,bytes FROM capability_run_events
+      WHERE run_id=${runId} AND sequence>${after} ORDER BY sequence`
+    const batches: Array<EventBatch> = []
+    let bytes = 0
+    for (const row of rows) {
+      if (batches.length > 0 && bytes + row.bytes > maxEventsAnswerBytes) break
+      bytes += row.bytes
+      batches.push(
+        yield* Schema.decodeUnknownEffect(EventBatch)({
+          sequence: row.sequence,
+          lines: JSON.parse(row.lines),
+        }),
+      )
+    }
+    const result = yield* sql`SELECT 1 FROM capability_run_results WHERE run_id=${runId}`
+    const usage = yield* sql<{
+      readonly calls: number
+      readonly outputTokens: number
+      readonly spent: number
+      readonly endReason: string | null
+    }>`SELECT u.calls,u.output_tokens AS outputTokens,u.spent,g.end_reason AS endReason
+      FROM capability_usage u JOIN capability_grants g ON g.run_id=u.run_id
+      WHERE u.run_id=${runId}`
+    const used = usage[0]
+    const ended: GatewayEnd | null =
+      used === undefined
+        ? null
+        : used.endReason === twoHolders
+          ? { reason: "two holders", calls: used.calls, outputTokens: used.outputTokens }
+          : used.spent !== 0
+            ? { reason: "budget", calls: used.calls, outputTokens: used.outputTokens }
+            : null
+    return { batches, result: result.length > 0, ended }
+  })
+  /** The part at `offset` of a runner run's result; refused when none is held or out of range. */
+  const readResult = Effect.fn("CapabilityStore.readResult")(function* (
+    runId: string,
+    offset: number,
+  ) {
+    const rows = yield* sql<{
+      readonly sha256: string
+      readonly size: number
+      readonly part: Uint8Array
+    }>`SELECT sha256,length(body) AS size,substr(body,${offset + 1},${resultPartBytes}) AS part
+      FROM capability_run_results WHERE run_id=${runId}`
+    const row = rows[0]
+    if (row === undefined || offset >= row.size) return yield* Effect.fail(new CapabilityRefused())
+    return {
+      size: row.size,
+      sha256: row.sha256,
+      part: Buffer.from(row.part).toString("base64"),
+    }
+  })
   return {
+    runSigned,
+    appendEvents,
+    holdResult,
+    readEvents,
+    readResult,
     leaseChallenge,
     sessionContext,
     staleAmong,

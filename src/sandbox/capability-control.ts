@@ -102,6 +102,10 @@ export const controlClient = (socket: string) => ({
       actionsRunId,
       actionsAttempt,
     }),
+  readEvents: (runId: string, after: number) =>
+    send(socket, "readEvents", controlProtocol.readEvents, { runId, after }),
+  readResult: (runId: string, offset: number) =>
+    send(socket, "readResult", controlProtocol.readResult, { runId, offset }),
 })
 
 /** A grant as workflowd's store holds it before its budget is fixed. */

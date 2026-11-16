@@ -5,3 +5,8 @@ export const maxJtiLength: number
 export const maxHeaderBytes: number
 export const maxHeaderValueBytes: number
 export const maxStreamIdleMs: number
+export const maxEventBatchBytes: number
+export const maxResultManifestBytes: number
+export const maxResultBundleBytes: number
+export const maxResultBody: number
+export const maxRunUploads: number

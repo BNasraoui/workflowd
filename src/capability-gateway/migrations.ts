@@ -84,11 +84,32 @@ const sessionKey = Effect.gen(function* () {
     CHECK(end_reason IS NULL OR (end_reason='two holders' AND revoked=1))`
 })
 
+/**
+ * What a runner run posts on its run routes: its event batches, numbered 1, 2, 3, … with no gap,
+ * and its one result, the exact bytes that it posted. Neither is ever replaced.
+ */
+const runRecords = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient
+  yield* sql`CREATE TABLE capability_run_events (
+    run_id TEXT NOT NULL REFERENCES capability_grants(run_id),
+    sequence INTEGER NOT NULL CHECK(sequence>=1),
+    lines TEXT NOT NULL CHECK(json_valid(lines)),
+    bytes INTEGER NOT NULL CHECK(bytes>=0),
+    PRIMARY KEY(run_id,sequence)
+  ) STRICT`
+  yield* sql`CREATE TABLE capability_run_results (
+    run_id TEXT PRIMARY KEY REFERENCES capability_grants(run_id),
+    sha256 TEXT NOT NULL CHECK(length(sha256)=64 AND sha256 NOT GLOB '*[^a-f0-9]*'),
+    body BLOB NOT NULL
+  ) STRICT`
+})
+
 export const runGatewayMigrations = Migrator.make({})({
   loader: Migrator.fromRecord({
     "0001_capability_store": capabilityStore,
     "0002_run_usage": runUsage,
     "0003_session_key": sessionKey,
+    "0004_run_records": runRecords,
   }),
   table: gatewayMigrationsTable,
 })
