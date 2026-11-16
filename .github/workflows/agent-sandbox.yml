@@ -89,6 +89,15 @@ jobs:
           path: /run/workflowd-sandbox/ready.json
           if-no-files-found: error
           retention-days: 1
+      - name: Probe the gateway Service and the box
+        if: inputs.bootstrap-mode == 'private'
+        # Two named lines of fixed words and numbers: a 16 MiB body through the Service, and the
+        # box's flags and network rules on this runner. A probe that fails does not end the job.
+        timeout-minutes: 20
+        env:
+          SANDBOX_GATEWAY_URL: ${{ inputs.gateway-url }}
+          SANDBOX_AGENT_IMAGE: ${{ inputs.agent-image }}
+        run: node deploy/sandbox/trial-probe.mjs
       - name: Prepare private first contact
         if: inputs.bootstrap-mode == 'private'
         # The helper waits up to 180 seconds for the gateway to know the run, then proves itself.

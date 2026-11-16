@@ -341,7 +341,7 @@ export async function runSteps(
     readonly handOver: Readonly<Record<string, (step: JobStep) => void>>
   },
 ) {
-  const ran: Array<string> = []
+  const ran: Array<{ readonly name: string; readonly run: string; readonly output: string }> = []
   for (const [index, step] of steps.entries()) {
     const handOver = options.handOver[step.name]
     if (handOver !== undefined) {
@@ -370,7 +370,7 @@ export async function runSteps(
       throw new Error(
         `step "${step.name}": exit ${code}: ${out.slice(-2000)} ${errors.slice(-2000)}`,
       )
-    ran.push(step.name)
+    ran.push({ name: step.name, run: step.run, output: out })
   }
   return ran
 }

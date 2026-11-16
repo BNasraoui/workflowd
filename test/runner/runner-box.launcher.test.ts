@@ -5,6 +5,7 @@ import { tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
 import type { Fixture } from "../capability-gateway/gateway-process"
 import { grantsJobIdentity, runnerJob, runSteps, type JobStep } from "./workflow-job"
+import { blockedDestinations } from "../../deploy/sandbox/trial-probe.mjs"
 import { Effect } from "effect"
 import { AgentRunIngress } from "../../src/kernel/agent-run-ingress"
 import { AgentRunStore } from "../../src/kernel/agent-run-store"
@@ -415,7 +416,7 @@ test("a trial run: a lease push of this repository's source runs the private-mod
   const scripts = await mkdtemp(join(tmpdir(), "wfd-trial-steps-"))
   // Test only: the runner's OIDC endpoint is GitHub's; here, the fixture issuer of the gateway.
   const identity = join(scripts, "oidc-endpoint.mjs")
-  const ran: Array<string> = []
+  const ran: Array<{ readonly name: string; readonly run: string; readonly output: string }> = []
   const start = async ({ leaseId, issuer, f }: { leaseId: string; issuer: string; f: Fixture }) => {
     await writeFile(
       identity,
@@ -483,10 +484,21 @@ globalThis.fetch = (url, init) => {
       )
       await step("job", jobEnded, record, 300000)
       // The job ran each step of private mode that a test can run, the hold to its good end.
-      expect(ran).toEqual(
+      expect(ran.map((entry) => entry.name)).toEqual(
         planned.steps.map((entry) => entry.name).filter((name) => !Object.hasOwn(handOver, name)),
       )
-      expect(ran.at(-1)).toBe("Hold the lease")
+      // The probes of the first real job report each result as a named line. The fixture's
+      // gateway refuses the probe's tokenless body as the real one does; whether its 403 comes
+      // after the whole body is the Service's to show.
+      const probes = ran.find((entry) => entry.run === "node deploy/sandbox/trial-probe.mjs")
+      expect(probes?.output.split("\n").filter((line) => line !== "")).toEqual([
+        expect.stringMatching(
+          /^workflowd\.probe service-body-16mib: (?:passed|headers-only) status=403 sent=\d+$/,
+        ),
+        "workflowd.probe box-flags: passed",
+        `workflowd.probe box-network: passed dropped=${blockedDestinations.length}`,
+      ])
+      expect(ran.at(-1)?.name).toBe("Hold the lease")
       const runs = await runtime.runPromise(AgentRunStore)
       const ended = await step(
         "run end",
