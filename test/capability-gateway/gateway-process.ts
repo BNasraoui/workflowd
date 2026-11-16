@@ -12,6 +12,8 @@ import { fixtureExecutable } from "../helpers/fixture-executable.mjs"
 import { loopbackCertificate, tlsFront } from "../helpers/loopback-tls"
 import { seedCapabilityRun, writeNoscopeProvider } from "./fixture"
 import { makeDaemonCapability, type DaemonCapability } from "../../src/sandbox/capability-control"
+import { defaultRunBudget } from "../../src/sandbox/config"
+import type { RunBudget } from "../../src/capability-control/protocol"
 
 const { privateKey, publicKey } = generateKeyPairSync("rsa", { modulusLength: 2048 })
 /** The private key of `jwks`: it signs the fixture's job proofs. */
@@ -96,18 +98,58 @@ export const sse =
   }) +
   event("message_stop", {})
 
+/**
+ * A message stream whose `message_start` reports the usage `start` and whose `message_delta`
+ * reports the usage `end`; with `end` null the stream ends after its content, with no
+ * `message_delta`. `text` is the content of the message.
+ */
+export const usageStream = (
+  start: Readonly<Record<string, unknown>>,
+  end: Readonly<Record<string, unknown>> | null,
+  text = "ok",
+) =>
+  event("message_start", {
+    message: {
+      id: "msg_fixture",
+      type: "message",
+      role: "assistant",
+      model: "fixture-model",
+      content: [],
+      stop_reason: null,
+      stop_sequence: null,
+      usage: start,
+    },
+  }) +
+  event("content_block_start", { index: 0, content_block: { type: "text", text: "" } }) +
+  event("content_block_delta", { index: 0, delta: { type: "text_delta", text } }) +
+  event("content_block_stop", { index: 0 }) +
+  (end === null
+    ? ""
+    : event("message_delta", {
+        delta: { stop_reason: "end_turn", stop_sequence: null },
+        usage: end,
+      }) + event("message_stop", {}))
+
 /** Keys of the gateway config that a test sets for its gateway. */
 interface GatewayKeys {
   readonly maxStreamsPerRun?: number
   readonly streamIdleMs?: number
 }
 
-/** The fixed event stream, one event and then silence, or `chunks` events `gapMs` apart. */
+/**
+ * The fixed event stream, one event and then silence, or `chunks` events `gapMs` apart; a text as
+ * the event stream, in pieces of `bytes` bytes `gapMs` apart when `pieces` is named; or a text as
+ * a JSON answer with the status `status`.
+ */
 type UpstreamAnswer =
   | "events"
   | "stall"
   | { readonly chunks: number; readonly gapMs: number }
-  | { readonly text: string }
+  | {
+      readonly text: string
+      readonly pieces?: { readonly bytes: number; readonly gapMs: number }
+    }
+  | { readonly json: string; readonly status: number }
 
 /** A request that reached the model upstream: its path and query, headers and body text. */
 export interface UpstreamRequest {
@@ -125,7 +167,11 @@ export interface UpstreamRequest {
  * request it receives. `keys` add to or replace keys of the gateway config. The key server and
  * the upstream listen on `host`: loopback, unless a gateway in a container reaches them there.
  */
-export async function fixture(keys: GatewayKeys = {}, host = "127.0.0.1") {
+export async function fixture(
+  keys: GatewayKeys = {},
+  host = "127.0.0.1",
+  initialBudget: RunBudget = defaultRunBudget,
+) {
   const root = await mkdtemp(join(tmpdir(), "wfd-gateway-process-"))
   await mkdir(join(root, "live"))
   await writeFile(
@@ -170,8 +216,16 @@ try {
       })
       if (answer === "events")
         return new Response(sse, { headers: { "content-type": "text/event-stream" } })
+      if (typeof answer === "object" && "json" in answer)
+        return new Response(answer.json, {
+          status: answer.status,
+          headers: { "content-type": "application/json" },
+        })
       if (typeof answer === "object" && "text" in answer)
-        return new Response(answer.text, { headers: { "content-type": "text/event-stream" } })
+        return new Response(
+          answer.pieces === undefined ? answer.text : inPieces(answer.text, answer.pieces),
+          { headers: { "content-type": "text/event-stream" } },
+        )
       const ends = answer !== "stall"
       const { chunks, gapMs } = answer === "stall" ? { chunks: 1, gapMs: 0 } : answer
       let timer: ReturnType<typeof setTimeout> | undefined
@@ -253,12 +307,13 @@ try {
       ),
     )
   await store(seedCapabilityRun(Date.now(), true, undefined, { gatewayStore: false }))
+  let budget = initialBudget
   const lines = async (name: string) =>
     (await readFile(join(root, name), "utf8").catch(() => "")).split("\n").filter(Boolean)
   const daemon = <A, E>(use: (capability: DaemonCapability) => Effect.Effect<A, E>) =>
     store(
       Effect.flatMap(
-        makeDaemonCapability({ socket: controlSocket, reconcileEveryMs: 3600000 }),
+        makeDaemonCapability({ socket: controlSocket, reconcileEveryMs: 3600000, budget }),
         use,
       ),
     )
@@ -296,9 +351,23 @@ try {
     setTrickle: (chunks: number, gapMs: number) => {
       answer = { chunks, gapMs }
     },
-    /** The upstream answers with `text` as its whole event stream. */
-    setAnswerText: (text: string) => {
-      answer = { text }
+    /**
+     * The upstream answers with `text` as its whole event stream, in pieces of `pieces.bytes`
+     * bytes `pieces.gapMs` apart when named.
+     */
+    setAnswerText: (text: string, pieces?: { readonly bytes: number; readonly gapMs: number }) => {
+      answer = pieces === undefined ? { text } : { text, pieces }
+    },
+    /** The upstream answers with `json` as a JSON answer that is not a stream, with `status`. */
+    setAnswerJson: (json: string, status = 200) => {
+      answer = { json, status }
+    },
+    /**
+     * The budget of a run that workflowd's side authorizes for the first time from now on, as a
+     * change of its config gives it.
+     */
+    setBudget: (next: RunBudget) => {
+      budget = next
     },
     /** How many upstream answers the gateway cancelled before their end. */
     upstreamCancels: () => cancelled,
@@ -332,6 +401,20 @@ try {
   }
 }
 export type Fixture = Awaited<ReturnType<typeof fixture>>
+
+/** `text` as a stream of pieces of `bytes` bytes, `gapMs` apart. */
+function inPieces(text: string, pieces: { readonly bytes: number; readonly gapMs: number }) {
+  const bytes = new TextEncoder().encode(text)
+  let at = 0
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      if (at > 0) await Bun.sleep(pieces.gapMs)
+      controller.enqueue(bytes.slice(at, at + pieces.bytes))
+      at += pieces.bytes
+      if (at >= bytes.length) controller.close()
+    },
+  })
+}
 /** Where a runner reaches a gateway: the origin of its front, and the front's certificate. */
 export interface Origin {
   readonly origin: string
@@ -579,8 +662,12 @@ export const client = (at: Origin) => {
       },
       body,
     })
-  const call = (token: string) =>
-    provider(token, JSON.stringify({ model: "fixture-model", stream: true, messages: [] }))
+  /** A streamed messages call that asks `maxTokens` output tokens. */
+  const call = (token: string, maxTokens = 1000) =>
+    provider(
+      token,
+      JSON.stringify({ model: "fixture-model", stream: true, messages: [], max_tokens: maxTokens }),
+    )
   const renew = (token: string) =>
     request("/capabilities/v1/renew", {
       method: "POST",
@@ -595,8 +682,9 @@ export async function withGateway(
   start: (f: Fixture) => Promise<Gateway>,
   body: (f: Fixture, gateway: Gateway) => Promise<void>,
   keys: GatewayKeys = {},
+  budget: RunBudget = defaultRunBudget,
 ) {
-  const f = await fixture(keys)
+  const f = await fixture(keys, undefined, budget)
   let gateway: Gateway | undefined
   try {
     gateway = await start(f)

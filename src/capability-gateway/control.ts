@@ -35,7 +35,10 @@ export interface ControlTarget {
     actionsRunId: number,
     actionsAttempt: number,
   ) => Effect.Effect<boolean, ControlFailure>
+  readonly usage: (runId: string) => Effect.Effect<RunUsage, ControlFailure>
 }
+/** What a run spent of its budget, as the `usage` verb answers it. */
+type RunUsage = typeof controlProtocol.usage.response.Type
 
 /** The request's body does not decode as its verb's request. */
 class ControlBodyRefused extends Schema.TaggedError<ControlBodyRefused>()(
@@ -81,6 +84,7 @@ const controlVerbs: Record<ControlVerb, ReturnType<typeof verb>> = {
     controlProtocol.sessionBound,
     (target) => (body) => target.sessionBound(body.runId, body.actionsRunId, body.actionsAttempt),
   ),
+  usage: verb(controlProtocol.usage, (target) => (body) => target.usage(body.runId)),
 }
 const isControlVerb = (name: string): name is ControlVerb => Object.hasOwn(controlVerbs, name)
 

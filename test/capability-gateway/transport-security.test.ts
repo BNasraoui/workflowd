@@ -17,7 +17,7 @@ test("bound streaming preserves native bytes, renews with noscope, and denies cr
   const root = await mkdtemp(join(tmpdir(), "wfd-gateway-"))
   await writeNoscopeProviders(root, 120000)
   const sent: { url: string; body: string; headers: Headers }[] = []
-  const native = '{ "model" : "fixture-model", "stream": true, "messages": [] }'
+  const native = '{ "model" : "fixture-model", "stream": true, "messages": [], "max_tokens": 1000 }'
   const responseBytes = "event: message_start\ndata: {}\n\nevent: message_stop\ndata: {}\n\n"
   let reflect: string | undefined
   let upstreamFault: string | undefined

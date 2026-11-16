@@ -178,7 +178,12 @@ test("through the front and the relay, a session, a renewal and a model call wor
           "anthropic-version": "2023-06-01",
           "anthropic-beta": "oauth-2025-04-20",
         },
-        body: JSON.stringify({ model: "fixture-model", stream: true, messages: [] }),
+        body: JSON.stringify({
+          model: "fixture-model",
+          stream: true,
+          messages: [],
+          max_tokens: 1000,
+        }),
       })
       expect(call.status).toBe(200)
       expect(await call.text()).toBe(sse)
@@ -220,7 +225,7 @@ test("a request whose headers are not those that Serve sends for a tagged node g
       f.front.hook({ alter })
       const answer = await runner.provider(
         token,
-        JSON.stringify({ model: "fixture-model", stream: true, messages: [] }),
+        JSON.stringify({ model: "fixture-model", stream: true, messages: [], max_tokens: 1000 }),
         extra,
       )
       expect({ reason, status: answer.status, body: await answer.text() }).toEqual({

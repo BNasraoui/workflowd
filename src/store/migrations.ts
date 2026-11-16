@@ -16,6 +16,7 @@ import { sessionLeaseReady } from "./0041-session-lease-ready"
 import { capabilityRenewal } from "./0042-capability-renewal"
 import { capabilityReplacements } from "./0043-capability-replacements"
 import { capabilityStoreSplit } from "./0044-capability-store-split"
+import { capabilityRunBudget } from "./0045-capability-run-budget"
 import { gatewayMigrationsTable } from "../capability-control/protocol"
 import { MAX_AGENT_LAUNCH_INTENT_BYTES, MAX_AGENT_OUTPUT_BYTES } from "../agent-payload"
 
@@ -1531,6 +1532,7 @@ export const runStoreMigrations = Effect.gen(function* () {
     loader: Migrator.fromRecord({
       ...migrationsThrough0043,
       "0044_capability_store_split": capabilityStoreSplit,
+      "0045_capability_run_budget": capabilityRunBudget,
     }),
   })
 })

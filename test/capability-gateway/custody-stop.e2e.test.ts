@@ -37,7 +37,7 @@ const callUntil = (at: Origin, token: string, signal: AbortSignal) =>
       "anthropic-version": "2023-06-01",
       "anthropic-beta": "oauth-2025-04-20",
     },
-    body: JSON.stringify({ model: "fixture-model", stream: true, messages: [] }),
+    body: JSON.stringify({ model: "fixture-model", stream: true, messages: [], max_tokens: 1000 }),
   })
 
 test("a client that goes away while the OAuth server holds the renewal ends its own wait only; the next call uses that renewal", async () => {

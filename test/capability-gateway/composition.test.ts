@@ -75,11 +75,17 @@ test("configured live composition settles prior leases, which revokes their gran
     await expect(
       loadConfig({ ...environment, WORKFLOWD_CAPABILITY_CONTROL: undefined }),
     ).rejects.toThrow("Native Actions requires")
-    // workflowd's section names the socket only; the gateway's section is not workflowd's.
+    // workflowd's section names the socket and the budget of a new run; the gateway's section is
+    // not workflowd's, and each count of the budget is a positive integer.
     for (const bad of [
       { socket, unexpected: true },
       { socket, storePath: gateway.storePath },
       { socket: "relative.sock" },
+      { socket, budget: { calls: 0 } },
+      { socket, budget: { outputTokens: -300000 } },
+      { socket, budget: { maxTokens: 1.5 } },
+      { socket, budget: { maxTokens: "64000" } },
+      { socket, budget: { calls: 2000, unexpected: 1 } },
     ])
       await expect(
         loadConfig({ ...environment, WORKFLOWD_CAPABILITY_CONTROL: JSON.stringify(bad) }),
@@ -88,7 +94,22 @@ test("configured live composition settles prior leases, which revokes their gran
       loadConfig({ ...environment, WORKFLOWD_CAPABILITY_GATEWAY: JSON.stringify(gateway) }),
     ).rejects.toThrow("belongs to the gateway process")
     const loaded = await loadConfig(environment, { home: root })
-    expect(loaded.agentRuns?.capabilityControl).toEqual({ socket })
+    expect(loaded.agentRuns?.capabilityControl).toEqual({
+      socket,
+      budget: { calls: 2000, outputTokens: 300000, maxTokens: 64000 },
+    })
+    const named = await loadConfig(
+      {
+        ...environment,
+        WORKFLOWD_CAPABILITY_CONTROL: JSON.stringify({ socket, budget: { outputTokens: 5000 } }),
+      },
+      { home: root },
+    )
+    expect(named.agentRuns?.capabilityControl?.budget).toEqual({
+      calls: 2000,
+      outputTokens: 5000,
+      maxTokens: 64000,
+    })
     // The gateway's process reads its section alone, with its listener, store and socket.
     expect(
       loadCapabilityGatewayConfig({ WORKFLOWD_CAPABILITY_GATEWAY: JSON.stringify(gateway) }),

@@ -81,6 +81,8 @@ export const serveCapabilityGateway = (
         "capability_bindings",
         "capability_tokens",
         "capability_proofs",
+        "capability_usage",
+        "capability_reservations",
       ])
       if (tables.some(({ name }) => !own.has(name)))
         return yield* Effect.fail(new Error("the gateway's store holds tables of another store"))
