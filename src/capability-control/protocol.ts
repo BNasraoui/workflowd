@@ -88,8 +88,11 @@ export const configuredRunBudget = (defaults: RunBudget) =>
     ),
   }).check(callWithinBudget)
 
-/** The most bytes of a runner run's prompt, as UTF-8: the reconcile of the most runs fits a frame. */
-export const maxLaunchPromptBytes = 128 * 1024
+/**
+ * The most bytes of a runner run's prompt, as UTF-8: the bound of a submitted prompt
+ * (`MAX_AGENT_RUN_PROMPT_BYTES`), so the reconcile of the most runs fits a frame.
+ */
+export const maxLaunchPromptBytes = 32 * 1024
 /** The agent image of a runner run: the workflowd image, by digest. */
 export const agentImagePattern = /^ghcr\.io\/bnasraoui\/workflowd-agent-base@sha256:[a-f0-9]{64}$/
 /**

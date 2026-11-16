@@ -62,6 +62,7 @@ import { SandboxDispatch, makeSandboxDispatch } from "./sandbox/dispatch"
 import { makeSandboxGithub } from "./sandbox/github"
 import { makeSandboxLeaseService } from "./sandbox/lease"
 import { makeDaemonCapability } from "./sandbox/capability-control"
+import { SealedResultGit, SealedResultGitLive, sealedResultLimits } from "./kernel/sealed-result"
 import { routeSandboxHandoffs, routeSandboxProvider } from "./sandbox/provider"
 import { WorkflowStoreLive } from "./store"
 import { WorkflowStore } from "./store/contracts"
@@ -351,6 +352,10 @@ const makeAutomationLayer = (config: Extract<AppConfig, { readonly mode?: "autom
           Layer.provideMerge(claudeCliLayer),
         )
   const sandboxPolicies = config.agentRuns?.sandboxRepositories ?? []
+  /** The repository aliases placed on a GitHub Actions runner. */
+  const runnerAliases = Object.entries(config.agentRuns?.placements ?? {})
+    .filter(([, placement]) => placement === "runner")
+    .map(([alias]) => alias)
   const sandboxLayer =
     sandboxPolicies.length === 0
       ? Layer.empty
@@ -367,6 +372,7 @@ const makeAutomationLayer = (config: Extract<AppConfig, { readonly mode?: "autom
                     gateway: yield* makeDaemonCapability({
                       socket: control.socket,
                       budget: control.budget,
+                      runnerAliases,
                     }),
                   }
             const leases = yield* makeSandboxLeaseService(
@@ -383,6 +389,28 @@ const makeAutomationLayer = (config: Extract<AppConfig, { readonly mode?: "autom
               client: yield* openCodeClientEffect,
               executorId: `opencode:${completionSourceOptions.providerId}`,
               endpointIdentity: completionSourceOptions.endpointIdentity,
+              ...(native === undefined || runnerAliases.length === 0
+                ? {}
+                : {
+                    runner: {
+                      aliases: runnerAliases,
+                      maxRuns: config.agentRuns?.runnerMaxRuns ?? sealedResultLimits.waitingChecks,
+                      gateway: native.gateway,
+                      // The one git runner of the checks of sealed results, of the main layer.
+                      sealed: yield* Effect.serviceOption(SealedResultGit).pipe(
+                        Effect.flatMap((sealed) =>
+                          Option.isSome(sealed)
+                            ? Effect.succeed(sealed.value)
+                            : Effect.fail(new Error("The check of sealed results is unavailable")),
+                        ),
+                      ),
+                      agentGit:
+                        config.agentGit ??
+                        (yield* Effect.fail(
+                          new Error("A runner placement needs the agent Git identity"),
+                        )),
+                    },
+                  }),
               nativeExecutors: {
                 codex: makeCodexCli({
                   credentialSocket: config.credentialSocket,
@@ -419,7 +447,19 @@ const makeAutomationLayer = (config: Extract<AppConfig, { readonly mode?: "autom
               return yield* Effect.fail(new Error("Configured sandbox service is unavailable"))
             return yield* routeSandboxProvider(openCodeAdapter, sandbox.value)
           }),
-        ).pipe(Layer.provideMerge(sandboxLayer), Layer.provideMerge(kernelStoreLayer))
+        ).pipe(
+          Layer.provideMerge(sandboxLayer),
+          Layer.provideMerge(kernelStoreLayer),
+          // The daemon's one git runner of sealed results holds its scratch root for the
+          // daemon's life; it is built here, once, with a runner placement only.
+          Layer.provideMerge(
+            runnerAliases.length === 0
+              ? Layer.empty
+              : SealedResultGitLive(
+                  join(dirname(config.storage.databasePath), "sealed-result-scratch"),
+                ),
+          ),
+        )
   const managedDirectoryObservations = makeManagedDirectoryObservationLayer(config).pipe(
     Layer.provide(directoryStores),
     Layer.provide(sandboxProviderLayer),

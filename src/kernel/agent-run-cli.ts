@@ -663,7 +663,7 @@ export const makeAgentRunCliDispatcher = (dependencies: {
                   ? run.prompt
                   : yield* dependencies.workerPrompt(run),
               model: run.resolvedSelection?.model ?? route.modelID,
-              ...(attachment === undefined
+              ...(attachment?.sandboxBindingFile === undefined
                 ? {}
                 : { sandboxBindingFile: attachment.sandboxBindingFile }),
               ...(run.resolvedSelection?.provider == null

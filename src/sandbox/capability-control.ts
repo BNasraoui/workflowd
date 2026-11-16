@@ -124,6 +124,8 @@ export const liveGrants = Effect.fn("DaemonCapability.liveGrants")(function* (
   runId: string | null,
   now: number,
   budget: RunBudget,
+  /** The repository aliases placed on a runner: each run of one carries its launch. */
+  runnerAliases: ReadonlyArray<string> = [],
 ) {
   const sql = yield* SqlClient.SqlClient
   const rows = yield* sql<Record<string, unknown>>`SELECT a.run_id AS runId,l.lease_id AS leaseId,
@@ -132,7 +134,8 @@ export const liveGrants = Effect.fn("DaemonCapability.liveGrants")(function* (
       json_extract(l.policy,'$.repositoryId') AS repositoryId,l.source_sha AS sourceSha,
       json_extract(l.policy,'$.repository') AS repositoryName,
       json_extract(l.policy,'$.installationId') AS installationId,
-      l.actions_run_id AS actionsRunId,l.actions_attempt AS actionsAttempt,l.deadline,l.policy
+      l.actions_run_id AS actionsRunId,l.actions_attempt AS actionsAttempt,l.deadline,l.policy,
+      a.prompt AS prompt,json_extract(l.policy,'$.agentImage') AS image
       FROM kernel_agent_runs a JOIN sandbox_leases l ON l.run_id=a.run_id
       JOIN directory_managed d ON d.run_id=a.run_id
       WHERE a.repository=json_extract(l.policy,'$.alias')
@@ -140,12 +143,13 @@ export const liveGrants = Effect.fn("DaemonCapability.liveGrants")(function* (
       AND l.state IN ('starting','ready') AND l.actions_run_id IS NOT NULL
       AND (${runId} IS NULL OR a.run_id=${runId})`
   const live: CapabilityGrant[] = []
-  for (const { state, createdAt, policy, ...row } of rows) {
+  for (const { state, createdAt, policy, prompt, image, ...row } of rows) {
     const created = new Date(String(createdAt))
     if (!authorizeWorker({ state: String(state), createdAt: created }, now)) continue
     const parsed: unknown = JSON.parse(String(policy))
     const grant = yield* Schema.decodeUnknownEffect(UnbudgetedGrant)({
       ...row,
+      ...(runnerAliases.includes(String(row.repository)) ? { launch: { prompt, image } } : {}),
       policy: parsed,
       notAfter: created.getTime() + workerLifetimeMs,
     })
@@ -184,6 +188,8 @@ export const makeDaemonCapability = (options: {
   readonly reconcileEveryMs?: number
   /** The budget of a run that workflowd authorizes for the first time. */
   readonly budget?: RunBudget
+  /** The repository aliases placed on a runner; each grant of their runs carries its launch. */
+  readonly runnerAliases?: ReadonlyArray<string>
 }) =>
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient
@@ -198,7 +204,7 @@ export const makeDaemonCapability = (options: {
     const watched = new Map<string, () => void>()
     const changed = yield* Queue.unbounded<string>()
     const grants = (runId: string | null) =>
-      liveGrants(runId, Date.now(), options.budget ?? defaultRunBudget).pipe(
+      liveGrants(runId, Date.now(), options.budget ?? defaultRunBudget, options.runnerAliases).pipe(
         Effect.provideService(SqlClient.SqlClient, sql),
       )
     const watch = (runId: string) => {
@@ -274,6 +280,10 @@ export const makeDaemonCapability = (options: {
       Effect.forever,
       Effect.forkScoped,
     )
-    return { authorize, revoke, reconcile, sessionBound, startRevoke }
+    /** A runner run's event batches after `after`, its result's presence and the gateway's end. */
+    const readEvents = (runId: string, after: number) => control.readEvents(runId, after)
+    /** The part at `offset` of a runner run's result. */
+    const readResult = (runId: string, offset: number) => control.readResult(runId, offset)
+    return { authorize, revoke, reconcile, sessionBound, startRevoke, readEvents, readResult }
   })
 export type DaemonCapability = Effect.Success<ReturnType<typeof makeDaemonCapability>>

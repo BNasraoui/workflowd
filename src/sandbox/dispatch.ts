@@ -1,5 +1,16 @@
 import { sandboxDiagnostic, retainSandboxFailure } from "./diagnostics"
-import { Context, Effect, Schedule, Schema } from "effect"
+import { Context, Deferred, Effect, Schedule, Schema, Stream } from "effect"
+import type { AgentGitConfig } from "../agent-git/config"
+import type { GatewayEnd } from "../capability-control/protocol"
+import {
+  makeRunnerExecutor,
+  type RunnerGateway,
+  type RunnerHandle,
+  RunnerRunFailed,
+} from "../kernel/runner-executor"
+import { SealedResultRefused, type SealedResultGitPort } from "../kernel/sealed-result"
+import { WorkspaceError } from "../workspace/errors"
+import { githubHost } from "./github"
 import { mkdir } from "node:fs/promises"
 import { dirname, join } from "node:path"
 import { AgentRunStore, type AgentRunRecord } from "../kernel/agent-run-store"
@@ -35,7 +46,8 @@ export type SandboxDispatchPort = {
   readonly prepareNative?: (run: AgentRunRecord) => Effect.Effect<
     {
       readonly cli: CliPort
-      readonly sandboxBindingFile: string
+      /** The binding of a local sandbox run; a runner run has none. */
+      readonly sandboxBindingFile?: string
     },
     SandboxError
   >
@@ -68,6 +80,10 @@ export type SandboxDispatchPort = {
 
 export const SandboxDispatch = Context.Service<SandboxDispatchPort>("workflowd/SandboxDispatch")
 
+/** A runner run's time from its start: the deadline of its lease (`store.request`). */
+const runnerDeadlineMs = 285 * 60000
+const workspaceFailure = (detail: string) =>
+  new WorkspaceError({ operation: "runner", cause: new Error(`Runner run failed: ${detail}`) })
 const failure = (cause?: unknown) =>
   new SandboxError(
     sandboxDiagnostic(
@@ -85,6 +101,15 @@ export const makeSandboxDispatch = (options: {
   readonly executorId: string
   readonly endpointIdentity: string
   readonly nativeExecutors?: Partial<Record<"codex" | "claude", CliPort>>
+  /** The runner placement: its aliases, its bound of runs, the gateway and the check of results. */
+  readonly runner?: {
+    readonly aliases: ReadonlyArray<string>
+    readonly maxRuns: number
+    readonly gateway: RunnerGateway
+    readonly sealed: SealedResultGitPort
+    readonly agentGit: AgentGitConfig
+    readonly pollMs?: number
+  }
 }) =>
   Effect.gen(function* () {
     const store = yield* makeSandboxStore
@@ -341,6 +366,7 @@ export const makeSandboxDispatch = (options: {
       })
     const finishNative: NonNullable<SandboxDispatchPort["finishNative"]> = (run, terminal) =>
       Effect.gen(function* () {
+        if (runnerPolicy(run.repository) !== undefined) return yield* finishRunner(run, terminal)
         // Stopping a CLI also wakes its exit observer. The cancellation caller owns
         // settlement until its terminal record is saved or custody reports failure.
         if (cancelling.has(run.runId)) return
@@ -348,11 +374,194 @@ export const makeSandboxDispatch = (options: {
         if (current === null) return yield* Effect.fail(failure())
         yield* settle(current, { ...terminal, sessionId: current.nativeSessionId })
       }).pipe((effect) => sandboxStage("dispatch.finishNative", effect))
+    /**
+     * The runner placement. A runner run's lease ref starts its job; the run is the job's, and the
+     * daemon reads its events and its one result from the gateway, checks the result and pushes
+     * `agent-run/<id>`. What ended the run, other than a completion, is kept for its settlement.
+     */
+    const runnerOptions = options.runner
+    const runnerEnds = new Map<string, { diagnostic: string; ended: GatewayEnd | null }>()
+    const runnerPolicy = (alias: string) =>
+      runnerOptions?.aliases.includes(alias) === true
+        ? options.policies.find(
+            (entry) => entry.alias === alias && entry.privateBootstrap?.mode === "actions-native",
+          )
+        : undefined
+    const runnerExecutor =
+      runnerOptions === undefined
+        ? undefined
+        : makeRunnerExecutor({
+            gateway: runnerOptions.gateway,
+            maxRuns: runnerOptions.maxRuns,
+            ...(runnerOptions.pollMs === undefined ? {} : { pollMs: runnerOptions.pollMs }),
+            begin: (launch) =>
+              Effect.gen(function* () {
+                const policy = runnerPolicy(launch.repository)
+                if (policy === undefined) return yield* Effect.fail(failure())
+                yield* github.verifyWorkflow(policy)
+                yield* store.request({
+                  runId: launch.runId,
+                  leaseId: launch.runId,
+                  policy,
+                  sourceSha: launch.sourceSha,
+                  now: Date.now(),
+                })
+                // The lease is ready once the job holds its gateway session; the job pulls its
+                // image before it opens the session, so the session opens close to the start.
+                yield* leases.acquire(launch.runId).pipe(
+                  Effect.repeat({
+                    until: (lease) => lease.state === "ready",
+                    schedule: Schedule.spaced("2 seconds"),
+                  }),
+                  Effect.timeout("30 minutes"),
+                )
+              }).pipe(
+                Effect.mapError(
+                  (cause) =>
+                    new RunnerRunFailed({
+                      reason: "runner_start",
+                      message: sandboxDiagnostic("runner.start", cause).message,
+                    }),
+                ),
+              ),
+          })
+    const runnerExit = (runId: string, diagnostic: string, ended: GatewayEnd | null = null) =>
+      Effect.sync(() => {
+        runnerEnds.set(runId, { diagnostic, ended })
+        return { exitCode: 1, stderr: diagnostic }
+      })
+    /** Checks the run's sealed result and pushes it to `agent-run/<id>`, which must be new. */
+    const publishRunner = (run: AgentRunRecord, handle: RunnerHandle, policy: SandboxPolicy) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const lease = yield* store.read(run.runId)
+          if (lease === null || runnerExecutor === undefined || runnerOptions === undefined)
+            return yield* Effect.fail(failure())
+          const result = yield* runnerExecutor.result(handle)
+          const checked = yield* runnerOptions.sealed.check(
+            result,
+            {
+              ref: `refs/heads/agent-run/${run.runId.replace(/^agent-run-/, "").slice(0, 16)}`,
+              expectedHead: null,
+            },
+            {
+              remote: `https://${githubHost}/${policy.repository}.git`,
+              sourceSha: lease.source_sha,
+              token: github.pushToken(policy),
+              agentGit: runnerOptions.agentGit,
+            },
+          )
+          yield* checked.push()
+          return { exitCode: 0, stderr: "" }
+        }),
+      ).pipe(
+        Effect.catch((error) =>
+          runnerExit(
+            run.runId,
+            error instanceof SealedResultRefused
+              ? `result_refused: ${error.check}`
+              : error instanceof RunnerRunFailed
+                ? `${error.reason}: ${error.message}`
+                : sandboxDiagnostic("runner.result", error).message,
+          ),
+        ),
+      )
+    /** The CLI of one runner run: its events from the gateway, its exit once its result is pushed. */
+    const runnerCli = (run: AgentRunRecord, policy: SandboxPolicy, sourceSha: string): CliPort => ({
+      ownership: "transient-exec",
+      preflight: Effect.void,
+      executionId: (runId) => runId,
+      attach: () => Effect.succeed(null),
+      spawn: (input) =>
+        Effect.gen(function* () {
+          if (runnerExecutor === undefined) return yield* Effect.fail(workspaceFailure("runner"))
+          const handle = yield* runnerExecutor
+            .start({
+              runId: run.runId,
+              repository: run.repository,
+              imageDigest: policy.agentImage,
+              sourceSha,
+              prompt: input.prompt,
+              model: input.model ?? "",
+              deadline: new Date(Date.now() + runnerDeadlineMs),
+            })
+            .pipe(Effect.mapError((error) => workspaceFailure(`${error.reason}: ${error.message}`)))
+          const eventsEnded = yield* Deferred.make<RunnerRunFailed | null>()
+          const events = runnerExecutor.events(handle).pipe(
+            Stream.catch((error) =>
+              Stream.fromEffect(Deferred.succeed(eventsEnded, error)).pipe(Stream.drain),
+            ),
+            Stream.ensuring(Deferred.succeed(eventsEnded, null)),
+          )
+          return {
+            executionId: run.runId,
+            events: Stream.toAsyncIterable(events),
+            exited: Deferred.await(eventsEnded).pipe(
+              Effect.flatMap((ended) =>
+                ended === null
+                  ? publishRunner(run, handle, policy)
+                  : runnerExit(run.runId, `${ended.reason}: ${ended.message}`, handle.ended),
+              ),
+            ),
+            cancel: runnerExecutor
+              .stop(handle)
+              .pipe(Effect.mapError(() => workspaceFailure("stop"))),
+          }
+        }),
+    })
+    /** A runner run's start: its source commit, then its executor, which starts its job. */
+    const prepareRunner = (run: AgentRunRecord, policy: SandboxPolicy) =>
+      Effect.gen(function* () {
+        if (run.agent !== "sandbox" || run.resolvedSelection?.executor !== "claude:actions")
+          return yield* Effect.fail(failure())
+        yield* Effect.tryPromise(async () => {
+          await mkdir(dirname(run.directory), { recursive: true, mode: 0o700 })
+          await mkdir(run.directory, { mode: 0o700 })
+        })
+        const sourceSha = yield* github.resolveSource(
+          policy,
+          policy.publish?.baseRef ?? run.baseRef ?? "HEAD",
+        )
+        return { cli: runnerCli(run, policy, sourceSha) }
+      }).pipe(Effect.timeout("5 minutes"), (effect) =>
+        sandboxStage("dispatch.prepareRunner", effect),
+      )
+    /**
+     * Settles a runner run: its lease is released (the gateway's run revoked, the lease ref
+     * removed), then the run ends as a host run does, with the gateway's own end when there is one.
+     */
+    const finishRunner = (
+      run: AgentRunRecord,
+      terminal: Parameters<NonNullable<SandboxDispatchPort["finishNative"]>>[1],
+    ) =>
+      Effect.gen(function* () {
+        const end = runnerEnds.get(run.runId)
+        runnerEnds.delete(run.runId)
+        runnerExecutor?.release(run.runId)
+        if ((yield* store.read(run.runId)) !== null)
+          yield* leases.release(run.runId).pipe(Effect.ignore)
+        const now = new Date()
+        if (terminal.state === "completed" && end === undefined)
+          yield* runs.complete({ runId: run.runId, now, finalMessage: terminal.finalMessage })
+        else
+          yield* runs.operatorRequired({
+            runId: run.runId,
+            now,
+            diagnostic: end?.diagnostic ?? terminal.diagnostic,
+            finalMessage: terminal.finalMessage,
+            ended: end?.ended ?? null,
+          })
+      }).pipe(
+        Effect.catchTag("AgentRunStoreConflictError", () => Effect.void),
+        (effect) => sandboxStage("dispatch.finishRunner", effect),
+      )
     const prepareNative: NonNullable<SandboxDispatchPort["prepareNative"]> = (run) =>
       Effect.gen(function* () {
         const policy = options.policies.find((entry) => entry.alias === run.repository)
         // A runner of an actions-native repository opens a gateway session and has no SSH peer
-        // to start the harness through, so such a run is refused before any lease or GitHub call.
+        // to start the harness through: only the runner placement starts such a run.
+        const runner = runnerPolicy(run.repository)
+        if (runner !== undefined) return yield* prepareRunner(run, runner)
         if (policy?.privateBootstrap?.mode === "actions-native")
           return yield* Effect.fail(failure(new Error("Actions-native harness start unavailable")))
         const cli = yield* Effect.try(() => nativeCli(run))

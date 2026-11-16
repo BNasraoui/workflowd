@@ -1096,7 +1096,10 @@ describe("runner placement", () => {
       ...fields,
     })
 
-  const dispatchRunner = async (repository?: () => Response) => {
+  const dispatchRunner = async (
+    repository?: () => Response,
+    input: import("../../src/agent-run-contract").AgentRunSubmission = submission,
+  ) => {
     const { RepositoryVisibility } = await import("../../src/sandbox/github")
     const state = defaultState()
     const trees: Array<{ repository: string; directory: string; branch: string }> = []
@@ -1105,6 +1108,7 @@ describe("runner placement", () => {
       const base = makeLayer(makeProvider(state), worktrees(trees), undefined, {
         placements: { workflowd: "runner" },
         sandboxRepositories: [runnerPolicy],
+        claudeRoutes: [{ name: "claude", modelID: "claude-opus-5-5" }],
       })
       const layer =
         stub === undefined
@@ -1115,7 +1119,7 @@ describe("runner placement", () => {
               ),
             )
       const refusal = await refusalOf(
-        Effect.runPromise(register(submission).pipe(Effect.provide(layer))),
+        Effect.runPromise(register(input).pipe(Effect.provide(layer))),
       )
       expect(state.created).toHaveLength(0)
       expect(trees).toHaveLength(0)
@@ -1129,16 +1133,29 @@ describe("runner placement", () => {
     }
   }
 
-  test("a runner dispatch of a public repository is refused until the runner executor exists", async () => {
+  test("a runner dispatch of a public repository reads its visibility once and runs Claude only", async () => {
     const { refusal, tokenRequests, revoked } = await dispatchRunner(
       visible({ visibility: "public" }),
     )
     expect(refusal.reason).toBe("executor_unavailable")
+    expect(refusal.detail).toBe("A runner runs Claude only")
     expect(tokenRequests).toEqual([
       { repository_ids: [runnerPolicy.repositoryId], permissions: { metadata: "read" } },
     ])
     // The token of the read is revoked once the read is done.
     expect(revoked.map((request) => request.authorization)).toEqual(["token fixture-token"])
+  })
+
+  test("a Claude runner run is refused a thinking request", async () => {
+    const claude = { ...submission, route: "claude" }
+    const thinking = await dispatchRunner(visible({ visibility: "public" }), {
+      ...claude,
+      thinking: { effort: "high" },
+    })
+    expect(thinking.refusal.reason).toBe("unsupported_thinking")
+    // A Claude run within the bounds goes on to the runner's sandbox, which this harness lacks.
+    const accepted = await dispatchRunner(visible({ visibility: "public" }), claude)
+    expect(accepted.refusal.detail).toBe("The required repository sandbox is unavailable")
   })
 
   test("a private or internal repository is refused for a runner", async () => {

@@ -285,8 +285,7 @@ const make = (options: AgentRunIngressOptions) =>
       refuse("executor_unavailable", sandboxDiagnostic("ingress.custody", cause).message)
     const visibility = Option.getOrUndefined(yield* Effect.serviceOption(RepositoryVisibility))
     // A runner run needs a public repository; a read that fails never counts as public.
-    // No runner executor is provided, so a public repository is refused too.
-    const refuseRunner = (alias: string) =>
+    const checkRunnerRepository = (alias: string) =>
       Effect.gen(function* () {
         const policy = options.sandboxRepositories?.find((candidate) => candidate.alias === alias)
         const read =
@@ -303,10 +302,35 @@ const make = (options: AgentRunIngressOptions) =>
             "runner_requires_public_repository",
             "A runner run needs a public repository",
           )
-        return yield* refuse(
-          "executor_unavailable",
-          "The runner placement has no executor yet; this repository's runs are refused",
-        )
+      })
+    /**
+     * The selection of a runner run: Claude with an explicit model and no thinking request, on
+     * the host `github-actions` with the executor `claude:actions`. The run needs no login on this
+     * host, so no readiness of a local client is read.
+     */
+    const runnerSelection = (
+      selection: ResolvedSelection,
+      thinking: Readonly<Record<string, unknown>> | undefined,
+    ) =>
+      Effect.gen(function* () {
+        if (selection.executorKind !== "claude")
+          return yield* refuse("executor_unavailable", "A runner runs Claude only")
+        if (selection.model === null)
+          return yield* refuse(
+            "executor_unavailable",
+            "A runner run needs an explicit configured model",
+          )
+        if (thinking !== undefined && Object.keys(thinking).length > 0)
+          return yield* refuse(
+            "unsupported_thinking",
+            "A runner run cannot verify a thinking request before it runs",
+          )
+        return {
+          ...selection,
+          host: "github-actions",
+          executor: "claude:actions",
+          provider: "anthropic",
+        } satisfies ResolvedSelection
       })
     const sessions = yield* KernelSessionStore
     const providerOption = yield* Effect.serviceOption(AgentRunProvider)
@@ -852,8 +876,12 @@ const make = (options: AgentRunIngressOptions) =>
             `repository "${submission.repository}" is not in the dispatch allow-list`,
           )
         }
-        if (options.placements?.[repository.name] === "runner")
-          return yield* refuseRunner(repository.name)
+        const runner = options.placements?.[repository.name] === "runner"
+        if (runner) {
+          yield* checkRunnerRepository(repository.name)
+          if (keyed?.resolvedSelection == null)
+            selection = yield* runnerSelection(selection, submission.thinking)
+        }
         if (dispatch.sandboxRepositories?.some((policy) => policy.alias === repository.name)) {
           if (sandbox === undefined)
             return yield* refuse(
@@ -861,8 +889,9 @@ const make = (options: AgentRunIngressOptions) =>
               "The required repository sandbox is unavailable",
             )
         }
-        if (keyed !== null && keyed.state !== "accepted") {
-          // Already-launched duplicates need no fresh launch preflight.
+        if ((keyed !== null && keyed.state !== "accepted") || runner) {
+          // Already-launched duplicates need no fresh launch preflight, nor does a runner run,
+          // which runs no client on this host.
         } else if (resolution.provider === "opencode" && submission.model === undefined) {
           yield* preflightRoute(resolution.route)
         } else if (resolution.provider !== "opencode") {
@@ -1046,6 +1075,9 @@ const make = (options: AgentRunIngressOptions) =>
         if (run.state === "completed" || run.state === "cancelled" || run.state === "failed") {
           return yield* refuse("run_conflict", `run ${runId} is already ${run.state}`)
         }
+        // A runner run is stopped by its own deadline until the stop of a runner run exists.
+        if (run.resolvedSelection?.host === "github-actions")
+          return yield* refuse("run_conflict", "Actions controller custody unavailable")
         if (
           sandbox !== undefined &&
           (yield* sandbox.owns(runId).pipe(Effect.mapError(sandboxFailure)))
