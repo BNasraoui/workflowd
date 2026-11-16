@@ -2622,7 +2622,15 @@ const rangesOf = (has: (code: number) => boolean) => {
   return ranges
 }
 
-test("the seal's invisible code points are the property classes Cf and Default_Ignorable_Code_Point of the daemon's engine", async () => {
+/**
+ * The value that `expression` gives in Python with the seal (result.py) loaded as `m`, decoded
+ * by `schema`: the seal's own tables and rules, read without running its entry point.
+ */
+const fromSeal = async <A>(
+  imports: string,
+  expression: string,
+  schema: Schema.Decoder<A>,
+): Promise<A> => {
   const child = Bun.spawn(
     [
       "python3",
@@ -2630,13 +2638,11 @@ test("the seal's invisible code points are the property classes Cf and Default_I
       "-B",
       "-c",
       `
-import importlib.util, json, sys, unicodedata
+import importlib.util, json, sys${imports}
 spec = importlib.util.spec_from_file_location('result', sys.argv[1])
 m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
-format = [c for c in range(0x110000) if unicodedata.category(chr(c)) == 'Cf']
-print(json.dumps({'ignorable': m.DEFAULT_IGNORABLE, 'format': format,
-                  'invisible': [c for c in range(0x110000) if m.invisible(chr(c))]}))
+print(json.dumps(${expression}))
 `,
       script,
     ],
@@ -2648,65 +2654,49 @@ print(json.dumps({'ignorable': m.DEFAULT_IGNORABLE, 'format': format,
     new Response(child.stderr).text(),
   ])
   expect({ status, stderr }).toEqual({ status: 0, stderr: "" })
-  const seal = Schema.decodeUnknownSync(
+  return Schema.decodeUnknownSync(schema)(JSON.parse(stdout))
+}
+const Ranges = Schema.Array(Schema.Tuple([Schema.Number, Schema.Number]))
+const codes = (code: string) => `[c for c in range(0x110000) if ${code}]`
+const has = (property: RegExp) => (code: number) => property.test(String.fromCodePoint(code))
+const rangesIn = (codes: ReadonlyArray<number>) => {
+  const set = new Set(codes)
+  return rangesOf((code) => set.has(code))
+}
+
+test("the seal's invisible code points are the property classes Cf and Default_Ignorable_Code_Point of the daemon's engine", async () => {
+  const seal = await fromSeal(
+    ", unicodedata",
+    `{'ignorable': m.DEFAULT_IGNORABLE,
+      'format': ${codes("unicodedata.category(chr(c)) == 'Cf'")},
+      'invisible': ${codes("m.invisible(chr(c))")}}`,
     Schema.Struct({
-      ignorable: Schema.Array(Schema.Tuple([Schema.Number, Schema.Number])),
+      ignorable: Ranges,
       format: Schema.Array(Schema.Number),
       invisible: Schema.Array(Schema.Number),
     }),
-  )(JSON.parse(stdout))
-  const has = (property: RegExp) => (code: number) => property.test(String.fromCodePoint(code))
+  )
   // The ranges written in result.py, each against the class of the engine.
   expect(seal.ignorable).toEqual(rangesOf(has(/\p{Default_Ignorable_Code_Point}/u)))
   // Python's Unicode data of Cf against the class of the engine.
-  const inSeal = new Set(seal.format)
-  expect(rangesOf((code) => inSeal.has(code))).toEqual(rangesOf(has(/\p{Cf}/u)))
+  expect(rangesIn(seal.format)).toEqual(rangesOf(has(/\p{Cf}/u)))
   // The one rule of the seal is the union of the two.
-  const invisible = new Set(seal.invisible)
-  expect(rangesOf((code) => invisible.has(code))).toEqual(
+  expect(rangesIn(seal.invisible)).toEqual(
     rangesOf(has(/[\p{Cf}\p{Default_Ignorable_Code_Point}]/u)),
   )
 })
 
 test("the seal's Emoji table is the property class Emoji of the daemon's engine, and U+FE0F is kept only after a code point of it that is not ASCII", async () => {
-  const child = Bun.spawn(
-    [
-      "python3",
-      "-I",
-      "-B",
-      "-c",
-      `
-import importlib.util, json, sys
-spec = importlib.util.spec_from_file_location('result', sys.argv[1])
-m = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(m)
-print(json.dumps({'emoji': m.EMOJI, 'presentation': [
-    c for c in range(0x110000) if m.without_presentation(chr(c) + '\\ufe0f') == chr(c)]}))
-`,
-      script,
-    ],
-    { stdout: "pipe", stderr: "pipe" },
+  const seal = await fromSeal(
+    "",
+    `{'emoji': m.EMOJI,
+      'presentation': ${codes("m.without_presentation(chr(c) + '\\ufe0f') == chr(c)")}}`,
+    Schema.Struct({ emoji: Ranges, presentation: Schema.Array(Schema.Number) }),
   )
-  const [status, stdout, stderr] = await Promise.all([
-    child.exited,
-    new Response(child.stdout).text(),
-    new Response(child.stderr).text(),
-  ])
-  expect({ status, stderr }).toEqual({ status: 0, stderr: "" })
-  const seal = Schema.decodeUnknownSync(
-    Schema.Struct({
-      emoji: Schema.Array(Schema.Tuple([Schema.Number, Schema.Number])),
-      presentation: Schema.Array(Schema.Number),
-    }),
-  )(JSON.parse(stdout))
-  const has = (property: RegExp) => (code: number) => property.test(String.fromCodePoint(code))
   // The ranges written in result.py against the class of the engine.
   expect(seal.emoji).toEqual(rangesOf(has(/\p{Emoji}/u)))
   // The code points after which the seal drops a U+FE0F: the class less ASCII.
-  const presentation = new Set(seal.presentation)
-  expect(rangesOf((code) => presentation.has(code))).toEqual(
-    rangesOf(has(/[\p{Emoji}--\p{ASCII}]/v)),
-  )
+  expect(rangesIn(seal.presentation)).toEqual(rangesOf(has(/[\p{Emoji}--\p{ASCII}]/v)))
 })
 
 // A long path with characters that the path rule accepts and a refusal escapes.
