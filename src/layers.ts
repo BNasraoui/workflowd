@@ -61,8 +61,9 @@ import { reviewServerId } from "./review-harness"
 import { SandboxDispatch, makeSandboxDispatch } from "./sandbox/dispatch"
 import { makeSandboxGithub } from "./sandbox/github"
 import { makeSandboxLeaseService } from "./sandbox/lease"
-import { makeDaemonCapability } from "./sandbox/capability-control"
-import { SealedResultGit, SealedResultGitLive, sealedResultLimits } from "./kernel/sealed-result"
+import { makeDaemonCapability, type DaemonCapability } from "./sandbox/capability-control"
+import { SealedResultGit, SealedResultGitLive } from "./kernel/sealed-result"
+import { maxRunnerRuns } from "./kernel/executor"
 import { routeSandboxHandoffs, routeSandboxProvider } from "./sandbox/provider"
 import { WorkflowStoreLive } from "./store"
 import { WorkflowStore } from "./store/contracts"
@@ -93,7 +94,52 @@ function makeManagedDirectoryObservationLayer(
       })
 }
 
-const makeAutomationLayer = (config: Extract<AppConfig, { readonly mode?: "automation" }>) => {
+type AutomationConfig = Extract<AppConfig, { readonly mode?: "automation" }>
+
+/** The repository aliases placed on a GitHub Actions runner. */
+const runnerAliasesOf = (config: AutomationConfig) =>
+  Object.entries(config.agentRuns?.placements ?? {})
+    .filter(([, placement]) => placement === "runner")
+    .map(([alias]) => alias)
+
+/**
+ * The daemon's one git runner of the checks of sealed results. It holds its scratch root for the
+ * daemon's life, so it is built once, here, and only with a runner placement.
+ */
+const sealedResultLayer = (config: AutomationConfig, runnerAliases: ReadonlyArray<string>) =>
+  runnerAliases.length === 0
+    ? Layer.empty
+    : SealedResultGitLive(join(dirname(config.storage.databasePath), "sealed-result-scratch"))
+
+/**
+ * The runner placement of the sandbox dispatch: its aliases, its bound of runs, the gateway, the
+ * one git runner of sealed results and the agent identity. None without a runner alias or a
+ * gateway; a runner alias with no git runner or no agent identity fails the daemon's start.
+ */
+const runnerDispatch = (
+  config: AutomationConfig,
+  runnerAliases: ReadonlyArray<string>,
+  native: { readonly gateway: DaemonCapability } | undefined,
+) =>
+  Effect.gen(function* () {
+    if (native === undefined || runnerAliases.length === 0) return {}
+    const sealed = yield* Effect.serviceOption(SealedResultGit)
+    if (Option.isNone(sealed))
+      return yield* Effect.fail(new Error("The check of sealed results is unavailable"))
+    if (config.agentGit === undefined)
+      return yield* Effect.fail(new Error("A runner placement needs the agent Git identity"))
+    return {
+      runner: {
+        aliases: runnerAliases,
+        maxRuns: config.agentRuns?.runnerMaxRuns ?? maxRunnerRuns,
+        gateway: native.gateway,
+        sealed: sealed.value,
+        agentGit: config.agentGit,
+      },
+    }
+  })
+
+const makeAutomationLayer = (config: AutomationConfig) => {
   const {
     openCodeAdapter,
     openCodeClientEffect,
@@ -352,10 +398,7 @@ const makeAutomationLayer = (config: Extract<AppConfig, { readonly mode?: "autom
           Layer.provideMerge(claudeCliLayer),
         )
   const sandboxPolicies = config.agentRuns?.sandboxRepositories ?? []
-  /** The repository aliases placed on a GitHub Actions runner. */
-  const runnerAliases = Object.entries(config.agentRuns?.placements ?? {})
-    .filter(([, placement]) => placement === "runner")
-    .map(([alias]) => alias)
+  const runnerAliases = runnerAliasesOf(config)
   const sandboxLayer =
     sandboxPolicies.length === 0
       ? Layer.empty
@@ -389,28 +432,7 @@ const makeAutomationLayer = (config: Extract<AppConfig, { readonly mode?: "autom
               client: yield* openCodeClientEffect,
               executorId: `opencode:${completionSourceOptions.providerId}`,
               endpointIdentity: completionSourceOptions.endpointIdentity,
-              ...(native === undefined || runnerAliases.length === 0
-                ? {}
-                : {
-                    runner: {
-                      aliases: runnerAliases,
-                      maxRuns: config.agentRuns?.runnerMaxRuns ?? sealedResultLimits.waitingChecks,
-                      gateway: native.gateway,
-                      // The one git runner of the checks of sealed results, of the main layer.
-                      sealed: yield* Effect.serviceOption(SealedResultGit).pipe(
-                        Effect.flatMap((sealed) =>
-                          Option.isSome(sealed)
-                            ? Effect.succeed(sealed.value)
-                            : Effect.fail(new Error("The check of sealed results is unavailable")),
-                        ),
-                      ),
-                      agentGit:
-                        config.agentGit ??
-                        (yield* Effect.fail(
-                          new Error("A runner placement needs the agent Git identity"),
-                        )),
-                    },
-                  }),
+              ...(yield* runnerDispatch(config, runnerAliases, native)),
               nativeExecutors: {
                 codex: makeCodexCli({
                   credentialSocket: config.credentialSocket,
@@ -452,13 +474,7 @@ const makeAutomationLayer = (config: Extract<AppConfig, { readonly mode?: "autom
           Layer.provideMerge(kernelStoreLayer),
           // The daemon's one git runner of sealed results holds its scratch root for the
           // daemon's life; it is built here, once, with a runner placement only.
-          Layer.provideMerge(
-            runnerAliases.length === 0
-              ? Layer.empty
-              : SealedResultGitLive(
-                  join(dirname(config.storage.databasePath), "sealed-result-scratch"),
-                ),
-          ),
+          Layer.provideMerge(sealedResultLayer(config, runnerAliases)),
         )
   const managedDirectoryObservations = makeManagedDirectoryObservationLayer(config).pipe(
     Layer.provide(directoryStores),
