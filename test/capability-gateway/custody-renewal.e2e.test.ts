@@ -89,7 +89,7 @@ const silent = async () => {
     expect(f.upstreamRequests()).toHaveLength(0)
     expect(JSON.parse(await readFile(loginFile(f), "utf8"))).toEqual(old)
     expect(gateway.output?.()).toContain(
-      "custody: the claude login was not renewed; custody waits before it asks the OAuth server again",
+      "custody: the OAuth server of claude gave no answer within 5 seconds; custody waits before it asks it again",
     )
     expect(gateway.output?.()).not.toContain("needs a new import")
     oauth.mode("renew")

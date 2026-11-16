@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test"
 import { createConnection } from "node:net"
 import { randomUUID } from "node:crypto"
-import { chmod, readFile, readdir, stat } from "node:fs/promises"
+import { chmod, readFile, readdir, rm, stat, writeFile } from "node:fs/promises"
 import { join, resolve } from "node:path"
 import { Effect, Exit, Scope } from "effect"
 import { serveCapabilityGateway } from "../../src/capability-gateway-server"
@@ -604,5 +604,57 @@ test("in this process, the gateway refuses a login it cannot hold and logs a log
     } finally {
       await gateway.stop()
     }
+  })
+}, 30000)
+
+test("a renewal that fails logs one line with the OAuth server's status and error code, and a state or login file that does not parse logs one line that names it and the cause, with no value", async () => {
+  await withCustody(async (f, oauth, start) => {
+    const old = claudeLogin(syntheticValue("access"), syntheticValue("refresh"), Date.now() - 1000)
+    await imported(f, old)
+    oauth.mode("invalid")
+    const gateway = await start()
+    const token = await runToken(gateway, "jti-fault")
+    // The failed renewal, then calls within its wait.
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const call = await client(gateway).call(token)
+      expect(call.status).toBe(503)
+      await call.text()
+    }
+    expect(oauth.requests()).toHaveLength(1)
+    const failed =
+      "custody: the OAuth server of claude answered 400 invalid_request; custody waits before it asks it again"
+    expect(gateway.output?.().split(failed)).toHaveLength(2)
+
+    // A state file and a login file that do not parse, each written by hand in place.
+    const state = join(loginDirectory(f), "claude.state")
+    await writeFile(state, `{"state": "renewing", "retryAt": ${JSON.stringify(old)}`, {
+      mode: 0o600,
+    })
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const call = await client(gateway).call(token)
+      expect(call.status).toBe(503)
+      await call.text()
+    }
+    const stateLine = `custody refused ${state}: does not parse as JSON`
+    expect(gateway.output?.().split(stateLine)).toHaveLength(2)
+    await rm(state)
+    await writeFile(
+      loginFile(f),
+      JSON.stringify({ claudeAiOauth: { ...old.claudeAiOauth, expiresAt: "soon" } }),
+    )
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const call = await client(gateway).call(token)
+      expect(call.status).toBe(503)
+      await call.text()
+    }
+    const loginLine = `custody refused ${loginFile(f)}: is not a login of claude`
+    expect(gateway.output?.().split(loginLine)).toHaveLength(2)
+    expect(oauth.requests()).toHaveLength(1)
+    expect(
+      leaked(gateway.output?.() ?? "", [
+        old.claudeAiOauth.accessToken,
+        old.claudeAiOauth.refreshToken,
+      ]),
+    ).toEqual([])
   })
 }, 30000)

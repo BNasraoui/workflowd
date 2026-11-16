@@ -393,6 +393,11 @@ test("in this process, custody renews, refuses only invalid_grant, waits between
     // leave the login and wait: 5 s, then 10, 20 and 40.
     await load(expired())
     const waits: number[] = []
+    const causes = {
+      busy: "answered 503",
+      invalid: "answered 400 invalid_request",
+      garbled: "gave no answer that custody reads",
+    }
     for (const mode of ["busy", "invalid", "garbled", "busy"] as const) {
       oauth.mode(mode)
       const before = Date.now()
@@ -401,7 +406,7 @@ test("in this process, custody renews, refuses only invalid_grant, waits between
       waits.push(Math.round((state.retryAt - before) / 1000))
       await expect(command()).rejects.toThrow("the claude login waits to renew until")
       expect(await loginFault(directory, "claude")).toBe(
-        "custody: the claude login was not renewed; custody waits before it asks the OAuth server again",
+        `custody: the OAuth server of claude ${causes[mode]}; custody waits before it asks it again`,
       )
       await waited()
     }

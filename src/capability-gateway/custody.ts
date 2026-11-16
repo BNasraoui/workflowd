@@ -129,6 +129,16 @@ class LoginImportRequired extends Error {
     super(`the ${provider} login needs a new import: the OAuth server refused its renewal value`)
   }
 }
+/** A renewal that failed; `line` is the cause for the gateway's log, the same for each call. */
+class RenewalFailed extends CustodyUnavailable {
+  readonly line: string
+  constructor(provider: CustodyProvider, cause: string, retryAt: number) {
+    super(
+      `the OAuth server of ${provider} ${cause}; no request before ${new Date(retryAt).toISOString()}`,
+    )
+    this.line = `custody: the OAuth server of ${provider} ${cause}; custody waits before it asks it again`
+  }
+}
 /** The stored login lacks the scope of a model call; its values are kept. */
 class LoginScopeMissing extends Error {
   constructor(provider: CustodyProvider) {
@@ -229,9 +239,14 @@ async function withDirectory<A>(path: string, body: (directory: Directory) => Pr
 
 const loginName = (provider: CustodyProvider) => `${provider}.json`
 const stateName = (provider: CustodyProvider) => `${provider}.state`
+/**
+ * The line that custody wrote for the last call that failed, for the gateway's log: it names a
+ * cause and a path, never a value. Removed once a call succeeds.
+ */
+const faultName = (provider: CustodyProvider) => `${provider}.fault`
 
-/** The text of a private file of custody in `directory`, or undefined when there is none. */
-async function readPrivate(directory: Directory, name: string) {
+/** A private file of custody in `directory`, open after its checks; undefined when there is none. */
+async function openPrivate(directory: Directory, name: string) {
   const path = join(directory.path, name)
   let file
   try {
@@ -247,9 +262,40 @@ async function readPrivate(directory: Directory, name: string) {
   }
   try {
     refuse(path, await file.stat(), "file")
+  } catch (error) {
+    await file.close()
+    throw error
+  }
+  return file
+}
+/** The text of a private file of custody in `directory`, or undefined when there is none. */
+async function readPrivate(directory: Directory, name: string) {
+  const file = await openPrivate(directory, name)
+  if (!file) return undefined
+  try {
     return await file.readFile("utf8")
   } finally {
     await file.close()
+  }
+}
+/** Whether a private file of custody is in `directory`, after its checks; it reads no byte. */
+async function checkPrivate(directory: Directory, name: string) {
+  const file = await openPrivate(directory, name)
+  await file?.close()
+  return file !== undefined
+}
+/** `text`, the file at `path`, decoded; a fault names the file and the cause, no part of it. */
+function parsed<A>(path: string, text: string, decode: (value: unknown) => A, form: string) {
+  let value: unknown
+  try {
+    value = JSON.parse(text)
+  } catch {
+    throw new CustodyRefused(`custody refused ${path}: does not parse as JSON`)
+  }
+  try {
+    return decode(value)
+  } catch {
+    throw new CustodyRefused(`custody refused ${path}: is not ${form}`)
   }
 }
 
@@ -275,7 +321,14 @@ async function remove(directory: Directory, name: string) {
 
 const readState = async (directory: Directory, provider: CustodyProvider) => {
   const text = await readPrivate(directory, stateName(provider))
-  return text === undefined ? undefined : Schema.decodeUnknownSync(State)(JSON.parse(text))
+  return text === undefined
+    ? undefined
+    : parsed(
+        join(directory.path, stateName(provider)),
+        text,
+        Schema.decodeUnknownSync(State),
+        "a state of custody",
+      )
 }
 const writeState = (directory: Directory, provider: CustodyProvider, state: State) =>
   persist(directory, stateName(provider), JSON.stringify(state))
@@ -287,8 +340,15 @@ async function readLogin(directory: Directory, provider: CustodyProvider) {
     throw new CustodyRefused(
       `custody refused ${join(directory.path, loginName(provider))}: no login imported`,
     )
-  const document = Schema.decodeUnknownSync(Document)(JSON.parse(text))
-  return { document, oauth: providers[provider].read(document) }
+  return parsed(
+    join(directory.path, loginName(provider)),
+    text,
+    (value) => {
+      const document = Schema.decodeUnknownSync(Document)(value)
+      return { document, oauth: providers[provider].read(document) }
+    },
+    `a login of ${provider}`,
+  )
 }
 
 /** Refuses the directory and the login of `provider` when either has another owner or a wider mode. */
@@ -296,7 +356,7 @@ export async function checkLogin(path: string, provider: CustodyProvider) {
   const directory = await openDirectory(path)
   if (!directory) return
   try {
-    await readPrivate(directory, loginName(provider))
+    await checkPrivate(directory, loginName(provider))
   } finally {
     await directory.handle.close()
   }
@@ -304,20 +364,17 @@ export async function checkLogin(path: string, provider: CustodyProvider) {
 
 /**
  * Why the login of `provider` cannot be used, as a line without any value; undefined when no
- * fault is known. The gateway logs it when a call finds no access value.
+ * fault is known. The gateway logs it when a call finds no access value. It checks the owner,
+ * mode and size of the login's files without reading them, and reads the line that custody wrote
+ * for its last failed call: no value of the login enters the gateway to make the line.
  */
 export async function loginFault(path: string, provider: CustodyProvider) {
   try {
     return await withDirectory(path, async (directory) => {
-      const state = await readState(directory, provider)
-      if (state?.state === "import-required")
-        return `custody: ${new LoginImportRequired(provider).message}`
-      const { oauth } = await readLogin(directory, provider)
-      if (!oauth.scopes.includes(inferenceScope))
-        return `custody: ${new LoginScopeMissing(provider).message}`
-      if (state?.state === "renewing" && state.retryAt > Date.now())
-        return `custody: the ${provider} login was not renewed; custody waits before it asks the OAuth server again`
-      return undefined
+      if (!(await checkPrivate(directory, loginName(provider))))
+        return `custody refused ${join(path, loginName(provider))}: no login imported`
+      await checkPrivate(directory, stateName(provider))
+      return (await readPrivate(directory, faultName(provider)))?.trim() || undefined
     })
   } catch (error) {
     return error instanceof CustodyRefused ? error.message : undefined
@@ -446,6 +503,7 @@ export async function importLogin(path: string, provider: CustodyProvider, input
     await clearTemporaries(directory, provider)
     await persist(directory, loginName(provider), JSON.stringify(document))
     await remove(directory, stateName(provider))
+    await remove(directory, faultName(provider))
     return existed ? ("replaced" as const) : ("imported" as const)
   })
 }
@@ -481,6 +539,17 @@ async function answer(response: Response) {
   return JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown
 }
 
+/**
+ * The error code of an OAuth error answer (RFC 6749 section 5.2), when it has the form of one: a
+ * code is a word of lower-case letters and underscores, so no other text of the answer is kept.
+ */
+async function errorCode(response: Response) {
+  const body = Schema.decodeUnknownOption(OAuthError)(await answer(response).catch(() => null))
+  return body._tag === "Some" && /^[a-z_]{1,64}$/.test(body.value.error)
+    ? body.value.error
+    : undefined
+}
+
 /** The wait that a `Retry-After` header asks for, in milliseconds, or 0. */
 function retryAfter(response: Response, now: number) {
   const value = response.headers.get("retry-after")?.trim() ?? ""
@@ -512,17 +581,13 @@ async function renew(provider: CustodyProvider, url: string, stored: OAuth): Pro
       }),
     })
     const now = Date.now()
-    if (response.status === 400) {
-      const body = Schema.decodeUnknownOption(OAuthError)(await answer(response).catch(() => null))
-      if (body._tag === "Some" && body.value.error === "invalid_grant") return { kind: "refused" }
-      return { kind: "failed", cause: "answered 400", askedWaitMs: 0 }
-    }
     if (!response.ok) {
-      await response.body?.cancel()
+      const error = await errorCode(response)
+      if (response.status === 400 && error === "invalid_grant") return { kind: "refused" }
       return {
         kind: "failed",
-        cause: `answered ${response.status}`,
-        askedWaitMs: retryAfter(response, now),
+        cause: `answered ${response.status}${error === undefined ? "" : ` ${error}`}`,
+        askedWaitMs: response.status === 400 ? 0 : retryAfter(response, now),
       }
     }
     const read = providers[provider].renewed(await answer(response), now, stored)
@@ -556,83 +621,103 @@ function usable(provider: CustodyProvider, oauth: OAuth) {
  */
 async function access(path: string, provider: CustodyProvider, url: string) {
   return await holding(path, provider, async (directory) => {
-    let state = await readState(directory, provider)
-    if (state?.state === "import-required") throw new LoginImportRequired(provider)
-    let { document, oauth } = await readLogin(directory, provider)
-    if (state?.state === "renewing" && (await recover(directory, provider, oauth))) {
-      ;({ document, oauth } = await readLogin(directory, provider))
-      await remove(directory, stateName(provider))
-      state = undefined
+    try {
+      const value = await renewedAccess(directory, provider, url)
+      await remove(directory, faultName(provider))
+      return value
+    } catch (error) {
+      // The cause of a failed call, for the gateway's log. A call within a wait keeps the line of
+      // the try that set the wait.
+      const line =
+        error instanceof RenewalFailed
+          ? error.line
+          : error instanceof CustodyRefused
+            ? error.message
+            : error instanceof LoginImportRequired || error instanceof LoginScopeMissing
+              ? `custody: ${error.message}`
+              : undefined
+      if (line !== undefined) await persist(directory, faultName(provider), `${line}\n`)
+      throw error
     }
-    await clearTemporaries(directory, provider)
-    if (state?.state === "renewed") {
-      if (state.renewAfter > Date.now()) {
-        if (oauth.expiresAt > Date.now()) return usable(provider, oauth)
-        throw new CustodyUnavailable(
-          `the ${provider} login waits to renew until ${new Date(state.renewAfter).toISOString()}`,
-        )
-      }
-      state = undefined
-    }
-    if (!state && oauth.expiresAt > Date.now() + renewWithinMs) return usable(provider, oauth)
-    if (state && state.retryAt > Date.now())
+  })
+}
+
+/** `access` while this process holds the login, in its open directory. */
+async function renewedAccess(directory: Directory, provider: CustodyProvider, url: string) {
+  let state = await readState(directory, provider)
+  if (state?.state === "import-required") throw new LoginImportRequired(provider)
+  let { document, oauth } = await readLogin(directory, provider)
+  if (state?.state === "renewing" && (await recover(directory, provider, oauth))) {
+    ;({ document, oauth } = await readLogin(directory, provider))
+    await remove(directory, stateName(provider))
+    state = undefined
+  }
+  await clearTemporaries(directory, provider)
+  if (state?.state === "renewed") {
+    if (state.renewAfter > Date.now()) {
+      if (oauth.expiresAt > Date.now()) return usable(provider, oauth)
       throw new CustodyUnavailable(
-        `the ${provider} login waits to renew until ${new Date(state.retryAt).toISOString()}`,
-      )
-    const failures = state?.failures ?? 0
-    // From here the OAuth server may take the refresh value: a stop leaves `renewing`.
-    await writeState(directory, provider, { state: "renewing", failures, retryAt: 0 })
-    const outcome = await renew(provider, url, oauth)
-    if (outcome.kind === "refused") {
-      await writeState(directory, provider, { state: "import-required" })
-      throw new LoginImportRequired(provider)
-    }
-    if (outcome.kind === "replaced")
-      // The server has replaced the refresh value: it is stored before the answer is judged.
-      await persist(
-        directory,
-        loginName(provider),
-        JSON.stringify(
-          providers[provider].write(document, { ...oauth, refreshToken: outcome.refreshToken }),
-        ),
-      )
-    if (outcome.kind === "failed" || outcome.kind === "replaced") {
-      const asked = outcome.kind === "failed" ? outcome.askedWaitMs : 0
-      const wait = Math.min(
-        retryWaitCapMs,
-        Math.max(firstRetryWaitMs * 2 ** Math.min(failures, 16), asked),
-      )
-      const retryAt = Date.now() + wait
-      await writeState(directory, provider, {
-        state: "renewing",
-        failures: Math.min(failures + 1, 64),
-        retryAt,
-      })
-      const cause =
-        outcome.kind === "failed"
-          ? outcome.cause
-          : "answered with a renewal value, which custody stored, and fields that custody does not take"
-      throw new CustodyUnavailable(
-        `the OAuth server of ${provider} ${cause}; no request before ${new Date(retryAt).toISOString()}`,
+        `the ${provider} login waits to renew until ${new Date(state.renewAfter).toISOString()}`,
       )
     }
-    // The server has replaced the refresh value: the new values are stored whatever their scope.
-    const next = outcome.next
+    state = undefined
+  }
+  if (!state && oauth.expiresAt > Date.now() + renewWithinMs) return usable(provider, oauth)
+  if (state && state.retryAt > Date.now())
+    throw new CustodyUnavailable(
+      `the ${provider} login waits to renew until ${new Date(state.retryAt).toISOString()}`,
+    )
+  const failures = state?.failures ?? 0
+  // From here the OAuth server may take the refresh value: a stop leaves `renewing`.
+  await writeState(directory, provider, { state: "renewing", failures, retryAt: 0 })
+  const outcome = await renew(provider, url, oauth)
+  if (outcome.kind === "refused") {
+    await writeState(directory, provider, { state: "import-required" })
+    throw new LoginImportRequired(provider)
+  }
+  if (outcome.kind === "replaced")
+    // The server has replaced the refresh value: it is stored before the answer is judged.
     await persist(
       directory,
       loginName(provider),
-      JSON.stringify(providers[provider].write(document, next)),
+      JSON.stringify(
+        providers[provider].write(document, { ...oauth, refreshToken: outcome.refreshToken }),
+      ),
     )
-    // An access value that ends within the renewal lead serves calls until it ends, and no
-    // renewal request goes out before the first wait has passed.
-    if (next.expiresAt > Date.now() + renewWithinMs) await remove(directory, stateName(provider))
-    else
-      await writeState(directory, provider, {
-        state: "renewed",
-        renewAfter: Date.now() + firstRetryWaitMs,
-      })
-    return usable(provider, next)
-  })
+  if (outcome.kind === "failed" || outcome.kind === "replaced") {
+    const asked = outcome.kind === "failed" ? outcome.askedWaitMs : 0
+    const wait = Math.min(
+      retryWaitCapMs,
+      Math.max(firstRetryWaitMs * 2 ** Math.min(failures, 16), asked),
+    )
+    const retryAt = Date.now() + wait
+    await writeState(directory, provider, {
+      state: "renewing",
+      failures: Math.min(failures + 1, 64),
+      retryAt,
+    })
+    const cause =
+      outcome.kind === "failed"
+        ? outcome.cause
+        : "answered with a renewal value, which custody stored, and fields that custody does not take"
+    throw new RenewalFailed(provider, cause, retryAt)
+  }
+  // The server has replaced the refresh value: the new values are stored whatever their scope.
+  const next = outcome.next
+  await persist(
+    directory,
+    loginName(provider),
+    JSON.stringify(providers[provider].write(document, next)),
+  )
+  // An access value that ends within the renewal lead serves calls until it ends, and no
+  // renewal request goes out before the first wait has passed.
+  if (next.expiresAt > Date.now() + renewWithinMs) await remove(directory, stateName(provider))
+  else
+    await writeState(directory, provider, {
+      state: "renewed",
+      renewAfter: Date.now() + firstRetryWaitMs,
+    })
+  return usable(provider, next)
 }
 
 /**
