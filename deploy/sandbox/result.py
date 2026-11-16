@@ -80,6 +80,20 @@ def invisible(c):
     return unicodedata.category(c) == 'Cf' or IGNORABLE.match(c) is not None
 
 
+def without_presentation(value):
+    """The text with each U+FE0F (emoji presentation) that directly follows a visible code point
+    left out: a commit message or a path may hold one there, and nowhere else."""
+    kept, previous = [], None
+    for c in value:
+        if c == '\ufe0f' and previous is not None and not (
+                unicodedata.category(previous) == 'Cc' or invisible(previous) or previous.isspace()):
+            previous = c
+            continue
+        kept.append(c)
+        previous = c
+    return ''.join(kept)
+
+
 LETTERS = re.compile('[' + UNICODE['letters'] + ']')
 STACKED_MARKS = re.compile('[' + UNICODE['marks'] + ']{3}')
 LANGUAGES = {'', 'text', 'diff', 'ts', 'typescript', 'tsx', 'js', 'json', 'sh', 'bash', 'python', 'rust', 'go', 'sql', 'yaml', 'toml'}
@@ -158,6 +172,8 @@ def publication_text(value, message=False):
     encoded = value.encode('utf8', errors='strict')
     if (len(encoded) > 10240) if message else (len(value) > 200):
         raise ValueError('Invalid publication text')
+    if message:
+        value = without_presentation(value)
     if any((unicodedata.category(c) == 'Cc' and not (message and c == '\n')) or invisible(c) for c in value):
         raise ValueError('Invalid publication text')
     if not message and any(c in value for c in ('\u2028', '\u2029')):
@@ -178,7 +194,8 @@ def publication_body(value):
 def final_message(value):
     # Data to the caller: newlines and tabs, and no other control or invisible character.
     if not isinstance(value, str) or len(value.encode('utf8', errors='strict')) > 65536 or any(
-            (unicodedata.category(c) == 'Cc' and c not in '\n\t') or invisible(c) for c in value):
+            (unicodedata.category(c) == 'Cc' and c not in '\n\t') or invisible(c)
+            for c in without_presentation(value)):
         raise ValueError('Invalid final message')
 
 
@@ -249,7 +266,8 @@ def safe_path(raw):
         raise ValueError('Unsafe path component')
     if name.startswith('deploy/sandbox/') or name == 'deploy/sandbox':
         raise ValueError('Sandbox tooling path is forbidden')
-    if '\\' in name or PATH_MARKS.search(name) or any(unicodedata.category(c) == 'Cc' or invisible(c) for c in name):
+    shown = '/'.join(without_presentation(part) for part in parts)
+    if '\\' in name or PATH_MARKS.search(name) or any(unicodedata.category(c) == 'Cc' or invisible(c) for c in shown):
         raise ValueError('Invalid path characters')
     if unicodedata.normalize('NFC', name) != name:
         raise ValueError('Path must be NFC normalized')

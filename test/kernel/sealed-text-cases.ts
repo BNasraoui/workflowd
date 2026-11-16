@@ -197,14 +197,33 @@ export const sealedTextCases: ReadonlyArray<SealedTextCase> = [
     "src/in\u200bdex.ts",
     "src/in\u200ddex.ts",
     "docs/\u{1f469}\u200d\u{1f4bb}.md",
-    ...invisibleCharacters.map((character) => hostilePath(character)),
+    ...invisibleCharacters.filter((character) => character !== "\ufe0f").map(hostilePath),
   ]),
   ...cases("path", true, ["docs/\u{1f680}.md"]),
   ...cases(
     "finalMessage",
     false,
-    invisibleCharacters.map((character) => `a${character}b`),
+    invisibleCharacters
+      .filter((character) => character !== "\ufe0f")
+      .map((character) => `a${character}b`),
   ),
+  // U+FE0F (emoji presentation) directly after a visible code point, and nowhere else.
+  ...cases("path", true, ["docs/\u2714\ufe0f.md", "src/a\ufe0fb.txt"]),
+  ...cases("path", false, [
+    "docs/\ufe0f.md",
+    "docs/a\ufe0f\ufe0f.md",
+    "docs/a \ufe0f.md",
+    "docs/a\u200d\ufe0f.md",
+  ]),
+  ...cases("commitMessage", true, ["Fix the \u2714\ufe0f marks\n"]),
+  ...cases("commitMessage", false, [
+    "\ufe0f first\n",
+    "two \u2714\ufe0f\ufe0f\n",
+    "after a space \ufe0f\n",
+    "after a line\n\ufe0f\n",
+  ]),
+  ...cases("finalMessage", true, ["Done \u2714\ufe0f"]),
+  ...cases("finalMessage", false, ["\ufe0f", "tab\t\ufe0f"]),
   {
     field: "path",
     value: "not UTF-8 (an encoded surrogate)",
