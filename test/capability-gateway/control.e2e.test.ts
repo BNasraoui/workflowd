@@ -70,7 +70,6 @@ const commands = {
     ))
   }),
   reconcile: () => capability.reconcile(),
-  usage: (runId) => capability.usage(runId),
 }
 for await (const line of createInterface({ input: process.stdin })) {
   const [verb, ...args] = line.split(" ")
@@ -442,57 +441,6 @@ test("neither process can name the other's database", async () => {
     expect(daemon.refusal).toContain("is the capability gateway's store")
     expect(await snapshot(config.storePath)).toEqual(stoppedFile)
   } finally {
-    await f.close()
-  }
-})
-
-test("the usage verb gives the daemon a run's counts, refuses a run that the gateway does not hold, and answers no other caller", async () => {
-  await withProcesses(async (f, { daemon }) => {
-    expect(await daemon.send("authorize run")).toEqual({ ok: true, value: null })
-    expect(await daemon.send("usage run")).toEqual({
-      ok: true,
-      value: {
-        calls: 0,
-        inputTokens: 0,
-        outputTokens: 0,
-        cacheCreationInputTokens: 0,
-        cacheReadInputTokens: 0,
-        spent: false,
-      },
-    })
-    expect(await daemon.send("usage other")).toEqual({
-      ok: false,
-      tag: "CapabilityControlRefused",
-    })
-    expect(
-      JSON.parse(
-        await rawFrame(socketOf(f), framed(JSON.stringify({ verb: "usage", body: { runId: 7 } }))),
-      ),
-    ).toEqual({ ok: false, error: "body" })
-  })
-  const f = await fixture()
-  const gateway = await startGateway(f, gatewayConfig(f, process.getuid!() + 1))
-  try {
-    expect(
-      JSON.parse(
-        await rawFrame(
-          socketOf(f),
-          framed(JSON.stringify({ verb: "usage", body: { runId: "run" } })),
-        ),
-      ),
-    ).toEqual({ ok: false, error: "caller" })
-    const daemon = await startDaemon(daemonDatabase(f), socketOf(f))
-    try {
-      expect(daemon.ready).toBe(true)
-      expect(await daemon.send("usage run")).toEqual({
-        ok: false,
-        tag: "CapabilityControlRefused",
-      })
-    } finally {
-      await daemon.stop()
-    }
-  } finally {
-    await gateway.stop()
     await f.close()
   }
 })

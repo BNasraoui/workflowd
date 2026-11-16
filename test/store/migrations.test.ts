@@ -181,7 +181,8 @@ describe("strict initial store schema", () => {
              'kernel_resume_requests', 'kernel_resume_attempts', 'kernel_resume_checkpoints',
              'kernel_resume_results', 'kernel_resume_observations', 'kernel_cleanup_requests',
               'kernel_cleanup_attempts', 'kernel_cleanup_outcomes',
-              'kernel_agent_completion_watches', 'kernel_agent_runs', 'sandbox_leases', 'sandbox_cleanup_runs', 'sandbox_lease_operations', 'sandbox_publications'
+              'kernel_agent_completion_watches', 'kernel_agent_runs', 'sandbox_leases', 'sandbox_cleanup_runs', 'sandbox_lease_operations', 'sandbox_publications',
+              'sandbox_run_budgets'
           )
           ORDER BY name
         `
@@ -241,7 +242,7 @@ describe("strict initial store schema", () => {
       { migration_id: 44, name: "capability_store_split" },
       { migration_id: 45, name: "capability_run_budget" },
     ])
-    expect(result.tables).toHaveLength(36)
+    expect(result.tables).toHaveLength(37)
     expect(result.tables.every((table) => table.strict === 1)).toBe(true)
     expect(result.foreignKeys).toEqual([{ foreign_keys: 1 }])
     expect(result.busyTimeout).toEqual([{ timeout: 5000 }])
@@ -1068,11 +1069,10 @@ test("migration 44 takes the gateway's tables and triggers out of a store that h
       yield* sql`INSERT INTO capability_proofs(jti_digest,run_id,expires_at) VALUES(${"e".repeat(64)},'run',${Date.now() + 600000})`
       const before = yield* sql`SELECT * FROM sandbox_leases`
       yield* runStoreMigrations
-      // The gateway's tables, their rows and both triggers are gone; workflowd's rows stay. The one
-      // table left is workflowd's own budget of each run, which migration 45 adds.
+      // The gateway's tables, their rows and both triggers are gone; workflowd's rows stay.
       expect(
         yield* sql`SELECT type,name FROM sqlite_master WHERE name LIKE 'capability_%' ORDER BY name`,
-      ).toEqual([{ type: "table", name: "capability_run_budgets" }])
+      ).toEqual([])
       expect(yield* sql`SELECT * FROM sandbox_leases`).toEqual(before)
       expect((yield* runs.read("run"))?.state).toBe("spawning")
       // A run that ends, and a lease that is released, write no gateway table.

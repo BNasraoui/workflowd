@@ -3,7 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { readFileSync } from "node:fs"
 import { join } from "node:path"
-import { claudeBetas } from "../../src/capability-gateway/claude"
+import { budgetHeld, claudeBetas } from "../../src/capability-gateway/claude"
 import { defaultRunBudget } from "../../src/sandbox/config"
 import { fixtureExecutable } from "../helpers/fixture-executable.mjs"
 import { client, processGateway, proof, sse, withGateway } from "./gateway-process"
@@ -136,6 +136,22 @@ for (const model of [
       ),
     ).toEqual([])
   }, 90000)
+
+test("the pinned Claude Code waits the retry-after of the gateway's 429 for a call that open calls hold back, asks again and completes", async () => {
+  const asked: number[] = []
+  const run = await runPinned("claude-opus-5-5", "fixture-oauth", async (request) => {
+    if (new URL(request.url).pathname !== "/v1/messages")
+      return new Response(sse, { headers: { "content-type": "text/event-stream" } })
+    asked.push(Date.now())
+    return asked.length === 1
+      ? budgetHeld()
+      : new Response(sse, { headers: { "content-type": "text/event-stream" } })
+  })
+  expect({ code: run.code, output: run.output.trim() }).toEqual({ code: 0, output: "ok" })
+  expect(asked.length).toBeGreaterThanOrEqual(2)
+  // retry-after: 5
+  expect(asked[1]! - asked[0]!).toBeGreaterThanOrEqual(5000)
+}, 90000)
 
 test("the pinned Claude Code completes a call through the gateway process, and its body keeps its meaning", async () => {
   await withGateway(processGateway, async (f, gateway) => {

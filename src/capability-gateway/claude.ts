@@ -1,3 +1,4 @@
+import { maxCallTokens } from "../capability-control/protocol"
 import { credentialPatterns } from "./provider-evidence"
 import { checkHeaders, RequestRefused } from "./headers"
 
@@ -250,7 +251,14 @@ export async function claudeRequest(
       signal,
     },
     reservation,
-  )
+  ).catch((error: unknown) => {
+    throw madeNoOutput(error) ? new NoProviderOutput() : error
+  })
+  // A redirect of the provider comes before any output.
+  if (response.status >= 300 && response.status < 400) {
+    await response.body?.cancel()
+    throw new NoProviderOutput()
+  }
   // An error answer of the provider comes before any output: it reports none.
   const answered = response.status >= 200 && response.status < 300
   const meter =
@@ -274,10 +282,7 @@ async function safeProviderResponse(
   meter?: UsageMeter,
 ) {
   const patterns = credentialPatterns(secrets)
-  if (
-    (response.status >= 300 && response.status < 400) ||
-    response.headers.has("content-encoding")
-  ) {
+  if (response.headers.has("content-encoding")) {
     await response.body?.cancel()
     throw new Error("upstream unavailable")
   }
@@ -302,12 +307,6 @@ async function safeProviderResponse(
     headers: outgoing,
   }
 }
-
-/**
- * The largest token count that the gateway takes from a usage the provider reports: ten times the
- * largest context window of a model. A count above it is no count.
- */
-export const maxReportedTokens = 10_000_000
 
 /**
  * The token counts that the provider reported for one call. `outputTokens` is undefined until the
@@ -353,7 +352,7 @@ const field = (value: unknown, name: string): unknown =>
 /**
  * Reads the usage of a messages answer as its bytes pass: the `usage` of the `message_start` and
  * `message_delta` events of an event stream, or of the body of a JSON answer. A count is taken
- * only when it is an integer from 0 to `maxReportedTokens`; an input count may also be null, which
+ * only when it is an integer from 0 to `maxCallTokens`; an input count may also be null, which
  * reports nothing. Any other value, a usage that is not an object, or an answer of another type
  * makes the whole usage of the call unknown.
  */
@@ -381,7 +380,7 @@ function usageMeter(contentType: string) {
         typeof value !== "number" ||
         !Number.isSafeInteger(value) ||
         value < 0 ||
-        value > maxReportedTokens
+        value > maxCallTokens
       ) {
         unknown = true
         return
@@ -471,6 +470,67 @@ function metered(body: ReadableStream<Uint8Array>, meter: UsageMeter) {
     { highWaterMark: 1 },
   )
 }
+
+/**
+ * Whether a failure of the upstream fetch shows that the provider made no output for the call.
+ * Bun's fetch fails with `ConnectionRefused` when the connection never opened: the connect was
+ * refused, the name did not resolve or the TLS handshake failed, each before a byte of the request
+ * was sent. It fails with `UnexpectedRedirect` on a 3xx answer, which `redirect: "error"` refuses.
+ * Each other failure can come after the request reached the provider: Bun's fetch gives
+ * `ECONNRESET` both for a connection closed before the provider read the request and for one
+ * closed after it, and an abort or a failed certificate check is charged as one that the provider
+ * can have answered.
+ */
+function madeNoOutput(error: unknown) {
+  const code: unknown = error instanceof Error ? Reflect.get(error, "code") : undefined
+  return code === "ConnectionRefused" || code === "UnexpectedRedirect"
+}
+
+/** A model call that ended before the provider could make output; it is charged none. */
+export class NoProviderOutput extends Error {
+  readonly _tag = "NoProviderOutput"
+  readonly usage = noOutput
+  constructor() {
+    super("upstream unavailable")
+  }
+}
+
+/**
+ * The seconds that a model call held back by its run's open reservations waits before it asks
+ * again. A reservation lives as long as the stream of its model call, which takes seconds for a
+ * short answer and minutes for a long one; five seconds keeps a client's quick first retries from
+ * finding the same streams open, and stays far below the minute above which the pinned Claude
+ * Code does not retry a 429.
+ */
+const heldRetrySeconds = 5
+
+/**
+ * A model call that the run's budget holds only once the run's open reservations settle; the
+ * gateway answers it with `budgetHeld`.
+ */
+export class RunBudgetHeld extends Error {
+  readonly _tag = "RunBudgetHeld"
+  constructor() {
+    super("run budget held by open calls")
+  }
+}
+
+/** The answer to a call that open reservations hold back, in the provider's rate limit form. */
+export const budgetHeld = () =>
+  new Response(
+    JSON.stringify({
+      type: "error",
+      error: { type: "rate_limit_error", message: "workflowd run budget held by open calls" },
+    }),
+    {
+      status: 429,
+      headers: {
+        "content-type": "application/json",
+        "cache-control": "no-store",
+        "retry-after": String(heldRetrySeconds),
+      },
+    },
+  )
 
 /** A model call of a run whose budget is spent; the gateway answers it with `budgetSpent`. */
 export class RunBudgetSpent extends Error {
