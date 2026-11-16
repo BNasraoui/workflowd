@@ -227,3 +227,45 @@ test("the gateway holds 16 refused connections at once; the next one is closed w
     await f.close()
   }
 })
+
+/**
+ * `serveSocket` in a new user namespace with its own mount namespace, on a socket under a tmpfs
+ * at /mnt that the namespace's root owns. `/` is owned by the host's root, which the namespace
+ * does not map, so `/` shows the overflow uid. With `nested`, the namespace is made inside a
+ * first one, and maps the first one's root: its uid 0 has a mapping.
+ */
+async function serveInNamespace(nested: boolean) {
+  const script = `import { createServer } from "node:net"
+import { serveSocket } from ${JSON.stringify(join(import.meta.dir, "../../src/peer-socket.ts"))}
+const role = { socket: "control socket", group: "the daemon's group" }
+try {
+  const close = await serveSocket(createServer(), "/mnt/control/gateway.sock", 0, 0o710, role)
+  await close()
+  console.log("served")
+} catch (error) {
+  console.log(error instanceof Error ? error.message : String(error))
+}`
+  const inner = ["unshare", "--user", "--map-root-user", "--mount", "sh", "-c"]
+  const serve = `mount -t tmpfs tmpfs /mnt && cat /proc/self/uid_map >&2 && exec "$0" -e "$1"`
+  const command = nested
+    ? ["unshare", "--user", "--map-root-user", ...inner, serve, process.execPath, script]
+    : [...inner, serve, process.execPath, script]
+  const child = Bun.spawn(command, { stdout: "pipe", stderr: "pipe" })
+  const [out, map] = await Promise.all([
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+  ])
+  await child.exited
+  return { result: out.trim(), map: map.trim().split(/\s+/) }
+}
+
+test("the overflow uid passes as the owner of / only in a user namespace that does not map uid 0", async () => {
+  // The host's uid 0 has no mapping: the namespace cannot tell who owns `/`, and accepts it.
+  const unmapped = await serveInNamespace(false)
+  expect(unmapped.map[1]).not.toBe("0")
+  expect(unmapped.result).toBe("served")
+  // The first namespace's uid 0 has a mapping, and does not own `/`.
+  const mapped = await serveInNamespace(true)
+  expect(mapped.map).toEqual(["0", "0", "1"])
+  expect(mapped.result).toBe("/ lets another user replace the control socket directory")
+})
