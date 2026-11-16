@@ -192,38 +192,45 @@ export const sealedTextCases: ReadonlyArray<SealedTextCase> = [
   ]),
   // A code point that a reader cannot see: a format character or a default-ignorable
   // code point, in a path as in a text. A file name with an emoji sequence that needs a
-  // joiner or a variation selector is refused; an emoji of one code point is not.
+  // joiner or a variation selector is refused; an emoji of one code point is not. A path
+  // holds no U+FE0F: `src/a\ufe0fb.txt` reads as `src/ab.txt` and is another path.
   ...cases("path", false, [
     "src/in\u200bdex.ts",
     "src/in\u200ddex.ts",
     "docs/\u{1f469}\u200d\u{1f4bb}.md",
-    ...invisibleCharacters.filter((character) => character !== "\ufe0f").map(hostilePath),
+    "docs/\u2714\ufe0f.md",
+    ...invisibleCharacters.map(hostilePath),
   ]),
-  ...cases("path", true, ["docs/\u{1f680}.md"]),
+  ...cases("path", true, ["docs/\u{1f680}.md", "docs/\u2714.md"]),
   ...cases(
     "finalMessage",
     false,
-    invisibleCharacters
-      .filter((character) => character !== "\ufe0f")
-      .map((character) => `a${character}b`),
+    invisibleCharacters.map((character) => `a${character}b`),
   ),
-  // U+FE0F (emoji presentation) directly after a visible code point, and nowhere else.
-  ...cases("path", true, ["docs/\u2714\ufe0f.md", "src/a\ufe0fb.txt"]),
-  ...cases("path", false, [
-    "docs/\ufe0f.md",
-    "docs/a\ufe0f\ufe0f.md",
-    "docs/a \ufe0f.md",
-    "docs/a\u200d\ufe0f.md",
-  ]),
-  ...cases("commitMessage", true, ["Fix the \u2714\ufe0f marks\n"]),
+  // U+FE0F where it selects the emoji form: directly after a code point with the Emoji
+  // property that is not ASCII. After a letter, a digit, `#`, a space, a joiner, another
+  // U+FE0F or at the start it is an invisible code point.
+  ...cases("commitMessage", true, ["Fix the \u2714\ufe0f marks\n", "Ship it \u{1f680}\ufe0f\n"]),
   ...cases("commitMessage", false, [
     "\ufe0f first\n",
+    "a letter a\ufe0f\n",
+    "a digit 1\ufe0f\n",
+    "a sign #\ufe0f\n",
     "two \u2714\ufe0f\ufe0f\n",
     "after a space \ufe0f\n",
     "after a line\n\ufe0f\n",
+    "after a joiner \u{1f469}\u200d\ufe0f\n",
   ]),
-  ...cases("finalMessage", true, ["Done \u2714\ufe0f"]),
-  ...cases("finalMessage", false, ["\ufe0f", "tab\t\ufe0f"]),
+  ...cases("finalMessage", true, ["Done \u2714\ufe0f", "\u2764\ufe0f\ttab"]),
+  ...cases("finalMessage", false, [
+    "\ufe0f",
+    "\ufe0f first",
+    "a letter a\ufe0f",
+    "a digit 1\ufe0f",
+    "a star *\ufe0f",
+    "two \u2714\ufe0f\ufe0f",
+    "tab\t\ufe0f",
+  ]),
   {
     field: "path",
     value: "not UTF-8 (an encoded surrogate)",

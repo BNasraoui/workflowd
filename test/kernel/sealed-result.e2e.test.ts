@@ -2668,6 +2668,47 @@ print(json.dumps({'ignorable': m.DEFAULT_IGNORABLE, 'format': format,
   )
 })
 
+test("the seal's Emoji table is the property class Emoji of the daemon's engine, and U+FE0F is kept only after a code point of it that is not ASCII", async () => {
+  const child = Bun.spawn(
+    [
+      "python3",
+      "-I",
+      "-B",
+      "-c",
+      `
+import importlib.util, json, sys
+spec = importlib.util.spec_from_file_location('result', sys.argv[1])
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+print(json.dumps({'emoji': m.EMOJI, 'presentation': [
+    c for c in range(0x110000) if m.without_presentation(chr(c) + '\\ufe0f') == chr(c)]}))
+`,
+      script,
+    ],
+    { stdout: "pipe", stderr: "pipe" },
+  )
+  const [status, stdout, stderr] = await Promise.all([
+    child.exited,
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+  ])
+  expect({ status, stderr }).toEqual({ status: 0, stderr: "" })
+  const seal = Schema.decodeUnknownSync(
+    Schema.Struct({
+      emoji: Schema.Array(Schema.Tuple([Schema.Number, Schema.Number])),
+      presentation: Schema.Array(Schema.Number),
+    }),
+  )(JSON.parse(stdout))
+  const has = (property: RegExp) => (code: number) => property.test(String.fromCodePoint(code))
+  // The ranges written in result.py against the class of the engine.
+  expect(seal.emoji).toEqual(rangesOf(has(/\p{Emoji}/u)))
+  // The code points after which the seal drops a U+FE0F: the class less ASCII.
+  const presentation = new Set(seal.presentation)
+  expect(rangesOf((code) => presentation.has(code))).toEqual(
+    rangesOf(has(/[\p{Emoji}--\p{ASCII}]/v)),
+  )
+})
+
 // A long path with characters that the path rule accepts and a refusal escapes.
 const longPath = `\u00e9\u96ea${"x".repeat(3000)}.txt`
 
