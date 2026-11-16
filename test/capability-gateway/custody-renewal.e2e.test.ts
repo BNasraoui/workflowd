@@ -28,11 +28,21 @@ import {
  * call ends that call's wait only.
  */
 
-/** Calls on `token` until `at` (a time of `Date.now()`): each gets 503, and none asks the OAuth server. */
-async function quietUntil(gateway: Gateway, token: string, oauth: OAuthFixture, at: number) {
+/**
+ * Custody's wait of `ms` after a call that failed: it starts no sooner than `sentAt`, when that
+ * call was sent, and no later than `answeredAt`, when its 503 came back (times of `Date.now()`).
+ * Calls on `token` until the earliest end of the wait each get 503 and ask the OAuth server
+ * nothing; this returns once the latest end has passed.
+ */
+async function quietUntil(
+  gateway: Gateway,
+  token: string,
+  oauth: OAuthFixture,
+  wait: { readonly sentAt: number; readonly answeredAt: number; readonly ms: number },
+) {
   const before = oauth.requests().length
   let calls = 0
-  while (Date.now() < at - 400) {
+  while (Date.now() < wait.sentAt + wait.ms - 400) {
     const call = await client(gateway).call(token)
     expect(call.status).toBe(503)
     await call.text()
@@ -41,7 +51,7 @@ async function quietUntil(gateway: Gateway, token: string, oauth: OAuthFixture, 
   }
   expect(calls).toBeGreaterThan(0)
   expect(oauth.requests()).toHaveLength(before)
-  await Bun.sleep(Math.max(0, at - Date.now()) + 100)
+  await Bun.sleep(Math.max(0, wait.answeredAt + wait.ms - Date.now()) + 100)
 }
 
 /** An exclusive advisory lock on `path`, as a custody process takes it, until `release`. */
@@ -68,8 +78,9 @@ const silent = async () => {
     const gateway = await start()
     const token = await runToken(gateway, "jti-silent")
     const began = performance.now()
+    const sentAt = Date.now()
     const call = await client(gateway).call(token)
-    const failedAt = Date.now()
+    const answeredAt = Date.now()
     const took = performance.now() - began
     expect(call.status).toBe(503)
     expect(took).toBeGreaterThanOrEqual(5000)
@@ -82,7 +93,8 @@ const silent = async () => {
     )
     expect(gateway.output?.()).not.toContain("needs a new import")
     oauth.mode("renew")
-    await quietUntil(gateway, token, oauth, failedAt + 5000)
+    // Custody's wait starts once its request has had no answer for 5 seconds.
+    await quietUntil(gateway, token, oauth, { sentAt: sentAt + 5000, answeredAt, ms: 5000 })
     await works(gateway, token, oauth, old.claudeAiOauth.refreshToken)
     expect(f.upstreamRequests().map((request) => request.headers.authorization)).toEqual([
       `Bearer ${oauth.next().access}`,
@@ -99,10 +111,11 @@ const limited = async () => {
     const token = await runToken(gateway, "jti-limited")
     // 429 with Retry-After 7: longer than the first wait of 5 seconds.
     oauth.mode("limited", { retryAfter: 7 })
+    const sentAt = Date.now()
     expect((await client(gateway).call(token)).status).toBe(503)
-    const limitedAt = Date.now()
+    const answeredAt = Date.now()
     oauth.mode("renew")
-    await quietUntil(gateway, token, oauth, limitedAt + 7000)
+    await quietUntil(gateway, token, oauth, { sentAt, answeredAt, ms: 7000 })
     await works(gateway, token, oauth, old.claudeAiOauth.refreshToken)
     expect(gateway.output?.()).not.toContain("needs a new import")
     expect(JSON.parse(await readFile(loginFile(f), "utf8")).claudeAiOauth.refreshToken).toBe(
@@ -119,10 +132,11 @@ const busy = async () => {
     const gateway = await start()
     const token = await runToken(gateway, "jti-busy")
     oauth.mode("busy")
+    const sentAt = Date.now()
     expect((await client(gateway).call(token)).status).toBe(503)
-    const busyAt = Date.now()
+    const answeredAt = Date.now()
     oauth.mode("renew")
-    await quietUntil(gateway, token, oauth, busyAt + 5000)
+    await quietUntil(gateway, token, oauth, { sentAt, answeredAt, ms: 5000 })
     await works(gateway, token, oauth, old.claudeAiOauth.refreshToken)
     expect(oauth.requests().map(sentRefresh)).toEqual([
       old.claudeAiOauth.refreshToken,
@@ -141,10 +155,11 @@ const invalid = async () => {
     oauth.mode("invalid")
     const gateway = await start()
     const token = await runToken(gateway, "jti-invalid")
+    const sentAt = Date.now()
     expect((await client(gateway).call(token)).status).toBe(503)
-    const failedAt = Date.now()
+    const answeredAt = Date.now()
     oauth.mode("renew")
-    await quietUntil(gateway, token, oauth, failedAt + 5000)
+    await quietUntil(gateway, token, oauth, { sentAt, answeredAt, ms: 5000 })
     await works(gateway, token, oauth, old.claudeAiOauth.refreshToken)
     expect(gateway.output?.()).not.toContain("needs a new import")
   })
