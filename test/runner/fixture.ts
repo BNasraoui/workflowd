@@ -1,6 +1,6 @@
 import { SqliteClient } from "@effect/sql-sqlite-bun"
 import { OpenCode } from "@opencode-ai/client/effect"
-import { Effect, Layer, ManagedRuntime } from "effect"
+import { Effect, Layer, ManagedRuntime, type Scope } from "effect"
 import { FetchHttpClient } from "effect/unstable/http"
 import { SqlClient } from "effect/unstable/sql"
 import { mkdir, readFile, writeFile } from "node:fs/promises"
@@ -19,7 +19,7 @@ import {
 } from "../../src/kernel/sealed-result"
 import { KernelSessionStoreLive } from "../../src/kernel/session-store"
 import { makeOpenCodeSdkClient, SdkOpenCodeAdapter } from "../../src/opencode/adapter"
-import { makeDaemonCapability } from "../../src/sandbox/capability-control"
+import { makeDaemonCapability, type DaemonCapability } from "../../src/sandbox/capability-control"
 import { defaultRunBudget } from "../../src/sandbox/config"
 import { makeSandboxDispatch, SandboxDispatch } from "../../src/sandbox/dispatch"
 import { RepositoryVisibility } from "../../src/sandbox/github"
@@ -114,7 +114,7 @@ export function run(step: string, argv: ReadonlyArray<string>, cwd?: string, inp
  * a public repository: upload-pack only. Its one commit is the run's source; the daemon pushes
  * the run's branch into the same bare repository.
  */
-async function gitRemote(root: string) {
+export async function gitRemote(root: string) {
   const work = join(root, "work")
   const projects = join(root, "remote")
   const bare = join(projects, "fixture", "repo.git")
@@ -187,7 +187,7 @@ async function gitRemote(root: string) {
  * lease ref starts (`actionsRunId`), its commits and its workflows. `started` runs once for each
  * lease ref that the daemon creates, as GitHub starts the caller workflow on its push.
  */
-async function githubStub(sourceSha: string, started: (leaseId: string) => void) {
+export async function githubStub(sourceSha: string, started: (leaseId: string) => void) {
   const leases = new Set<string>()
   const ended = new Set<string>()
   const repository = "/repos/fixture/repo"
@@ -256,7 +256,7 @@ async function githubStub(sourceSha: string, started: (leaseId: string) => void)
 }
 
 /** The policy of the runner repository: public, actions-native, with the job's own image. */
-const runnerPolicy = (agentImage: string) => ({
+export const runnerPolicy = (agentImage: string) => ({
   alias: "runner",
   repository: "fixture/repo",
   repositoryId: 12,
@@ -355,16 +355,24 @@ const alive = (pid: number) => {
   }
 }
 
+/** What the daemon's runner placement uses of the gateway: the lease's calls and the run's reads. */
+export type RunnerControl = Pick<
+  DaemonCapability,
+  "authorize" | "revoke" | "sessionBound" | "startRevoke" | "readEvents" | "readResult"
+>
+
 /**
  * The daemon of the runner placement on workflowd's store `database`: its ingress, and its
  * sandbox dispatch with the gateway's control socket, the GitHub stub and the check of sealed
  * results, which pushes to the fixture remote `bare` in place of github.com.
  */
-function daemonRuntime(
-  f: Fixture,
+export function daemonRuntime(
+  f: { readonly root: string; readonly database: string },
   github: Awaited<ReturnType<typeof githubStub>>,
   bare: string,
   policy: ReturnType<typeof runnerPolicy>,
+  /** workflowd's side of the gateway: its control client, or a test's script of the gateway. */
+  gateway: Effect.Effect<RunnerControl, never, SqlClient.SqlClient | Scope.Scope>,
 ) {
   const stores = Layer.mergeAll(KernelSessionStoreLive, AgentRunStoreLive).pipe(
     Layer.provideMerge(
@@ -399,17 +407,12 @@ function daemonRuntime(
   const sandbox = Layer.effect(
     SandboxDispatch,
     Effect.gen(function* () {
-      const gateway = yield* makeDaemonCapability({
-        socket: f.config.controlSocket,
-        reconcileEveryMs: 3600000,
-        budget: defaultRunBudget,
-        runner: { aliases: [policy.alias], identity: runnerIdentity },
-      })
+      const control = yield* gateway
       const leases = yield* makeSandboxLeaseService(
         github.github,
         join(f.root, "control-root"),
         undefined,
-        { native: { gateway } },
+        { native: { gateway: control } },
       )
       const client = yield* OpenCode.make({ baseUrl: "http://127.0.0.1:1" }).pipe(
         Effect.provide(FetchHttpClient.layer),
@@ -425,7 +428,7 @@ function daemonRuntime(
         runner: {
           aliases: [policy.alias],
           maxRuns: 1,
-          gateway,
+          gateway: control,
           sealed: yield* SealedResultGit,
           agentGit: { ...runnerIdentity, blockedEmails: [] },
           pollMs: 200,
@@ -525,7 +528,18 @@ export async function withRunnerDaemon<A>(
   let runtime: ReturnType<typeof daemonRuntime> | undefined
   try {
     gateway = await gitGateway(f, remote.url)
-    runtime = daemonRuntime(f, github, remote.bare, runnerPolicy(job.image))
+    runtime = daemonRuntime(
+      f,
+      github,
+      remote.bare,
+      runnerPolicy(job.image),
+      makeDaemonCapability({
+        socket: f.config.controlSocket,
+        reconcileEveryMs: 3600000,
+        budget: defaultRunBudget,
+        runner: { aliases: ["runner"], identity: runnerIdentity },
+      }),
+    )
     const jobEnded = async () => {
       for (let tries = 0; jobStart === undefined; tries++) {
         if (tries > 6000) throw new Error("step job: the daemon created no lease ref")
