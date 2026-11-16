@@ -189,14 +189,18 @@ process.stdout.write(JSON.stringify(out))`,
 
 /**
  * A request for a challenge on the listener's socket, with the headers of the front, from a
- * container as `user` with the listener's volume: the status line of the answer, `ended` when
- * the connection ends with no answer, or the error of the connect.
+ * container as `user` with the listener's volume. `stat` is `ok`, or the code of the error of a
+ * stat of the socket; `call` is the status line of the answer, `ended` when the connection ends
+ * with no answer, or `error` and the code of the connect's error, which Bun reports as ENOENT
+ * where the kernel refuses the connect with EACCES.
  */
 async function socketCall(user: string, service: string) {
   const request = `GET /capabilities/v1/challenge?lease=lease HTTP/1.1\r\nhost: localhost\r\nx-forwarded-for: 100.64.0.7\r\nx-forwarded-proto: https\r\nx-forwarded-host: ${service}\r\nconnection: close\r\n\r\n`
   const result = await probe(
     `let answer = "", done = false
-const end = (text) => { if (!done) { done = true; process.stdout.write(text) } }
+let stat = "ok"
+try { require("node:fs").statSync(${JSON.stringify(listenSocket)}) } catch (error) { stat = error.code }
+const end = (call) => { if (!done) { done = true; process.stdout.write(JSON.stringify({ stat, call })) } }
 const socket = require("node:net").connect(${JSON.stringify(listenSocket)})
 socket.on("connect", () => socket.write(${JSON.stringify(request)}))
 socket.on("data", (bytes) => (answer += bytes))
@@ -205,7 +209,7 @@ socket.on("close", () => end(answer === "" ? "ended" : answer.split("\\r\\n")[0]
     { user, volume: true },
   )
   if (result.code !== 0) throw new Error(`the call as ${user} failed: ${result.stderr}`)
-  return result.stdout
+  return JSON.parse(result.stdout) as unknown
 }
 
 /** The runner's group; each container adds it to the image's user to reach the fixture. */
@@ -629,14 +633,28 @@ process.stdout.write(JSON.stringify({ gateway, front: await connect(${JSON.strin
     front: "open",
     socket: false,
   })
-  // With the volume: a uid outside the front's group cannot connect; a uid of the group that is
-  // not the front's is ended at accept; the front's uid is answered.
-  assert.equal(
-    await socketCall(`${outsiderId}:${outsiderId}`, frontContainer.service),
-    "error EACCES",
+  // With the volume: a uid outside the front's group may not enter the listener's directory and
+  // cannot connect; a uid of the group that is not the front's is ended at accept; the front's
+  // uid is answered.
+  const outsider = await socketCall(`${outsiderId}:${outsiderId}`, frontContainer.service)
+  assert.ok(
+    typeof outsider === "object" &&
+      outsider !== null &&
+      "stat" in outsider &&
+      outsider.stat === "EACCES" &&
+      "call" in outsider &&
+      typeof outsider.call === "string" &&
+      outsider.call.startsWith("error "),
+    `a uid outside the group reached the socket: ${JSON.stringify(outsider)}`,
   )
-  assert.equal(await socketCall(`${groupMemberId}:${frontId}`, frontContainer.service), "ended")
-  assert.equal(await socketCall(`${frontId}:${frontId}`, frontContainer.service), "HTTP/1.1 200 OK")
+  assert.deepEqual(await socketCall(`${groupMemberId}:${frontId}`, frontContainer.service), {
+    stat: "ok",
+    call: "ended",
+  })
+  assert.deepEqual(await socketCall(`${frontId}:${frontId}`, frontContainer.service), {
+    stat: "ok",
+    call: "HTTP/1.1 200 OK",
+  })
   console.log(
     "gateway image: no published port and no TCP listener; a bridge peer without the volume, a uid outside the group and a uid of the group that is not the front's do not reach a route",
   )
