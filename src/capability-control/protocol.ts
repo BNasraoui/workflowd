@@ -1,4 +1,4 @@
-import { Schema } from "effect"
+import { Effect, Schema } from "effect"
 
 /**
  * The control socket's protocol, which workflowd and its capability gateway both import. Each
@@ -41,17 +41,52 @@ export const SessionPolicy = Schema.Struct({
   toolingSha: Schema.optionalKey(Schema.String),
 })
 
-const positiveCount = Schema.Int.check(Schema.isGreaterThan(0))
+/**
+ * The largest token count of one model call: ten times the largest context window of a model.
+ * The gateway takes no larger count from a usage that the provider reports, and a call asks no
+ * more output tokens.
+ */
+export const maxCallTokens = 10_000_000
+/**
+ * The most model calls of one run. Each call adds at most `maxCallTokens` to each count of its
+ * run, so each count stays below 2^53, the largest integer that a number holds exactly.
+ */
+const maxRunCalls = 100_000_000
+/** An integer from 1 to `maximum`. */
+const count = (maximum: number) =>
+  Schema.Int.check(Schema.isGreaterThan(0), Schema.isLessThanOrEqualTo(maximum))
+const runBudgetFields = {
+  calls: count(maxRunCalls),
+  // The most output tokens that the most calls can be charged: a larger budget holds nothing back.
+  outputTokens: count(maxRunCalls * maxCallTokens),
+  maxTokens: count(maxCallTokens),
+}
+/** A budget whose one call asks more than all its output tokens refuses that call at once. */
+const callWithinBudget = Schema.makeFilter(
+  (budget: { readonly outputTokens: number; readonly maxTokens: number }) =>
+    budget.maxTokens <= budget.outputTokens
+      ? true
+      : { path: ["maxTokens"], issue: "Expected a value of at most outputTokens" },
+)
 /**
  * The budget of one run: the model calls the gateway sends to the provider for it, the output
  * tokens they may make, and the most output tokens (`max_tokens`) one call may ask.
  */
-export const RunBudget = Schema.Struct({
-  calls: positiveCount,
-  outputTokens: positiveCount,
-  maxTokens: positiveCount,
-})
+export const RunBudget = Schema.Struct(runBudgetFields).check(callWithinBudget)
 export type RunBudget = typeof RunBudget.Type
+/** `RunBudget` as a config names it: each key that it leaves out is the key of `defaults`. */
+export const configuredRunBudget = (defaults: RunBudget) =>
+  Schema.Struct({
+    calls: runBudgetFields.calls.pipe(
+      Schema.withDecodingDefaultKey(Effect.succeed(defaults.calls)),
+    ),
+    outputTokens: runBudgetFields.outputTokens.pipe(
+      Schema.withDecodingDefaultKey(Effect.succeed(defaults.outputTokens)),
+    ),
+    maxTokens: runBudgetFields.maxTokens.pipe(
+      Schema.withDecodingDefaultKey(Effect.succeed(defaults.maxTokens)),
+    ),
+  }).check(callWithinBudget)
 
 /**
  * What workflowd authorized for one run, sent on the control socket. workflowd sends a grant only

@@ -1,3 +1,4 @@
+import { maxCallTokens } from "../capability-control/protocol"
 import { credentialPatterns } from "./provider-evidence"
 import { checkHeaders, RequestRefused } from "./headers"
 
@@ -308,12 +309,6 @@ async function safeProviderResponse(
 }
 
 /**
- * The largest token count that the gateway takes from a usage the provider reports: ten times the
- * largest context window of a model. A count above it is no count.
- */
-const maxReportedTokens = 10_000_000
-
-/**
  * The token counts that the provider reported for one call. `outputTokens` is undefined until the
  * answer gave its final count: the `message_delta` event of a stream, or the body of an answer
  * that is not a stream.
@@ -357,7 +352,7 @@ const field = (value: unknown, name: string): unknown =>
 /**
  * Reads the usage of a messages answer as its bytes pass: the `usage` of the `message_start` and
  * `message_delta` events of an event stream, or of the body of a JSON answer. A count is taken
- * only when it is an integer from 0 to `maxReportedTokens`; an input count may also be null, which
+ * only when it is an integer from 0 to `maxCallTokens`; an input count may also be null, which
  * reports nothing. Any other value, a usage that is not an object, or an answer of another type
  * makes the whole usage of the call unknown.
  */
@@ -385,7 +380,7 @@ function usageMeter(contentType: string) {
         typeof value !== "number" ||
         !Number.isSafeInteger(value) ||
         value < 0 ||
-        value > maxReportedTokens
+        value > maxCallTokens
       ) {
         unknown = true
         return

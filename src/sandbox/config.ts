@@ -7,6 +7,7 @@ import {
   maxStreamsPerRun,
   providerIdPattern,
 } from "../../deploy/sandbox/capability-limits.mjs"
+import { configuredRunBudget } from "../capability-control/protocol"
 
 const PublicationCoAuthor = Schema.String.check(
   Schema.makeFilter(
@@ -100,21 +101,15 @@ export const CapabilityGatewayConfig = Schema.Struct({
 export type CapabilityGatewayConfig = typeof CapabilityGatewayConfig.Type
 /** The budget that workflowd fixes for a run when it first authorizes it, when the config names none. */
 export const defaultRunBudget = { calls: 2000, outputTokens: 600000, maxTokens: 128000 } as const
-const budgetCount = (value: number) =>
-  Schema.Int.check(Schema.isGreaterThan(0)).pipe(
-    Schema.withDecodingDefaultKey(Effect.succeed(value)),
-  )
 /**
  * workflowd's side of the gateway: the control socket, never the gateway's store, and the budget
  * of a new run. A change of the budget changes no run that workflowd has authorized.
  */
 export const CapabilityControlConfig = Schema.Struct({
   socket: AbsolutePath,
-  budget: Schema.Struct({
-    calls: budgetCount(defaultRunBudget.calls),
-    outputTokens: budgetCount(defaultRunBudget.outputTokens),
-    maxTokens: budgetCount(defaultRunBudget.maxTokens),
-  }).pipe(Schema.withDecodingDefaultKey(Effect.succeed({}))),
+  budget: configuredRunBudget(defaultRunBudget).pipe(
+    Schema.withDecodingDefaultKey(Effect.succeed({})),
+  ),
 })
 export type CapabilityControlConfig = typeof CapabilityControlConfig.Type
 export const SandboxPolicy = Schema.Struct({
