@@ -7,8 +7,7 @@ import {
   parseSandboxRepositories,
   type SandboxPolicy,
 } from "./sandbox/config"
-import type { Placement } from "./kernel/executor"
-import { sealedResultLimits } from "./kernel/sealed-result"
+import { maxRunnerRuns, type Placement } from "./kernel/executor"
 import { Schema } from "effect"
 import { parseInstallationAccountIds } from "./installation-policy"
 import {
@@ -473,12 +472,12 @@ export function parseAgentRunPlacements(
 
 /**
  * `WORKFLOWD_RUNNER_MAX_RUNS`, the runner runs at one time; 4 when absent. Each runner run sends
- * one sealed result, and the daemon lets at most `sealedResultLimits.waitingChecks` checks wait for
+ * one sealed result, and the daemon lets at most `maxRunnerRuns` checks of a sealed result wait for
  * a slot, so a setting above that bound would refuse a result that a run sent in time: it is
  * refused at startup.
  */
 export function parseRunnerMaxRuns(value: string | undefined): number {
-  const bound = sealedResultLimits.waitingChecks
+  const bound = maxRunnerRuns
   if (value === undefined) return bound
   if (!/^[1-9][0-9]*$/.test(value) || Number(value) > bound)
     throw new Error(

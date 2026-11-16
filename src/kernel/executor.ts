@@ -8,6 +8,13 @@ import type { SealedResult } from "./sealed-result"
  */
 export type Placement = "host" | "runner"
 
+/**
+ * The most runner runs at one time that `WORKFLOWD_RUNNER_MAX_RUNS` may name. Each runner run
+ * sends one sealed result, and the check of sealed results lets this many checks wait for a slot
+ * (`sealedResultLimits.waitingChecks`), so no result that a run sent in time is refused.
+ */
+export const maxRunnerRuns = 4
+
 /** What a placement is given to start one run. */
 export type ExecutorLaunch = {
   readonly runId: string

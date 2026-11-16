@@ -6,6 +6,7 @@ import type { AgentGitConfig } from "../agent-git/config"
 import { PublicationBody, PublicationMessage, PublicationTitle } from "../sandbox/config"
 import { tryFileLock } from "../file-lock"
 import { githubHost } from "../sandbox/github"
+import { maxRunnerRuns } from "./executor"
 
 /**
  * The daemon's check of a sealed result from a run placed off the host, and its
@@ -43,10 +44,10 @@ export const sealedResultLimits = {
   /**
    * Checks that wait for a slot at one time; a further check is refused. Each runner
    * run sends one result, and the daemon refuses at startup a `WORKFLOWD_RUNNER_MAX_RUNS`
-   * above this bound (config.ts parseRunnerMaxRuns), so no more results than this wait
-   * when each runner run sends its result.
+   * above `maxRunnerRuns` (config.ts parseRunnerMaxRuns), so no more results than this
+   * wait when each runner run sends its result.
    */
-  waitingChecks: 4,
+  waitingChecks: maxRunnerRuns,
   /**
    * How long a check waits for a slot. A slot is held by a check and its push, each
    * ended at `timeLimitMs`.
