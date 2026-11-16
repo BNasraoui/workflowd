@@ -425,7 +425,7 @@ test("in this process, custody renews, refuses only invalid_grant, waits between
       // A call within the wait fails for the wait: its line replaces the line of the try.
       await expect(command()).rejects.toThrow("the claude login waits to renew until")
       expect(await loginFault(directory, "claude")).toBe(
-        `custody: the claude login waits to renew until ${new Date(state.retryAt).toISOString()}`,
+        `custody: the claude login waits to renew until ${new Date(Number(state.retryAt)).toISOString()}`,
       )
       await waited()
     }
@@ -587,7 +587,7 @@ test("in this process, the fault line is the cause of the last failed call, of a
     const line = await readFile(join(long, "claude.fault"), "utf8")
     expect(line).toHaveLength(513)
     expect(line).toEndWith("\n")
-    expect(line.slice(0, -1)).toMatch(/^custody refused [A-Za-z0-9 .\/:;,_()'?-]+$/)
+    expect(line.slice(0, -1)).toMatch(/^custody refused [A-Za-z0-9 ./:;,_()'?-]+$/)
     expect(line).toContain("/a??31m?bbb")
   })
 })
