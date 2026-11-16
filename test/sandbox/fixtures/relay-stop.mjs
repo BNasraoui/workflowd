@@ -6,7 +6,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { serveRunnerRelay } from "../../../deploy/sandbox/capability-relay.mjs"
-import { sessionKeyPair } from "../../../deploy/sandbox/renewal.mjs"
+import { relayConfig } from "./relay-config.mjs"
 
 /** Runs the event loop for `cycles` turns; the mocked timers do not move. */
 const turns = async (cycles) => {
@@ -54,19 +54,7 @@ async function renewalInFlight(t, body) {
   await once(server, "listening")
   const now = Date.now()
   t.mock.timers.enable({ apis: ["Date", "setTimeout"], now })
-  const relay = await serveRunnerRelay(
-    {
-      token: "a".repeat(43),
-      channel: "c".repeat(64),
-      sessionKey: sessionKeyPair().privateKey,
-      expiresAt: now + 3600000,
-      renewAt: now + 2700000,
-      deadline: now + 7200000,
-      providerId: "anthropic",
-      gateway: `https://127.0.0.1:${server.address().port}`,
-    },
-    root,
-  )
+  const relay = await serveRunnerRelay(relayConfig(now, server.address().port), root)
   try {
     t.mock.timers.tick(2700000)
     const { request, response } = await first.promise
