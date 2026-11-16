@@ -118,7 +118,6 @@ const executorOf = (f: Fixture) => {
       revoke: control.revoke,
     },
     maxRuns: 1,
-    pollMs: 50,
     begin: () => Effect.void,
   })
 }

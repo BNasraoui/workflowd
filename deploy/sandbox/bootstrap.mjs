@@ -5,18 +5,23 @@ import { fileURLToPath, pathToFileURL } from "node:url"
 import { openSession, takeJobIdentity } from "./bootstrap-helper.mjs"
 import { sessionKeyPair } from "./renewal.mjs"
 
+const tooling = dirname(fileURLToPath(import.meta.url))
+
+/** The harness of a job's run: the box of `native-runner.mjs`, which the job's `prepare` names. */
+export const boxHarness = [process.execPath, `${tooling}/native-runner.mjs`]
+
 /**
  * The runner's first contact: it opens its gateway session with its own OIDC proof, then starts
- * the run client, which holds the relay and with it the run token, and runs the run's harness
- * (`native-runner.mjs`, the box). The request authority is cleared before the run client starts.
- * The session's private key goes to the run client on its standard input with the grant, and to
- * no file, environment, argument or output.
+ * the run client, which holds the relay and with it the run token, and runs the run's `harness`,
+ * a command (`boxHarness` for a job). The request authority is cleared before the run client
+ * starts. The session's private key goes to the run client on its standard input with the grant,
+ * and to no file, environment, argument or output.
  */
 export async function prepare({
+  harness,
   directory = "/run/workflowd-sandbox",
   environment = process.env,
   identity = fetch,
-  tooling = dirname(fileURLToPath(import.meta.url)),
   /** The pause between proofs; the helper's own when not named. */
   backoff,
   /**
@@ -25,9 +30,7 @@ export async function prepare({
    * otherwise only in this process's memory and on the relay's standard input.
    */
   sessionKey = sessionKeyPair(),
-  /** The harness that the run client runs: the box of `native-runner.mjs`. */
-  harness = [process.execPath, `${tooling}/native-runner.mjs`],
-} = {}) {
+}) {
   const ref = environment.GITHUB_REF ?? ""
   if (!/^[a-f0-9]{40}$/.test(environment.GITHUB_SHA ?? "") || !ref.startsWith("refs/heads/workflowd/leases/"))
     throw new Error("lease ref refused")
@@ -83,6 +86,7 @@ export async function prepare({
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   // The public wrapper of this step shows only that it failed, so no cause is written.
-  if (process.argv[2] === "prepare") await prepare().catch(() => (process.exitCode = 1))
+  if (process.argv[2] === "prepare")
+    await prepare({ harness: boxHarness }).catch(() => (process.exitCode = 1))
   else process.exitCode = 1
 }

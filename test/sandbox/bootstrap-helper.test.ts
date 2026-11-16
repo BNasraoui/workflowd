@@ -242,8 +242,9 @@ test("the runner's bootstrap names an untrusted gateway certificate and stops at
         fixtureExecutable("node"),
         "--input-type=module",
         "-e",
-        `import { prepare } from ${JSON.stringify(resolve("deploy/sandbox/bootstrap.mjs"))}
+        `import { boxHarness, prepare } from ${JSON.stringify(resolve("deploy/sandbox/bootstrap.mjs"))}
 await prepare({
+  harness: boxHarness,
   directory: ${JSON.stringify(directory)},
   identity: async () => Response.json({ value: "fixture-proof" }),
 }).catch((error) => { process.stderr.write(error.message + "\\n"); process.exitCode = 1 })`,

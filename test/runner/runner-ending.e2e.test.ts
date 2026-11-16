@@ -210,7 +210,6 @@ async function endJob(daemon: Daemon, directory: string) {
 async function withEnding<A>(
   mode: "stream" | "quiet" | "unchanged",
   use: (daemon: Daemon, directory: string) => Promise<A>,
-  lostAfterMs?: number,
 ) {
   const directory = await mkdtemp(join(tmpdir(), "runner-ending-"))
   try {
@@ -219,7 +218,6 @@ async function withEnding<A>(
         directory,
         image,
         harness: () => writeEndingHarness(directory, mode),
-        ...(lostAfterMs === undefined ? {} : { lostAfterMs }),
       },
       async (daemon) => {
         try {
@@ -301,32 +299,35 @@ test("stop during an open model stream: the gateway closes its upstream call and
 }, 90000)
 
 test("a runner whose posts stop while its Actions run goes on ends runner_lost, and the cancel of its Actions run that follows adds no message", async () => {
-  await withEnding(
-    "quiet",
-    async (daemon, directory) => {
-      const id = await dispatch(daemon)
-      // The runner is lost: its run client and its harness end with no word.
-      await endJob(daemon, directory)
-      const end = await ended(daemon.runtime, id)
-      expect(end.run.state).toBe("operator_required")
-      expect(end.run.diagnostic).toBe(
-        "runner_lost: no post of the run for 1500ms while its Actions run is in_progress",
-      )
-      await released(daemon, false)
-      // GitHub now reports the Actions run cancelled, by the daemon's own cancel.
-      const runs = await daemon.runtime.runPromise(AgentRunStore)
-      expect((await daemon.runtime.runPromise(runs.read(id)))?.state).toBe("operator_required")
-      expect(end.messages.map((entry) => entry.message)).toEqual([
-        expect.objectContaining({
-          status: "operator_required",
-          end_reason: end.run.diagnostic,
-          placement: "runner",
-        }),
-      ])
-      expect((await daemon.runtime.runPromise(mailbox(id))).length).toBe(1)
-    },
-    1500,
-  )
+  await withEnding("quiet", async (daemon, directory) => {
+    const id = await dispatch(daemon)
+    // The runner is lost: its run client and its harness end with no word, and two minutes
+    // pass.
+    await endJob(daemon, directory)
+    let end: Awaited<ReturnType<typeof ended>>
+    try {
+      setSystemTime(new Date(Date.now() + 120000))
+      end = await ended(daemon.runtime, id)
+    } finally {
+      setSystemTime()
+    }
+    expect(end.run.state).toBe("operator_required")
+    expect(end.run.diagnostic).toBe(
+      "runner_lost: no post of the run for 120000ms while its Actions run is in_progress",
+    )
+    await released(daemon, false)
+    // GitHub now reports the Actions run cancelled, by the daemon's own cancel.
+    const runs = await daemon.runtime.runPromise(AgentRunStore)
+    expect((await daemon.runtime.runPromise(runs.read(id)))?.state).toBe("operator_required")
+    expect(end.messages.map((entry) => entry.message)).toEqual([
+      expect.objectContaining({
+        status: "operator_required",
+        end_reason: end.run.diagnostic,
+        placement: "runner",
+      }),
+    ])
+    expect((await daemon.runtime.runPromise(mailbox(id))).length).toBe(1)
+  })
 }, 90000)
 
 for (const [conclusion, reason, text] of [
@@ -337,7 +338,14 @@ for (const [conclusion, reason, text] of [
     await withEnding("quiet", async (daemon, directory) => {
       const id = await dispatch(daemon)
       daemon.github.endRun(daemon.leaseId(), conclusion)
-      const end = await ended(daemon.runtime, id)
+      // The daemon reads the Actions run of a run whose posts come each 30 s.
+      let end: Awaited<ReturnType<typeof ended>>
+      try {
+        setSystemTime(new Date(Date.now() + 30000))
+        end = await ended(daemon.runtime, id)
+      } finally {
+        setSystemTime()
+      }
       expect({ state: end.run.state, diagnostic: end.run.diagnostic }).toEqual({
         state: "operator_required",
         diagnostic: `${reason}: ${text}`,
@@ -408,7 +416,6 @@ async function scriptedEnd(
     github: Awaited<ReturnType<typeof githubStub>>,
     stop: () => Promise<void>,
   ) => () => Promise<void>,
-  lostAfterMs?: number,
   /** Runs once the run ended, with the daemon still up. */
   after?: (runtime: ReturnType<typeof daemonRuntime>) => Promise<void>,
 ) {
@@ -428,7 +435,6 @@ async function scriptedEnd(
     remote.bare,
     runnerPolicy(image),
     Effect.succeed(gateway.control),
-    lostAfterMs === undefined ? {} : { lostAfterMs },
   )
   daemon.runtime = runtime
   try {
@@ -473,7 +479,6 @@ test("a deadline that passes with no stop ends the run runner_deadline; a stop a
     () => async () => {
       setSystemTime(new Date(Date.now() + 286 * 60000))
     },
-    undefined,
     async (runtime) => {
       late = await runtime.runPromise(
         Effect.flatMap(AgentRunIngress, (ingress) =>
@@ -496,12 +501,12 @@ test("a runner that is lost when GitHub reports its Actions run cancelled, at on
       if (first) {
         first = false
         // The run is quiet past the time of a lost run, and its Actions run ended cancelled.
-        setSystemTime(new Date(Date.now() + 5000))
+        setSystemTime(new Date(Date.now() + 120000))
         github.endRun(github.leaseRefs()[0]!, "cancelled")
       }
       return Promise.resolve()
     }
-  }, 1000)
+  })
   expect(end.run.diagnostic).toBe(
     "runner_cancelled: the run's Actions run was cancelled before its result",
   )

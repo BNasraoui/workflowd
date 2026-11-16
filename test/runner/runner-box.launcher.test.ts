@@ -129,7 +129,7 @@ test("a runner run on the real runner scripts runs the pinned Claude Code in the
       ]),
     ),
   ).toBe(pinned)
-  await withBoxJob(async ({ f, runtime, remote, jobEnded, record }) => {
+  await withBoxJob(async ({ f, runtime, remote, jobEnded, github, leaseId, record }) => {
     f.onUpstream(async (request) => {
       const path = new URL(request.url).pathname
       const body = await request.clone().text()
@@ -138,25 +138,24 @@ test("a runner run on the real runner scripts runs the pinned Claude Code in the
       else if (body.includes('"name":"Write"')) f.setAnswerText(write)
       else f.setAnswerText(text("ok"))
     })
-    // The dispatch returns once the run's first event arrived; a job that ends first, with no
-    // event, fails this step with the job's record.
+    // GitHub reports the Actions run completed once its job ended. The dispatch returns once the
+    // run's first model output arrived; a job that ends first, with none, ends the run and fails
+    // this step with the job's record.
+    void jobEnded().then(
+      () => github.endRun(leaseId()),
+      () => github.endRun(leaseId(), "failure"),
+    )
     const receipt = await step(
       "dispatch",
       () =>
-        Promise.race([
-          runtime.runPromise(
-            Effect.flatMap(AgentRunIngress, (ingress) =>
-              ingress.register(
-                { route: "claude", repository: "runner", prompt: "Write the proof file." },
-                new Date(),
-              ),
+        runtime.runPromise(
+          Effect.flatMap(AgentRunIngress, (ingress) =>
+            ingress.register(
+              { route: "claude", repository: "runner", prompt: "Write the proof file." },
+              new Date(),
             ),
           ),
-          jobEnded().then(async (): Promise<never> => {
-            await Bun.sleep(30000)
-            throw new Error("the job ended and the run had no first event")
-          }),
-        ]),
+        ),
       record,
       360000,
     )

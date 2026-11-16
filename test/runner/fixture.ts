@@ -328,8 +328,6 @@ export interface RunnerJob {
   readonly harness?: (bare: string) => Promise<ReadonlyArray<string>>
   /** The job's agent image. */
   readonly image: string
-  /** The time with no post after which the daemon ends the run lost; 120 s when not named. */
-  readonly lostAfterMs?: number
 }
 
 /**
@@ -350,11 +348,11 @@ async function startJob(
       fixtureExecutable("node"),
       "--input-type=module",
       "-e",
-      `import { prepare } from ${JSON.stringify(resolve("deploy/sandbox/bootstrap.mjs"))}
+      `import { boxHarness, prepare } from ${JSON.stringify(resolve("deploy/sandbox/bootstrap.mjs"))}
 await prepare({
+  harness: ${harness === undefined ? "boxHarness" : JSON.stringify(harness)},
   directory: ${JSON.stringify(job.directory)},
   identity: (url, init) => fetch(${JSON.stringify(issuer)} + url.search, init),
-  ${harness === undefined ? "" : `harness: ${JSON.stringify(harness)},`}
 }).catch((error) => { process.stderr.write(String(error?.message) + "\\n"); process.exitCode = 1 })`,
     ],
     {
@@ -411,8 +409,6 @@ export function daemonRuntime(
   /** workflowd's side of the gateway: its control client, or a test's script of the gateway. */
   gateway: Effect.Effect<RunnerControl, never, SqlClient.SqlClient | Scope.Scope>,
   options: {
-    /** The time with no post after which a run is lost; 120 s when not named. */
-    readonly lostAfterMs?: number
     /** The window for a run's first model output from its box's ready line; 120 s, as configured by default. */
     readonly verifyTimeoutMs?: number
   } = {},
@@ -477,10 +473,6 @@ export function daemonRuntime(
           gateway: control,
           sealed: yield* SealedResultGit,
           agentGit: { ...runnerIdentity, blockedEmails: [] },
-          pollMs: 200,
-          // The Actions run of a quiet run is read each half second, so its end is seen at once.
-          jobEveryMs: 500,
-          ...(options.lostAfterMs === undefined ? {} : { lostAfterMs: options.lostAfterMs }),
         },
       })
     }),
@@ -603,7 +595,6 @@ export async function withRunnerDaemon<A>(
         budget: defaultRunBudget,
         runner: { aliases: ["runner"], identity: runnerIdentity },
       }),
-      job.lostAfterMs === undefined ? {} : { lostAfterMs: job.lostAfterMs },
     )
     const jobEnded = async () => {
       for (let tries = 0; jobStart === undefined; tries++) {

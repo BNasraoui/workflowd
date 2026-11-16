@@ -112,11 +112,6 @@ export const makeSandboxDispatch = (options: {
     readonly gateway: RunnerGateway
     readonly sealed: SealedResultGitPort
     readonly agentGit: AgentGitConfig
-    readonly pollMs?: number
-    /** The time with no post after which a run whose Actions run goes on is lost. */
-    readonly lostAfterMs?: number
-    /** The pause between two reads of a quiet run's Actions run. */
-    readonly jobEveryMs?: number
   }
 }) =>
   Effect.gen(function* () {
@@ -425,13 +420,6 @@ export const makeSandboxDispatch = (options: {
         : makeRunnerExecutor({
             gateway: runnerOptions.gateway,
             maxRuns: runnerOptions.maxRuns,
-            ...(runnerOptions.pollMs === undefined ? {} : { pollMs: runnerOptions.pollMs }),
-            ...(runnerOptions.lostAfterMs === undefined
-              ? {}
-              : { lostAfterMs: runnerOptions.lostAfterMs }),
-            ...(runnerOptions.jobEveryMs === undefined
-              ? {}
-              : { jobEveryMs: runnerOptions.jobEveryMs }),
             // The Actions run of the lease, once the lease holds one. A failed read is no news:
             // the run goes on to its deadline.
             job: (runId) =>

@@ -82,6 +82,16 @@ export type RunnerHandle = {
 export const gatewayEndText = (ended: GatewayEnd) =>
   `ended: ${ended.reason} (${ended.calls} calls, ${ended.outputTokens} output tokens)`
 
+/** The pause between two reads of a run's events when the last read gave none. */
+const pollMs = 2000
+/**
+ * The time with no post after which a run whose Actions run goes on is lost. The run client posts
+ * an empty batch after 10 s with no post, so a live runner is never quiet this long.
+ */
+const lostAfterMs = 120000
+/** The pause between two reads of a run's Actions run while its posts come. */
+const jobEveryMs = 30000
+
 const gatewayUnavailable = (cause: { readonly _tag: string }) =>
   new RunnerRunFailed({ reason: "gateway_unavailable", message: `gateway: ${cause._tag}` })
 
@@ -110,22 +120,11 @@ export const makeRunnerExecutor = (options: {
   ) => Effect.Effect<void, RunnerRunFailed>
   /** The Actions run of the run's job, or null while none is known or it cannot be read. */
   readonly job?: (runId: string) => Effect.Effect<RunnerJobState | null>
-  /** The pause between two reads of a run's events when the last read gave none. */
-  readonly pollMs?: number
-  /** The time with no post after which a run whose Actions run goes on is lost. */
-  readonly lostAfterMs?: number
-  /** The pause between two reads of a quiet run's Actions run. */
-  readonly jobEveryMs?: number
-  readonly now?: () => number
 }) => {
   const live = new Set<string>()
   /** The runs whose stop came; a stop before the start ends the start. */
   const stopped = new Set<string>()
   const handles = new Map<string, RunnerHandle>()
-  const now = options.now ?? Date.now
-  const pollMs = options.pollMs ?? 2000
-  const lostAfterMs = options.lostAfterMs ?? 120000
-  const jobEveryMs = options.jobEveryMs ?? 30000
   const start = (launch: ExecutorLaunch) =>
     Effect.suspend(() => {
       if (!live.has(launch.runId) && live.size >= options.maxRuns)
@@ -141,7 +140,7 @@ export const makeRunnerExecutor = (options: {
         .pipe(
           Effect.onError(() => Effect.sync(() => live.delete(launch.runId))),
           Effect.map(() => {
-            const started = now()
+            const started = Date.now()
             const handle: RunnerHandle = {
               runId: launch.runId,
               deadline: launch.deadline.getTime(),
@@ -162,9 +161,9 @@ export const makeRunnerExecutor = (options: {
    */
   const jobOf = (handle: RunnerHandle, quiet: boolean) =>
     Effect.suspend(() => {
-      if (options.job === undefined || (!quiet && now() - handle.jobReadAt < jobEveryMs))
+      if (options.job === undefined || (!quiet && Date.now() - handle.jobReadAt < jobEveryMs))
         return Effect.succeed(undefined)
-      handle.jobReadAt = now()
+      handle.jobReadAt = Date.now()
       return options.job(handle.runId)
     })
   const ending = (reason: RunnerFailure, message: string) =>
@@ -193,7 +192,7 @@ export const makeRunnerExecutor = (options: {
         if (handle.stopping) return yield* ending("cancelled", "the run was stopped")
         const last = read.batches.at(-1)?.sequence ?? after
         if (read.batches.length > 0) {
-          handle.lastPost = now()
+          handle.lastPost = Date.now()
           const lines = read.batches.flatMap((batch) => batch.lines)
           if (!Deferred.isDoneUnsafe(handle.boxReady) && lines.length > 0) {
             if (lines[0] !== boxReadyLine)
@@ -211,9 +210,9 @@ export const makeRunnerExecutor = (options: {
           return yield* ending("gateway_ended", gatewayEndText(read.ended))
         }
         if (read.result) return [[], Option.none()] as const
-        if (now() >= handle.deadline)
+        if (Date.now() >= handle.deadline)
           return yield* ending("runner_deadline", "the run's deadline passed before its result")
-        const quiet = now() - handle.lastPost >= lostAfterMs
+        const quiet = Date.now() - handle.lastPost >= lostAfterMs
         const job = yield* jobOf(handle, quiet)
         if (job?.status === "completed") {
           // The job may have posted its last batches and its result after the read above.
