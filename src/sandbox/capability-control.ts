@@ -102,7 +102,6 @@ export const controlClient = (socket: string) => ({
       actionsRunId,
       actionsAttempt,
     }),
-  endReason: (runId: string) => send(socket, "endReason", controlProtocol.endReason, { runId }),
   usage: (runId: string) => send(socket, "usage", controlProtocol.usage, { runId }),
 })
 
@@ -253,10 +252,6 @@ export const makeDaemonCapability = (options: {
         Effect.forkIn(scope),
       )
     })
-    /** Why the gateway ended the run by itself, or null when it did not. */
-    const endReason = Effect.fn("DaemonCapability.endReason")((runId: string) =>
-      control.endReason(runId),
-    )
     // A change notifies inside its transaction; this read waits for it to commit or roll back.
     yield* Queue.take(changed).pipe(
       Effect.flatMap((runId) =>
@@ -276,6 +271,6 @@ export const makeDaemonCapability = (options: {
     )
     /** What the run spent of its budget, and whether the budget is spent. */
     const usage = Effect.fn("DaemonCapability.usage")((runId: string) => control.usage(runId))
-    return { authorize, revoke, reconcile, sessionBound, startRevoke, endReason, usage }
+    return { authorize, revoke, reconcile, sessionBound, startRevoke, usage }
   })
 export type DaemonCapability = Effect.Success<ReturnType<typeof makeDaemonCapability>>

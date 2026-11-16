@@ -8,7 +8,7 @@ import {
   renewalWindowMs,
   verifyRenewal,
 } from "../../deploy/sandbox/renewal.mjs"
-import { CapabilityGrant, EndReason, SessionPolicy } from "../capability-control/protocol"
+import { CapabilityGrant, SessionPolicy } from "../capability-control/protocol"
 import type { ReportedUsage } from "./claude"
 
 export class CapabilityRefused extends Schema.TaggedError<CapabilityRefused>()(
@@ -23,8 +23,16 @@ export class CapabilityRetired extends Schema.TaggedError<CapabilityRetired>()(
   "CapabilityRetired",
   { runId: Schema.String, channel: Schema.String },
 ) {}
-/** The end reason of a run that a renewal showed to have two holders. */
-const twoHolders: typeof EndReason.Type = "two holders"
+/**
+ * Why the gateway ended a run itself, as its store keeps it: a renewal showed that the run's
+ * tokens have two holders. It is the one end reason, and the store's CHECK names it.
+ */
+export const twoHolders = "two holders"
+/** A signed renewal request: the relay's signature and the request's attempt number. */
+export interface SignedRenewal {
+  readonly signature: string
+  readonly attempt: string
+}
 /**
  * The lease cannot be challenged: it is unknown, its Actions run is not recorded, its run has
  * ended, or its binding is revoked. All of them get the same answer.
@@ -219,9 +227,12 @@ export const makeCapabilityStore = Effect.gen(function* () {
       Effect.map((rows) => rows.length > 0),
     )
   /**
-   * The authority of a run token that may be renewed now, signed by the binding's session key
-   * over the predecessor's digest. A token with more than `renewalWindowMs` left is not renewed,
-   * nor one whose successor would not outlive it by `minimumExtensionMs` (near the run's
+   * The authority of a run token that may be renewed now by `renewal`: a signature by the
+   * binding's session key over the predecessor's digest and the request's attempt number, which
+   * is higher than each that the binding took. A binding with no session key renews nothing. A
+   * request whose number is not higher, a copy of one that was taken among them, is refused as a
+   * bad signature is, and changes nothing. A token with more than `renewalWindowMs` left is not
+   * renewed, nor one whose successor would not outlive it by `minimumExtensionMs` (near the run's
    * deadline), nor one whose successor has renewed already, nor one whose successor was replaced
    * `maxReplacements` times. When the successor that it would replace has authorized a call, a
    * second party holds the run's tokens: `twoHolders` is true and nothing else is checked.
@@ -229,8 +240,7 @@ export const makeCapabilityStore = Effect.gen(function* () {
   const renewable = Effect.fn("CapabilityStore.renewable")(function* (
     binding: CapabilityBinding,
     predecessor: string,
-    /** The relay's signature of the renewal, in base64url. */
-    signature: string,
+    renewal: SignedRenewal,
     /** The successor's expiry, or its longest for the run's deadline before it is minted. */
     successor: (deadline: number) => number,
     now: number,
@@ -238,9 +248,16 @@ export const makeCapabilityStore = Effect.gen(function* () {
     const authority = yield* authorize(binding, predecessor, now)
     const keys = yield* sql<{
       readonly session_key: string | null
-    }>`SELECT session_key FROM capability_bindings WHERE run_id=${binding.runId}`
+      readonly renewal_attempt: number
+    }>`SELECT session_key,renewal_attempt FROM capability_bindings WHERE run_id=${binding.runId}`
     const key = keys[0]?.session_key
-    if (typeof key !== "string" || !verifyRenewal(key, binding.channel, predecessor, signature))
+    const taken = keys[0]?.renewal_attempt
+    if (
+      typeof key !== "string" ||
+      typeof taken !== "number" ||
+      !verifyRenewal(key, binding.channel, predecessor, renewal.attempt, renewal.signature) ||
+      Number(renewal.attempt) <= taken
+    )
       return yield* Effect.fail(new CapabilityRefused())
     if (yield* successorUsed(predecessor))
       return { ...authority, earlier: undefined, twoHolders: true }
@@ -269,15 +286,17 @@ export const makeCapabilityStore = Effect.gen(function* () {
     }
   })
   /**
-   * Renews a run token. A renewal asked again for the same predecessor (its answer was lost)
-   * replaces the successor that has not renewed itself and has authorized no call, so exactly one
-   * successor stays valid; it does so at most `maxReplacements` times for one predecessor. When
-   * that successor has authorized a call, nothing is stored and the answer is `twoHolders`.
+   * Renews a run token by `renewal`, as `renewable` permits, and records its attempt number as
+   * the binding's highest in the same transaction. A renewal asked again for the same predecessor
+   * (its answer was lost), with a higher number, replaces the successor that has not renewed
+   * itself and has authorized no call, so exactly one successor stays valid; it does so at most
+   * `maxReplacements` times for one predecessor. When that successor has authorized a call,
+   * nothing is stored and the answer is `twoHolders`.
    */
   const renew = Effect.fn("CapabilityStore.renew")(function* (
     binding: CapabilityBinding,
     predecessor: string,
-    signature: string,
+    renewal: SignedRenewal,
     successor: string,
     expiresAt: number,
     now: number,
@@ -288,11 +307,13 @@ export const makeCapabilityStore = Effect.gen(function* () {
         const { session, earlier, twoHolders } = yield* renewable(
           binding,
           predecessor,
-          signature,
+          renewal,
           () => expiresAt,
           now,
         )
         if (twoHolders) return { twoHolders }
+        yield* sql`UPDATE capability_bindings SET renewal_attempt=${Number(renewal.attempt)}
+          WHERE run_id=${binding.runId}`
         if (earlier !== undefined) {
           yield* sql`DELETE FROM capability_tokens WHERE digest=${earlier}`
           yield* sql`UPDATE capability_tokens SET replaced=replaced+1 WHERE digest=${predecessor}`
@@ -361,7 +382,8 @@ export const makeCapabilityStore = Effect.gen(function* () {
   /**
    * A verified proof for the current unused challenge opens the run's next session: the jti is
    * recorded once, the challenge is used, every token of an earlier session stops being valid,
-   * and `sessionKey`, the public key that the proof binds, replaces the binding's key.
+   * and `sessionKey`, the public key that the proof binds, replaces the binding's key; the new
+   * key's renewals are numbered from 1.
    */
   const bindSession = Effect.fn("CapabilityStore.bindSession")(function* (
     challenge: typeof Challenge.Type,
@@ -396,7 +418,8 @@ export const makeCapabilityStore = Effect.gen(function* () {
           return yield* Effect.fail(new CapabilityRefused())
         const session = row.session + 1
         yield* sql`INSERT INTO capability_proofs(jti_digest,run_id,expires_at) VALUES(${proof},${row.run_id},${proofExpiresAt})`
-        yield* sql`UPDATE capability_bindings SET session=${session},challenge_expires=0,nonce=NULL,session_key=${sessionKey} WHERE run_id=${row.run_id}`
+        yield* sql`UPDATE capability_bindings SET session=${session},challenge_expires=0,nonce=NULL,session_key=${sessionKey},
+          renewal_attempt=0 WHERE run_id=${row.run_id}`
         yield* sql`INSERT INTO capability_tokens(digest,run_id,expires_at,session) VALUES(${digest},${row.run_id},${expiresAt},${session})`
         return { runId: row.run_id, channel: row.channel, session }
       }),
@@ -482,29 +505,20 @@ export const makeCapabilityStore = Effect.gen(function* () {
     })
   })
   /**
-   * The authority of a run token for a call: `authorize`, and refused as `CapabilityRetired` when
-   * its successor has authorized a call. A call checks it once before it reads a body, and again
-   * as it admits its stream and as it launches each upstream request, which charges the budget.
-   */
-  const authorizeCall = Effect.fn("CapabilityStore.authorizeCall")(function* (
-    binding: CapabilityBinding,
-    digest: string,
-    now: number,
-  ) {
-    const grant = yield* authorize(binding, digest, now)
-    if (yield* successorUsed(digest)) return yield* Effect.fail(new CapabilityRetired(binding))
-    return grant
-  })
-  /**
-   * The one check of a run token, for each route that takes one: its binding, the session it
-   * belongs to and `authorizeCall`. The first call that a token authorizes is recorded.
+   * The one check of a run token, for each route and each step of a call: its binding, the
+   * session it belongs to and `authorize`, and refused as `CapabilityRetired` when its successor
+   * has authorized a call. A call checks it before it reads a body, again as it admits its
+   * stream, and again as it launches each upstream request, before that request reserves of the
+   * budget. The first call that a token authorizes is recorded. Only the renewal's own check,
+   * inside `renewable`, reads a retired token, so that its signed renewal can show two holders.
    */
   const authenticate = Effect.fn("CapabilityStore.authenticate")(function* (
     digest: string,
     now: number,
   ) {
     const { session, ...binding } = yield* bindingFor(digest, now)
-    const grant = yield* authorizeCall(binding, digest, now)
+    const grant = yield* authorize(binding, digest, now)
+    if (yield* successorUsed(digest)) return yield* Effect.fail(new CapabilityRetired(binding))
     yield* sql`UPDATE capability_tokens SET used_at=${now} WHERE digest=${digest} AND used_at IS NULL`
     return { binding, session, grant }
   })
@@ -625,11 +639,8 @@ export const makeCapabilityStore = Effect.gen(function* () {
   return {
     leaseChallenge,
     sessionContext,
-    bindingFor,
     staleAmong,
     bindSession,
-    authorize,
-    validateBinding,
     renewable,
     renew,
     sweep,
@@ -639,8 +650,8 @@ export const makeCapabilityStore = Effect.gen(function* () {
     revoke: Effect.fn("CapabilityStore.revoke")((runId: string) =>
       sql.withTransaction(revokeRun(runId)),
     ),
-    authorizeCall,
     authenticate,
+    /** Ends a run whose tokens have two holders, and records that reason with its revoke. */
     revokeTwoHolders: Effect.fn("CapabilityStore.revokeTwoHolders")((runId: string) =>
       sql.withTransaction(
         Effect.gen(function* () {
@@ -649,14 +660,6 @@ export const makeCapabilityStore = Effect.gen(function* () {
         }),
       ),
     ),
-    endReason: Effect.fn("CapabilityStore.endReason")(function* (runId: string) {
-      const rows = yield* sql<{
-        readonly end_reason: string | null
-      }>`SELECT end_reason FROM capability_grants WHERE run_id=${runId}`
-      return yield* Schema.decodeUnknownEffect(Schema.NullOr(EndReason))(
-        rows[0]?.end_reason ?? null,
-      )
-    }),
     reserve,
     settle,
     chargeOpenReservations,

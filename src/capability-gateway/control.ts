@@ -8,7 +8,6 @@ import {
   type ControlError,
   type ControlVerb,
   type ControlVerbSchemas,
-  type EndReason,
   maxControlFrame,
 } from "../capability-control/protocol"
 import { peerCredentials, serveSocket } from "../peer-socket"
@@ -34,7 +33,6 @@ export interface ControlTarget {
     actionsRunId: number,
     actionsAttempt: number,
   ) => Effect.Effect<boolean, ControlFailure>
-  readonly endReason: (runId: string) => Effect.Effect<typeof EndReason.Type | null, ControlFailure>
   readonly usage: (runId: string) => Effect.Effect<RunUsage, ControlFailure>
 }
 /** What a run spent of its budget, as the `usage` verb answers it. */
@@ -84,7 +82,6 @@ const controlVerbs: Record<ControlVerb, ReturnType<typeof verb>> = {
     controlProtocol.sessionBound,
     (target) => (body) => target.sessionBound(body.runId, body.actionsRunId, body.actionsAttempt),
   ),
-  endReason: verb(controlProtocol.endReason, (target) => (body) => target.endReason(body.runId)),
   usage: verb(controlProtocol.usage, (target) => (body) => target.usage(body.runId)),
 }
 const isControlVerb = (name: string): name is ControlVerb => Object.hasOwn(controlVerbs, name)

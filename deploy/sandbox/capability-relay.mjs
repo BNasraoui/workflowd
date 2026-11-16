@@ -5,7 +5,7 @@ import { writeFileSync } from "node:fs"
 import { chmod } from "node:fs/promises"
 import { pathToFileURL } from "node:url"
 import { gatewayOrigin } from "./bootstrap-helper.mjs"
-import { renewalRequests, signRenewal } from "./renewal.mjs"
+import { maxRenewalAttempt, renewalRequests, signRenewal } from "./renewal.mjs"
 import {
   maxHeaderBytes,
   maxStreamIdleMs,
@@ -38,10 +38,18 @@ async function configInput() {
   return JSON.parse(Buffer.concat(chunks).toString("utf8"))
 }
 
-/** The signature of a renewal of `token`, or undefined when the session key cannot sign. */
-function signedRenewal(sessionKey, channel, token) {
+/**
+ * The signature of the renewal request numbered `attempt` of `token`, or undefined when the
+ * session key cannot sign.
+ */
+function signedRenewal(sessionKey, channel, token, attempt) {
   try {
-    return signRenewal(sessionKey, channel, createHash("sha256").update(token).digest("hex"))
+    return signRenewal(
+      sessionKey,
+      channel,
+      createHash("sha256").update(token).digest("hex"),
+      String(attempt),
+    )
   } catch {
     return undefined
   }
@@ -49,7 +57,9 @@ function signedRenewal(sessionKey, channel, token) {
 
 /**
  * The local half of a run's calls: it adds the run token and forwards to the gateway over HTTPS.
- * It signs each renewal with the session key of the run's channel, which it holds in memory only.
+ * It signs each renewal with the session key of the run's channel, which it holds in memory only,
+ * and numbers each renewal request of the session, a retry too, one higher than the one before:
+ * the gateway takes only a number higher than each that it took, so a copy of a request is void.
  */
 export async function serveRunnerRelay(config, directory = root) {
   if (
@@ -57,7 +67,7 @@ export async function serveRunnerRelay(config, directory = root) {
     typeof config.channel !== "string" ||
     !/^[a-f0-9]{64}$/.test(config.channel) ||
     typeof config.sessionKey !== "string" ||
-    signedRenewal(config.sessionKey, config.channel, config.token) === undefined ||
+    signedRenewal(config.sessionKey, config.channel, config.token, 1) === undefined ||
     !Number.isSafeInteger(config.expiresAt) ||
     !Number.isSafeInteger(config.renewAt) ||
     !Number.isSafeInteger(config.deadline) ||
@@ -160,6 +170,8 @@ export async function serveRunnerRelay(config, directory = root) {
     socket.on("close", () => sockets.delete(socket))
   })
   let failures = 0
+  // The number of the session's last renewal request.
+  let attempts = 0
   const renew = async () => {
     let retryable = true
     // After a clock jump the predecessor may have expired: it is never sent.
@@ -167,9 +179,15 @@ export async function serveRunnerRelay(config, directory = root) {
       end("expiry")
       return
     }
+    if (attempts >= maxRenewalAttempt) {
+      end("renewal")
+      return
+    }
+    attempts++
     try {
       const body = JSON.stringify({
-        signature: signedRenewal(config.sessionKey, config.channel, credential.token),
+        signature: signedRenewal(config.sessionKey, config.channel, credential.token, attempts),
+        attempt: String(attempts),
       })
       const { status, raw } = await new Promise((resolve, reject) => {
         const call = httpsRequest(

@@ -105,6 +105,7 @@ export interface FrontHooks {
   readonly held?: (path: string | undefined) => Promise<void> | undefined
   readonly alter?: (headers: HeaderValues) => HeaderValues
   readonly taken?: (path: string | undefined, body: string) => void
+  readonly copied?: (path: string | undefined, authorization: string, body: string) => void
 }
 
 /**
@@ -116,8 +117,12 @@ export interface FrontHooks {
  * and the client never gets it, as the front closes the connection instead; a request reaches the
  * gateway once `held(path)` settles; `alter` changes the headers that the front sends, as a front
  * other than Serve would; `taken(path, body)` gets the body of each answer that `lost` holds, as a
- * party on the path between the front and the runner would. The front listens on `listen`: a free loopback port unless named, as a
- * front in a container listens on the port that it publishes.
+ * party on the path between the front and the runner would. `copied(path, authorization, body)`
+ * gets each request's authorization and body, as such a party would; the front then reads the
+ * whole body before `held` settles, and sends it on whole, also when the client has gone by then,
+ * as a front that keeps its connection to the gateway would. The front listens on `listen`: a
+ * free loopback port unless named, as a front in a container listens on the port that it
+ * publishes.
  */
 export async function tlsFront(
   tls: { key: string; cert: string },
@@ -136,7 +141,15 @@ export async function tlsFront(
       held = () => undefined,
       alter = (headers) => headers,
       taken = () => undefined,
+      copied,
     } = current
+    let body: Buffer | undefined
+    if (copied) {
+      const chunks: Array<Buffer> = []
+      for await (const chunk of incoming) if (Buffer.isBuffer(chunk)) chunks.push(chunk)
+      body = Buffer.concat(chunks)
+      copied(incoming.url, incoming.headers.authorization ?? "", body.toString("utf8"))
+    }
     await held(incoming.url)
     const headers = Object.entries(alter(serveHeaders(incoming.rawHeaders))).map(
       ([name, values]) => [name, values.length === 1 ? values[0]! : values] as const,
@@ -158,6 +171,8 @@ export async function tlsFront(
           })
           return
         }
+        // A client that has gone gets no answer; the gateway's answer is read and dropped.
+        if (outgoing.destroyed) return void reply.resume()
         outgoing.writeHead(reply.statusCode ?? 502, reply.headers)
         pipeline(reply, outgoing, () => {})
       },
@@ -168,7 +183,8 @@ export async function tlsFront(
       outgoing.writeHead(502)
       outgoing.end()
     })
-    pipeline(incoming, upstream, () => {})
+    if (body === undefined) pipeline(incoming, upstream, () => {})
+    else upstream.end(body)
   }
   server.listen(listen.port, listen.host)
   await once(server, "listening")

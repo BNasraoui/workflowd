@@ -1,7 +1,8 @@
 import { expect, test } from "bun:test"
 import { capabilityApi, serveCapabilityListener } from "../../src/capability-gateway/http"
 import { fixtureExecutable } from "../helpers/fixture-executable.mjs"
-import { Effect, Schema } from "effect"
+import { Effect, Fiber, Schema } from "effect"
+import { randomBytes } from "node:crypto"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
 import { mkdtemp, readFile, rm } from "node:fs/promises"
 import { join } from "node:path"
@@ -9,13 +10,8 @@ import { tmpdir } from "node:os"
 import { connect } from "node:tls"
 import { AgentRunStoreLive } from "../../src/kernel/agent-run-store"
 import { makeCapabilityGateway } from "../../src/capability-gateway/service"
-import {
-  bindRunSession,
-  renewalSignature,
-  seedCapabilityRun,
-  writeNoscopeProviders,
-} from "./fixture"
-import { capabilityDigest } from "../../src/capability-gateway/store"
+import { bindRunSession, seedCapabilityRun, signedRenewal, writeNoscopeProviders } from "./fixture"
+import { capabilityDigest, makeCapabilityStore } from "../../src/capability-gateway/store"
 import { maxRenewalBody } from "../../deploy/sandbox/renewal.mjs"
 import { loopbackCertificate, tlsFront } from "../helpers/loopback-tls"
 import { client } from "./gateway-process"
@@ -168,14 +164,16 @@ test("bound streaming preserves native bytes, renews with noscope, and denies cr
           expect((yield* gateway.handle(denied)).status).toBe(403)
         expect(sent.length).toBe(1)
         expect(yield* Effect.promise(() => readFile(join(root, "access-mints"), "utf8"))).toBe("x")
-        // A renewal asked again replaces the successor that has not renewed: the last one holds.
+        // A renewal asked again, with a higher attempt number, replaces the successor that has
+        // not renewed: the last one holds.
         const renewals: Array<{ readonly token: string }> = []
-        const signedRenewal = JSON.stringify({
-          signature: renewalSignature(issued.binding, capabilityDigest(issued.token)),
-        })
-        for (let asked = 0; asked < 3; asked++) {
+        for (let asked = 1; asked <= 3; asked++) {
           const renew = yield* gateway.handle(
-            request("/capabilities/v1/renew", issued.token, signedRenewal),
+            request(
+              "/capabilities/v1/renew",
+              issued.token,
+              JSON.stringify(signedRenewal(issued.binding, capabilityDigest(issued.token), asked)),
+            ),
           )
           expect(renew.status).toBe(200)
           renewals.push(
@@ -253,8 +251,13 @@ test("bound streaming preserves native bytes, renews with noscope, and denies cr
         }
         expect((yield* gateway.handle(request(undefined, successor.token))).status).toBe(403)
         expect(
-          (yield* gateway.handle(request("/capabilities/v1/renew", issued.token, signedRenewal)))
-            .status,
+          (yield* gateway.handle(
+            request(
+              "/capabilities/v1/renew",
+              issued.token,
+              JSON.stringify(signedRenewal(issued.binding, capabilityDigest(issued.token), 4)),
+            ),
+          )).status,
         ).toBe(403)
         expect(sent.length).toBe(beforeRevocation + 1)
       }).pipe(
@@ -345,3 +348,86 @@ for (const attack of ["resets", "preface", "h2-preface", "truncated"] as const)
       await rm(root, { recursive: true, force: true })
     }
   })
+
+test("a call of a run token that was admitted before its successor's first call, and sends its body after it, starts no upstream call", async () => {
+  const root = await mkdtemp(join(tmpdir(), "wfd-gateway-retired-"))
+  await writeNoscopeProviders(root, 120000)
+  const native = '{ "model" : "fixture-model", "stream": true, "messages": [], "max_tokens": 1000 }'
+  const responseBytes = "event: message_start\ndata: {}\n\nevent: message_stop\ndata: {}\n\n"
+  const sent: Array<string> = []
+  try {
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* seedCapabilityRun(Date.now(), true)
+        const gateway = yield* makeCapabilityGateway(
+          {
+            noscope: { binary: fixtureExecutable("noscope"), configHome: root },
+            providerId: "anthropic",
+            credentialRole: "fixture",
+            maxStreams: 8,
+            maxStreamsPerRun: 2,
+          },
+          async (_, init) => {
+            sent.push(Buffer.from(init.body).toString())
+            return new Response(responseBytes, { headers: { "content-type": "text/event-stream" } })
+          },
+        )
+        const issued = yield* bindRunSession(Date.now(), { expiresAt: Date.now() + 300000 })
+        const call = (token: string, body: string | ReadableStream<Uint8Array>) =>
+          new Request("http://capability.invalid/capabilities/v1/providers/anthropic/v1/messages", {
+            method: "POST",
+            headers: {
+              authorization: `Bearer ${token}`,
+              "content-type": "application/json",
+              "anthropic-version": "2023-06-01",
+              "anthropic-beta": "oauth-2025-04-20",
+            },
+            body,
+          })
+        // The gateway reads a call's body only once it has admitted the call's stream; with no
+        // queue, the body is pulled first by that read.
+        const admitted = Promise.withResolvers<void>()
+        const bodySent = Promise.withResolvers<void>()
+        const held = new ReadableStream<Uint8Array>(
+          {
+            async pull(controller) {
+              admitted.resolve()
+              await bodySent.promise
+              controller.enqueue(new TextEncoder().encode(native))
+              controller.close()
+            },
+          },
+          { highWaterMark: 0 },
+        )
+        const predecessor = yield* Effect.forkChild(gateway.handle(call(issued.token, held)))
+        yield* Effect.promise(() => admitted.promise)
+        const successor = randomBytes(32).toString("base64url")
+        const digest = capabilityDigest(issued.token)
+        yield* (yield* makeCapabilityStore).renew(
+          issued.binding,
+          digest,
+          signedRenewal(issued.binding, digest, 1),
+          capabilityDigest(successor),
+          Date.now() + 600000,
+          Date.now(),
+        )
+        const used = yield* gateway.handle(call(successor, native))
+        expect([used.status, yield* Effect.promise(() => used.text())]).toEqual([
+          200,
+          responseBytes,
+        ])
+        expect(sent).toHaveLength(1)
+        bodySent.resolve()
+        const refused = yield* Fiber.join(predecessor)
+        expect([refused.status, yield* Effect.promise(() => refused.text())]).toEqual([403, ""])
+        expect(sent).toHaveLength(1)
+      }).pipe(
+        Effect.scoped,
+        Effect.provide(AgentRunStoreLive),
+        Effect.provide(SqliteClient.layer({ filename: ":memory:" })),
+      ),
+    )
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})

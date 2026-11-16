@@ -129,9 +129,23 @@ export const seedCapabilityRun = (
 /** The session key of each session that `bindRunSession` opens. */
 export const fixtureSessionKey = sessionKeyPair()
 
-/** The relay's signature of the renewal of the run token whose digest is `predecessor`. */
-export const renewalSignature = (binding: { readonly channel: string }, predecessor: string) =>
-  signRenewal(fixtureSessionKey.privateKey, binding.channel, predecessor)
+/**
+ * The relay's signed renewal request numbered `attempt` of the run token whose digest is
+ * `predecessor`.
+ */
+export const signedRenewal = (
+  binding: { readonly channel: string },
+  predecessor: string,
+  attempt: number,
+) => ({
+  signature: signRenewal(
+    fixtureSessionKey.privateKey,
+    binding.channel,
+    predecessor,
+    String(attempt),
+  ),
+  attempt: String(attempt),
+})
 
 /**
  * Binds the run of `seedCapabilityRun(now, true)` as production does: the lease's challenge, the

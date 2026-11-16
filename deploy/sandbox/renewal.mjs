@@ -36,7 +36,13 @@ function exactBytes(text, length) {
   return bytes.length === length && bytes.toString("base64url") === text ? bytes : undefined
 }
 
-/** True when `text` is a session's public key: the base64url form of an Ed25519 key's 32 bytes. */
+/**
+ * True when `text` is a session's public key: the base64url form of an Ed25519 key's 32 bytes.
+ * A key of small order, for which anyone can make a valid signature, is not refused, as the
+ * crypto of the runtime gives no check of the subgroup; it does not matter here, because the
+ * runner's own proof binds the key, so only the runner chooses it, and a runner that chose such
+ * a key could as well give its private key away.
+ */
 export function isSessionKey(text) {
   return publicSessionKey(text) !== undefined
 }
@@ -58,38 +64,61 @@ export function sessionBinder(nonce, publicKey) {
   return createHash("sha256").update(`${nonce}:${publicKey}`).digest("hex")
 }
 
-/** The exact bytes that the relay signs to renew the run token whose digest is `predecessor`. */
-export function renewalMessage(channel, predecessor) {
-  return Buffer.from(`workflowd-renew:${channel}:${predecessor}`, "utf8")
+/**
+ * The attempt number of a renewal request, as its exact decimal text. The relay numbers each
+ * renewal request of its session 1, 2, 3, …, a retry too, and the gateway takes a renewal only
+ * when its number is higher than each that it took before for the session; so a copy of a signed
+ * request, sent again, renews nothing and ends nothing. The text has no sign, no leading zero and
+ * at most nine digits: the bound, 999999999, is far above the requests of any run, which sends
+ * at most `renewalRequests` of them for each run token, and a run token lives minutes.
+ */
+export const maxRenewalAttempt = 999999999
+function isRenewalAttempt(text) {
+  return typeof text === "string" && /^[1-9][0-9]{0,8}$/.test(text)
 }
 
-/** The renewal's body is `{"signature":"<signature>"}`; the gateway reads at most this many bytes. */
+/**
+ * The exact bytes that the relay signs to renew the run token whose digest is `predecessor`, as
+ * its request numbered `attempt` of the session.
+ */
+export function renewalMessage(channel, predecessor, attempt) {
+  return Buffer.from(`workflowd-renew:${channel}:${predecessor}:${attempt}`, "utf8")
+}
+
+/**
+ * The renewal's body is `{"signature":"<signature>","attempt":"<attempt>"}`; the gateway reads at
+ * most this many bytes.
+ */
 export const maxRenewalBody = 128
 
 /**
- * The relay's signature, in base64url, of the renewal of `predecessor` on `channel`. It throws
- * when `privateKey` is not an Ed25519 key as PKCS #8 in base64url.
+ * The relay's signature, in base64url, of its renewal request numbered `attempt` of
+ * `predecessor` on `channel`. It throws when `privateKey` is not an Ed25519 key as PKCS #8 in
+ * base64url, or when `attempt` is not an attempt number.
  */
-export function signRenewal(privateKey, channel, predecessor) {
+export function signRenewal(privateKey, channel, predecessor, attempt) {
+  if (!isRenewalAttempt(attempt)) throw new Error("renewal attempt refused")
   const key = createPrivateKey({
     key: Buffer.from(privateKey, "base64url"),
     format: "der",
     type: "pkcs8",
   })
   if (key.asymmetricKeyType !== "ed25519") throw new Error("session key refused")
-  return sign(null, renewalMessage(channel, predecessor), key).toString("base64url")
+  return sign(null, renewalMessage(channel, predecessor, attempt), key).toString("base64url")
 }
 
 /**
- * True when `signature` is the base64url form of exactly 64 bytes and an Ed25519 signature by
- * `publicKey` of the renewal of `predecessor` on `channel`.
+ * True when `attempt` is an attempt number and `signature` is the base64url form of exactly 64
+ * bytes and an Ed25519 signature by `publicKey` of the renewal request numbered `attempt` of
+ * `predecessor` on `channel`.
  */
-export function verifyRenewal(publicKey, channel, predecessor, signature) {
+export function verifyRenewal(publicKey, channel, predecessor, attempt, signature) {
   const key = publicSessionKey(publicKey)
   const bytes = exactBytes(signature, 64)
   return (
+    isRenewalAttempt(attempt) &&
     key !== undefined &&
     bytes !== undefined &&
-    verify(null, renewalMessage(channel, predecessor), key, bytes)
+    verify(null, renewalMessage(channel, predecessor, attempt), key, bytes)
   )
 }

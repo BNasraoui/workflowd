@@ -1,4 +1,5 @@
 import { generateKeyPairSync, randomBytes, sign } from "node:crypto"
+import { watch } from "node:fs"
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
@@ -136,6 +137,7 @@ export const usageStream = (
 interface GatewayKeys {
   readonly maxStreamsPerRun?: number
   readonly streamIdleMs?: number
+  readonly staleSweepMs?: number
 }
 
 /**
@@ -152,6 +154,11 @@ type UpstreamAnswer =
       readonly pieces?: { readonly bytes: number; readonly gapMs: number }
     }
   | { readonly json: string; readonly status: number }
+  | { readonly held: Promise<void> }
+
+/** The held answer's first event, sent at once, and its last, sent at its release. */
+export const heldStart = "event: message_start\ndata: {}\n\n"
+export const heldEnd = "event: message_stop\ndata: {}\n\n"
 
 /** A request that reached the model upstream: its path and query, headers and body text. */
 export interface UpstreamRequest {
@@ -208,7 +215,7 @@ try {
   const upstream = Bun.serve({
     hostname: host,
     port: 0,
-    fetch: async (request) => {
+    fetch: async (request, server) => {
       const url = new URL(request.url)
       await onUpstream?.(request)
       received.push({
@@ -223,6 +230,28 @@ try {
           status: answer.status,
           headers: { "content-type": "application/json" },
         })
+      if (typeof answer === "object" && "held" in answer) {
+        const { held } = answer
+        // A held answer has no idle limit of the upstream: only the gateway or its release ends it.
+        server.timeout(request, 0)
+        const encoded = (text: string) => new TextEncoder().encode(text)
+        return new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(encoded(heldStart))
+              void held.then(() => {
+                try {
+                  controller.enqueue(encoded(heldEnd))
+                  controller.close()
+                } catch {
+                  // The gateway cancelled the stream before its release.
+                }
+              })
+            },
+          }),
+          { headers: { "content-type": "text/event-stream" } },
+        )
+      }
       if (typeof answer === "object" && "text" in answer)
         return new Response(
           answer.pieces === undefined ? answer.text : inPieces(answer.text, answer.pieces),
@@ -337,6 +366,23 @@ try {
     mints: async () => (await lines("mints")).length,
     peakMints: async () => Math.max(0, ...(await lines("peaks")).map(Number)),
     liveMints: async () => (await readdir(join(root, "live"))).length,
+    /** Settles once `count` mints run at once, as the run token provider records each start. */
+    mintsRunning: async (count: number) => {
+      const live = join(root, "live")
+      const reached = Promise.withResolvers<void>()
+      const check = () =>
+        void readdir(live).then((names) => {
+          if (names.length >= count) reached.resolve()
+        }, reached.reject)
+      // The watch starts before the first read, so no start falls between the two.
+      const watcher = watch(live, check)
+      try {
+        check()
+        await reached.promise
+      } finally {
+        watcher.close()
+      }
+    },
     slowMints: async (slow: boolean) =>
       slow ? writeFile(join(root, "slow"), "") : rm(join(root, "slow"), { force: true }),
     tokenSeconds: (seconds: number | null) =>
@@ -348,6 +394,15 @@ try {
     /** The upstream answers with one event and then nothing, until set back. */
     setStall: (value: boolean) => {
       answer = value ? "stall" : "events"
+    },
+    /**
+     * The upstream answers with `heldStart`, then holds its stream open, with no idle limit,
+     * until the returned release is called, then sends `heldEnd` and ends.
+     */
+    holdStream: () => {
+      const held = Promise.withResolvers<void>()
+      answer = { held: held.promise }
+      return held.resolve
     },
     /** The upstream answers with `chunks` events `gapMs` apart, then ends. */
     setTrickle: (chunks: number, gapMs: number) => {
@@ -623,6 +678,13 @@ export const seedLease = (
 /** The session key of the fixture's runner: each client signs with it unless it names another. */
 export const runnerKey = sessionKeyPair()
 
+/** The body of the relay's renewal request numbered `attempt` of `token`, signed by `privateKey`. */
+export const renewalBody = (privateKey: string, channel: string, token: string, attempt: number) =>
+  JSON.stringify({
+    signature: signRenewal(privateKey, channel, capabilityDigest(token), String(attempt)),
+    attempt: String(attempt),
+  })
+
 /**
  * The runner's and the relay's requests to a gateway, through its front at `at`. The client holds
  * the session key `key`: its proofs bind the public key, and its renewals are signed with it.
@@ -687,14 +749,16 @@ export const client = (at: Origin, key: { publicKey: string; privateKey: string 
       headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
       body,
     })
-  /** The relay's renewal of `token` on the run's `channel`, signed with the client's key. */
-  const renew = (token: string, channel: string) =>
-    renewWith(
-      token,
-      JSON.stringify({
-        signature: signRenewal(key.privateKey, channel, capabilityDigest(token)),
-      }),
-    )
+  // The number of the client's last renewal request, as the relay keeps it for its session.
+  let attempts = 0
+  /**
+   * The relay's renewal of `token` on the run's `channel`, signed with the client's key; its
+   * attempt number is one higher than the client's last unless named.
+   */
+  const renew = (token: string, channel: string, attempt = attempts + 1) => {
+    attempts = Math.max(attempts, attempt)
+    return renewWith(token, renewalBody(key.privateKey, channel, token, attempt))
+  }
   return { url, request, challenge, audience, session, grant, provider, call, renew, renewWith }
 }
 

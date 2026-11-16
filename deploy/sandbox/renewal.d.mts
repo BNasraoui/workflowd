@@ -6,12 +6,19 @@ export const renewalWindowMs: number
 export function sessionKeyPair(): { publicKey: string; privateKey: string }
 export function isSessionKey(text: unknown): boolean
 export function sessionBinder(nonce: string, publicKey: string): string
-export function renewalMessage(channel: string, predecessor: string): Buffer
+export const maxRenewalAttempt: number
+export function renewalMessage(channel: string, predecessor: string, attempt: string): Buffer
 export const maxRenewalBody: number
-export function signRenewal(privateKey: string, channel: string, predecessor: string): string
+export function signRenewal(
+  privateKey: string,
+  channel: string,
+  predecessor: string,
+  attempt: string,
+): string
 export function verifyRenewal(
   publicKey: string,
   channel: string,
   predecessor: string,
+  attempt: unknown,
   signature: unknown,
 ): boolean

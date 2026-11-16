@@ -16,6 +16,8 @@ import {
   CapabilityRetired,
   capabilityDigest,
   makeCapabilityStore,
+  type SignedRenewal,
+  twoHolders,
 } from "./store"
 import { githubJobKeys, verifyJobProof } from "../sandbox/bootstrap"
 import { runLifetime } from "../store/run-lifetime"
@@ -47,8 +49,13 @@ const SessionProof = Schema.Struct({
   key: Schema.String.check(Schema.makeFilter(isSessionKey)),
 })
 const SessionAudience = /^workflowd:([a-f0-9]{64}):([a-f0-9]{64})$/
-/** The body of a renewal: the relay's signature of it with the session key. */
-const RenewalBody = Schema.fromJsonString(Schema.Struct({ signature: Schema.String }))
+/**
+ * The body of a renewal: the request's attempt number, as its exact decimal text, and the relay's
+ * signature of the renewal and that number with the session key.
+ */
+const RenewalBody = Schema.fromJsonString(
+  Schema.Struct({ signature: Schema.String, attempt: Schema.String }),
+)
 /**
  * Reads the audience and jti of an unverified proof only to select its challenge, to check its
  * binder and to refuse a used proof early; verification follows.
@@ -320,48 +327,69 @@ export const makeCapabilityGateway = (
         ),
       )
     /**
-     * Ends a run that a renewal showed to have two holders: the run is revoked with that reason,
-     * its open streams end, and the renewal is refused.
+     * A check of a renewal, under the run-lifetime fence. When it shows that the run has two
+     * holders, the same transaction revokes the run with that reason, and its open streams end;
+     * the renewal is then refused, and the gateway logs the run and the reason.
      */
-    const endTwoHolders = (runId: string) =>
+    const decided = <A extends { readonly twoHolders: boolean }, E, R>(
+      runId: string,
+      check: Effect.Effect<A, E, R>,
+    ) =>
       authority
-        .change(
-          runId,
-          store.revokeTwoHolders(runId).pipe(Effect.ensuring(Effect.sync(() => abortRun(runId)))),
+        .withPermit(
+          Effect.tap(check, ({ twoHolders: found }) =>
+            found
+              ? authority.change(
+                  runId,
+                  store
+                    .revokeTwoHolders(runId)
+                    .pipe(Effect.ensuring(Effect.sync(() => abortRun(runId)))),
+                )
+              : Effect.void,
+          ),
         )
-        .pipe(Effect.andThen(Effect.fail(new CapabilityRefused())))
+        .pipe(
+          Effect.tap(({ twoHolders: found }) =>
+            found
+              ? Effect.logWarning("Capability run ended", { runId, reason: twoHolders }).pipe(
+                  Effect.andThen(Effect.fail(new CapabilityRefused())),
+                )
+              : Effect.void,
+          ),
+        )
     /**
-     * A renewal, signed by the session key, is checked before its mint and again when its
-     * successor is stored. Asked again for the same predecessor, it replaces the successor that
-     * has not renewed itself; a successor that has authorized a call ends the run instead.
+     * A renewal, signed by the session key with an attempt number higher than each taken, is
+     * checked before its mint and again when its successor is stored. Asked again for the same
+     * predecessor, it replaces the successor that has not renewed itself; a successor that has
+     * authorized a call ends the run instead.
      */
     const renewal = Effect.fn("CapabilityGateway.renewal")(function* (
       binding: { readonly runId: string; readonly channel: string },
       predecessor: string,
-      signature: string,
+      signed: SignedRenewal,
     ) {
-      const previous = yield* authority.withPermit(
+      const previous = yield* decided(
+        binding.runId,
         store.renewable(
           binding,
           predecessor,
-          signature,
+          signed,
           (deadline) => Math.min(Date.now() + tokenLifeMs, deadline),
           Date.now(),
         ),
       )
-      if (previous.twoHolders) return yield* endTwoHolders(binding.runId)
       const next = yield* issue(previous.deadline)
-      const stored = yield* authority.withPermit(
+      yield* decided(
+        binding.runId,
         store.renew(
           binding,
           predecessor,
-          signature,
+          signed,
           capabilityDigest(next.token),
           next.expiresAt,
           Date.now(),
         ),
       )
-      if (stored.twoHolders) return yield* endTwoHolders(binding.runId)
       return { token: next.token, expiresAt: next.expiresAt, renewAt: renewAt(next.expiresAt) }
     })
     const sessionChallenge = Effect.fn("CapabilityGateway.sessionChallenge")((lease: string) =>
@@ -446,10 +474,24 @@ export const makeCapabilityGateway = (
       ),
     )
     type Binding = { readonly runId: string; readonly channel: string }
-    type Grant = Effect.Success<ReturnType<typeof store.authorizeCall>>
     /**
-     * The renew route: a body of the relay's signature, at most `maxRenewalBody` bytes, and the
-     * successor of the presented token.
+     * The check of a run token again, at a later step of its call. A token refused there, revoked
+     * or retired since the first check, is refused as at the first check.
+     */
+    const checkedAgain = (digest: string) =>
+      store
+        .authenticate(digest, Date.now())
+        .pipe(
+          Effect.mapError((error) =>
+            error instanceof CapabilityRefused || error instanceof CapabilityRetired
+              ? new RequestRefused()
+              : error,
+          ),
+        )
+    type Grant = Effect.Success<ReturnType<typeof store.authenticate>>["grant"]
+    /**
+     * The renew route: a body of the relay's signature and attempt number, at most
+     * `maxRenewalBody` bytes, and the successor of the presented token.
      */
     const renewRoute = Effect.fn("CapabilityGateway.renewRoute")(function* (
       request: Request,
@@ -477,7 +519,7 @@ export const makeCapabilityGateway = (
       )
       if (body._tag === "Failure") return denied()
       // A refused renewal is final for this token; only a busy or failed mint or store is 503.
-      const renewed = yield* Effect.result(renewal(binding, digest, body.success.signature))
+      const renewed = yield* Effect.result(renewal(binding, digest, body.success))
       if (renewed._tag === "Failure")
         return renewed.failure instanceof CapabilityRefused ? denied() : unavailable()
       return Response.json(renewed.success, { headers: { "cache-control": "no-store" } })
@@ -486,11 +528,14 @@ export const makeCapabilityGateway = (
      * Admits one stream of a run, under the run-lifetime fence: null when the gateway or the run
      * holds its most streams. The stream ends at the token's expiry or the run's deadline, after
      * `streamIdleMs` without a chunk, at the provider credential's expiry, or when the run changes.
+     * A stream that a run token opened before its successor's first call runs on after that call:
+     * at most to the token's expiry, which is at most `renewalWindowMs` (330 s) after its renewal,
+     * as no token is renewed earlier.
      */
     const admit = (binding: Binding, session: number, digest: string, grant: Grant) =>
       authority.withPermit(
         Effect.gen(function* () {
-          yield* store.authorizeCall(binding, digest, Date.now())
+          yield* checkedAgain(digest)
           const owned =
             active.get(binding.runId) ??
             new Map<AbortController, { readonly session: number; readonly digest: string }>()
@@ -645,7 +690,7 @@ export const makeCapabilityGateway = (
           const started = await Effect.runPromise(
             authority.withPermit(
               Effect.gen(function* () {
-                yield* store.authorizeCall(binding, digest, Date.now())
+                yield* checkedAgain(digest)
                 if (tokens !== undefined) {
                   const reservation = yield* store.reserve(binding.runId, tokens, Date.now())
                   if (reservation === null) return { spent: true as const }
@@ -756,6 +801,11 @@ export const makeCapabilityGateway = (
             Effect.sync(() => {
               if (ownership && !ownership.transferred) ownership.release()
             }),
+        ).pipe(
+          Effect.catchIf(
+            (error) => error instanceof RequestRefused,
+            () => Effect.succeed(denied()),
+          ),
         )
       },
       Effect.catch((error) =>
@@ -787,7 +837,6 @@ export const makeCapabilityGateway = (
           Effect.asVoid,
         ),
       sessionBound: store.sessionBound,
-      endReason: store.endReason,
       usage: store.usage,
     }
     return { sessionChallenge, session, revoke, control, handle }

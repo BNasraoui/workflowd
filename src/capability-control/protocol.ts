@@ -80,12 +80,6 @@ export const CapabilityGrant = Schema.Struct({
 })
 export type CapabilityGrant = typeof CapabilityGrant.Type
 
-/**
- * Why the gateway ended a run by itself: `two holders`, when a renewal would have replaced a
- * successor run token that had already authorized a call.
- */
-export const EndReason = Schema.Literal("two holders")
-
 export interface ControlVerbSchemas<A, I, B, O> {
   readonly request: Schema.Codec<A, I>
   readonly response: Schema.Codec<B, O>
@@ -117,11 +111,6 @@ export const controlProtocol = {
       actionsAttempt: Schema.Int,
     }),
     response: Schema.Boolean,
-  }),
-  /** Why the gateway ended the run by itself, or null when it did not. */
-  endReason: schemas({
-    request: Schema.Struct({ runId: Schema.String }),
-    response: Schema.NullOr(EndReason),
   }),
   /** What the run spent of its budget, and whether the budget is spent. */
   usage: schemas({
