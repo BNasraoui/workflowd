@@ -7,4 +7,4 @@
 contract_version = 1
 
 [commands]
-mint = "/bin/bun /app/src/capability-gateway/custody.ts access LOGIN_DIRECTORY {role} {ttl}"
+mint = "/bin/bun /app/src/capability-gateway/custody-process.ts access LOGIN_DIRECTORY {role} {ttl}"

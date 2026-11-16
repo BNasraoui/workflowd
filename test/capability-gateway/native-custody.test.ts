@@ -15,12 +15,8 @@ import {
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { Schema } from "effect"
-import {
-  checkLogin,
-  CustodyRefused,
-  custodyCommand,
-  loginFault,
-} from "../../src/capability-gateway/custody"
+import { checkLogin, CustodyRefused, loginFault } from "../../src/capability-gateway/custody"
+import { custodyCommand } from "../../src/capability-gateway/custody-process"
 import { importLoginCommand } from "../../src/capability-gateway-server"
 import {
   claudeLogin,
@@ -79,7 +75,7 @@ const access = (root: string, oauth: OAuthFixture) =>
   Bun.spawn(
     [
       process.execPath,
-      resolve("src/capability-gateway/custody.ts"),
+      resolve("src/capability-gateway/custody-process.ts"),
       "access",
       join(root, "login"),
       "--token-url",
@@ -199,7 +195,7 @@ test("an OAuth server that refuses the connection leaves the login as it was, th
         Bun.spawn(
           [
             process.execPath,
-            resolve("src/capability-gateway/custody.ts"),
+            resolve("src/capability-gateway/custody-process.ts"),
             "access",
             join(root, "login"),
             "--token-url",
@@ -244,7 +240,7 @@ test("the custody command refuses a token URL that is plain HTTP off loopback, a
     expect((await importLogin(env, JSON.stringify(login))).code).toBe(0)
     const run = (args: ReadonlyArray<string>) =>
       finished(
-        Bun.spawn([process.execPath, resolve("src/capability-gateway/custody.ts"), ...args], {
+        Bun.spawn([process.execPath, resolve("src/capability-gateway/custody-process.ts"), ...args], {
           env: { PATH: "/usr/bin:/bin" },
           stdout: "pipe",
           stderr: "pipe",
@@ -268,7 +264,7 @@ test("the provider-access template runs custody's access command from the image,
   const mint = /^mint = "(.*)"$/m.exec(template)?.[1]?.split(" ")
   expect(mint).toEqual([
     "/bin/bun",
-    "/app/src/capability-gateway/custody.ts",
+    "/app/src/capability-gateway/custody-process.ts",
     "access",
     "LOGIN_DIRECTORY",
     "{role}",

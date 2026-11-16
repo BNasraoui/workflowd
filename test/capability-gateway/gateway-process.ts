@@ -842,7 +842,7 @@ export async function writeCustodyProvider(
   directory: string,
   tokenUrl: string,
   bun = process.execPath,
-  source = resolve("src/capability-gateway/custody.ts"),
+  source = resolve("src/capability-gateway/custody-process.ts"),
 ) {
   await writeFile(
     join(root, "noscope/providers/provider-access.toml"),

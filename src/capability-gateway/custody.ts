@@ -611,11 +611,17 @@ function usable(provider: CustodyProvider, oauth: OAuth) {
 }
 
 /**
- * The access value of the login of `provider`, renewed first when it ends within a minute or a
- * renewal was not finished. Calls at one time wait for each other, so one renewal serves them
- * all. The renewed login is on disk before its access value is returned.
+ * The access value of the login of `provider` in the directory `path`, renewed first when it ends
+ * within a minute or a renewal was not finished. `tokenUrlOverride` replaces the OAuth server's
+ * token URL; only a fixture names one. Calls at one time wait for each other, so one renewal
+ * serves them all. The renewed login is on disk before its access value is returned.
  */
-async function access(path: string, provider: CustodyProvider, url: string) {
+export async function loginAccess(
+  path: string,
+  provider: CustodyProvider,
+  tokenUrlOverride?: string,
+) {
+  const url = tokenUrl(provider, tokenUrlOverride)
   return await holding(path, provider, async (directory) => {
     try {
       const value = await renewedAccess(directory, provider, url)
@@ -721,36 +727,8 @@ async function renewedAccess(directory: Directory, provider: CustodyProvider, ur
   return usable(provider, next)
 }
 
-/**
- * The noscope provider command: `access <directory> [--token-url <url>] <provider> <ttl>`. It
- * prints the access value as noscope's provider contract asks, or throws.
- */
-export async function custodyCommand(args: ReadonlyArray<string>) {
-  const [operation, directory, ...rest] = args
-  const override = rest[0] === "--token-url" ? rest[1] : undefined
-  const [name, ttlText, ...extra] = override === undefined ? rest : rest.slice(2)
-  const provider = custodyProvider(name ?? "")
-  const ttl = Number(ttlText)
-  if (
-    operation !== "access" ||
-    !directory?.startsWith("/") ||
-    !provider ||
-    extra.length > 0 ||
-    !Number.isInteger(ttl) ||
-    ttl < 1 ||
-    ttl > 3600
-  )
-    throw new CustodyRefused("refused")
-  const value = await access(directory, provider, tokenUrl(provider, override))
-  return {
-    token: value.token,
-    token_id: randomUUID(),
-    expires_at: new Date(Math.min(value.expiresAt, Date.now() + ttl * 1000)).toISOString(),
-  }
-}
-
 /** The line of standard error for a failed command; it names no value. */
-const custodyFailure = (error: unknown) =>
+export const custodyFailure = (error: unknown) =>
   `custody: ${
     error instanceof LoginImportRequired ||
     error instanceof LoginScopeMissing ||
@@ -779,28 +757,5 @@ export function forbidCoreFiles() {
       throw new Error("the core file limit was not set")
   } finally {
     libc.close()
-  }
-}
-
-// Noscope starts the command in its own process group: parent-death signaling ends it with
-// noscope, and it refuses to run when its parent is gone.
-if (import.meta.main) {
-  const parent = process.ppid
-  const libc = dlopen("libc.so.6", {
-    prctl: {
-      args: [FFIType.i32, FFIType.u64, FFIType.u64, FFIType.u64, FFIType.u64],
-      returns: FFIType.i32,
-    },
-  })
-  // PR_SET_PDEATHSIG, SIGKILL
-  const attached = parent > 1 && libc.symbols.prctl(1, 9, 0, 0, 0) === 0 && process.ppid === parent
-  libc.close()
-  try {
-    if (!attached) throw new CustodyRefused("refused")
-    forbidCoreFiles()
-    process.stdout.write(JSON.stringify(await custodyCommand(process.argv.slice(2))))
-  } catch (error) {
-    process.stderr.write(custodyFailure(error))
-    process.exitCode = 1
   }
 }
