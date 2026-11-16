@@ -726,6 +726,10 @@ export const makeAgentRunCliDispatcher = (dependencies: {
             resourceId,
             createdAt: run.createdAt,
             kind,
+            // A run on a GitHub Actions runner holds its session there, not on this host.
+            ...(run.resolvedSelection?.executor.endsWith(":actions") === true
+              ? { host: run.resolvedSelection.host }
+              : {}),
           })
           yield* store.markSpawned({
             runId: run.runId,

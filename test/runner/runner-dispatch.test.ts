@@ -9,6 +9,8 @@ import { sealRun } from "../../deploy/sandbox/native-seal.mjs"
 import type { GatewayEnd } from "../../src/capability-control/protocol"
 import { AgentRunIngress, agentRunIdentifiers } from "../../src/kernel/agent-run-ingress"
 import { AgentRunStore } from "../../src/kernel/agent-run-store"
+import { claudeEndpointIdentity } from "../../src/kernel/claude-session"
+import { KernelSessionStore } from "../../src/kernel/session-store"
 import { CapabilityGatewayUnavailable } from "../../src/sandbox/capability-control"
 import {
   daemonRuntime,
@@ -269,7 +271,15 @@ async function ended(runtime: ReturnType<typeof daemonRuntime>, remote: Remote, 
     const current = await runtime.runPromise(runs.read(runId))
     if (current !== null && !["spawning", "spawned", "verified"].includes(current.state)) {
       const messages = await runtime.runPromise(mailbox(runId))
-      return { run: current, message: messages[0]?.message, branch: remote.ref(branch) }
+      const session =
+        current.sessionId === null
+          ? null
+          : await runtime.runPromise(
+              Effect.flatMap(KernelSessionStore, (sessions) =>
+                sessions.readSession(current.sessionId!),
+              ),
+            )
+      return { run: current, message: messages[0]?.message, branch: remote.ref(branch), session }
     }
     await Bun.sleep(50)
   }
@@ -308,6 +318,12 @@ test("a sealed result that passes the check is pushed as agent-run/<id>, and the
     end_reason: "completed",
     final_message: "Done.",
     placement: "runner",
+  })
+  // The run's Claude session is held on the runner, not on this host.
+  expect(end.session).toMatchObject({
+    provider_kind: "claude",
+    server_id: "github-actions",
+    endpoint_identity: claudeEndpointIdentity("github-actions"),
   })
 })
 
