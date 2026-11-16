@@ -16,7 +16,7 @@ import { tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
 import { Schema } from "effect"
 import { checkLogin, CustodyRefused, loginFault } from "../../src/capability-gateway/custody"
-import { custodyCommand } from "../../src/capability-gateway/custody-process"
+import { custodyCommand, custodyRun } from "../../src/capability-gateway/custody-process"
 import { importLoginCommand } from "../../src/capability-gateway-server"
 import { until } from "./custody-fixture"
 import {
@@ -589,6 +589,30 @@ test("in this process, the fault line is the cause of the last failed call, of a
     expect(line).toEndWith("\n")
     expect(line.slice(0, -1)).toMatch(/^custody refused [A-Za-z0-9 ./:;,_()'?-]+$/)
     expect(line).toContain("/a??31m?bbb")
+  })
+})
+
+test("in this process, custody's run gives the access value as its output, or a line of standard error that names no value", async () => {
+  await withLogin(async (root, oauth, env) => {
+    const directory = join(root, "login")
+    const run = (args: ReadonlyArray<string>) => custodyRun(args, running)
+    expect(await run(["access", directory, "claude", "60", "more"])).toEqual({
+      code: 1,
+      output: "",
+      error: "custody: refused\n",
+    })
+    expect(await run(["access", directory, "--token-url", oauth.url, "claude", "60"])).toEqual({
+      code: 1,
+      output: "",
+      error: `custody: custody refused ${directory}: no login imported\n`,
+    })
+    const old = claudeLogin(syntheticValue("access"), syntheticValue("refresh"), Date.now() - 1000)
+    expect((await importLoginCommand(env, ["claude"], input(JSON.stringify(old)))).code).toBe(0)
+    const given = await run(["access", directory, "--token-url", oauth.url, "claude", "60"])
+    expect([given.code, given.error]).toEqual([0, ""])
+    expect(Schema.decodeUnknownSync(Schema.fromJsonString(Provided))(given.output).token).toBe(
+      oauth.next().access,
+    )
   })
 })
 

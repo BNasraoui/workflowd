@@ -53,6 +53,7 @@ test("custody's process, which noscope starts for the provider provider-access, 
   expect(loaded("capability-gateway/custody-process.ts")).toEqual([
     "capability-gateway/custody-process.ts",
     "capability-gateway/custody.ts",
+    "capability-gateway/parent-death.ts",
   ])
 })
 
