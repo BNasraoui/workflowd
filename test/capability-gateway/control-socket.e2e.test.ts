@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test"
-import { chmod, mkdir, symlink, writeFile } from "node:fs/promises"
+import { chmod, mkdir, rm, symlink, writeFile } from "node:fs/promises"
+import { createServer } from "node:net"
 import { join } from "node:path"
 import { maxControlFrame } from "../../src/capability-control/protocol"
 import { fixture } from "./gateway-process"
@@ -268,4 +269,30 @@ test("the overflow uid passes as the owner of / only in a user namespace that do
   const mapped = await serveInNamespace(true)
   expect(mapped.map).toEqual(["0", "0", "1"])
   expect(mapped.result).toBe("/ lets another user replace the control socket directory")
+})
+
+test("the gateway refuses a socket path that a process serves without the lock, and the socket stays served", async () => {
+  const f = await fixture()
+  try {
+    // The gateway's own control directory, which it leaves at its stop, with no socket in it.
+    await (await startGateway(f)).stop()
+    await rm(socketOf(f), { force: true })
+    const server = createServer((connection) =>
+      connection.once("data", () =>
+        connection.end(framed(JSON.stringify({ ok: true, value: "other" }))),
+      ),
+    )
+    await new Promise<void>((resolve) => server.listen(socketOf(f), resolve))
+    try {
+      await expect(startGateway(f)).rejects.toThrow("is held by a live process")
+      expect(JSON.parse(await rawFrame(socketOf(f), reconcileFrame))).toEqual({
+        ok: true,
+        value: "other",
+      })
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()))
+    }
+  } finally {
+    await f.close()
+  }
 })
