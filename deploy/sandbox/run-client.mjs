@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process"
-import { lstat, readFile } from "node:fs/promises"
+import { lstat, readFile, writeFile } from "node:fs/promises"
 import { createInterface } from "node:readline"
 import { pathToFileURL } from "node:url"
 import { serveRunnerRelay } from "./capability-relay.mjs"
@@ -37,22 +37,35 @@ async function sent(relay, route, body, attempts = 8) {
   }
 }
 
+/** The agent Git identity of a launch: a name and an address, as the seal takes them. */
+const identityOf = (identity) =>
+  typeof identity === "object" &&
+  identity !== null &&
+  Object.keys(identity).sort().join() === "email,name" &&
+  typeof identity.name === "string" &&
+  typeof identity.email === "string"
+
 /**
- * The run's launch, as the gateway holds it: its prompt, its image, its model, its source commit
- * and its deadline, and no other key. A launch whose image is not the job's own is refused.
+ * The run's launch, as the gateway holds it: its prompt, its image, the agent Git identity, its
+ * model, its source commit, its repository and its deadline, and no other key. A launch whose
+ * image is not the job's own is refused.
  */
 export async function readLaunch(relay, jobImage) {
   const answer = await sent(relay, "launch")
   if (answer.status !== 200) throw new Error("launch refused")
   const launch = JSON.parse(answer.body.toString("utf8"))
   if (
-    Object.keys(launch).sort().join() !== "deadline,image,model,prompt,sourceSha" ||
+    Object.keys(launch).sort().join() !==
+      "deadline,identity,image,model,prompt,repositoryId,sourceSha" ||
     typeof launch.prompt !== "string" ||
+    !identityOf(launch.identity) ||
+    !Number.isSafeInteger(launch.repositoryId) ||
+    launch.repositoryId < 1 ||
     typeof launch.model !== "string" ||
     !imagePattern.test(launch.image) ||
     !/^[a-f0-9]{40}$/.test(launch.sourceSha) ||
     !Number.isSafeInteger(launch.deadline) ||
-    (jobImage !== undefined && launch.image !== jobImage)
+    launch.image !== jobImage
   )
     throw new Error("launch refused")
   return launch
@@ -156,14 +169,13 @@ export async function runJob(config, directory, command) {
   const relay = await serveRunnerRelay(config, directory)
   try {
     process.stdout.write("ready\n")
-    const jobImage = await readFile(`${directory}/agent-image`, "utf8").then(
-      (text) => text.trim(),
-      () => undefined,
-    )
+    const jobImage = (await readFile(`${directory}/agent-image`, "utf8")).trim()
     const launch = await readLaunch(relay, jobImage)
     const code = await runHarness(relay, directory, command, launch)
     if (code !== 0) throw new Error("harness failed")
     await postResult(relay, directory)
+    // The job's hold step reads this end: the run's one result is posted.
+    await writeFile(`${directory}/relay-ended`, "result\n", { mode: 0o600 })
   } finally {
     relay.close()
   }

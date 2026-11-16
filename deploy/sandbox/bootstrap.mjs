@@ -7,9 +7,10 @@ import { sessionKeyPair } from "./renewal.mjs"
 
 /**
  * The runner's first contact: it opens its gateway session with its own OIDC proof, then starts
- * the relay that holds the run token. The request authority is cleared before the relay starts.
- * The session's private key goes to the relay on its standard input with the grant, and to no
- * file, environment, argument or output.
+ * the run client, which holds the relay and with it the run token, and runs the run's harness
+ * (`native-runner.mjs`, the box). The request authority is cleared before the run client starts.
+ * The session's private key goes to the run client on its standard input with the grant, and to
+ * no file, environment, argument or output.
  */
 export async function prepare({
   directory = "/run/workflowd-sandbox",
@@ -24,11 +25,17 @@ export async function prepare({
    * otherwise only in this process's memory and on the relay's standard input.
    */
   sessionKey = sessionKeyPair(),
+  /** The harness that the run client runs: the box of `native-runner.mjs`. */
+  harness = [process.execPath, `${tooling}/native-runner.mjs`],
 } = {}) {
   const ref = environment.GITHUB_REF ?? ""
   if (!/^[a-f0-9]{40}$/.test(environment.GITHUB_SHA ?? "") || !ref.startsWith("refs/heads/workflowd/leases/"))
     throw new Error("lease ref refused")
   const leaseId = ref.slice("refs/heads/workflowd/leases/".length)
+  // The job's own image: the run client refuses a launch of any other.
+  const image = environment.SANDBOX_AGENT_IMAGE ?? ""
+  if (!/^ghcr\.io\/bnasraoui\/workflowd-agent-base@sha256:[a-f0-9]{64}$/.test(image))
+    throw new Error("agent image refused")
   const gateway = environment.SANDBOX_GATEWAY_URL ?? ""
   const issue = takeJobIdentity(environment, identity)
   let grant
@@ -37,13 +44,14 @@ export async function prepare({
   } finally {
     issue.clear()
   }
+  await writeFile(`${directory}/agent-image`, image, { mode: 0o600, flag: "wx" })
   await writeFile(`${directory}/native-deadline`, String(grant.deadline), {
     mode: 0o600,
     flag: "wx",
   })
   const child = spawn(
     process.execPath,
-    [`${tooling}/capability-relay.mjs`, "runner", directory],
+    [`${tooling}/run-client.mjs`, "runner", directory, "--", ...harness],
     {
       env: {
         PATH: "/usr/bin:/bin",

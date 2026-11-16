@@ -50,6 +50,7 @@ type Store = Effect.Success<typeof makeCapabilityStore>
 type RunGrant = {
   readonly modelId: string
   readonly sourceSha: string
+  readonly repositoryId: number
   readonly deadline: number
   readonly launch?: RunLaunch
 }
@@ -103,8 +104,10 @@ export const makeRunRoutes = Effect.gen(function* () {
             {
               prompt: launch.prompt,
               image: launch.image,
+              identity: launch.identity,
               model: grant.modelId,
               sourceSha: grant.sourceSha,
+              repositoryId: grant.repositoryId,
               deadline: grant.deadline,
             },
             noStore,

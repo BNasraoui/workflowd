@@ -29,7 +29,8 @@ import {
 
 const origin = "http://capability.invalid"
 const image = `ghcr.io/bnasraoui/workflowd-agent-base@sha256:${"b".repeat(64)}`
-const launch = { prompt: "fixture prompt", image }
+const identity = { name: "Fixture Agent", email: "agent@example.invalid" }
+const launch = { prompt: "fixture prompt", image, identity }
 
 type Gateway = Effect.Success<ReturnType<typeof makeCapabilityGateway>>
 type Store = Effect.Success<typeof makeCapabilityStore>
@@ -125,7 +126,7 @@ const usedCalls = async () =>
   (await inStore(sql<{ calls: number }>`SELECT calls FROM capability_usage WHERE run_id='run'`))[0]
     ?.calls
 
-test("the launch answers the run token with the run's prompt, image, model, source and deadline", async () => {
+test("the launch answers the run token with the run's prompt, image, identity, model, source, repository and deadline", async () => {
   const response = await call("launch")
   expect(response.status).toBe(200)
   expect(response.headers.get("cache-control")).toBe("no-store")
@@ -133,8 +134,10 @@ test("the launch answers the run token with the run's prompt, image, model, sour
   expect(value).toEqual({
     prompt: "fixture prompt",
     image,
+    identity,
     model: "fixture-model",
     sourceSha: "d".repeat(40),
+    repositoryId: 12,
     deadline: expect.any(Number),
   })
   expect((await call("launch", { method: "POST", body: "{}" })).status).toBe(403)

@@ -229,7 +229,7 @@ test("release logs out even when container cleanup fails and preserves the failu
   }
 })
 
-test("the hold of a session fails with the reason for which its relay ended or the deadline passed", async () => {
+test("the hold of a session ends well once its result is posted, and fails with the reason for which its relay ended or the deadline passed", async () => {
   const source = await Bun.file(`${root}/deploy/sandbox/runner.sh`).text()
   const script = source.split("    python3 -c '\n")[1]?.split('\n\' "$1"')[0]
   if (!script?.includes('Path("/run/workflowd-sandbox")')) throw new Error("Missing hold script")
@@ -268,6 +268,9 @@ test("the hold of a session fails with the reason for which its relay ended or t
       await writeFile(join(directory, "relay-ended"), `${reason}\n`)
       expect(await receipt()).toEqual({ code: 1, outcome: "failed", reason })
     }
+    // The run client posted the run's one result: the hold ends well.
+    await writeFile(join(directory, "relay-ended"), "result\n")
+    expect(await receipt()).toEqual({ code: 0, outcome: "ok", reason: "none" })
     // The deadline passes while the relay still holds the session.
     await rm(join(directory, "relay-ended"))
     await writeFile(join(directory, "relay.pid"), String(process.pid))

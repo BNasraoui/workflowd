@@ -103,6 +103,20 @@ const runnerAliasesOf = (config: AutomationConfig) =>
     .map(([alias]) => alias)
 
 /**
+ * The runner placement's part of the gateway's grants: its aliases and the agent identity. None
+ * without a runner alias or an agent identity; `runnerDispatch` then refuses the daemon's start.
+ */
+const runnerGrantsOf = (config: AutomationConfig, runnerAliases: ReadonlyArray<string>) =>
+  runnerAliases.length === 0 || config.agentGit === undefined
+    ? {}
+    : {
+        runner: {
+          aliases: runnerAliases,
+          identity: { name: config.agentGit.name, email: config.agentGit.email },
+        },
+      }
+
+/**
  * The daemon's one git runner of the checks of sealed results. It holds its scratch root for the
  * daemon's life, so it is built once, here, and only with a runner placement.
  */
@@ -415,7 +429,7 @@ const makeAutomationLayer = (config: AutomationConfig) => {
                     gateway: yield* makeDaemonCapability({
                       socket: control.socket,
                       budget: control.budget,
-                      runnerAliases,
+                      ...runnerGrantsOf(config, runnerAliases),
                     }),
                   }
             const leases = yield* makeSandboxLeaseService(

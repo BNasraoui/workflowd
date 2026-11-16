@@ -252,6 +252,7 @@ await prepare({
         env: {
           PATH: "/usr/bin:/bin",
           GITHUB_SHA: "a".repeat(40),
+          SANDBOX_AGENT_IMAGE: `ghcr.io/bnasraoui/workflowd-agent-base@sha256:${"b".repeat(64)}`,
           GITHUB_REF: "refs/heads/workflowd/leases/lease",
           GITHUB_REPOSITORY: "fixture/repo",
           SANDBOX_GATEWAY_URL: gateway.url,

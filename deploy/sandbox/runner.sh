@@ -244,9 +244,9 @@ if mode == "audit":
 else:
     mode_file = root / "execution-mode"
     if mode_file.exists() and mode_file.read_text() == "actions-native":
-        # The hold lasts while the relay holds the session, up to the deadline of the run. Each end
-        # is a failure: 3 a failed renewal, 4 the expiry of the token, 5 the deadline, 6 a relay
-        # that ended with no reason.
+        # The hold lasts while the run client holds the session, up to the deadline of the run.
+        # 0 is the result of the run posted; each other end is a failure: 3 a failed renewal, 4 the
+        # expiry of the token, 5 the deadline, 6 a run client that ended with no reason.
         pid = int((root / "relay.pid").read_text())
         deadline = int((root / "native-deadline").read_text()) / 1000
         while time.time() < deadline:
@@ -255,7 +255,7 @@ else:
             time.sleep(1)
         ended = root / "relay-ended"
         reason = ended.read_text() if ended.exists() else ""
-        codes = {"renewal\n": 3, "expiry\n": 4, "deadline\n": 5}
+        codes = {"result\n": 0, "renewal\n": 3, "expiry\n": 4, "deadline\n": 5}
         sys.exit(codes.get(reason, 5 if time.time() >= deadline else 6))
     heartbeat = root / "heartbeat"
     last_heartbeat = int(time.time())
@@ -288,6 +288,13 @@ else:
       /usr/local/bin/container-use stdio
     ;;
   stop)
+    # A run's box and its volumes, when its harness did not remove them.
+    for container in $(docker ps -aq --filter label=io.workflowd.native); do
+      docker rm -f -v "$container" >/dev/null
+    done
+    for volume in $(docker volume ls -q --filter label=io.workflowd.native); do
+      docker volume rm -f "$volume" >/dev/null
+    done
     for container in workflowd-sandbox-tooling workflowd-sandbox-engine; do
       if docker container inspect "$container" >/dev/null 2>&1; then
         docker rm -f "$container" >/dev/null

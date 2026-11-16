@@ -116,6 +116,12 @@ const UnbudgetedGrant = Schema.Struct(Struct.omit(CapabilityGrant.fields, ["budg
 /** workflowd's worker authorization ends a run's authority this long after the run was made. */
 const workerLifetimeMs = 86400000
 
+/** The runner placement's part of the grants: its aliases, and the identity its seals commit as. */
+export interface RunnerGrants {
+  readonly aliases: ReadonlyArray<string>
+  readonly identity: { readonly name: string; readonly email: string }
+}
+
 /**
  * The grant of each live native run in workflowd's store, or of `runId` alone: a run that
  * workflowd's worker authorization admits, whose lease is starting or ready with its Actions run
@@ -126,8 +132,8 @@ export const liveGrants = Effect.fn("DaemonCapability.liveGrants")(function* (
   runId: string | null,
   now: number,
   budget: RunBudget,
-  /** The repository aliases placed on a runner: each run of one carries its launch. */
-  runnerAliases: ReadonlyArray<string> = [],
+  /** The runner placement: each run of one of its aliases carries its launch. */
+  runner?: RunnerGrants,
 ) {
   const sql = yield* SqlClient.SqlClient
   const rows = yield* sql<Record<string, unknown>>`SELECT a.run_id AS runId,l.lease_id AS leaseId,
@@ -137,7 +143,8 @@ export const liveGrants = Effect.fn("DaemonCapability.liveGrants")(function* (
       json_extract(l.policy,'$.repository') AS repositoryName,
       json_extract(l.policy,'$.installationId') AS installationId,
       l.actions_run_id AS actionsRunId,l.actions_attempt AS actionsAttempt,l.deadline,l.policy,
-      a.prompt AS prompt,json_extract(l.policy,'$.agentImage') AS image
+      a.prompt AS prompt,json_extract(l.policy,'$.agentImage') AS image,
+      json_extract(a.resolved_selection,'$.provider') AS selectedProvider
       FROM kernel_agent_runs a JOIN sandbox_leases l ON l.run_id=a.run_id
       JOIN directory_managed d ON d.run_id=a.run_id
       WHERE a.repository=json_extract(l.policy,'$.alias')
@@ -145,13 +152,20 @@ export const liveGrants = Effect.fn("DaemonCapability.liveGrants")(function* (
       AND l.state IN ('starting','ready') AND l.actions_run_id IS NOT NULL
       AND (${runId} IS NULL OR a.run_id=${runId})`
   const live: CapabilityGrant[] = []
-  for (const { state, createdAt, policy, prompt, image, ...row } of rows) {
+  for (const { state, createdAt, policy, prompt, image, selectedProvider, ...row } of rows) {
     const created = new Date(String(createdAt))
     if (!authorizeWorker({ state: String(state), createdAt: created }, now)) continue
     const parsed: unknown = JSON.parse(String(policy))
     const grant = yield* Schema.decodeUnknownEffect(UnbudgetedGrant)({
       ...row,
-      ...(runnerAliases.includes(String(row.repository)) ? { launch: { prompt, image } } : {}),
+      // A runner run's provider at the gateway is its selection's: the run is Claude's
+      // ("claude-cli") on this host, and the gateway's provider ("anthropic") on the runner.
+      ...(runner?.aliases.includes(String(row.repository)) === true
+        ? {
+            launch: { prompt, image, identity: runner.identity },
+            providerId: selectedProvider ?? row.providerId,
+          }
+        : {}),
       policy: parsed,
       notAfter: created.getTime() + workerLifetimeMs,
     })
@@ -193,8 +207,8 @@ export const makeDaemonCapability = (options: {
   readonly reconcileEveryMs?: number
   /** The budget of a run that workflowd authorizes for the first time. */
   readonly budget?: RunBudget
-  /** The repository aliases placed on a runner; each grant of their runs carries its launch. */
-  readonly runnerAliases?: ReadonlyArray<string>
+  /** The runner placement; each grant of a run of one of its aliases carries its launch. */
+  readonly runner?: RunnerGrants
 }) =>
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient
@@ -219,7 +233,7 @@ export const makeDaemonCapability = (options: {
     const watched = new Map<string, () => void>()
     const changed = yield* Queue.unbounded<string>()
     const grants = (runId: string | null) =>
-      liveGrants(runId, Date.now(), options.budget ?? defaultRunBudget, options.runnerAliases).pipe(
+      liveGrants(runId, Date.now(), options.budget ?? defaultRunBudget, options.runner).pipe(
         Effect.provideService(SqlClient.SqlClient, sql),
       )
     const watch = (runId: string) => {

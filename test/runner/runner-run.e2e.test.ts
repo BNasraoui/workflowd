@@ -82,8 +82,12 @@ async function runnerGateway(f: Fixture): Promise<Gateway> {
   )
   await f
     .store(
-      Effect.flatMap(liveGrants(null, Date.now(), defaultRunBudget, ["fixture"]), (live) =>
-        controlClient(f.config.controlSocket).reconcile(live),
+      Effect.flatMap(
+        liveGrants(null, Date.now(), defaultRunBudget, {
+          aliases: ["fixture"],
+          identity: { name: "Fixture Agent", email: "agent@example.invalid" },
+        }),
+        (live) => controlClient(f.config.controlSocket).reconcile(live),
       ),
     )
     .catch(async (error: unknown) => {

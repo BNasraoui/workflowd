@@ -101,8 +101,9 @@ export const maxLaunchPromptBytes = 32 * 1024
 /** The agent image of a runner run: the workflowd image, by digest. */
 export const agentImagePattern = /^ghcr\.io\/bnasraoui\/workflowd-agent-base@sha256:[a-f0-9]{64}$/
 /**
- * What a run placed on a runner is given at its start, beside its grant's model, source commit and
- * deadline: its prompt and the image that its job must run.
+ * What a run placed on a runner is given at its start, beside its grant's model, source commit,
+ * repository and deadline: its prompt, the image that its job must run and the Git identity of
+ * its seal.
  */
 export const RunLaunch = Schema.Struct({
   prompt: Schema.String.check(
@@ -113,6 +114,11 @@ export const RunLaunch = Schema.Struct({
     ),
   ),
   image: Schema.String.check(Schema.isPattern(agentImagePattern)),
+  /** The agent Git identity that the run's seal commits as; the daemon's check requires it. */
+  identity: Schema.Struct({
+    name: Schema.String.check(Schema.isMaxLength(200)),
+    email: Schema.String.check(Schema.isMaxLength(200)),
+  }),
 })
 export type RunLaunch = typeof RunLaunch.Type
 
