@@ -172,7 +172,9 @@ test("bound streaming preserves native bytes, renews with noscope, and denies cr
             request(
               "/capabilities/v1/renew",
               issued.token,
-              JSON.stringify(signedRenewal(issued.binding, capabilityDigest(issued.token), asked)),
+              JSON.stringify(
+                signedRenewal(issued.binding, capabilityDigest(issued.token), asked, Date.now()),
+              ),
             ),
           )
           expect(renew.status).toBe(200)
@@ -255,7 +257,9 @@ test("bound streaming preserves native bytes, renews with noscope, and denies cr
             request(
               "/capabilities/v1/renew",
               issued.token,
-              JSON.stringify(signedRenewal(issued.binding, capabilityDigest(issued.token), 4)),
+              JSON.stringify(
+                signedRenewal(issued.binding, capabilityDigest(issued.token), 4, Date.now()),
+              ),
             ),
           )).status,
         ).toBe(403)
@@ -406,7 +410,7 @@ test("a call of a run token that was admitted before its successor's first call,
         yield* (yield* makeCapabilityStore).renew(
           issued.binding,
           digest,
-          signedRenewal(issued.binding, digest, 1),
+          signedRenewal(issued.binding, digest, 1, Date.now()),
           capabilityDigest(successor),
           Date.now() + 600000,
           Date.now(),

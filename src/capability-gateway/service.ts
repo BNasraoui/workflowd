@@ -53,11 +53,12 @@ const SessionProof = Schema.Struct({
 })
 const SessionAudience = /^workflowd:([a-f0-9]{64}):([a-f0-9]{64})$/
 /**
- * The body of a renewal: the request's attempt number, as its exact decimal text, and the relay's
- * signature of the renewal and that number with the session key.
+ * The body of a renewal: the request's attempt number and the time at which the relay signed it,
+ * each as its exact decimal text, and the relay's signature of the renewal, that number and that
+ * time with the session key.
  */
 const RenewalBody = Schema.fromJsonString(
-  Schema.Struct({ signature: Schema.String, attempt: Schema.String }),
+  Schema.Struct({ signature: Schema.String, attempt: Schema.String, time: Schema.String }),
 )
 /**
  * Reads the audience and jti of an unverified proof only to select its challenge, to check its
@@ -492,7 +493,7 @@ export const makeCapabilityGateway = (
       )
     type Grant = Effect.Success<ReturnType<typeof store.authenticate>>["grant"]
     /**
-     * The renew route: a body of the relay's signature and attempt number, at most
+     * The renew route: a body of the relay's signature, attempt number and time, at most
      * `maxRenewalBody` bytes, and the successor of the presented token.
      */
     const renewRoute = Effect.fn("CapabilityGateway.renewRoute")(function* (

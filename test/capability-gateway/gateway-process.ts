@@ -1,3 +1,4 @@
+import { setSystemTime } from "bun:test"
 import { generateKeyPairSync, randomBytes, sign } from "node:crypto"
 import { watch } from "node:fs"
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises"
@@ -195,12 +196,16 @@ try {
   while (existsSync(root+'/slow')) await new Promise((r)=>setTimeout(r,50));
   const asked=Number(process.argv[2]);
   const ttl=existsSync(root+'/ttl')?Math.min(asked,Number(readFileSync(root+'/ttl','utf8'))):asked;
-  process.stdout.write(JSON.stringify({token:randomBytes(32).toString('base64url'),token_id:randomUUID(),expires_at:new Date(Date.now()+ttl*1000).toISOString()}));
+  const now=existsSync(root+'/clock')?Number(readFileSync(root+'/clock','utf8')):Date.now();
+  process.stdout.write(JSON.stringify({token:randomBytes(32).toString('base64url'),token_id:randomUUID(),expires_at:new Date(now+ttl*1000).toISOString()}));
 } finally { rmSync(root+'/live/'+process.pid,{force:true}) }`,
   )
   await writeFile(
     join(root, "access.mjs"),
-    `process.stdout.write(JSON.stringify({token:"fixture-access",token_id:"fixture",expires_at:new Date(Date.now()+120000).toISOString()}))`,
+    `import {existsSync,readFileSync} from 'node:fs';
+const clock=${JSON.stringify(join(root, "clock"))};
+const now=existsSync(clock)?Number(readFileSync(clock,'utf8')):Date.now();
+process.stdout.write(JSON.stringify({token:"fixture-access",token_id:"fixture",expires_at:new Date(now+120000).toISOString()}))`,
   )
   await writeNoscopeProvider(root, "run-capability", [
     process.execPath,
@@ -383,6 +388,20 @@ try {
         watcher.close()
       }
     },
+    /**
+     * Stops the clock of this process, and so of a gateway in this process, at `at` milliseconds,
+     * and has the run token and provider access mints set their expiry by the same clock; `null`
+     * lets each run again. A gateway process keeps the host's clock.
+     */
+    stopClock: async (at: number | null) => {
+      if (at === null) {
+        setSystemTime()
+        await rm(join(root, "clock"), { force: true })
+        return
+      }
+      setSystemTime(new Date(at))
+      await writeFile(join(root, "clock"), String(at))
+    },
     slowMints: async (slow: boolean) =>
       slow ? writeFile(join(root, "slow"), "") : rm(join(root, "slow"), { force: true }),
     tokenSeconds: (seconds: number | null) =>
@@ -450,6 +469,7 @@ try {
         }),
       ),
     close: async () => {
+      setSystemTime()
       front.close()
       await upstream.stop(true)
       await keyServer.stop(true)
@@ -681,11 +701,24 @@ export const seedLease = (
 /** The session key of the fixture's runner: each client signs with it unless it names another. */
 export const runnerKey = sessionKeyPair()
 
-/** The body of the relay's renewal request numbered `attempt` of `token`, signed by `privateKey`. */
-export const renewalBody = (privateKey: string, channel: string, token: string, attempt: number) =>
+/** The time of a renewal request signed now, as the relay gives it: the clock in whole seconds. */
+export const renewalTime = () => String(Math.floor(Date.now() / 1000))
+
+/**
+ * The body of the relay's renewal request numbered `attempt` of `token`, signed by `privateKey`
+ * at `time`, now unless named.
+ */
+export const renewalBody = (
+  privateKey: string,
+  channel: string,
+  token: string,
+  attempt: number,
+  time = renewalTime(),
+) =>
   JSON.stringify({
-    signature: signRenewal(privateKey, channel, capabilityDigest(token), String(attempt)),
+    signature: signRenewal(privateKey, channel, capabilityDigest(token), String(attempt), time),
     attempt: String(attempt),
+    time,
   })
 
 /**

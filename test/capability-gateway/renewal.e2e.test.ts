@@ -1,13 +1,15 @@
 import { expect, test } from "bun:test"
-import { sign, createPrivateKey } from "node:crypto"
+import { sign, createPrivateKey, type KeyObject } from "node:crypto"
 import {
   client,
   gateways,
   heldEnd,
   heldStart,
+  inProcessGateway,
   processGateway,
   proof,
   renewalBody,
+  renewalTime,
   runnerKey,
   seedLease,
   sse,
@@ -17,7 +19,9 @@ import {
 } from "./gateway-process"
 import { capabilityDigest } from "../../src/capability-gateway/store"
 import {
+  maxRenewalAttempt,
   maxRenewalBody,
+  maxRenewalTime,
   renewalMessage,
   sessionKeyPair,
   signRenewal,
@@ -69,6 +73,21 @@ const opened = async (
   await f.tokenSeconds(null)
   return { ...grant, channel }
 }
+
+/** The run's successors of `token`, and the highest attempt number that the gateway took. */
+const renewalState = (f: Fixture, token: string) =>
+  f.gatewaySql(
+    (sql) => sql`SELECT (SELECT count(*) FROM capability_tokens
+        WHERE predecessor=${capabilityDigest(token)}) AS successors,
+      (SELECT renewal_attempt FROM capability_bindings WHERE run_id='run') AS attempt`,
+  )
+
+/** The runner's session key as the relay holds it. */
+const runnerPrivateKey: KeyObject = createPrivateKey({
+  key: Buffer.from(runnerKey.privateKey, "base64url"),
+  format: "der",
+  type: "pkcs8",
+})
 
 for (const [mode, start] of gateways) {
   test(`[${mode}] a run token with more than 330 seconds left is not renewed, and the refusal is final`, async () => {
@@ -223,10 +242,11 @@ for (const [mode, start] of gateways) {
       const grant = await opened(f, gateway, 200)
       await f.tokenSeconds(300)
       const digest = capabilityDigest(grant.token)
-      const valid = signRenewal(runnerKey.privateKey, grant.channel, digest, "1")
+      const time = renewalTime()
+      const valid = signRenewal(runnerKey.privateKey, grant.channel, digest, "1", time)
       const bytes = Buffer.from(valid, "base64url")
       const signed = (signature: unknown, attempt: unknown = "1") =>
-        JSON.stringify({ signature, attempt })
+        JSON.stringify({ signature, attempt, time })
       // A valid signature of the session key over the exact text of an attempt that is refused.
       const key = createPrivateKey({
         key: Buffer.from(runnerKey.privateKey, "base64url"),
@@ -235,19 +255,21 @@ for (const [mode, start] of gateways) {
       })
       const numbered = (attempt: string) =>
         signed(
-          sign(null, renewalMessage(grant.channel, digest, attempt), key).toString("base64url"),
+          sign(null, renewalMessage(grant.channel, digest, attempt, time), key).toString(
+            "base64url",
+          ),
           attempt,
         )
       const bodies = [
         "",
         "{}",
-        JSON.stringify({ signature: valid }),
+        JSON.stringify({ signature: valid, time }),
         signed(""),
         signed(null),
-        JSON.stringify({ signature: valid, attempt: "1", predecessor: digest }),
-        signed(signRenewal(sessionKeyPair().privateKey, grant.channel, digest, "1")),
-        signed(signRenewal(runnerKey.privateKey, grant.channel, "0".repeat(64), "1")),
-        signed(signRenewal(runnerKey.privateKey, "0".repeat(64), digest, "1")),
+        JSON.stringify({ signature: valid, attempt: "1", time, predecessor: digest }),
+        signed(signRenewal(sessionKeyPair().privateKey, grant.channel, digest, "1", time)),
+        signed(signRenewal(runnerKey.privateKey, grant.channel, "0".repeat(64), "1", time)),
+        signed(signRenewal(runnerKey.privateKey, "0".repeat(64), digest, "1", time)),
         signed(valid, "2"),
         signed(valid, 1),
         signed(bytes.subarray(0, 63).toString("base64url")),
@@ -277,9 +299,16 @@ for (const [mode, start] of gateways) {
       expect(
         (await client(gateway, sessionKeyPair()).renew(grant.token, grant.channel)).status,
       ).toBe(403)
-      // The highest number takes the bound's nine digits; the same signature in a body at the
-      // bound, and the relay's own renewal, are taken.
-      expect(numbered("999999999").length).toBeLessThanOrEqual(maxRenewalBody)
+      // The highest number takes the bound's nine digits, and the latest time the bound's ten:
+      // their body is at the bound. The same signature in a body at the bound, and the relay's
+      // own renewal, are taken.
+      expect(
+        JSON.stringify({
+          signature: valid,
+          attempt: String(maxRenewalAttempt),
+          time: String(maxRenewalTime),
+        }).length,
+      ).toBe(maxRenewalBody)
       const renewed = await relay.renewWith(grant.token, signed(valid).padEnd(maxRenewalBody, " "))
       expect(renewed.status).toBe(200)
       expect(await state()).toEqual([{ successors: 1, attempt: 1 }])
@@ -490,5 +519,135 @@ for (const [mode, start] of gateways) {
       },
       { staleSweepMs: 60000 },
     )
+  }, 60000)
+}
+
+// The gateway's clock is the clock of its process: only a gateway in this process follows the
+// test's clock.
+test("[in-process] a signed renewal that was refused because its token was not yet in its window, sent again unchanged once the token is, is refused: no mint, no successor, no attempt taken, and the relay's next request renews", async () => {
+  await withGateway(inProcessGateway, async (f, gateway) => {
+    const relay = client(gateway)
+    const grant = await opened(f, gateway, null)
+    expect(grant.expiresAt - Date.now()).toBeGreaterThan(330000)
+    const body = renewalBody(runnerKey.privateKey, grant.channel, grant.token, 1)
+    const early = await relay.renewWith(grant.token, body)
+    expect([early.status, await early.text()]).toEqual([403, ""])
+    // Ten minutes on, the token has five minutes left: it is in its window.
+    await f.stopClock(grant.expiresAt - 300000)
+    const mints = await f.mints()
+    const again = await client(gateway, sessionKeyPair()).renewWith(grant.token, body)
+    expect([again.status, await again.text()]).toEqual([403, ""])
+    expect(await f.mints()).toBe(mints)
+    expect(await renewalState(f, grant.token)).toEqual([{ successors: 0, attempt: 0 }])
+    expect(await ending(f)).toEqual(goesOn)
+    const renewed = await relay.renew(grant.token, grant.channel, 2)
+    expect(renewed.status).toBe(200)
+    expect(await (await relay.call((await relay.grant(renewed)).token)).text()).toBe(sse)
+  })
+}, 60000)
+
+test("[in-process] a signed renewal that got 503 because its mint failed, sent again unchanged two minutes later, is refused: no mint, no successor, no attempt taken, and the relay's next request renews", async () => {
+  await withGateway(inProcessGateway, async (f, gateway) => {
+    const relay = client(gateway)
+    const grant = await opened(f, gateway, 300)
+    const signedAt = Date.now()
+    // The run token provider gives a token that has expired: the mint fails.
+    await f.tokenSeconds(0)
+    const body = renewalBody(runnerKey.privateKey, grant.channel, grant.token, 1)
+    const failed = await relay.renewWith(grant.token, body)
+    expect(failed.status).toBe(503)
+    await f.tokenSeconds(null)
+    await f.stopClock(signedAt + 120000)
+    expect(grant.expiresAt - Date.now()).toBeGreaterThan(120000)
+    const mints = await f.mints()
+    const again = await client(gateway, sessionKeyPair()).renewWith(grant.token, body)
+    expect([again.status, await again.text()]).toEqual([403, ""])
+    expect(await f.mints()).toBe(mints)
+    expect(await renewalState(f, grant.token)).toEqual([{ successors: 0, attempt: 0 }])
+    expect(await ending(f)).toEqual(goesOn)
+    const renewed = await relay.renew(grant.token, grant.channel, 2)
+    expect(renewed.status).toBe(200)
+    expect(await (await relay.call((await relay.grant(renewed)).token)).text()).toBe(sse)
+  })
+}, 60000)
+
+test("[in-process] a renewal signed 60 s before or after the gateway's clock is taken, and one signed 60.001 s before or after it is refused with nothing changed", async () => {
+  await withGateway(inProcessGateway, async (f, gateway) => {
+    const relay = client(gateway)
+    const grant = await opened(f, gateway, 200)
+    await f.tokenSeconds(300)
+    const second = Math.floor(Date.now() / 1000)
+    const signedAt = (attempt: number, time: number) =>
+      relay.renewWith(
+        grant.token,
+        renewalBody(runnerKey.privateKey, grant.channel, grant.token, attempt, String(time)),
+      )
+    const mints = await f.mints()
+    await f.stopClock(second * 1000 + 1)
+    const late = await signedAt(1, second - 60)
+    expect([late.status, await late.text()]).toEqual([403, ""])
+    await f.stopClock(second * 1000 - 1)
+    const ahead = await signedAt(2, second + 60)
+    expect([ahead.status, await ahead.text()]).toEqual([403, ""])
+    expect(await f.mints()).toBe(mints)
+    expect(await renewalState(f, grant.token)).toEqual([{ successors: 0, attempt: 0 }])
+    await f.stopClock(second * 1000)
+    expect((await signedAt(3, second - 60)).status).toBe(200)
+    expect(await renewalState(f, grant.token)).toEqual([{ successors: 1, attempt: 3 }])
+    const last = await signedAt(4, second + 60)
+    expect(last.status).toBe(200)
+    expect(await renewalState(f, grant.token)).toEqual([{ successors: 1, attempt: 4 }])
+    expect(await (await relay.call((await relay.grant(last)).token)).text()).toBe(sse)
+    expect(await ending(f)).toEqual(goesOn)
+  })
+}, 60000)
+
+for (const [mode, start] of gateways) {
+  test(`[${mode}] a renewal with no time, or with a time that is not whole seconds as exact decimal text of at most ten digits, is refused even when the session key signed that time; it mints nothing, and the relay's own renewal goes on`, async () => {
+    await withGateway(start, async (f, gateway) => {
+      const relay = client(gateway)
+      const grant = await opened(f, gateway, 200)
+      await f.tokenSeconds(300)
+      const digest = capabilityDigest(grant.token)
+      const now = renewalTime()
+      const signedAt = (time: string) =>
+        sign(null, renewalMessage(grant.channel, digest, "1", time), runnerPrivateKey).toString(
+          "base64url",
+        )
+      const bodies = [
+        JSON.stringify({ signature: signedAt(now), attempt: "1" }),
+        JSON.stringify({ signature: signedAt(now), attempt: "1", time: Number(now) }),
+        JSON.stringify({ signature: signedAt(now), attempt: "1", time: null }),
+        ...[
+          "",
+          "0",
+          `0${now}`,
+          `+${now}`,
+          `-${now}`,
+          ` ${now}`,
+          `${now} `,
+          `${now}.0`,
+          `${now}e0`,
+          `0x${Number(now).toString(16)}`,
+          String(Date.now()),
+          String(maxRenewalTime + 1),
+        ].map((time) => JSON.stringify({ signature: signedAt(time), attempt: "1", time })),
+      ]
+      const mints = await f.mints()
+      for (const body of bodies) {
+        const answer = await relay.renewWith(grant.token, body)
+        expect({ body, status: answer.status, text: await answer.text() }).toEqual({
+          body,
+          status: 403,
+          text: "",
+        })
+      }
+      expect(await f.mints()).toBe(mints)
+      expect(await renewalState(f, grant.token)).toEqual([{ successors: 0, attempt: 0 }])
+      const renewed = await relay.renew(grant.token, grant.channel)
+      expect(renewed.status).toBe(200)
+      expect(await (await relay.call((await relay.grant(renewed)).token)).text()).toBe(sse)
+      expect(await ending(f)).toEqual(goesOn)
+    })
   }, 60000)
 }
