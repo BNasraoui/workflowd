@@ -168,8 +168,8 @@ const scripted = (script: {
   readonly ended?: GatewayEnd
   readonly parts?: (offset: number) => { size: number; sha256: string; part: string }
 }): RunnerControl => ({
-  authorize: () => Effect.void,
-  revoke: () => Effect.void,
+  authorize: () => Effect.succeed(undefined),
+  revoke: () => Effect.succeed(null),
   startRevoke: () => Effect.void,
   sessionBound: () => Effect.succeed(true),
   readEvents: (_runId, after) =>
