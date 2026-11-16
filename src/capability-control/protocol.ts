@@ -112,18 +112,6 @@ export const controlProtocol = {
     }),
     response: Schema.Boolean,
   }),
-  /** What the run spent of its budget, and whether the budget is spent. */
-  usage: schemas({
-    request: Schema.Struct({ runId: Schema.String }),
-    response: Schema.Struct({
-      calls: Schema.Int,
-      inputTokens: Schema.Int,
-      outputTokens: Schema.Int,
-      cacheCreationInputTokens: Schema.Int,
-      cacheReadInputTokens: Schema.Int,
-      spent: Schema.Boolean,
-    }),
-  }),
 }
 export type ControlVerb = keyof typeof controlProtocol
 

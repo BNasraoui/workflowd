@@ -515,36 +515,6 @@ export const makeCapabilityStore = Effect.gen(function* () {
       }),
     ),
   )
-  /**
-   * What a run that the gateway holds spent: its calls and the token counts it was charged, and
-   * whether its budget is spent: the budget refused a call, or the calls or the output tokens
-   * reached their limit.
-   */
-  const usage = Effect.fn("CapabilityStore.usage")(function* (runId: string) {
-    const rows = yield* sql`SELECT u.calls,u.input_tokens AS inputTokens,
-      u.output_tokens AS outputTokens,u.cache_creation_input_tokens AS cacheCreationInputTokens,
-      u.cache_read_input_tokens AS cacheReadInputTokens,u.spent,g.grant_json AS grant
-      FROM capability_usage u JOIN capability_grants g ON g.run_id=u.run_id WHERE u.run_id=${runId}`
-    if (rows.length !== 1) return yield* Effect.fail(new CapabilityRefused())
-    const { spent, grant, ...counts } = yield* Schema.decodeUnknownEffect(
-      Schema.Struct({
-        calls: Schema.Int,
-        inputTokens: Schema.Int,
-        outputTokens: Schema.Int,
-        cacheCreationInputTokens: Schema.Int,
-        cacheReadInputTokens: Schema.Int,
-        spent: Schema.Int,
-        grant: StoredGrant,
-      }),
-    )(rows[0])
-    return {
-      ...counts,
-      spent:
-        spent !== 0 ||
-        counts.calls >= grant.budget.calls ||
-        counts.outputTokens >= grant.budget.outputTokens,
-    }
-  })
   return {
     leaseChallenge,
     sessionContext,
@@ -565,6 +535,5 @@ export const makeCapabilityStore = Effect.gen(function* () {
     reserve,
     settle,
     chargeOpenReservations,
-    usage,
   }
 })

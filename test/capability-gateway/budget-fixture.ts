@@ -18,8 +18,25 @@ export async function runToken(at: Origin, jti = "jti-budget") {
   return (await runner.grant(opened)).token
 }
 
-/** What the daemon reads of the seeded run on the control socket. */
-export const usage = (f: Fixture) => f.daemon((capability) => capability.usage("run"))
+/** The counts of the seeded run in the gateway's store, and whether its budget is spent. */
+export async function usage(f: Fixture) {
+  const rows = await f.gatewaySql(
+    (sql) => sql<{
+      readonly calls: number
+      readonly inputTokens: number
+      readonly outputTokens: number
+      readonly cacheCreationInputTokens: number
+      readonly cacheReadInputTokens: number
+      readonly spent: number
+    }>`SELECT calls,input_tokens AS inputTokens,output_tokens AS outputTokens,
+      cache_creation_input_tokens AS cacheCreationInputTokens,
+      cache_read_input_tokens AS cacheReadInputTokens,spent
+      FROM capability_usage WHERE run_id='run'`,
+  )
+  const [row] = rows
+  if (rows.length !== 1 || row === undefined) throw new Error("the run has no usage row")
+  return { ...row, spent: row.spent === 1 }
+}
 
 /** The open reservations in the gateway's store. */
 export const openReservations = (f: Fixture) =>
@@ -42,7 +59,7 @@ export async function eventually(check: () => Promise<boolean>) {
 }
 
 /** Reads a stream until it ends or fails; the timeout of the test bounds the wait. */
-export async function readToEnd(reader: ReadableStreamDefaultReader<Uint8Array>) {
+export async function readToEnd(reader: { read(): Promise<{ readonly done: boolean }> }) {
   for (;;) {
     const item = await reader.read().catch(() => undefined)
     if (item === undefined || item.done) return

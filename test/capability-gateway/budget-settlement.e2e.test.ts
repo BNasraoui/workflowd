@@ -1,5 +1,4 @@
 import { expect, test } from "bun:test"
-import { maxReportedTokens } from "../../src/capability-gateway/claude"
 import {
   client,
   fixture,
@@ -18,6 +17,9 @@ import {
   usage,
   withBudget,
 } from "./budget-fixture"
+
+/** The largest token count that the gateway takes from a usage the provider reports. */
+const maxReportedTokens = 10_000_000
 
 for (const [mode, start] of gateways) {
   test(`[${mode}] a client that goes away in the middle of a stream is charged the max_tokens of its call`, async () => {

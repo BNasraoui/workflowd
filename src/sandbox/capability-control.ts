@@ -102,7 +102,6 @@ export const controlClient = (socket: string) => ({
       actionsRunId,
       actionsAttempt,
     }),
-  usage: (runId: string) => send(socket, "usage", controlProtocol.usage, { runId }),
 })
 
 /** A grant as workflowd's store holds it before its budget is fixed. */
@@ -269,7 +268,6 @@ export const makeDaemonCapability = (options: {
       Effect.forever,
       Effect.forkScoped,
     )
-    const usage = Effect.fn("DaemonCapability.usage")((runId: string) => control.usage(runId))
-    return { authorize, revoke, reconcile, sessionBound, startRevoke, usage }
+    return { authorize, revoke, reconcile, sessionBound, startRevoke }
   })
 export type DaemonCapability = Effect.Success<ReturnType<typeof makeDaemonCapability>>

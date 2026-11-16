@@ -731,7 +731,6 @@ export const makeCapabilityGateway = (
           Effect.asVoid,
         ),
       sessionBound: store.sessionBound,
-      usage: store.usage,
     }
     return { sessionChallenge, session, revoke, control, handle }
   })

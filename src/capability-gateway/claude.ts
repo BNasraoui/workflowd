@@ -311,7 +311,7 @@ async function safeProviderResponse(
  * The largest token count that the gateway takes from a usage the provider reports: ten times the
  * largest context window of a model. A count above it is no count.
  */
-export const maxReportedTokens = 10_000_000
+const maxReportedTokens = 10_000_000
 
 /**
  * The token counts that the provider reported for one call. `outputTokens` is undefined until the
