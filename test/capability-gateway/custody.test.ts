@@ -1,6 +1,5 @@
 import { expect, test } from "bun:test"
 import { createConnection } from "node:net"
-import { randomUUID } from "node:crypto"
 import { chmod, readFile, readdir, rm, stat, writeFile } from "node:fs/promises"
 import { join, resolve } from "node:path"
 import { Effect, Exit, Scope } from "effect"
