@@ -399,6 +399,18 @@ export const makeSandboxLeaseService = (
             completed = run?.status === "completed"
             if (run !== undefined) {
               yield* commit(store.recordRun(runId, run.id, run.run_attempt))
+              if (completed && lease.policy.privateBootstrap?.mode === "actions-native") {
+                // A job that held its gateway session may end before this read: its run's
+                // events and result are in the gateway, so its lease is bound, and the run's
+                // own end releases it. A job that ended with no session is released.
+                completed = !(yield* privatePeer(
+                  lease,
+                  run.id,
+                  run.run_attempt,
+                  commit(store.bindSession(runId, run.id, run.run_attempt)),
+                ))
+                return
+              }
               if (run.status !== "completed") {
                 if (lease.policy.privateBootstrap !== undefined) {
                   yield* privatePeer(

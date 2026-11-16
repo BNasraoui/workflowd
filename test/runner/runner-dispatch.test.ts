@@ -226,11 +226,21 @@ async function withDispatch<A>(
     readonly pushTo?: string
     /** The window for the run's first model output, 120 s unless named. */
     readonly verifyTimeoutMs?: number
+    /** Whether GitHub reports the job's Actions run completed from its start. */
+    readonly jobEnded?: boolean
   } = {},
 ) {
   const root = await mkdtemp(join(tmpdir(), "runner-dispatch-"))
   const remote = await gitRemote(join(root, "git"))
-  const github = await githubStub(remote.sourceSha, () => undefined, options.workflows)
+  const stub: { github?: Awaited<ReturnType<typeof githubStub>> } = {}
+  const github = await githubStub(
+    remote.sourceSha,
+    (leaseId) => {
+      if (options.jobEnded === true) stub.github?.endRun(leaseId)
+    },
+    options.workflows,
+  )
+  stub.github = github
   options.prepare?.(remote)
   const runtime = daemonRuntime(
     { root, database: join(root, "workflowd.db") },
@@ -517,6 +527,18 @@ for (const [name, parts, reason] of [
     })
     expect(end.branch).toBeNull()
   }, 30000)
+
+test("a job that held its session, posted its result and ended before the daemon read its session still completes the run", async () => {
+  const end = await dispatch(
+    async (remote, root) => scripted({ body: bodyOf(await seal(root, remote)) }),
+    { jobEnded: true },
+  )
+  expect({ state: end.run.state, diagnostic: end.run.diagnostic }).toEqual({
+    state: "completed",
+    diagnostic: null,
+  })
+  expect(end.branch).not.toBeNull()
+})
 
 test("the window for a run's first model output starts at its box's ready line: a box ready after a window's length still gives its first output in time", async () => {
   // The image pull, the box's start and the clone take 3 s; the window is 2 s.
