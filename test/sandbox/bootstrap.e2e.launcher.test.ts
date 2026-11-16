@@ -1,8 +1,8 @@
 import { expect, test } from "bun:test"
 import { fixtureExecutable } from "../helpers/fixture-executable.mjs"
 import { loopbackCertificate, tlsFront } from "../helpers/loopback-tls"
-import { sign } from "node:crypto"
-import { mkdtemp, mkdir, writeFile, rm, readFile } from "node:fs/promises"
+import { createPrivateKey, sign } from "node:crypto"
+import { mkdtemp, mkdir, writeFile, rm, readFile, readdir, readlink, stat } from "node:fs/promises"
 import {
   gatewaySource,
   jwks,
@@ -23,6 +23,7 @@ import { makeSandboxLeaseService } from "../../src/sandbox/lease"
 import { makeSandboxStore } from "../../src/sandbox/store"
 import { AgentRunStore, AgentRunStoreLive } from "../../src/kernel/agent-run-store"
 import { runStoreMigrations } from "../../src/store/migrations"
+import { sessionKeyPair } from "../../deploy/sandbox/renewal.mjs"
 
 const hostileClaims: Record<string, Record<string, unknown>> = {
   fork: { repository: "fork/repo", repository_id: "99" },
@@ -40,6 +41,85 @@ const hostileClaims: Record<string, Record<string, unknown>> = {
   attempt: { run_attempt: "2" },
 }
 
+/** A session's private key, as PKCS #8 in base64url, as a key object. */
+const keyObject = (privateKey: string) =>
+  createPrivateKey({ key: Buffer.from(privateKey, "base64url"), format: "der", type: "pkcs8" })
+/** The 32-byte seed of a session's private key, as the JWK `d` holds it. */
+const seedOf = (privateKey: string) =>
+  Buffer.from(String(keyObject(privateKey).export({ format: "jwk" }).d), "base64url")
+/** The PKCS #8 bytes of a session's private key. */
+const derOf = (privateKey: string) => Buffer.from(privateKey, "base64url")
+
+/**
+ * The forms in which a session's private key could be written: its PEM, and its PKCS #8 bytes
+ * and its seed (the JWK's `d`) each in base64url, base64, hex in lower and upper case with no
+ * separator or with a space, colon, dash or comma between bytes, and as a list of decimal bytes.
+ */
+const keyForms = (privateKey: string) => [
+  String(keyObject(privateKey).export({ type: "pkcs8", format: "pem" })),
+  ...[derOf(privateKey), seedOf(privateKey)].flatMap((bytes) => {
+    const pairs = [...bytes].map((byte) => byte.toString(16).padStart(2, "0"))
+    return [
+      bytes.toString("base64url"),
+      bytes.toString("base64").replace(/=+$/, ""),
+      ...[pairs, pairs.map((pair) => pair.toUpperCase())].flatMap((cased) =>
+        ["", " ", ":", "-", ", "].map((separator) => cased.join(separator)),
+      ),
+      [...bytes].join(","),
+      [...bytes].join(", "),
+    ]
+  }),
+]
+
+/**
+ * The outputs of the bootstrap and of its running relay that a process can read: the bootstrap's
+ * standard output and error, each file in the sandbox directory, and the relay's environment and
+ * arguments; with the gateway's output.
+ */
+async function runnerOutputs(
+  sandbox: string,
+  relay: number,
+  bootstrap: { readonly stdout: string; readonly stderr: string },
+  gateway: string,
+) {
+  const outputs: Record<string, string> = {
+    "bootstrap standard output": bootstrap.stdout,
+    "bootstrap standard error": bootstrap.stderr,
+    "relay environment": await readFile(`/proc/${relay}/environ`, "latin1"),
+    "relay arguments": await readFile(`/proc/${relay}/cmdline`, "latin1"),
+    "gateway output": gateway,
+  }
+  for (const name of await readdir(sandbox))
+    if ((await stat(join(sandbox, name))).isFile())
+      outputs[`file ${name}`] = await readFile(join(sandbox, name), "latin1")
+  return outputs
+}
+
+/** Each output of `outputs` that holds a form of `privateKey`, also once its line breaks go. */
+const holding = (outputs: Record<string, string>, privateKey: string) =>
+  Object.entries(outputs)
+    .filter(([, text]) =>
+      [text, text.replace(/\r?\n/g, "")].some((joined) =>
+        keyForms(privateKey).some((form) => joined.includes(form)),
+      ),
+    )
+    .map(([name]) => name)
+
+/**
+ * The private key planted in one place that the search reads, each in another form: the
+ * bootstrap's environment (PKCS #8 in base64url), which the relay inherits; the relay's
+ * arguments (the seed in base64url, as the sandbox directory's name); a file of the sandbox
+ * directory (PEM with lines of 16 characters). Each case's search finds the key in that place
+ * alone.
+ */
+const planted = {
+  "planted environment": "relay environment",
+  "planted arguments": "relay arguments",
+  "planted file": "file planted",
+} as const
+const isPlanted = (race: unknown): race is keyof typeof planted =>
+  typeof race === "string" && race in planted
+
 // One key pair serves every case: the job keys, and the GitHub App key of the fixture.
 for (const race of [
   false,
@@ -48,11 +128,18 @@ for (const race of [
   "release-failure",
   ...Object.keys(hostileClaims),
   "key",
+  ...Object.keys(planted),
 ])
   test(`private HTTPS session bootstrap through the gateway process; bind race=${race}`, async () => {
     const node = fixtureExecutable("node")
+    const sessionKey = sessionKeyPair()
     const root = await mkdtemp(join(tmpdir(), "wfd-private-job-"))
-    const sandbox = join(root, "sandbox")
+    const sandbox = join(
+      root,
+      race === "planted arguments"
+        ? seedOf(sessionKey.privateKey).toString("base64url")
+        : "sandbox",
+    )
     const database = join(root, "store.sqlite")
     await mkdir(sandbox, { mode: 0o700 })
     const tls = await loopbackCertificate(root)
@@ -311,6 +398,7 @@ await prepare({
   identity: (url, init) => fetch(${JSON.stringify(issuer.url.origin + "/token")} + url.search, init),
   // The fixture's gateway answers at once: a new proof after a lost or refused one need not wait.
   backoff: () => 0,
+  sessionKey: ${JSON.stringify(sessionKey)},
 })`,
             ],
             {
@@ -324,15 +412,23 @@ await prepare({
                   "https://fixture.actions.githubusercontent.com/token?api-version=2",
                 ACTIONS_ID_TOKEN_REQUEST_TOKEN: "fixture-request",
                 NODE_EXTRA_CA_CERTS: tls.cert,
+                ...(race === "planted environment"
+                  ? { RUNNER_TRACKING_ID: sessionKey.privateKey }
+                  : {}),
               },
-              stdout: "ignore",
+              stdout: "pipe",
               stderr: "pipe",
             },
           )
-          const [code, diagnostic] = yield* Effect.promise(() =>
-            Promise.all([bootstrap.exited, new Response(bootstrap.stderr).text()]),
+          const [code, printed, diagnostic] = yield* Effect.promise(() =>
+            Promise.all([
+              bootstrap.exited,
+              new Response(bootstrap.stdout).text(),
+              new Response(bootstrap.stderr).text(),
+            ]),
           )
-          expect({ code, diagnostic }).toEqual({ code: 0, diagnostic: "" })
+          expect({ code, printed, diagnostic }).toEqual({ code: 0, printed: "", diagnostic: "" })
+
           // The gateway sent the first session and the runner lost it; a hostile first proof
           // opened nothing. Two proofs opened sessions; the runner holds the second.
           expect(dropped).toBe(1)
@@ -342,6 +438,10 @@ await prepare({
               (SELECT session FROM capability_bindings) AS session`,
             ),
           ).toEqual([{ proofs: 2, session: 2 }])
+          // The session holds the public key of the runner's session key.
+          expect(
+            yield* gatewayStore((gateway) => gateway`SELECT session_key FROM capability_bindings`),
+          ).toEqual([{ session_key: sessionKey.publicKey }])
           const hostileFirst = typeof race === "string" && (race in hostileClaims || race === "key")
           expect(proofs).toBe(hostileFirst ? 3 : 2)
           expect(
@@ -397,6 +497,40 @@ await prepare({
           expect(accepted.status).toBe(200)
           expect(yield* Effect.promise(() => accepted.text())).toBe(response)
           expect(upstreamEffects).toBe(1)
+          if (race === "planted file") {
+            const base64 = derOf(sessionKey.privateKey).toString("base64")
+            const lines = base64.match(/.{1,16}/g) ?? []
+            yield* Effect.promise(() =>
+              writeFile(
+                join(sandbox, "planted"),
+                ["-----BEGIN PRIVATE KEY-----", ...lines, "-----END PRIVATE KEY-----", ""].join(
+                  "\n",
+                ),
+              ),
+            )
+          }
+          // No output of the bootstrap or of the relay holds the private key. The relay's standard
+          // output is a socket, which no other process can open: its one reader, the bootstrap,
+          // took exactly "ready\n" as its first chunk, or it would have failed, and closed it, so
+          // what the relay writes there later reaches no one. Its standard error is the null device.
+          const relay = (yield* Effect.promise(relayPid)) ?? 0
+          expect(yield* Effect.promise(() => readlink(`/proc/${relay}/fd/1`))).toMatch(
+            /^socket:\[\d+\]$/,
+          )
+          expect(yield* Effect.promise(() => readlink(`/proc/${relay}/fd/2`))).toBe("/dev/null")
+          const outputs = yield* Effect.promise(() =>
+            runnerOutputs(
+              sandbox,
+              relay,
+              { stdout: printed, stderr: diagnostic },
+              gateway?.output?.() ?? "",
+            ),
+          )
+          for (const name of ["relay environment", "file relay.pid", "gateway output"])
+            expect(outputs).toHaveProperty([name])
+          expect(holding(outputs, sessionKey.privateKey)).toEqual(
+            isPlanted(race) ? [planted[race]] : [],
+          )
           expect(publicArtifacts).toBe(0)
           // workflowd revokes; the gateway process refuses the relay's next call.
           yield* local.revoke("run")

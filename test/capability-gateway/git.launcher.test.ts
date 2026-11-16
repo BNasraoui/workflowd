@@ -9,6 +9,7 @@ import { AgentRunStoreLive } from "../../src/kernel/agent-run-store"
 import { makeCapabilityGateway } from "../../src/capability-gateway/service"
 import {
   bindRunSession,
+  fixtureSessionKey,
   runCapabilityMint,
   seedCapabilityRun,
   writeNoscopeProvider,
@@ -116,6 +117,8 @@ test("real Git clone/fetch, repository and write fences", async () => {
             stdin: new Blob([
               JSON.stringify({
                 token: grant.token,
+                channel: grant.binding.channel,
+                sessionKey: fixtureSessionKey.privateKey,
                 expiresAt: grant.expiresAt,
                 renewAt: grant.renewAt,
                 deadline: Date.now() + 3600000,

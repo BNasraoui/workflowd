@@ -7,6 +7,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { setImmediate } from "node:timers/promises"
 import { serveRunnerRelay } from "../../../deploy/sandbox/capability-relay.mjs"
+import { relayConfig } from "./relay-config.mjs"
 
 test("renewal never sends an expired predecessor after a clock jump", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "relay-clock-"))
@@ -29,17 +30,7 @@ test("renewal never sends an expired predecessor after a clock jump", async (t) 
   await once(server, "listening")
   const now = 1000000
   t.mock.timers.enable({ apis: ["Date", "setTimeout"], now })
-  const relay = await serveRunnerRelay(
-    {
-      token: "a".repeat(43),
-      expiresAt: now + 3600000,
-      renewAt: now + 2700000,
-      deadline: now + 7200000,
-      providerId: "anthropic",
-      gateway: `https://127.0.0.1:${server.address().port}`,
-    },
-    root,
-  )
+  const relay = await serveRunnerRelay(relayConfig(now, server.address().port), root)
   try {
     t.mock.timers.tick(2700000)
     await first.promise

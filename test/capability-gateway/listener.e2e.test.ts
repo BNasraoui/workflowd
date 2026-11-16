@@ -21,6 +21,7 @@ import {
   gatewaySource,
   processGateway,
   proof,
+  runnerKey,
   sse,
   startGatewayProcess,
   withGateway,
@@ -140,7 +141,7 @@ test("through the front and the relay, a session, a renewal and a model call wor
     const runner = client(f.front)
     // A token that lives 180 seconds may be renewed at once.
     await f.tokenSeconds(180)
-    const { audience } = await runner.audience()
+    const { audience, channel } = await runner.audience()
     const opened = await runner.session(proof(audience, "jti-relay"))
     expect(opened.status).toBe(200)
     const grant = await runner.grant(opened)
@@ -155,7 +156,13 @@ test("through the front and the relay, a session, a renewal and a model call wor
       {
         env: { PATH: "/usr/bin:/bin", HOME: root, NODE_EXTRA_CA_CERTS: f.tls.cert },
         stdin: new Blob([
-          JSON.stringify({ ...grant, renewAt: Date.now(), gateway: f.front.origin }),
+          JSON.stringify({
+            ...grant,
+            channel,
+            sessionKey: runnerKey.privateKey,
+            renewAt: Date.now(),
+            gateway: f.front.origin,
+          }),
         ]),
         stdout: "pipe",
         stderr: "pipe",

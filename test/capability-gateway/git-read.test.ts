@@ -8,6 +8,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { AgentRunStoreLive } from "../../src/kernel/agent-run-store"
 import { makeCapabilityGateway } from "../../src/capability-gateway/service"
+import { capabilityDigest } from "../../src/capability-gateway/store"
 import {
   bindRunSession,
   grantLiveRuns,
@@ -296,6 +297,23 @@ test(`redirects and slow streams stay inside run authority`, () =>
         ),
       ).toBe("interrupted")
       expect(state.upstreamCancelled).toBe(true)
+      const attempts = state.attempts
+      expect((yield* call(direct())).status).toBe(403)
+      expect(state.attempts).toBe(attempts)
+    }),
+  ))
+
+test(`a run token whose successor has made a call is refused on the Git read before the upstream`, () =>
+  withGitGateway(({ state, sql, grant, direct, call }) =>
+    Effect.gen(function* () {
+      const served = yield* call(direct())
+      expect(served.status).toBe(200)
+      yield* Effect.promise(() => served.arrayBuffer())
+      // The token's successor, as a renewal stores it, has authorized a call.
+      const predecessor = capabilityDigest(grant.token)
+      yield* sql`INSERT INTO capability_tokens(digest,run_id,predecessor,expires_at,session,used_at)
+        SELECT ${"e".repeat(64)},run_id,digest,expires_at,session,${Date.now()}
+        FROM capability_tokens WHERE digest=${predecessor}`
       const attempts = state.attempts
       expect((yield* call(direct())).status).toBe(403)
       expect(state.attempts).toBe(attempts)

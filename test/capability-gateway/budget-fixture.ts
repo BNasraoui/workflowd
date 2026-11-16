@@ -9,14 +9,17 @@ export const spentBody = {
   error: { type: "permission_error", message: "workflowd run budget spent" },
 }
 
-/** Opens the seeded run's session and gives its run token. */
-export async function runToken(at: Origin, jti = "jti-budget") {
+/** Opens the seeded run's session and gives its run token and its channel. */
+export async function openRun(at: Origin, jti = "jti-budget") {
   const runner = client(at)
-  const { audience } = await runner.audience()
+  const { audience, channel } = await runner.audience()
   const opened = await runner.session(proof(audience, jti))
   expect(opened.status).toBe(200)
-  return (await runner.grant(opened)).token
+  return { token: (await runner.grant(opened)).token, channel }
 }
+
+/** Opens the seeded run's session and gives its run token. */
+export const runToken = async (at: Origin, jti?: string) => (await openRun(at, jti)).token
 
 /** The counts of the seeded run in the gateway's store, and whether its budget is spent. */
 export async function usage(f: Fixture) {

@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test"
+import { sessionKeyPair } from "../../deploy/sandbox/renewal.mjs"
 import { Effect } from "effect"
 import { openSession } from "../../deploy/sandbox/bootstrap-helper.mjs"
 import { makeSandboxStore } from "../../src/sandbox/store"
@@ -70,6 +71,7 @@ test("the runner's helper waits while the gateway answers 503 for its first minu
     }
     let proofs = 0
     const grant = await openSession({
+      sessionKey: sessionKeyPair(),
       gateway: "https://gateway.fixture.invalid",
       leaseId: "lease-w",
       issue: async (audience: string) =>
@@ -93,6 +95,7 @@ test("the runner's helper gives up after 180 seconds of 503 without using a proo
     let proofs = 0
     await expect(
       openSession({
+        sessionKey: sessionKeyPair(),
         gateway: "https://gateway.fixture.invalid",
         leaseId: "lease-w",
         issue: async () => `proof-${++proofs}`,

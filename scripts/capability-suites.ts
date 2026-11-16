@@ -33,6 +33,14 @@ const budgetEndToEnd = gatewayEndToEnd.filter((file) =>
   file.startsWith(`${gatewayTestDirectory}/budget`),
 )
 
+/**
+ * The end-to-end files of the renewal of run tokens, by the session key. They run as a suite of
+ * their own, for the same limit.
+ */
+const renewalEndToEnd = gatewayEndToEnd.filter((file) =>
+  file.startsWith(`${gatewayTestDirectory}/renewal`),
+)
+
 export const suites: Readonly<Record<string, ReadonlyArray<string>>> = {
   core: [
     "test/sandbox/public-output.test.ts",
@@ -42,7 +50,9 @@ export const suites: Readonly<Record<string, ReadonlyArray<string>>> = {
     "test/sandbox/capability-relay.test.ts",
     ...gatewayFiles.filter((file) => !gatewayEndToEnd.includes(file)),
   ],
-  gateway: gatewayEndToEnd.filter((file) => !budgetEndToEnd.includes(file)),
+  gateway: gatewayEndToEnd.filter(
+    (file) => !budgetEndToEnd.includes(file) && !renewalEndToEnd.includes(file),
+  ),
   "publication-local": [
     "test/sandbox/publisher-http.e2e.test.ts",
     "test/sandbox/publish.e2e.test.ts",
@@ -56,6 +66,7 @@ export const suites: Readonly<Record<string, ReadonlyArray<string>>> = {
     "test/runtime-startup.test.ts",
   ],
   "gateway-budget": budgetEndToEnd,
+  "gateway-renewal": renewalEndToEnd,
 }
 
 /**

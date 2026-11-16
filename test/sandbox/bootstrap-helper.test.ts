@@ -7,6 +7,7 @@ import { join, resolve } from "node:path"
 import { once } from "node:events"
 import { createServer } from "node:net"
 import { fixtureExecutable } from "../helpers/fixture-executable.mjs"
+import { sessionBinder, sessionKeyPair } from "../../deploy/sandbox/renewal.mjs"
 
 const channel = "c".repeat(64)
 const grant = {
@@ -16,6 +17,10 @@ const grant = {
   deadline: Date.now() + 20000,
   providerId: "anthropic",
 }
+/** The session key of each exchange of this file. */
+const sessionKey = sessionKeyPair()
+/** What the helper gives the relay: the grant, the run's channel and the private key. */
+const granted = { ...grant, channel, sessionKey: sessionKey.privateKey }
 /** A gateway whose answers follow `plan`, one entry per request, and that records each request. */
 function scriptedGateway(plan: Array<"challenge" | "grant" | number | "lost">) {
   const seen: string[] = []
@@ -57,8 +62,9 @@ test("the runner proves itself for each challenge and keeps only the granted ses
       send: gateway.send,
       backoff: () => 0,
       waitBackoff: () => 0,
+      sessionKey,
     }),
-  ).toEqual(grant)
+  ).toEqual(granted)
   expect(gateway.seen).toEqual([
     "GET /capabilities/v1/challenge",
     "POST /capabilities/v1/session",
@@ -68,11 +74,12 @@ test("the runner proves itself for each challenge and keeps only the granted ses
     "GET /capabilities/v1/challenge",
     "POST /capabilities/v1/session",
   ])
-  expect(audiences).toEqual([
-    `workflowd:${channel}:${"1".repeat(64)}`,
-    `workflowd:${channel}:${"2".repeat(64)}`,
-    `workflowd:${channel}:${"3".repeat(64)}`,
-  ])
+  // Each proof binds the session's public key to the nonce of its challenge.
+  expect(audiences).toEqual(
+    ["1", "2", "3"].map(
+      (digit) => `workflowd:${channel}:${sessionBinder(digit.repeat(64), sessionKey.publicKey)}`,
+    ),
+  )
 })
 
 test("a refused challenge ends the exchange, and refused sessions end it after five proofs", async () => {
@@ -81,6 +88,7 @@ test("a refused challenge ends the exchange, and refused sessions end it after f
   const refused = scriptedGateway([403])
   await expect(
     openSession({
+      sessionKey,
       gateway: "https://gateway.fixture.invalid",
       leaseId: "lease",
       issue,
@@ -95,6 +103,7 @@ test("a refused challenge ends the exchange, and refused sessions end it after f
   )
   await expect(
     openSession({
+      sessionKey,
       gateway: "https://gateway.fixture.invalid",
       leaseId: "lease",
       issue,
@@ -105,10 +114,10 @@ test("a refused challenge ends the exchange, and refused sessions end it after f
   expect(proofs).toBe(5)
   for (const gateway of ["http://gateway.fixture.invalid", "https://u@gateway.fixture.invalid"])
     await expect(
-      openSession({ gateway, leaseId: "lease", issue, send: refused.send }),
+      openSession({ sessionKey, gateway, leaseId: "lease", issue, send: refused.send }),
     ).rejects.toThrow("gateway refused")
   await expect(
-    openSession({ gateway: "https://gateway.fixture.invalid", leaseId: "../x", issue }),
+    openSession({ sessionKey, gateway: "https://gateway.fixture.invalid", leaseId: "../x", issue }),
   ).rejects.toThrow("lease refused")
 })
 
@@ -121,6 +130,7 @@ test("a session grant whose provider id is missing or not of the form costs a pr
         : Response.json({ ...grant, providerId })
     await expect(
       openSession({
+        sessionKey,
         gateway: "https://gateway.fixture.invalid",
         leaseId: "lease",
         issue: async () => `proof-${++proofs}`,
@@ -173,10 +183,11 @@ async function tlsGateway() {
         return Response.json({ channel, nonce: "d".repeat(64) })
       }
       expect(request.headers.get("content-type")).toBe("application/json")
-      proofs.push(
-        Schema.decodeUnknownSync(Schema.Struct({ token: Schema.String }))(await request.json())
-          .token,
-      )
+      const posted = Schema.decodeUnknownSync(
+        Schema.Struct({ token: Schema.String, key: Schema.String }),
+      )(await request.json(), { onExcessProperty: "error" })
+      expect(posted.key).toBe(sessionKey.publicKey)
+      proofs.push(posted.token)
       return Response.json(grant)
     },
   })
@@ -205,14 +216,17 @@ test("the runner is admitted over HTTPS by a gateway it trusts; a certificate it
         sleep: async (milliseconds) => {
           waits.push(milliseconds)
         },
+        sessionKey,
       })
     await expect(admit(false)).rejects.toThrow(
       "gateway certificate not trusted (DEPTH_ZERO_SELF_SIGNED_CERT)",
     )
     expect(waits).toEqual([])
     expect(gateway.proofs).toEqual([])
-    expect(await admit(true)).toEqual(grant)
-    expect(gateway.proofs).toEqual([`proof-for-workflowd:${channel}:${"d".repeat(64)}`])
+    expect(await admit(true)).toEqual(granted)
+    expect(gateway.proofs).toEqual([
+      `proof-for-workflowd:${channel}:${sessionBinder("d".repeat(64), sessionKey.publicKey)}`,
+    ])
   } finally {
     await gateway.close()
   }
@@ -302,8 +316,11 @@ test("a challenge is waited for after a 503, a refused connection, a reset, a ti
         sleep: async (milliseconds) => {
           waits.push(milliseconds)
         },
+        sessionKey,
       })
-    expect(await open((url, init) => faults.shift()?.() ?? gateway.send(url, init))).toEqual(grant)
+    expect(await open((url, init) => faults.shift()?.() ?? gateway.send(url, init))).toEqual(
+      granted,
+    )
     expect(waits).toHaveLength(7)
     expect(proofs).toBe(1)
     waits.length = 0
@@ -402,12 +419,14 @@ test("OIDC authority issues at most its limit of proofs, and none after clear", 
 const sessionAt = (
   gateway: string,
 ) => `import { openSession } from ${JSON.stringify(resolve("deploy/sandbox/bootstrap-helper.mjs"))}
+import { sessionKeyPair } from ${JSON.stringify(resolve("deploy/sandbox/renewal.mjs"))}
 const waits = []
 let proofs = 0
 const outcome = await openSession({
   gateway: ${JSON.stringify(gateway)},
   leaseId: "lease",
   issue: async () => \`proof-\${++proofs}\`,
+  sessionKey: sessionKeyPair(),
   wait: 1000,
   clock: () => waits.reduce((sum, wait) => sum + wait, 0),
   sleep: async (milliseconds) => { waits.push(milliseconds) },

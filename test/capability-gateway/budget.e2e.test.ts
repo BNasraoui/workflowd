@@ -7,6 +7,7 @@ import {
   heldBody,
   heldUpstream,
   openReservations,
+  openRun,
   readToEnd,
   runToken,
   small,
@@ -51,7 +52,7 @@ for (const [mode, start] of gateways) {
   test(`[${mode}] calls are served while their reservation fits, then each model call gets 403 with the budget body`, async () => {
     await withBudget(start, small, async (f, gateway) => {
       await f.tokenSeconds(180)
-      const token = await runToken(gateway)
+      const { token, channel } = await openRun(gateway)
       await f.tokenSeconds(null)
       const runner = client(gateway)
       const stream = usageStream(
@@ -98,7 +99,7 @@ for (const [mode, start] of gateways) {
       expect(f.upstreamRequests().length).toBe(3)
       expect(await usage(f)).toMatchObject({ calls: 3, outputTokens: 750, spent: true })
       // The run token stays valid: the renew route still answers it.
-      expect((await runner.renew(token)).status).toBe(200)
+      expect((await runner.renew(token, channel)).status).toBe(200)
     })
   }, 30000)
 

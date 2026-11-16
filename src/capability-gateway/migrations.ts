@@ -65,10 +65,30 @@ const runUsage = Effect.gen(function* () {
   yield* sql`CREATE INDEX capability_reservations_run ON capability_reservations(run_id)`
 })
 
+/**
+ * The session key of a binding, which signs each renewal of its run tokens, and the highest
+ * attempt number of a renewal that the gateway took for the session (0 before the first; its
+ * bound is `maxRenewalAttempt`). A binding with no session key renews no run token. When a run
+ * token first authorized a call; and why the gateway ended a run, when it ended the run itself:
+ * only "two holders", and only on a revoked run.
+ */
+const sessionKey = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient
+  yield* sql`ALTER TABLE capability_bindings ADD COLUMN session_key TEXT
+    CHECK(session_key IS NULL OR length(session_key)=43)`
+  yield* sql`ALTER TABLE capability_bindings ADD COLUMN renewal_attempt INTEGER NOT NULL DEFAULT 0
+    CHECK(renewal_attempt BETWEEN 0 AND 999999999)`
+  yield* sql`ALTER TABLE capability_tokens ADD COLUMN used_at INTEGER
+    CHECK(used_at IS NULL OR used_at>0)`
+  yield* sql`ALTER TABLE capability_grants ADD COLUMN end_reason TEXT
+    CHECK(end_reason IS NULL OR (end_reason='two holders' AND revoked=1))`
+})
+
 export const runGatewayMigrations = Migrator.make({})({
   loader: Migrator.fromRecord({
     "0001_capability_store": capabilityStore,
     "0002_run_usage": runUsage,
+    "0003_session_key": sessionKey,
   }),
   table: gatewayMigrationsTable,
 })
