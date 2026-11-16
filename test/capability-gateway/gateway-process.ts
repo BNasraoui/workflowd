@@ -441,7 +441,7 @@ export async function startGatewayProcess(
 }
 
 /**
- * The gateway as its own process: its real entry and network listener, with the fixture's servers.
+ * The gateway as its own process: its real entry and listener, with the fixture's servers.
  * Once it listens, workflowd's side grants its live runs on the control socket.
  */
 export async function processGateway(f: Fixture): Promise<Gateway> {

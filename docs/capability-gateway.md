@@ -14,7 +14,33 @@ decode it with the same schema, and a key it does not name is refused.
 | `maxStreamsPerRun` | The most streams open at once for one run: 1 to 4, and at most `maxStreams`. |
 | `streamIdleMs` | Optional. Milliseconds a stream may go without a chunk before the gateway aborts it: 1 to 120000, 120000 when absent. The bound is the listener's socket timeout, which also cuts a silent stream. A stream that keeps sending runs to its token's expiry. |
 | `gitRead` | Optional. Whether runs may read their saved repository; false when absent. |
-| `listen.host`, `listen.port` | Where the gateway process listens: `127.0.0.1` or `::1`, since the listener is clear text, and port 0 to 65535, where 0 asks for a free port. workflowd accepts the key and does not read it; the gateway process requires it. |
+| `listen.socket` | The absolute path of the gateway's one listener, a Unix socket. The gateway has no TCP listener. It owns the socket's directory, mode 0710 with the front's group, and makes it when it is missing; each directory above it must be owned by root or the gateway's uid and closed to writes by others, or have the sticky bit. The socket has mode 0660. |
+| `listen.front.uid`, `listen.front.gid` | The uid and gid of the front, Tailscale Serve. The gateway serves the front's uid only; the directory has the front's group. |
+| `listen.service` | The Service as its clients name it, as Serve sends it on in `X-Forwarded-Host`: its MagicDNS name in lower case, with `:<port>` when Serve serves it on a port other than 443. |
+
+A `listen` section with another key, such as `host` or `port`, is refused, and the gateway
+process exits with that error before it makes a socket. workflowd accepts the section and does
+not read it; the gateway process requires it.
+
+## The listener
+
+The front reaches the gateway on `listen.socket`. As the gateway accepts a connection, it reads
+the caller's uid from the kernel (SO_PEERCRED), before it reads a byte; a caller whose uid is
+not `listen.front.uid` is ended there, and no route runs. Each other connection goes on to the
+gateway's HTTP server, which listens on a socket in a directory of the gateway's own, mode
+0700, below its temporary directory: Bun's HTTP server gives no descriptor of a connection that
+it accepts, so the uid is read before it.
+
+Before any route, a request must carry the headers that Serve sends to a `unix:` target for a
+request of a tagged node: `X-Forwarded-For` once, one address in `100.64.0.0/10` or
+`fd7a:115c:a1e0::/48` and not a list; `X-Forwarded-Proto` once, `https`; and
+`X-Forwarded-Host` once, equal to `listen.service`. A request with `Forwarded`, any other
+`X-Forwarded-` header (`X-Forwarded-Port` and `X-Forwarded-Server` among them), `X-Real-IP`,
+`Via` or a header whose name starts with `Tailscale-` gets an empty 403, as does one that
+misses the rule; Serve adds `Tailscale-User-` headers for a node of a user, so only a tagged
+node's request passes. The three headers are removed before the route: no route reads one, the
+store keeps none, none is an identity, and none reaches the provider. `Host`, which Serve sets
+to `localhost` for a `unix:` target, names the listener and reaches no route.
 
 ## Git reads
 
@@ -35,8 +61,8 @@ revocation with model calls.
 On the runner, the relay listens on the socket `gateway.sock` in its state directory.
 It accepts only the local placeholder `Authorization: Bearer workflowd-local`, which is
 no upstream credential, and sends the request on with the run token to the gateway's
-HTTPS origin. The gateway's own listener is clear text; TLS comes from a front between
-the runner and that listener.
+HTTPS origin: the Service, where Tailscale Serve ends TLS and passes the request on to the
+gateway's Unix socket.
 
 ## Session leases and publication
 
