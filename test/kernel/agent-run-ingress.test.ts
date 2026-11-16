@@ -1200,4 +1200,18 @@ describe("runner placement", () => {
     for (const [value, policies, message] of cases)
       expect(() => parseAgentRunPlacements(value, repositories, policies)).toThrow(message)
   })
+
+  test("the runner runs at one time follow the bound of waiting checks, and a larger setting is refused at startup", async () => {
+    const { parseRunnerMaxRuns } = await import("../../src/config")
+    const { sealedResultLimits } = await import("../../src/kernel/sealed-result")
+    expect(parseRunnerMaxRuns(undefined)).toBe(sealedResultLimits.waitingChecks)
+    expect(parseRunnerMaxRuns("1")).toBe(1)
+    expect(parseRunnerMaxRuns(String(sealedResultLimits.waitingChecks))).toBe(
+      sealedResultLimits.waitingChecks,
+    )
+    for (const value of [String(sealedResultLimits.waitingChecks + 1), "0", "-1", "2.5", "04", ""])
+      expect(() => parseRunnerMaxRuns(value)).toThrow(
+        `WORKFLOWD_RUNNER_MAX_RUNS must be an integer from 1 to ${sealedResultLimits.waitingChecks}`,
+      )
+  })
 })

@@ -8,6 +8,7 @@ import {
   type SandboxPolicy,
 } from "./sandbox/config"
 import type { Placement } from "./kernel/executor"
+import { sealedResultLimits } from "./kernel/sealed-result"
 import { Schema } from "effect"
 import { parseInstallationAccountIds } from "./installation-policy"
 import {
@@ -121,6 +122,11 @@ export interface AgentRunConfig {
   readonly capabilityControl?: CapabilityControlConfig
   /** Repositories placed off the host; an alias that is absent is `host`. */
   readonly placements?: Readonly<Record<string, Placement>>
+  /**
+   * The runner runs at one time (`WORKFLOWD_RUNNER_MAX_RUNS`), with a runner placement only; a
+   * further dispatch is refused.
+   */
+  readonly runnerMaxRuns?: number
   readonly sandboxRepositories?: ReadonlyArray<SandboxPolicy>
   readonly token: string
   readonly claudeBinary: string
@@ -465,6 +471,22 @@ export function parseAgentRunPlacements(
   return placements
 }
 
+/**
+ * `WORKFLOWD_RUNNER_MAX_RUNS`, the runner runs at one time; 4 when absent. Each runner run sends
+ * one sealed result, and the daemon lets at most `sealedResultLimits.waitingChecks` checks wait for
+ * a slot, so a setting above that bound would refuse a result that a run sent in time: it is
+ * refused at startup.
+ */
+export function parseRunnerMaxRuns(value: string | undefined): number {
+  const bound = sealedResultLimits.waitingChecks
+  if (value === undefined) return bound
+  if (!/^[1-9][0-9]*$/.test(value) || Number(value) > bound)
+    throw new Error(
+      `WORKFLOWD_RUNNER_MAX_RUNS must be an integer from 1 to ${bound}: each runner run sends one sealed result, and at most ${bound} checks of a sealed result wait for a slot`,
+    )
+  return Number(value)
+}
+
 function loadAgentRunConfig(
   env: Record<string, string | undefined>,
   token: string | undefined,
@@ -510,6 +532,7 @@ function loadAgentRunConfig(
     )
   )
     throw new Error("Unknown sandbox alias")
+  const runnerMaxRuns = parseRunnerMaxRuns(env.WORKFLOWD_RUNNER_MAX_RUNS)
   const placements = parseAgentRunPlacements(
     env.WORKFLOWD_AGENT_RUN_PLACEMENTS,
     repositories,
@@ -518,6 +541,7 @@ function loadAgentRunConfig(
   return {
     ...(sandboxRepositories.length === 0 ? {} : { sandboxRepositories }),
     ...(Object.keys(placements).length === 0 ? {} : { placements }),
+    ...(Object.values(placements).includes("runner") ? { runnerMaxRuns } : {}),
     ...(capabilityControl === undefined ? {} : { capabilityControl }),
     token,
     claudeBinary: env.WORKFLOWD_AGENT_RUN_CLAUDE_BIN ?? "claude",
