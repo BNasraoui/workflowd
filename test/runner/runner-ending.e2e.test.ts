@@ -2,11 +2,12 @@ import { expect, setSystemTime, test } from "bun:test"
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { Effect } from "effect"
+import { Effect, Fiber } from "effect"
 import { boxReadyLine } from "../../deploy/sandbox/box-ready.mjs"
 import { AgentRunIngress, agentRunIdentifiers } from "../../src/kernel/agent-run-ingress"
 import { AgentRunStore } from "../../src/kernel/agent-run-store"
-import { controlClient } from "../../src/sandbox/capability-control"
+import { controlClient, liveGrants } from "../../src/sandbox/capability-control"
+import { defaultRunBudget } from "../../src/sandbox/config"
 import { client } from "../capability-gateway/gateway-process"
 import { fixtureExecutable } from "../helpers/fixture-executable.mjs"
 import {
@@ -15,6 +16,7 @@ import {
   githubStub,
   gitRemote,
   mailbox,
+  runnerIdentity,
   runnerModel,
   runnerPolicy,
   step,
@@ -597,6 +599,109 @@ test("a runner run that is live at a start of the daemon ends once at that start
       expect((await cancelRun(runtime))._tag).toBe("Failure")
       expect((await runtime.runPromise(mailbox(runId))).length).toBe(1)
     })
+  } finally {
+    await github.close()
+    await remote.close()
+    await rm(root, { recursive: true, force: true })
+  }
+}, 30000)
+
+test("a job that holds no session within 30 minutes of its lease ends the start runner_start, once, with its lease released, and the daemon grants the run no more", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-ending-"))
+  const remote = await gitRemote(join(root, "git"))
+  const github = await githubStub(remote.sourceSha, () => undefined)
+  const gateway = scripted(() => Promise.resolve())
+  const authorized: Array<string> = []
+  try {
+    await withScriptedDaemon(
+      root,
+      github,
+      remote.bare,
+      {
+        ...gateway.control,
+        authorize: (id) => Effect.sync(() => void authorized.push(id)),
+        // No job holds the run's session. The daemon reads that last in each acquisition, and
+        // 30 minutes have passed since the lease once it read it.
+        sessionBound: () =>
+          Effect.sync(() => {
+            setSystemTime(new Date(Date.now() + 30 * 60000 + 1000))
+            return false
+          }),
+      },
+      async (runtime) => {
+        try {
+          const refusal = await step("start end", () => registerRun(runtime), undefined, 10000)
+          expect(refusal._tag).toBe("Failure")
+        } finally {
+          setSystemTime()
+        }
+        const end = await ended(runtime, runId)
+        expect({ state: end.run.state, diagnostic: end.run.diagnostic }).toEqual({
+          state: "operator_required",
+          diagnostic: "runner_start: the run's job held no gateway session within 30 minutes",
+        })
+        expect(end.messages.length).toBe(1)
+        // The release revoked the run after its one grant, and cancelled its Actions run.
+        expect(authorized).toEqual([runId])
+        expect(gateway.revokes).toContain(runId)
+        expect(github.cancels()).toEqual([actionsRunId])
+        // The daemon's grants, which its reconcile sends the gateway, hold none of the run: a
+        // job that starts late gets no session.
+        expect(
+          await runtime.runPromise(
+            liveGrants(null, Date.now(), defaultRunBudget, {
+              aliases: ["runner"],
+              identity: runnerIdentity,
+            }),
+          ),
+        ).toEqual([])
+        expect((await runtime.runPromise(mailbox(runId))).length).toBe(1)
+      },
+    )
+  } finally {
+    await github.close()
+    await remote.close()
+    await rm(root, { recursive: true, force: true })
+  }
+}, 30000)
+
+test("a stop of the daemon while its runner run waits for the job's session ends the wait at once, releases the lease and ends the run once, runner_start", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-ending-"))
+  const remote = await gitRemote(join(root, "git"))
+  const github = await githubStub(remote.sourceSha, () => undefined)
+  const gateway = scripted(() => Promise.resolve())
+  try {
+    await withScriptedDaemon(
+      root,
+      github,
+      remote.bare,
+      // The job never opens its session.
+      { ...gateway.control, sessionBound: () => Effect.succeed(false) },
+      async (runtime) => {
+        const dispatching = runtime.runFork(
+          Effect.flatMap(AgentRunIngress, (ingress) => ingress.register(submission, new Date())),
+        )
+        await until("lease ref", () => (github.leaseRefs().length > 0 ? true : undefined))
+        // The daemon's stop interrupts the dispatch that it runs.
+        const stoppedAt = Date.now()
+        await step(
+          "daemon stop",
+          () => runtime.runPromise(Fiber.interrupt(dispatching)),
+          undefined,
+          10000,
+        )
+        expect(Date.now() - stoppedAt).toBeLessThan(5000)
+        const end = await ended(runtime, runId)
+        expect({ state: end.run.state, diagnostic: end.run.diagnostic }).toEqual({
+          state: "operator_required",
+          diagnostic:
+            "runner_start: the daemon stopped before the run's job held its gateway session",
+        })
+        expect(end.messages.length).toBe(1)
+        expect(gateway.revokes).toContain(runId)
+        expect(github.cancels()).toEqual([actionsRunId])
+      },
+    )
   } finally {
     await github.close()
     await remote.close()

@@ -84,6 +84,8 @@ export const SandboxDispatch = Context.Service<SandboxDispatchPort>("workflowd/S
 const runnerDeadlineMs = 285 * 60000
 /** The states of a runner run that has not ended. */
 const activeRunStates = new Set(["accepted", "spawning", "spawned", "verified"])
+/** The time from a runner run's lease to the session of its job, after which its start fails. */
+const runnerSessionWaitMs = 30 * 60000
 const workspaceFailure = (detail: string) =>
   new WorkspaceError({ operation: "runner", cause: new Error(`Runner run failed: ${detail}`) })
 const failure = (cause?: unknown) =>
@@ -456,23 +458,28 @@ export const makeSandboxDispatch = (options: {
                   sourceSha: launch.sourceSha,
                   now: Date.now(),
                 })
-                // The lease is ready once the job holds its gateway session; the job pulls its
-                // image before it opens the session, so the session opens close to the start.
-                yield* leases.acquire(launch.runId).pipe(
-                  Effect.repeat({
-                    // A stop before the session ends the wait; the run's events then end it.
-                    until: (lease) => lease.state === "ready" || stopped(),
-                    schedule: Schedule.spaced("2 seconds"),
-                  }),
-                  Effect.timeout("30 minutes"),
-                )
-              }).pipe(
-                Effect.mapError(
-                  (cause) =>
-                    new RunnerRunFailed({
+                // The lease is ready once the job holds its gateway session. The wait ends at
+                // the session, at a stop of the run (its events then end it) or after
+                // `runnerSessionWaitMs`; a stop of the daemon ends it between two reads.
+                const until = Date.now() + runnerSessionWaitMs
+                for (;;) {
+                  const lease = yield* leases.acquire(launch.runId)
+                  if (lease.state === "ready" || stopped()) return
+                  if (Date.now() >= until)
+                    return yield* new RunnerRunFailed({
                       reason: "runner_start",
-                      message: sandboxDiagnostic("runner.start", cause).message,
-                    }),
+                      message: `the run's job held no gateway session within ${runnerSessionWaitMs / 60000} minutes`,
+                    })
+                  yield* Effect.interruptible(Effect.sleep("2 seconds"))
+                }
+              }).pipe(
+                Effect.mapError((cause) =>
+                  cause instanceof RunnerRunFailed
+                    ? cause
+                    : new RunnerRunFailed({
+                        reason: "runner_start",
+                        message: sandboxDiagnostic("runner.start", cause).message,
+                      }),
                 ),
               ),
           })
@@ -568,7 +575,20 @@ export const makeSandboxDispatch = (options: {
               model: input.model ?? "",
               deadline: new Date(Date.now() + runnerDeadlineMs),
             })
-            .pipe(Effect.mapError((error) => workspaceFailure(`${error.reason}: ${error.message}`)))
+            .pipe(
+              // A start that fails or that a stop of the daemon ends leaves its cause for the
+              // run's settlement, which releases the lease if one was made.
+              Effect.tapError((error) =>
+                runnerExit(run.runId, `${error.reason}: ${error.message}`),
+              ),
+              Effect.onInterrupt(() =>
+                runnerExit(
+                  run.runId,
+                  "runner_start: the daemon stopped before the run's job held its gateway session",
+                ),
+              ),
+              Effect.mapError((error) => workspaceFailure(`${error.reason}: ${error.message}`)),
+            )
           const eventsEnded = yield* Deferred.make<RunnerRunFailed | null>()
           // The observer's stop of a run whose events stalled: the run ends with its diagnostic.
           const halted = yield* Deferred.make<void>()
