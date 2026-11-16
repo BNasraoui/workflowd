@@ -8,13 +8,12 @@ import {
   type ControlError,
   type ControlVerb,
   type ControlVerbSchemas,
+  maxControlConnections,
   maxControlFrame,
 } from "../capability-control/protocol"
 import { peerCredentials, serveSocket } from "../peer-socket"
 import { CapabilityRefused } from "./store"
 
-/** The daemon's connections that the gateway holds open at once; another one gets `unavailable`. */
-export const maxControlConnections = 16
 /** A connection, refused or not, ends this long after the gateway accepted it, whatever it sent. */
 export const controlConnectionMs = 10000
 
