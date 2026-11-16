@@ -2690,6 +2690,156 @@ for (const [check, build] of pathRefusals)
   )
 
 test(
+  "a push that git refuses with no status line is a fault push whose text holds no token and is printable ASCII of a bounded length",
+  withFixture(async (f) => {
+    const stderr = join(f.root, "stderr")
+    await writeFile(stderr, `${token} ${hostileValues.join("")}`)
+    const failing = join(f.root, "failing-push-git")
+    await writeFile(
+      failing,
+      `#!/bin/sh\nfor arg; do [ "$arg" = push ] && { cat ${stderr} >&2; exit 1; }; done\nexec /usr/bin/git "$@"\n`,
+    )
+    await chmod(failing, 0o755)
+    const sealed = await sealWithResultPy(f, async (workspace) => {
+      await writeFile(join(workspace, "result.txt"), "content\n")
+    })
+    const exit = await publish(
+      await decode(sealed.json, sealed.bundle),
+      options(f, { binary: failing }),
+    )
+    const error = failure(exit)
+    if (!(error instanceof SealedResultFault)) throw error
+    expect(error.operation).toBe("push")
+    expect(error.message).toStartWith("git push exited 1: ")
+    expect(error.message).not.toContain(token)
+    expect(error.message).toMatch(printableAscii)
+    expect(error.message.length).toBeLessThanOrEqual(2000)
+    expect(await remoteRef(f)).toBe("")
+  }),
+  30_000,
+)
+
+test(
+  "a git child that cannot be started is a fault of its command, with no token and in printable ASCII",
+  withFixture(async (f) => {
+    // A git of the test that removes the scratch directory after init: the next child
+    // cannot be started, since the size of its scratch cannot be read.
+    const removing = join(f.root, "removing-git")
+    await writeFile(
+      removing,
+      `#!/bin/sh\nfor arg; do [ "$arg" = init ] && { /usr/bin/git "$@" && rm -rf "$PWD"; exit; }; done\nexec /usr/bin/git "$@"\n`,
+    )
+    await chmod(removing, 0o755)
+    const sealed = await sealWithResultPy(f, async (workspace) => {
+      await writeFile(join(workspace, "result.txt"), "content\n")
+    })
+    const exit = await publish(
+      await decode(sealed.json, sealed.bundle),
+      options(f, { binary: removing }),
+    )
+    const error = failure(exit)
+    if (!(error instanceof SealedResultFault)) throw error
+    expect(error.message).toStartWith(`git ${error.operation} failed: `)
+    expect(error.message).toContain("ENOENT")
+    expect(error.message).not.toContain(token)
+    expect(error.message).toMatch(printableAscii)
+    expect(await remoteRef(f)).toBe("")
+  }),
+  30_000,
+)
+
+test("a scratch directory that cannot be removed after its check is logged as remaining", async () => {
+  const f = await fixture()
+  // A git of the test that leaves a directory the daemon cannot read after init.
+  const locking = join(f.root, "locking-git")
+  await writeFile(
+    locking,
+    `#!/bin/sh\nfor arg; do [ "$arg" = init ] && { /usr/bin/git "$@" && mkdir -p "$PWD/locked/x" && chmod 000 "$PWD/locked"; exit; }; done\nexec /usr/bin/git "$@"\n`,
+  )
+  await chmod(locking, 0o755)
+  try {
+    const sealed = await sealWithResultPy(f, async (workspace) => {
+      await writeFile(join(workspace, "result.txt"), "content\n")
+    })
+    const result = await decode(sealed.json, sealed.bundle)
+    const logs: string[] = []
+    const logged = Logger.layer([Logger.make((entry) => logs.push(Bun.inspect(entry)))])
+    const opts = options(f, { binary: locking })
+    const exit = await Effect.runPromiseExit(
+      Effect.provide(
+        Effect.scoped(checkSealedResult(result, target, opts)),
+        Layer.mergeAll(gitLayer(opts.git), logged),
+      ),
+    )
+    expect(failure(exit)).toBeInstanceOf(SealedResultFault)
+    expect(
+      logs.filter((line) => line.includes("Sealed result scratch directory remains")),
+    ).toHaveLength(1)
+    expect(await scratchEntries(f.scratchRoot)).toHaveLength(1)
+  } finally {
+    for (const entry of await scratchEntries(f.scratchRoot))
+      await chmod(join(f.scratchRoot, entry, "locked"), 0o700)
+    await rm(f.root, { recursive: true, force: true })
+  }
+}, 30_000)
+
+test(
+  "a git runner whose scratch of an earlier process cannot be removed is not built",
+  withFixture(async (f) => {
+    const locked = join(f.scratchRoot, "sealed-result-earlier", "locked")
+    await mkdir(join(locked, "x"), { recursive: true })
+    await chmod(locked, 0o000)
+    try {
+      expect(lockFault(await built(options(f).git))).toEqual({
+        operation: "scratch",
+        message: "Scratch directories of an earlier process remain",
+      })
+    } finally {
+      await chmod(locked, 0o700)
+      await rm(join(f.scratchRoot, "sealed-result-earlier"), { recursive: true })
+    }
+  }),
+)
+
+test(
+  "a scratch directory that cannot be made below the root is a fault scratch, before a token is made",
+  withFixture(async (f) => {
+    const sealed = await sealWithResultPy(f, async (workspace) => {
+      await writeFile(join(workspace, "result.txt"), "content\n")
+    })
+    const result = await decode(sealed.json, sealed.bundle)
+    const { runner, close } = await openRunner(options(f).git)
+    // The root stays private, but the daemon can no longer write in it.
+    await chmod(f.scratchRoot, 0o500)
+    let minted = 0
+    try {
+      const exit = await publish(
+        result,
+        options(f, {
+          token: Effect.sync(() => {
+            minted += 1
+            return Redacted.make(token)
+          }),
+        }),
+        undefined,
+        undefined,
+        runner,
+      )
+      expect(failure(exit)).toMatchObject({
+        _tag: "SealedResultFault",
+        operation: "scratch",
+        message: "Scratch directory unavailable",
+      })
+    } finally {
+      await chmod(f.scratchRoot, 0o700)
+      await close()
+    }
+    expect(minted).toBe(0)
+  }),
+  30_000,
+)
+
+test(
   "the error output of index-pack is shown in a refusal fsck as printable ASCII of a bounded length",
   withFixture(async (f) => {
     const stderr = join(f.root, "stderr")
