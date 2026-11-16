@@ -1,3 +1,4 @@
+import { maxModelBodyBytes } from "../../deploy/sandbox/capability-limits.mjs"
 import { maxCallTokens } from "../capability-control/protocol"
 import { credentialPatterns } from "./provider-evidence"
 import { checkHeaders, RequestRefused } from "./headers"
@@ -235,7 +236,7 @@ export async function claudeRequest(
   )
     throw new RequestRefused()
   const headers = claudeHeaders(request)
-  const data = parsedBody(await readRequestBody(request, signal, 1048576))
+  const data = parsedBody(await readRequestBody(request, signal, maxModelBodyBytes))
   if (!("model" in data) || data.model !== model) throw new RequestRefused()
   const reservation = messages ? askedTokens(data, maxTokens) : 0
   const access = await credential()

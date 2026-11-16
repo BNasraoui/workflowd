@@ -15,6 +15,7 @@ import {
 } from "./renewal.mjs"
 import {
   maxHeaderBytes,
+  maxModelBodyBytes,
   maxRelaySockets,
   maxStreamIdleMs,
   maxStreamsPerRun,
@@ -143,41 +144,91 @@ export async function serveRunnerRelay(config, directory = root) {
       const path = request.url.startsWith("/capabilities/v1/")
         ? request.url
         : `/capabilities/v1/providers/${config.providerId}${request.url}`
+      // A model call's body is held (the gateway reads at most `maxModelBodyBytes` of it), so the
+      // call can be sent once again; a Git read streams.
+      const model = !request.url.startsWith("/capabilities/v1/")
       streams++
       let counted = true
-      const upstream = httpsRequest(
-        new URL(path, origin),
-        {
-          method: request.method,
-          headers: { ...headers, authorization: `Bearer ${credential.token}` },
-          agent,
-          maxHeaderSize: maxHeaderBytes,
-        },
-        (reply) => {
-          const output = Object.fromEntries(
-            Object.entries(reply.headers).filter(
-              ([key]) => !["connection", "transfer-encoding", "keep-alive"].includes(key),
-            ),
-          )
-          response.writeHead(reply.statusCode ?? 503, output)
-          // An answer cut upstream stays cut here: no terminal chunk turns it into success.
-          pipeline(reply, response, (error) => {
-            if (error) upstream.destroy()
-          })
-        },
-      )
-      upstream.setTimeout(maxStreamIdleMs, () => upstream.destroy())
-      upstream.once("close", () => {
-        if (counted) streams--
-        counted = false
-        if (!response.writableEnded) response.destroy()
-      })
-      upstream.once("error", () => response.destroy())
+      /**
+       * Sends the call upstream with `token`. The gateway refuses a token whose successor has made
+       * a call, before any upstream request: a model call that a renewal overtook on its way, sent
+       * with the predecessor and refused (403) while the relay holds the successor, is sent once
+       * again with the successor. No other answer is sent again, and the predecessor's own power
+       * at the gateway is unchanged.
+       */
+      const send = (token, again) => {
+        const upstream = httpsRequest(
+          new URL(path, origin),
+          {
+            method: request.method,
+            headers: { ...headers, authorization: `Bearer ${token}` },
+            agent,
+            maxHeaderSize: maxHeaderBytes,
+          },
+          (reply) => {
+            if (again && reply.statusCode === 403 && token !== credential.token && !closed) {
+              reply.resume()
+              current = send(credential.token, false)
+              current.end(body)
+              return
+            }
+            const output = Object.fromEntries(
+              Object.entries(reply.headers).filter(
+                ([key]) => !["connection", "transfer-encoding", "keep-alive"].includes(key),
+              ),
+            )
+            response.writeHead(reply.statusCode ?? 503, output)
+            // An answer cut upstream stays cut here: no terminal chunk turns it into success.
+            pipeline(reply, response, (error) => {
+              if (error) upstream.destroy()
+            })
+          },
+        )
+        upstream.setTimeout(maxStreamIdleMs, () => upstream.destroy())
+        upstream.once("close", () => {
+          if (upstream !== current) return
+          if (counted) streams--
+          counted = false
+          if (!response.writableEnded) response.destroy()
+        })
+        upstream.once("error", () => {
+          if (upstream === current) response.destroy()
+        })
+        return upstream
+      }
+      let body
+      let current
       response.once("close", () => {
-        if (!response.writableFinished) upstream.destroy()
+        if (!response.writableFinished) current?.destroy()
+        if (current === undefined && counted) {
+          streams--
+          counted = false
+        }
       })
-      pipeline(request, upstream, (error) => {
-        if (error) upstream.destroy()
+      if (!model) {
+        current = send(credential.token, false)
+        pipeline(request, current, (error) => {
+          if (error) current.destroy()
+        })
+        return
+      }
+      const chunks = []
+      let size = 0
+      request.on("data", (chunk) => {
+        size += chunk.length
+        if (size > maxModelBodyBytes) {
+          // The gateway refuses a model call of this size: the relay refuses it at once.
+          request.destroy()
+          if (!response.headersSent) response.writeHead(403)
+          response.end()
+        } else chunks.push(chunk)
+      })
+      request.once("error", () => response.destroy())
+      request.once("end", () => {
+        if (response.writableEnded || response.destroyed) return
+        body = Buffer.concat(chunks)
+        current = send(credential.token, true)
+        current.end(body)
       })
     },
   )

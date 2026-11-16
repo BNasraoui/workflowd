@@ -19,6 +19,11 @@ export const providerIdPattern = /^[a-z][a-z0-9-]{0,63}$/
 export const maxProofLength = 16384
 /** The longest jti of a proof that opens a session. */
 export const maxJtiLength = 256
+/**
+ * The most bytes of a model call's body. The gateway reads no more of a model call, and the relay
+ * holds the body of each, so that it can send a call once again (capability-relay.mjs).
+ */
+export const maxModelBodyBytes = 1048576
 /** The bytes of all request header names and values, and of one header value. */
 export const maxHeaderBytes = 8192
 export const maxHeaderValueBytes = 2048
