@@ -183,13 +183,14 @@ export const makeCapabilityGateway = (
         })
       return waitFor(inFlight, AbortSignal.any([signal, AbortSignal.timeout(accessWaitMs)]))
     }
-    // A stop waits for a renewal in flight, up to the bound of its request and its write, before
-    // it ends the gateway's lifetime: an answer that the stop cut off would leave the stored
-    // refresh value one that the OAuth server has replaced.
+    // A stop waits for a renewal of the login in flight (custody's mint), up to the bound of its
+    // request and its write, before it ends the gateway's lifetime: an answer that the stop cut
+    // off would leave the stored refresh value one that the OAuth server has replaced. A mint of
+    // another provider renews no login, and ends at once.
     yield* Effect.addFinalizer(() =>
       Effect.gen(function* () {
         const pending = inFlight
-        if (pending) {
+        if (pending && custody && config.login) {
           console.error("the gateway waits for a renewal in flight before it stops")
           yield* Effect.promise(() =>
             pending.then(
