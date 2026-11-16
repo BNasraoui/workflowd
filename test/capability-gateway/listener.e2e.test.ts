@@ -10,11 +10,11 @@ import {
   rm,
   symlink,
 } from "node:fs/promises"
-import { connect } from "node:net"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { fixtureExecutable } from "../helpers/fixture-executable.mjs"
 import { runnerAddress } from "../helpers/loopback-tls"
+import { unixCall } from "../helpers/unix-call"
 import {
   client,
   fixture,
@@ -282,17 +282,13 @@ test("a connection to the listener from a uid that is not the front's is ended w
   })
   try {
     await f.reconcile()
-    const answer = await new Promise<string>((done) => {
-      const socket = connect(f.config.listen.socket)
-      let text = ""
-      socket.on("data", (bytes) => (text += bytes.toString()))
-      socket.on("error", () => undefined)
-      socket.on("close", () => done(text))
-      socket.write(
-        `GET /capabilities/v1/challenge?lease=lease HTTP/1.1\r\nhost: localhost\r\nx-forwarded-for: ${runnerAddress}\r\nx-forwarded-proto: https\r\nx-forwarded-host: ${f.config.listen.service}\r\n\r\n`,
-      )
-    })
-    expect(answer).toBe("")
+    // The kernel takes the connect; the gateway ends the connection with no byte of an answer.
+    expect(
+      unixCall(
+        f.config.listen.socket,
+        `GET /capabilities/v1/challenge?lease=lease HTTP/1.1\r\nhost: localhost\r\nx-forwarded-for: ${runnerAddress}\r\nx-forwarded-proto: https\r\nx-forwarded-host: ${f.config.listen.service}\r\nconnection: close\r\n\r\n`,
+      ),
+    ).toBe("ended")
     // The front, run as this uid, is ended too: it answers 502, as Serve does.
     expect((await client(f.front).challenge("lease")).status).toBe(502)
     // No route ran: no challenge was issued, so the gateway's store binds no channel.

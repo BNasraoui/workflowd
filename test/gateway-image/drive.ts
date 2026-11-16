@@ -139,12 +139,17 @@ type FrontContainer = Awaited<ReturnType<typeof startFront>>
 
 /**
  * A container of the image with `options`: on `network` (none unless named), as `user` (the
- * image's unless named), with the listener's volume when `volume` holds; the image's Bun runs
- * `source`. Its standard output, standard error and exit code.
+ * image's unless named), with the listener's volume when `volume` holds and each of `mounts`;
+ * the image's Bun runs `source`. Its standard output, standard error and exit code.
  */
 async function probe(
   source: string,
-  options: { readonly network?: string; readonly user?: string; readonly volume?: boolean } = {},
+  options: {
+    readonly network?: string
+    readonly user?: string
+    readonly volume?: boolean
+    readonly mounts?: ReadonlyArray<string>
+  } = {},
 ) {
   const child = Bun.spawn(
     [
@@ -156,6 +161,7 @@ async function probe(
       ...lockedDown,
       ...(options.user === undefined ? [] : ["--user", options.user]),
       ...(options.volume ? ["--volume", `${volume}:${volumeMount}`] : []),
+      ...(options.mounts ?? []).flatMap((mount) => ["--volume", mount]),
       "--entrypoint",
       "/bin/bun",
       image,
@@ -189,49 +195,21 @@ process.stdout.write(JSON.stringify(out))`,
 
 /**
  * A request for a challenge on the listener's socket, with the headers of the front, from a
- * container as `user` with the listener's volume, by libc's calls through Bun's FFI: Bun's own
- * client reports a connection that the server ends at accept as a refused connect. `stat` is
- * `ok`, or the error of a stat of the socket; `call` is the status line of the answer, `ended`
- * when the connection ends with no byte of an answer, or `error` and the errno of the connect.
+ * container as `user` with the listener's volume. `stat` is `ok`, or the error of a stat of the
+ * socket; `call` is what `unixCall` of test/helpers/unix-call.ts gives.
  */
 async function socketCall(user: string, service: string) {
   const request = `GET /capabilities/v1/challenge?lease=lease HTTP/1.1\r\nhost: localhost\r\nx-forwarded-for: 100.64.0.7\r\nx-forwarded-proto: https\r\nx-forwarded-host: ${service}\r\nconnection: close\r\n\r\n`
   const result = await probe(
-    `import { dlopen, FFIType, ptr, read } from "bun:ffi"
-const path = ${JSON.stringify(listenSocket)}
+    `import { unixCall } from "/probe/unix-call.ts"
 let stat = "ok"
-try { require("node:fs").statSync(path) } catch (error) { stat = error.code }
-const libc = dlopen("libc.so.6", {
-  socket: { args: [FFIType.i32, FFIType.i32, FFIType.i32], returns: FFIType.i32 },
-  connect: { args: [FFIType.i32, FFIType.ptr, FFIType.u32], returns: FFIType.i32 },
-  send: { args: [FFIType.i32, FFIType.ptr, FFIType.u64, FFIType.i32], returns: FFIType.i64 },
-  recv: { args: [FFIType.i32, FFIType.ptr, FFIType.u64, FFIType.i32], returns: FFIType.i64 },
-  __errno_location: { args: [], returns: FFIType.ptr },
-})
-const names = { 2: "ENOENT", 13: "EACCES", 104: "ECONNRESET", 111: "ECONNREFUSED" }
-const errno = () => { const code = read.i32(libc.symbols.__errno_location(), 0); return names[code] ?? String(code) }
-// AF_UNIX and SOCK_STREAM are 1; sockaddr_un is the family, then the path and its NUL.
-const fd = libc.symbols.socket(1, 1, 0)
-const address = Buffer.alloc(110)
-address.writeUInt16LE(1, 0)
-address.write(path, 2)
-let call
-if (libc.symbols.connect(fd, ptr(address), 2 + Buffer.byteLength(path) + 1) !== 0) call = "error " + errno()
-else {
-  const bytes = Buffer.from(${JSON.stringify(request)})
-  // MSG_NOSIGNAL: a socket that the server ended gives EPIPE, not SIGPIPE.
-  libc.symbols.send(fd, ptr(bytes), bytes.length, 0x4000)
-  const chunk = Buffer.alloc(65536)
-  let answer = Buffer.alloc(0)
-  for (;;) {
-    const size = Number(libc.symbols.recv(fd, ptr(chunk), chunk.length, 0))
-    if (size <= 0) break
-    answer = Buffer.concat([answer, chunk.subarray(0, size)])
-  }
-  call = answer.length === 0 ? "ended" : answer.toString("latin1").split("\\r\\n")[0]
-}
-process.stdout.write(JSON.stringify({ stat, call }))`,
-    { user, volume: true },
+try { require("node:fs").statSync(${JSON.stringify(listenSocket)}) } catch (error) { stat = error.code }
+process.stdout.write(JSON.stringify({ stat, call: unixCall(${JSON.stringify(listenSocket)}, ${JSON.stringify(request)}) }))`,
+    {
+      user,
+      volume: true,
+      mounts: [`${resolve("test/helpers/unix-call.ts")}:/probe/unix-call.ts:ro`],
+    },
   )
   if (result.code !== 0) throw new Error(`the call as ${user} failed: ${result.stderr}`)
   return JSON.parse(result.stdout) as unknown
