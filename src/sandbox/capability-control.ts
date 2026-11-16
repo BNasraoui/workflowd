@@ -335,8 +335,6 @@ export const makeDaemonCapability = (options: {
       startRevoke,
       readEvents,
       readResult,
-      /** The runs that have a call in flight or waiting for its turn. */
-      runsWithCalls: () => runs.size,
     }
   })
 export type DaemonCapability = Effect.Success<ReturnType<typeof makeDaemonCapability>>

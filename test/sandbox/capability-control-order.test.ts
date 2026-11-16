@@ -198,7 +198,7 @@ test("the calls of one run reach the gateway one after the other, in the order t
   )
 }, 20000)
 
-test("after the calls of 50 runs end, the client holds no state of a run, and it never holds more connections than the gateway's places", async () => {
+test("after the calls of 50 runs end, a new call of each of those runs reaches the gateway and is answered, and the client never holds more connections than the gateway's places", async () => {
   let holding = true
   const runs = Array.from({ length: 50 }, (_, index) => `run-${index}`)
   await withClient(
@@ -215,15 +215,25 @@ test("after the calls of 50 runs end, the client holds no state of a run, and it
         yield* until(() => gateway.held() === maxControlConnections, "the held revokes")
         yield* settle()
         expect(gateway.held()).toBe(maxControlConnections)
-        expect(capability.runsWithCalls()).toBe(50)
+        // The calls of the other runs have not reached the gateway.
+        expect(
+          gateway.events().filter((event) => event.startsWith("received revoke")),
+        ).toHaveLength(maxControlConnections)
         holding = false
         gateway.answer(() => true)
         yield* Fiber.join(calls)
         expect(runs.map((runId) => gateway.count(`answered revoke ${runId}`))).toEqual(
           runs.map(() => 1),
         )
+        // A run whose turn the client still held would hold its next call back: none is held.
+        yield* Effect.all(
+          runs.map((runId) => capability.revoke(runId)),
+          { concurrency: "unbounded" },
+        )
+        expect(runs.map((runId) => gateway.count(`answered revoke ${runId}`))).toEqual(
+          runs.map(() => 2),
+        )
         expect(gateway.peak()).toBeLessThanOrEqual(maxControlConnections)
-        expect(capability.runsWithCalls()).toBe(0)
       }),
   )
 }, 20000)
@@ -254,8 +264,13 @@ test("an interrupted call of a run gives up its turn, waiting or in flight, and 
           "received revoke run-a",
           "answered revoke run-a",
         ])
-        // Run c's call is still held; run a has no call left.
-        expect(capability.runsWithCalls()).toBe(1)
+        // Run a has no call left: its next call goes on at once. Run c's call is still held,
+        // and holds the next call of run c back.
+        yield* capability.revoke("run-a")
+        expect(gateway.count("answered revoke run-a")).toBe(2)
+        yield* Effect.forkChild(capability.revoke("run-c"))
+        yield* settle()
+        expect(gateway.events("run-c")).toEqual(["received revoke run-c"])
       }),
   )
 }, 20000)
