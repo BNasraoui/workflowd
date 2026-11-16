@@ -75,9 +75,11 @@ a lease. Writes go through protected publication with the pinned publisher
 
 ## Fixture suites in CI
 
-`scripts/capability-suites.ts` names four suites of test files: `core`, `gateway`,
-`publication-local` and `final-local`. Each test file of `test/capability-gateway`, at each
-depth, belongs to one of them: the end-to-end files to `gateway`, the others to `core`,
+`scripts/capability-suites.ts` names five suites of test files: `core`, `gateway`,
+`publication-local`, `final-local` and `gateway-budget`. Each test file of
+`test/capability-gateway`, at each depth, belongs to one of them: the end-to-end files of the
+run budget (`budget*.e2e.test.ts`) to `gateway-budget`, so that each suite ends within the unit's
+time limit, the other end-to-end files to `gateway`, the others to `core`,
 except the pinned Claude Code test, `claude-pinned.launcher.test.ts`. One step of the Tests
 job runs that file, as the runner's user, in a network namespace whose only interface is
 loopback; the file fails when it runs anywhere else. No file is in two suites, and
@@ -95,3 +97,22 @@ test, or passes its time or output limit.
 Test files named `*.launcher.test.ts` run only in these suites, or, for the pinned Claude
 Code test, in its own step; `bunfig.toml` keeps them out of the plain test run and its
 coverage gate.
+
+## Login custody
+
+With a `login` section, the gateway holds its provider's login in `login.directory` and renews
+it on demand. The login comes in only through `import-login <provider>`, which reads it on
+standard input. The gateway runs as one uid, and `import-login` runs as that same uid, never as
+root: it makes a missing `login.directory` with mode 0700, refuses an existing one that the
+gateway's own check at start refuses (another owner, or a mode other than 0700), and names in its
+output the uid that owns the login. The gateway refuses at start a login directory or file of
+another owner, and names that owner as the cause. A renewal sends the stored refresh value to the OAuth server; the server replaces
+that value in its answer, so an answer that is lost (a kill of the gateway during the request,
+or a failed write of the answer) can leave a stored value that the server no longer takes, and
+the login then needs a new import.
+
+On SIGTERM, the gateway waits for a renewal in flight, up to 6 seconds (custody's limit of 5
+seconds on the request, then the write of the answer), before it stops the custody process.
+The stop timeout of the gateway's container or unit, from SIGTERM to SIGKILL, must be at least
+15 seconds: `docker stop --time 15` or `--stop-timeout 15`, or `TimeoutStopSec=15` in a systemd
+unit, which covers that wait and the stop of the listener and the store.

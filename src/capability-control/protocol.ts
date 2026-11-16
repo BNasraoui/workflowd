@@ -41,6 +41,18 @@ export const SessionPolicy = Schema.Struct({
   toolingSha: Schema.optionalKey(Schema.String),
 })
 
+const positiveCount = Schema.Int.check(Schema.isGreaterThan(0))
+/**
+ * The budget of one run: the model calls the gateway sends to the provider for it, the output
+ * tokens they may make, and the most output tokens (`max_tokens`) one call may ask.
+ */
+export const RunBudget = Schema.Struct({
+  calls: positiveCount,
+  outputTokens: positiveCount,
+  maxTokens: positiveCount,
+})
+export type RunBudget = typeof RunBudget.Type
+
 /**
  * What workflowd authorized for one run, sent on the control socket. workflowd sends a grant only
  * for a live run whose lease has recorded its Actions run; `notAfter` ends the run's authority as
@@ -63,6 +75,8 @@ export const CapabilityGrant = Schema.Struct({
   deadline: Schema.Number,
   notAfter: Schema.Number,
   policy: SessionPolicy,
+  /** Fixed by workflowd when it first authorizes the run; each grant of the run sends it again. */
+  budget: RunBudget,
 })
 export type CapabilityGrant = typeof CapabilityGrant.Type
 
@@ -108,6 +122,18 @@ export const controlProtocol = {
   endReason: schemas({
     request: Schema.Struct({ runId: Schema.String }),
     response: Schema.NullOr(EndReason),
+  }),
+  /** What the run spent of its budget, and whether the budget is spent. */
+  usage: schemas({
+    request: Schema.Struct({ runId: Schema.String }),
+    response: Schema.Struct({
+      calls: Schema.Int,
+      inputTokens: Schema.Int,
+      outputTokens: Schema.Int,
+      cacheCreationInputTokens: Schema.Int,
+      cacheReadInputTokens: Schema.Int,
+      spent: Schema.Boolean,
+    }),
   }),
 }
 export type ControlVerb = keyof typeof controlProtocol

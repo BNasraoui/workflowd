@@ -25,6 +25,14 @@ const gatewayFiles = testFilesBelow(import.meta.dir + "/..", gatewayTestDirector
 /** The gateway's end-to-end files: a gateway process or listener on a real socket. */
 const gatewayEndToEnd = gatewayFiles.filter((file) => file.endsWith(".e2e.test.ts"))
 
+/**
+ * The end-to-end files of the run budget. They run as a suite of their own, so that each suite
+ * of gateway end-to-end files ends within the isolated fixture's time limit.
+ */
+const budgetEndToEnd = gatewayEndToEnd.filter((file) =>
+  file.startsWith(`${gatewayTestDirectory}/budget`),
+)
+
 export const suites: Readonly<Record<string, ReadonlyArray<string>>> = {
   core: [
     "test/sandbox/public-output.test.ts",
@@ -34,7 +42,7 @@ export const suites: Readonly<Record<string, ReadonlyArray<string>>> = {
     "test/sandbox/capability-relay.test.ts",
     ...gatewayFiles.filter((file) => !gatewayEndToEnd.includes(file)),
   ],
-  gateway: gatewayEndToEnd,
+  gateway: gatewayEndToEnd.filter((file) => !budgetEndToEnd.includes(file)),
   "publication-local": [
     "test/sandbox/publisher-http.e2e.test.ts",
     "test/sandbox/publish.e2e.test.ts",
@@ -47,6 +55,7 @@ export const suites: Readonly<Record<string, ReadonlyArray<string>>> = {
     "test/sandbox/publication-parity.test.ts",
     "test/runtime-startup.test.ts",
   ],
+  "gateway-budget": budgetEndToEnd,
 }
 
 /**

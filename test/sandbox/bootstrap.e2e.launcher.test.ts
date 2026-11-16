@@ -116,7 +116,8 @@ for (const race of [
       tailscaleAudience: "fixture",
       privateBootstrap: { repositoryOwnerId: 34, mode: "actions-native" as const },
     }
-    const native = '{ "model" : "fixture-model", "stream": true, "messages": [] }'
+    const native =
+      '{ "model" : "fixture-model", "stream": true, "messages": [], "max_tokens": 1000 }'
     const response = "event: message_start\ndata: {}\n\nevent: message_stop\ndata: {}\n\n"
     let upstreamEffects = 0
     let publicArtifacts = 0

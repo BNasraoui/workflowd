@@ -363,7 +363,12 @@ const makeAutomationLayer = (config: Extract<AppConfig, { readonly mode?: "autom
             const native =
               control === undefined
                 ? undefined
-                : { gateway: yield* makeDaemonCapability({ socket: control.socket }) }
+                : {
+                    gateway: yield* makeDaemonCapability({
+                      socket: control.socket,
+                      budget: control.budget,
+                    }),
+                  }
             const leases = yield* makeSandboxLeaseService(
               github,
               controlRoot,

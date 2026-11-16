@@ -187,7 +187,7 @@ test("a stop after the answer of the OAuth server and before the write keeps the
   })
 }, 30000)
 
-test("an OAuth server that refuses the connection leaves the login as it was, and the next run sends nothing before the first wait ends", async () => {
+test("an OAuth server that refuses the connection leaves the login as it was, the next run sends nothing before the first wait ends, and a run after it renews", async () => {
   await withLogin(async (root, oauth, env) => {
     const old = claudeLogin(syntheticValue("access"), syntheticValue("refresh"), Date.now() - 1000)
     expect((await importLogin(env, JSON.stringify(old))).code).toBe(0)
@@ -219,6 +219,18 @@ test("an OAuth server that refuses the connection leaves the login as it was, an
     const waiting = await custody(oauth.url)
     expect(waiting.stderr).toStartWith("custody: the claude login waits to renew until ")
     expect(oauth.requests()).toHaveLength(0)
+    // After the wait that custody wrote, on the clock that it reads, the next run renews.
+    const { retryAt } = Schema.decodeUnknownSync(
+      Schema.fromJsonString(Schema.Struct({ retryAt: Schema.Number })),
+    )(await readFile(join(root, "login", "claude.state"), "utf8"))
+    while (Date.now() <= retryAt) await Bun.sleep(retryAt - Date.now() + 1)
+    const renewed = await custody(oauth.url)
+    expect(renewed.code).toBe(0)
+    expect(Schema.decodeUnknownSync(Schema.fromJsonString(Provided))(renewed.stdout).token).toBe(
+      oauth.next().access,
+    )
+    expect(oauth.requests()).toHaveLength(1)
+    expect(oauth.requests()[0]!.time).toBeGreaterThanOrEqual(retryAt)
   })
 }, 30000)
 
@@ -284,12 +296,12 @@ test("in this process, import-login imports, replaces and refuses as its process
       importLoginCommand(with_, args, input(text, asked))
     expect(await run(["claude"], JSON.stringify(login))).toEqual({
       code: 0,
-      output: "imported the claude login\n",
+      output: `imported the claude login, owned by uid ${process.getuid!()}\n`,
     })
     expect(asked).toEqual([16385])
     expect(await run(["claude"], JSON.stringify(login))).toEqual({
       code: 0,
-      output: "replaced the claude login\n",
+      output: `replaced the claude login, owned by uid ${process.getuid!()}\n`,
     })
     const refused = async (
       args: ReadonlyArray<string>,
@@ -393,6 +405,11 @@ test("in this process, custody renews, refuses only invalid_grant, waits between
     // leave the login and wait: 5 s, then 10, 20 and 40.
     await load(expired())
     const waits: number[] = []
+    const causes = {
+      busy: "answered 503",
+      invalid: "answered 400 invalid_request",
+      garbled: "gave no answer that custody reads",
+    }
     for (const mode of ["busy", "invalid", "garbled", "busy"] as const) {
       oauth.mode(mode)
       const before = Date.now()
@@ -401,7 +418,7 @@ test("in this process, custody renews, refuses only invalid_grant, waits between
       waits.push(Math.round((state.retryAt - before) / 1000))
       await expect(command()).rejects.toThrow("the claude login waits to renew until")
       expect(await loginFault(directory, "claude")).toBe(
-        "custody: the claude login was not renewed; custody waits before it asks the OAuth server again",
+        `custody: the OAuth server of claude ${causes[mode]}; custody waits before it asks it again`,
       )
       await waited()
     }
@@ -592,5 +609,75 @@ test("in this process, custody stores the renewal value of a 200 whose other fie
     expect((await command()).token).toBe(oauth.next().access)
     expect(oauth.requests()).toHaveLength(before + 2)
     expect(await readdir(directory)).not.toContain("claude.state")
+  })
+}, 30000)
+
+test("in this process, a wait on disk past the cap from now is read as the cap, and a Retry-After that is a date, zero, negative or not a number waits as it reads", async () => {
+  await withLogin(async (root, oauth, env) => {
+    const directory = join(root, "login")
+    const statePath = join(directory, "claude.state")
+    const expired = () =>
+      claudeLogin(syntheticValue("access"), syntheticValue("refresh"), Date.now() - 1000)
+    const load = async () =>
+      expect(
+        (await importLoginCommand(env, ["claude"], input(JSON.stringify(expired())))).code,
+      ).toBe(0)
+    const command = () =>
+      custodyCommand(["access", directory, "--token-url", oauth.url, "claude", "60"])
+    const State = Schema.fromJsonString(Schema.Struct({ retryAt: Schema.Number }))
+    const retryAt = async () =>
+      Schema.decodeUnknownSync(State)(await readFile(statePath, "utf8")).retryAt
+
+    // A clock set back leaves a wait on disk far past the cap: it is read as the cap from now.
+    await load()
+    await writeFile(
+      statePath,
+      JSON.stringify({ state: "renewing", failures: 3, retryAt: Date.now() + 10 * 365 * 86400000 }),
+      { mode: 0o600 },
+    )
+    const before = Date.now()
+    const error = await command().then(
+      () => undefined,
+      (reason: unknown) => (reason instanceof Error ? reason.message : String(reason)),
+    )
+    const until = /waits to renew until (\S+)$/.exec(error ?? "")?.[1]
+    expect(Date.parse(until ?? "")).toBeGreaterThanOrEqual(before + 300000)
+    expect(Date.parse(until ?? "")).toBeLessThanOrEqual(Date.now() + 300000)
+    expect(oauth.requests()).toHaveLength(0)
+    // The same for the wait after a renewal, whose longest is the first wait, 5 s.
+    await writeFile(
+      statePath,
+      JSON.stringify({ state: "renewed", renewAfter: Date.now() + 10 * 365 * 86400000 }),
+      { mode: 0o600 },
+    )
+    const renewedBefore = Date.now()
+    const renewedError = await command().then(
+      () => undefined,
+      (reason: unknown) => (reason instanceof Error ? reason.message : String(reason)),
+    )
+    const renewAfter = Date.parse(/waits to renew until (\S+)$/.exec(renewedError ?? "")?.[1] ?? "")
+    expect(renewAfter).toBeGreaterThanOrEqual(renewedBefore + 5000)
+    expect(renewAfter).toBeLessThanOrEqual(Date.now() + 5000)
+
+    // Each Retry-After of a 429, after a new import, so that the first wait is 5 s. Custody reads
+    // the clock between `sent` and `answered`: a date waits until that date, when it is past the
+    // first wait; zero, a negative number and a word ask for nothing.
+    const date = new Date(Date.now() + 8000).toUTCString()
+    for (const value of [date, "0", "-1", "soon"]) {
+      await load()
+      oauth.mode("limited", { retryAfter: value })
+      const sent = Date.now()
+      await expect(command()).rejects.toThrow("answered 429")
+      const answered = Date.now()
+      const at = await retryAt()
+      const target = value === date ? Date.parse(date) : undefined
+      if (target === undefined) {
+        expect(at - 5000).toBeGreaterThanOrEqual(sent)
+        expect(at - 5000).toBeLessThanOrEqual(answered)
+      } else {
+        expect(at - target).toBeGreaterThanOrEqual(0)
+        expect(at - target).toBeLessThanOrEqual(answered - sent)
+      }
+    }
   })
 }, 30000)

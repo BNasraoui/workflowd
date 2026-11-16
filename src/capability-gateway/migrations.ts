@@ -42,6 +42,30 @@ const capabilityStore = Effect.gen(function* () {
 })
 
 /**
+ * What each run spent of its budget: the calls sent to the provider, the token counts that the
+ * provider reported, and whether the budget refused a call. A reservation is the `max_tokens` of a
+ * call that has started and not yet been settled; its id is random, so it is never used twice.
+ */
+const runUsage = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient
+  yield* sql`CREATE TABLE capability_usage (
+    run_id TEXT PRIMARY KEY REFERENCES capability_grants(run_id),
+    calls INTEGER NOT NULL DEFAULT 0 CHECK(calls>=0),
+    input_tokens INTEGER NOT NULL DEFAULT 0 CHECK(input_tokens>=0),
+    output_tokens INTEGER NOT NULL DEFAULT 0 CHECK(output_tokens>=0),
+    cache_creation_input_tokens INTEGER NOT NULL DEFAULT 0 CHECK(cache_creation_input_tokens>=0),
+    cache_read_input_tokens INTEGER NOT NULL DEFAULT 0 CHECK(cache_read_input_tokens>=0),
+    spent INTEGER NOT NULL DEFAULT 0 CHECK(spent IN (0,1))
+  ) STRICT`
+  yield* sql`CREATE TABLE capability_reservations (
+    id TEXT PRIMARY KEY CHECK(length(id)=32 AND id NOT GLOB '*[^a-f0-9]*'),
+    run_id TEXT NOT NULL REFERENCES capability_usage(run_id),
+    tokens INTEGER NOT NULL CHECK(tokens>=0)
+  ) STRICT`
+  yield* sql`CREATE INDEX capability_reservations_run ON capability_reservations(run_id)`
+})
+
+/**
  * The session key of a binding, which signs each renewal of its run tokens; when a run token
  * first authorized a call; and why the gateway ended a run, when it ended the run itself.
  */
@@ -56,7 +80,8 @@ const sessionKey = Effect.gen(function* () {
 export const runGatewayMigrations = Migrator.make({})({
   loader: Migrator.fromRecord({
     "0001_capability_store": capabilityStore,
-    "0002_session_key": sessionKey,
+    "0002_run_usage": runUsage,
+    "0003_session_key": sessionKey,
   }),
   table: gatewayMigrationsTable,
 })

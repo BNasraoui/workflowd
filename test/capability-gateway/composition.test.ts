@@ -75,11 +75,17 @@ test("configured live composition settles prior leases, which revokes their gran
     await expect(
       loadConfig({ ...environment, WORKFLOWD_CAPABILITY_CONTROL: undefined }),
     ).rejects.toThrow("Native Actions requires")
-    // workflowd's section names the socket only; the gateway's section is not workflowd's.
+    // workflowd's section names the socket and the budget of a new run; the gateway's section is
+    // not workflowd's, and each count of the budget is a positive integer.
     for (const bad of [
       { socket, unexpected: true },
       { socket, storePath: gateway.storePath },
       { socket: "relative.sock" },
+      { socket, budget: { calls: 0 } },
+      { socket, budget: { outputTokens: -600000 } },
+      { socket, budget: { maxTokens: 1.5 } },
+      { socket, budget: { maxTokens: "128000" } },
+      { socket, budget: { calls: 2000, unexpected: 1 } },
     ])
       await expect(
         loadConfig({ ...environment, WORKFLOWD_CAPABILITY_CONTROL: JSON.stringify(bad) }),
@@ -88,7 +94,22 @@ test("configured live composition settles prior leases, which revokes their gran
       loadConfig({ ...environment, WORKFLOWD_CAPABILITY_GATEWAY: JSON.stringify(gateway) }),
     ).rejects.toThrow("belongs to the gateway process")
     const loaded = await loadConfig(environment, { home: root })
-    expect(loaded.agentRuns?.capabilityControl).toEqual({ socket })
+    expect(loaded.agentRuns?.capabilityControl).toEqual({
+      socket,
+      budget: { calls: 2000, outputTokens: 600000, maxTokens: 128000 },
+    })
+    const named = await loadConfig(
+      {
+        ...environment,
+        WORKFLOWD_CAPABILITY_CONTROL: JSON.stringify({ socket, budget: { outputTokens: 5000 } }),
+      },
+      { home: root },
+    )
+    expect(named.agentRuns?.capabilityControl?.budget).toEqual({
+      calls: 2000,
+      outputTokens: 5000,
+      maxTokens: 128000,
+    })
     // The gateway's process reads its section alone, with its listener, store and socket.
     expect(
       loadCapabilityGatewayConfig({ WORKFLOWD_CAPABILITY_GATEWAY: JSON.stringify(gateway) }),
@@ -268,4 +289,40 @@ test("the gateway's listener is a Unix socket: a listen section with a host or a
   expect(load({ ...listen, service: "gateway.example.ts.net:8443" }).service).toBe(
     "gateway.example.ts.net:8443",
   )
+})
+
+test("the gateway's login directory is an absolute path of letters, digits, '.', '_', '-' and '/' only, as the provider file's command takes it", () => {
+  const gateway = {
+    noscope: { binary: "/fixture/noscope", configHome: "/fixture" },
+    providerId: "anthropic",
+    credentialRole: "claude",
+    maxStreams: 2,
+    maxStreamsPerRun: 2,
+    storePath: "/fixture/gateway.db",
+    controlSocket: "/fixture/control/gateway.sock",
+    daemon: { uid: 1000, gid: 1000 },
+    listen: {
+      socket: "/fixture/front/gateway.sock",
+      front: { uid: 1001, gid: 1001 },
+      service: "gateway.example.ts.net",
+    },
+  }
+  const load = (directory: string) =>
+    loadCapabilityGatewayConfig({
+      WORKFLOWD_CAPABILITY_GATEWAY: JSON.stringify({ ...gateway, login: { directory } }),
+    }).login?.directory
+  expect(load("/var/lib/gateway-1/login_dir.d")).toBe("/var/lib/gateway-1/login_dir.d")
+  for (const directory of [
+    "login",
+    "/var/lib/gateway login",
+    "/var/lib/$HOME",
+    '/var/lib/"login"',
+    "/var/lib/'login'",
+    "/var/lib/login\\n",
+    "/var/lib/login\nmint = x",
+    "/var/lib/login;id",
+    "/var/lib/`id`",
+    "/",
+  ])
+    expect(() => load(directory)).toThrow('at ["login"]["directory"]')
 })

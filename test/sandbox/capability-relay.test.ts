@@ -371,7 +371,12 @@ test("a renewal that the gateway refuses ends the relay at once: it sends no fur
             "anthropic-version": "2023-06-01",
             "anthropic-beta": "oauth-2025-04-20",
           },
-          body: JSON.stringify({ model: "fixture-model", stream: true, messages: [] }),
+          body: JSON.stringify({
+            model: "fixture-model",
+            stream: true,
+            messages: [],
+            max_tokens: 1000,
+          }),
         })
         expect(stream.status).toBe(200)
         const reader = stream.body!.getReader()
@@ -505,7 +510,12 @@ async function relayOfRun(f: Fixture, gateway: Gateway, root: string, renewIn = 
         "anthropic-version": "2023-06-01",
         "anthropic-beta": "oauth-2025-04-20",
       },
-      body: JSON.stringify({ model: "fixture-model", stream: true, messages: [] }),
+      body: JSON.stringify({
+        model: "fixture-model",
+        stream: true,
+        messages: [],
+        max_tokens: 100,
+      }),
     })
   return { runner, grant, channel, child, call }
 }
@@ -632,4 +642,54 @@ test("when a second client makes a call with the successor that the front took f
       await rm(root, { recursive: true, force: true })
     }
   })
+}, 40000)
+
+test("through the relay, a model call of a run whose budget is spent gets the budget body; the daemon reads the budget spent, and the run token still renews", async () => {
+  await withGateway(
+    processGateway,
+    async (f, gateway) => {
+      const root = await mkdtemp(join(tmpdir(), "relay-budget-"))
+      const renewals: Array<number | undefined> = []
+      const spent = Promise.withResolvers<void>()
+      // The relay's renewal reaches the gateway only once the run's budget is spent.
+      f.front.hook({
+        lost: (path, status) => {
+          if (path === "/capabilities/v1/renew") renewals.push(status)
+          return false
+        },
+        held: (path) => (path === "/capabilities/v1/renew" ? spent.promise : undefined),
+      })
+      try {
+        const { child, call } = await relayOfRun(f, gateway, root)
+        try {
+          const served = await call()
+          expect([served.status, await served.text()]).toEqual([200, sse])
+          const refused = await call()
+          expect(refused.status).toBe(403)
+          expect(await refused.json()).toEqual({
+            type: "error",
+            error: { type: "permission_error", message: "workflowd run budget spent" },
+          })
+          expect(await f.daemon((capability) => capability.usage("run"))).toEqual({
+            calls: 1,
+            inputTokens: 1,
+            outputTokens: 1,
+            cacheCreationInputTokens: 0,
+            cacheReadInputTokens: 0,
+            spent: true,
+          })
+          spent.resolve()
+          await until(() => renewals.length > 0)
+          expect(renewals[0]).toBe(200)
+          expect(f.upstreamRequests().length).toBe(1)
+        } finally {
+          child.kill("SIGKILL")
+        }
+      } finally {
+        await rm(root, { recursive: true, force: true })
+      }
+    },
+    {},
+    { calls: 1, outputTokens: 1000, maxTokens: 400 },
+  )
 }, 40000)

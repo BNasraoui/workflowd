@@ -7,6 +7,7 @@ import { capabilityDigest, makeCapabilityStore } from "../../src/capability-gate
 import { randomBytes } from "node:crypto"
 import { runGatewayMigrations } from "../../src/capability-gateway/migrations"
 import { liveGrants } from "../../src/sandbox/capability-control"
+import { defaultRunBudget } from "../../src/sandbox/config"
 import { mkdir, writeFile } from "node:fs/promises"
 import { sessionKeyPair, signRenewal } from "../../deploy/sandbox/renewal.mjs"
 import { join, resolve } from "node:path"
@@ -61,7 +62,7 @@ export async function writeNoscopeProviders(
  */
 export const grantLiveRuns = (now: number) =>
   Effect.gen(function* () {
-    const live = yield* liveGrants(null, now)
+    const live = yield* liveGrants(null, now, defaultRunBudget)
     return yield* (yield* makeCapabilityStore).reconcileGrants(live)
   })
 
