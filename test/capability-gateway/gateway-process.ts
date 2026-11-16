@@ -420,8 +420,8 @@ try {
       answer = { json, status }
     },
     /**
-     * The budget of a run that workflowd's side authorizes for the first time from now on, as a
-     * change of its config gives it.
+     * The budget of each run that workflowd's side authorizes for the first time after this call,
+     * as a change of its config gives it.
      */
     setBudget: (next: RunBudget) => {
       budget = next

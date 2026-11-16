@@ -7,7 +7,7 @@ import { SqlClient } from "effect/unstable/sql"
  */
 export const capabilityRunBudget = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient
-  yield* sql`CREATE TABLE capability_run_budgets (
+  yield* sql`CREATE TABLE sandbox_run_budgets (
     run_id TEXT PRIMARY KEY REFERENCES kernel_agent_runs(run_id) ON DELETE CASCADE,
     calls INTEGER NOT NULL CHECK(calls>0),
     output_tokens INTEGER NOT NULL CHECK(output_tokens>0),

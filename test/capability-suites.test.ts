@@ -55,6 +55,7 @@ test("each gateway test file belongs to exactly one suite, or names the job that
   )
   expect(suites["gateway-budget"]).toEqual([
     `${gatewayTestDirectory}/budget-settlement.e2e.test.ts`,
+    `${gatewayTestDirectory}/budget-upstream.e2e.test.ts`,
     `${gatewayTestDirectory}/budget.e2e.test.ts`,
   ])
   expect(suites["gateway-renewal"]).toEqual([`${gatewayTestDirectory}/renewal.e2e.test.ts`])

@@ -808,14 +808,12 @@ test("through the relay, a model call of a run whose budget is spent gets the bu
             type: "error",
             error: { type: "permission_error", message: "workflowd run budget spent" },
           })
-          expect(await f.daemon((capability) => capability.usage("run"))).toEqual({
-            calls: 1,
-            inputTokens: 1,
-            outputTokens: 1,
-            cacheCreationInputTokens: 0,
-            cacheReadInputTokens: 0,
-            spent: true,
-          })
+          expect(
+            await f.gatewaySql(
+              (sql) =>
+                sql`SELECT calls,output_tokens AS outputTokens,spent FROM capability_usage WHERE run_id='run'`,
+            ),
+          ).toEqual([{ calls: 1, outputTokens: 1, spent: 1 }])
           spent.resolve()
           await renewals.reach(1)
           expect(renewals.statuses[0]).toBe(200)

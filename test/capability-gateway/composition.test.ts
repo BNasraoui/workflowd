@@ -4,9 +4,10 @@ import { join } from "node:path"
 import { Server } from "node:http"
 import { tmpdir } from "node:os"
 import { generateKeyPairSync } from "node:crypto"
-import { Effect, Exit, Option, Scope } from "effect"
+import { Effect, Exit, Option, Schema, Scope } from "effect"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
 import { loadCapabilityGatewayConfig, loadConfig } from "../../src/config"
+import { CapabilityControlConfig } from "../../src/sandbox/config"
 import { makeLiveLayer } from "../../src/layers"
 import { SandboxDispatch } from "../../src/sandbox/dispatch"
 import { seedCapabilityRun } from "./fixture"
@@ -101,14 +102,17 @@ test("configured live composition settles prior leases, which revokes their gran
     const named = await loadConfig(
       {
         ...environment,
-        WORKFLOWD_CAPABILITY_CONTROL: JSON.stringify({ socket, budget: { outputTokens: 5000 } }),
+        WORKFLOWD_CAPABILITY_CONTROL: JSON.stringify({
+          socket,
+          budget: { outputTokens: 5000, maxTokens: 4000 },
+        }),
       },
       { home: root },
     )
     expect(named.agentRuns?.capabilityControl?.budget).toEqual({
       calls: 2000,
       outputTokens: 5000,
-      maxTokens: 128000,
+      maxTokens: 4000,
     })
     // The gateway's process reads its section alone, with its listener, store and socket.
     expect(
@@ -190,6 +194,32 @@ test("configured live composition settles prior leases, which revokes their gran
     front.close()
     await rm(root, { recursive: true, force: true })
   }
+})
+
+test("the budget of a new run in workflowd's config is at most 100000000 calls, 10^15 output tokens and 10000000 output tokens a call, and a call asks no more than the run's output tokens", () => {
+  const decode = (budget: object) =>
+    Schema.decodeUnknownSync(CapabilityControlConfig)({ socket: "/run/control.sock", budget })
+  expect(decode({ calls: 100_000_000, outputTokens: 10 ** 15, maxTokens: 10_000_000 })).toEqual({
+    socket: "/run/control.sock",
+    budget: { calls: 100_000_000, outputTokens: 10 ** 15, maxTokens: 10_000_000 },
+  })
+  expect(decode({ outputTokens: 1000, maxTokens: 1000 }).budget).toEqual({
+    calls: 2000,
+    outputTokens: 1000,
+    maxTokens: 1000,
+  })
+  expect(() => decode({ calls: 100_000_001 })).toThrow(
+    "Expected a value less than or equal to 100000000",
+  )
+  expect(() => decode({ outputTokens: 10 ** 15 + 1 })).toThrow(
+    "Expected a value less than or equal to 1000000000000000",
+  )
+  expect(() => decode({ maxTokens: 10_000_001 })).toThrow(
+    "Expected a value less than or equal to 10000000",
+  )
+  // The default max_tokens of 128000 is above a named budget of 5000 output tokens.
+  for (const budget of [{ outputTokens: 1000, maxTokens: 1001 }, { outputTokens: 5000 }])
+    expect(() => decode(budget)).toThrow("Expected a value of at most outputTokens")
 })
 
 test("the gateway config bounds its streams: an idle limit of 1 ms to the listener's socket timeout of two minutes, a stale sweep every 100 ms to a minute, and at most maxStreams for a run", async () => {

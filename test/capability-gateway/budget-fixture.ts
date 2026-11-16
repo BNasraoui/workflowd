@@ -21,8 +21,25 @@ export async function openRun(at: Origin, jti = "jti-budget") {
 /** Opens the seeded run's session and gives its run token. */
 export const runToken = async (at: Origin, jti?: string) => (await openRun(at, jti)).token
 
-/** What the daemon reads of the seeded run on the control socket. */
-export const usage = (f: Fixture) => f.daemon((capability) => capability.usage("run"))
+/** The counts of the seeded run in the gateway's store, and whether its budget is spent. */
+export async function usage(f: Fixture) {
+  const rows = await f.gatewaySql(
+    (sql) => sql<{
+      readonly calls: number
+      readonly inputTokens: number
+      readonly outputTokens: number
+      readonly cacheCreationInputTokens: number
+      readonly cacheReadInputTokens: number
+      readonly spent: number
+    }>`SELECT calls,input_tokens AS inputTokens,output_tokens AS outputTokens,
+      cache_creation_input_tokens AS cacheCreationInputTokens,
+      cache_read_input_tokens AS cacheReadInputTokens,spent
+      FROM capability_usage WHERE run_id='run'`,
+  )
+  const [row] = rows
+  if (rows.length !== 1 || row === undefined) throw new Error("the run has no usage row")
+  return { ...row, spent: row.spent === 1 }
+}
 
 /** The open reservations in the gateway's store. */
 export const openReservations = (f: Fixture) =>
@@ -30,13 +47,59 @@ export const openReservations = (f: Fixture) =>
     (sql) => sql<{ readonly n: number }>`SELECT count(*) AS n FROM capability_reservations`,
   )
 
-/** Polls `check` until it holds, for at most five seconds. */
+/** The body of a model call that open calls of its run hold back. */
+export const heldBody = {
+  type: "error",
+  error: { type: "rate_limit_error", message: "workflowd run budget held by open calls" },
+}
+
+/**
+ * Polls `check` every 50 ms until it holds: a settlement is stored after the stream that it
+ * settles has ended, and the timeout of the test bounds the wait.
+ */
 export async function eventually(check: () => Promise<boolean>) {
-  for (let poll = 0; poll < 100; poll++) {
-    if (await check()) return
-    await Bun.sleep(50)
+  while (!(await check())) await Bun.sleep(50)
+}
+
+/** Reads a stream until it ends or fails; the timeout of the test bounds the wait. */
+export async function readToEnd(reader: { read(): Promise<{ readonly done: boolean }> }) {
+  for (;;) {
+    const item = await reader.read().catch(() => undefined)
+    if (item === undefined || item.done) return
   }
-  throw new Error("the condition did not hold within five seconds")
+}
+
+/**
+ * Has the fixture upstream hold the next `count` requests that reach it before it answers them:
+ * `holding` resolves once all of them wait, and `letGo(n)` lets the first `n` that still wait
+ * be answered. Each later request is answered at once. Its disposal lets each one go, so a test
+ * that fails leaves no request held when its gateway stops.
+ */
+export function heldUpstream(f: Fixture, count: number) {
+  const waiting: Array<() => void> = []
+  let arrived = 0
+  let all: () => void = () => undefined
+  const holding = new Promise<void>((resolve) => {
+    all = resolve
+  })
+  f.onUpstream(async () => {
+    if (arrived === count) return
+    arrived++
+    const answer = new Promise<void>((resolve) => waiting.push(resolve))
+    if (arrived === count) all()
+    await answer
+  })
+  const letGo = (n: number) => {
+    for (const resolve of waiting.splice(0, n)) resolve()
+  }
+  return {
+    holding,
+    letGo,
+    [Symbol.dispose]: () => {
+      f.onUpstream(undefined)
+      letGo(waiting.length)
+    },
+  }
 }
 
 /** Reads an answer to its end, and gives its status and its text. */
