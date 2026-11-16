@@ -1,6 +1,6 @@
 import { SqliteClient } from "@effect/sql-sqlite-bun"
 import { OpenCode } from "@opencode-ai/client/effect"
-import { Effect, Layer, ManagedRuntime, type Scope } from "effect"
+import { Cause, Effect, Layer, Logger, ManagedRuntime, type Scope } from "effect"
 import { FetchHttpClient } from "effect/unstable/http"
 import { SqlClient } from "effect/unstable/sql"
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises"
@@ -420,6 +420,8 @@ export function daemonRuntime(
   options: {
     /** The window for a run's first model output from its box's ready line; 120 s, as configured by default. */
     readonly verifyTimeoutMs?: number
+    /** The pause between two passes of the sandbox workers (30 s in the daemon). */
+    readonly reconcileEveryMs?: number
   } = {},
 ) {
   const stores = Layer.mergeAll(KernelSessionStoreLive, AgentRunStoreLive).pipe(
@@ -485,6 +487,34 @@ export function daemonRuntime(
       })
     }),
   ).pipe(Layer.provide(sealed), Layer.provide(stores))
+  // The daemon's sandbox workers, as runtime.ts runs them: the reconcile and the heartbeat, each
+  // pass after the one before it, for the life of the runtime.
+  const workers = Layer.effectDiscard(
+    Effect.gen(function* () {
+      const dispatch = yield* SandboxDispatch
+      for (const [name, operation] of [
+        ["reconcile", dispatch.iteration],
+        ["heartbeat", dispatch.heartbeat],
+      ] as const)
+        yield* Effect.forkScoped(
+          Effect.forever(
+            operation.pipe(
+              Effect.catchCause((cause) =>
+                Effect.logError(`Sandbox ${name} failed: ${Cause.pretty(cause)}`),
+              ),
+              Effect.andThen(Effect.sleep(options.reconcileEveryMs ?? 250)),
+            ),
+          ),
+        )
+    }),
+  )
+  // Each line that the daemon logs, for a test that reads what its workers did.
+  const logs: Array<string> = []
+  const logger = Logger.layer([
+    Logger.make<unknown, void>(({ logLevel, message }) => {
+      logs.push(`${logLevel}: ${typeof message === "string" ? message : JSON.stringify(message)}`)
+    }),
+  ])
   const unused = Effect.die("a runner run uses no client of this host")
   const ingress = AgentRunIngressLive({
     routes: [],
@@ -528,14 +558,19 @@ export function daemonRuntime(
       }),
     ),
   )
-  return Object.assign(ManagedRuntime.make(ingress), {
-    /**
-     * Runs the release cleanup of the lease of `runId` again, as the daemon's reconcile does once
-     * GitHub reports its Actions run completed: the ref of an ended run is removed then.
-     */
-    cleanup: (runId: string) =>
-      leaseService === undefined ? Effect.void : Effect.ignore(leaseService.release(runId)),
-  })
+  return Object.assign(
+    ManagedRuntime.make(workers.pipe(Layer.provideMerge(ingress), Layer.provideMerge(logger))),
+    {
+      /** The lines that the daemon logged. */
+      logs: (): ReadonlyArray<string> => logs,
+      /**
+       * Runs the release cleanup of the lease of `runId` again, as the daemon's reconcile does once
+       * GitHub reports its Actions run completed: the ref of an ended run is removed then.
+       */
+      cleanup: (runId: string) =>
+        leaseService === undefined ? Effect.void : Effect.ignore(leaseService.release(runId)),
+    },
+  )
 }
 
 /**
@@ -598,9 +633,12 @@ export async function withRunnerDaemon<A>(
   let runtime: ReturnType<typeof daemonRuntime> | undefined
   try {
     gateway = await gitGateway(f, remote.url)
+    // The daemon's own store: not the gateway fixture's, which holds a host sandbox's run and
+    // lease for the gateway's own tests. A restart keeps it.
+    const store = { root: f.root, database: join(f.root, "runner-daemon.db") }
     const daemon = () =>
       daemonRuntime(
-        f,
+        store,
         github,
         remote.bare,
         runnerPolicy(job.image),
@@ -612,6 +650,15 @@ export async function withRunnerDaemon<A>(
         }),
       )
     runtime = daemon()
+    // The daemon's host in its directory, as its start binds it: each run is then its own.
+    await runtime.runPromise(
+      Effect.flatMap(
+        SqlClient.SqlClient,
+        (sql) =>
+          sql`INSERT INTO directory_local_identity(singleton,host_id) VALUES(1,'fixture-controller')
+            ON CONFLICT DO NOTHING`,
+      ),
+    )
     const jobEnded = async () => {
       for (let tries = 0; jobStart === undefined; tries++) {
         if (tries > 6000) throw new Error("step job: the daemon created no lease ref")

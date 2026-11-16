@@ -8,6 +8,7 @@ import {
   type RunnerGateway,
   type RunnerHandle,
   RunnerRunFailed,
+  runnerWindows,
 } from "../kernel/runner-executor"
 import { SealedResultRefused, type SealedResultGitPort } from "../kernel/sealed-result"
 import { WorkspaceError } from "../workspace/errors"
@@ -82,11 +83,9 @@ export type SandboxDispatchPort = {
 export const SandboxDispatch = Context.Service<SandboxDispatchPort>("workflowd/SandboxDispatch")
 
 /** A runner run's time from its start: the deadline of its lease (`store.request`). */
-const runnerDeadlineMs = 285 * 60000
 /** The states of a runner run that has not ended. */
 const activeRunStates = new Set(["accepted", "spawning", "spawned", "verified"])
 /** The time from a runner run's lease to the session of its job, after which its start fails. */
-const runnerSessionWaitMs = 30 * 60000
 /** The most code points of a runner run's diagnostic that reach its caller. */
 const runnerTextCharacters = 1000
 const workspaceFailure = (detail: string) =>
@@ -448,18 +447,19 @@ export const makeSandboxDispatch = (options: {
                   policy,
                   sourceSha: launch.sourceSha,
                   now: Date.now(),
+                  deadline: launch.deadline.getTime() + runnerWindows.leaseGraceMs,
                 })
                 // The lease is ready once the job holds its gateway session. The wait ends at
                 // the session, at a stop of the run (its events then end it) or after
-                // `runnerSessionWaitMs`; a stop of the daemon ends it between two reads.
-                const until = Date.now() + runnerSessionWaitMs
+                // `sessionWaitMs`; a stop of the daemon ends it between two reads.
+                const until = Date.now() + runnerWindows.sessionWaitMs
                 for (;;) {
                   const lease = yield* leases.acquire(launch.runId)
                   if (lease.state === "ready" || stopped()) return
                   if (Date.now() >= until)
                     return yield* new RunnerRunFailed({
                       reason: "runner_start",
-                      message: `the run's job held no gateway session within ${runnerSessionWaitMs / 60000} minutes`,
+                      message: `the run's job held no gateway session within ${runnerWindows.sessionWaitMs / 60000} minutes`,
                     })
                   yield* Effect.interruptible(Effect.sleep("2 seconds"))
                 }
@@ -564,7 +564,7 @@ export const makeSandboxDispatch = (options: {
               sourceSha,
               prompt: input.prompt,
               model: input.model ?? "",
-              deadline: new Date(Date.now() + runnerDeadlineMs),
+              deadline: new Date(Date.now() + runnerWindows.deadlineMs),
             })
             .pipe(
               // A start that fails or that a stop of the daemon ends leaves its cause for the
@@ -838,6 +838,9 @@ export const makeSandboxDispatch = (options: {
       )
     const observe = (run: AgentRunRecord) =>
       Effect.gen(function* () {
+        // A runner run's executor owns each of its ends and windows (runnerWindows); a run that no
+        // executor holds after a restart is settled by the startup sweep.
+        if (runnerPolicy(run.repository) !== undefined) return
         const lease = yield* store.read(run.runId)
         if (lease === null) return
         // Notify the caller of uncertain remote custody; reconciliation continues after delivery.
@@ -951,10 +954,13 @@ export const makeSandboxDispatch = (options: {
         yield* store.sessionCleanupError(lease.run_id)
       else yield* store.beginRelease(lease.run_id)
     }
+    // The heartbeat of a host sandbox's SSH transport; a runner lease has none, its job posts to
+    // the gateway.
     const heartbeat = Effect.gen(function* () {
       for (const lease of yield* store.active())
         if (
           lease.state === "ready" &&
+          runnerPolicy(lease.policy.alias) === undefined &&
           (lease.policy.publish === undefined || (yield* publications.read(lease.run_id)) === null)
         )
           yield* leases.heartbeat(lease.run_id).pipe(

@@ -520,7 +520,10 @@ export const makeSandboxLeaseService = (
             ) {
               yield* cleanupUnobserved(lease)
               yield* discover(lease)
-            } else yield* acquire(lease.run_id)
+            } else if (lease.policy.privateBootstrap?.mode !== "actions-native")
+              yield* acquire(lease.run_id)
+            // A runner lease (actions-native) is acquired by its run's executor alone, which waits
+            // for its job's gateway session within its own window and releases it at its end.
           }
           yield* cleanup(policy)
           yield* store.clearPolicyErrors(policy)

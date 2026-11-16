@@ -193,7 +193,9 @@ async function released(daemon: Daemon, jobEnded: boolean) {
     await daemon.runtime.runPromise(daemon.runtime.cleanup(daemon.leaseId()))
     return undefined
   })
-  if (!jobEnded) expect(daemon.github.cancels()).toEqual([actionsRunId])
+  // The release and the daemon's reconcile, which runs beside it, may each ask the cancel of the
+  // Actions run; each asks it of that run alone.
+  if (!jobEnded) expect(new Set(daemon.github.cancels())).toEqual(new Set([actionsRunId]))
   // The gateway's answer for the run's session: a revoked binding answers as an unknown lease.
   const bound = (lease: string) =>
     Effect.runPromise(

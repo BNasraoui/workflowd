@@ -83,15 +83,34 @@ export type RunnerHandle = {
 export const gatewayEndText = (ended: GatewayEnd) =>
   `ended: ${ended.reason} (${ended.calls} calls, ${ended.outputTokens} output tokens)`
 
-/** The pause between two reads of a run's events when the last read gave none. */
-const pollMs = 2000
 /**
- * The time with no post after which a run whose Actions run goes on is lost. The run client posts
- * an empty batch after 10 s with no post, so a live runner is never quiet this long.
+ * The windows of a runner run, in one place; no other rule of the daemon ends a runner run by time
+ * (the sandbox reconcile leaves a runner run to its executor while one holds it).
+ *
+ * - `sessionWaitMs`: from the run's start to its job's gateway session, which makes its lease
+ *   ready; then the run's events are read.
+ * - The box's ready line, the first line of the run, starts the first-token window: the ingress's
+ *   window for the first model output (its `verifyTimeoutMs`), counted from that line and not from
+ *   the dispatch, so the job's queue, image pull and source fetch do not count against it.
+ * - `lostAfterMs`: no post of the run for this long, whether its Actions run can be read or not,
+ *   ends it `runner_lost`. The run client posts at least each 10 s.
+ * - `deadlineMs`: from the run's start to its deadline, which ends it `runner_deadline`.
+ * - `leaseGraceMs`: the lease's own deadline is this long after the run's, so the executor's
+ *   deadline always comes first; the lease's deadline is the reconcile's end of a runner run that
+ *   no executor holds.
  */
-const lostAfterMs = 120000
-/** The pause between two reads of a run's Actions run while its posts come. */
-const jobEveryMs = 30000
+export const runnerWindows = {
+  sessionWaitMs: 30 * 60000,
+  lostAfterMs: 120000,
+  deadlineMs: 285 * 60000,
+  leaseGraceMs: 5 * 60000,
+  /** The pause between two reads of a run's events when the last read gave none. */
+  pollMs: 2000,
+  /** The pause between two reads of a run's Actions run while its posts come. */
+  jobEveryMs: 30000,
+} as const
+
+const { pollMs, lostAfterMs, jobEveryMs } = runnerWindows
 
 const gatewayUnavailable = (cause: { readonly _tag: string }) =>
   new RunnerRunFailed({ reason: "gateway_unavailable", message: `gateway: ${cause._tag}` })

@@ -308,7 +308,7 @@ test("a run client refuses a launch whose image is not its job's own, and runs n
  * that seals the run; the agent writes `forged` into Claude Code's stream. It ends completed with
  * the sealed final message, whatever the event lines say.
  */
-const sealedDispatch = async (forged: ReadonlyArray<unknown> = []) => {
+const sealedDispatch = async (forged: ReadonlyArray<unknown> = [], registeredAgoMs = 0) => {
   const directory = await mkdtemp(join(tmpdir(), "runner-job-"))
   try {
     await withRunnerDaemon(
@@ -326,7 +326,7 @@ const sealedDispatch = async (forged: ReadonlyArray<unknown> = []) => {
             Effect.flatMap(AgentRunIngress, (ingress) =>
               ingress.register(
                 { route: "claude", repository: "runner", prompt: "Write the proof file." },
-                new Date(),
+                new Date(Date.now() - registeredAgoMs),
               ),
             ),
           ),
@@ -358,6 +358,8 @@ const sealedDispatch = async (forged: ReadonlyArray<unknown> = []) => {
         expect(
           run("branch", ["git", "-C", remote.bare, "show", `${pushed}:runner-proof.txt`]),
         ).toBe("written by the runner run")
+        // The daemon's sandbox workers ran beside the run and failed at no runner lease.
+        expect(runtime.logs().filter((line) => /^(Error|Warn)/.test(line))).toEqual([])
         const messages = await runtime.runPromise(mailbox(receipt.runId))
         expect(messages.map((entry) => entry.id)).toEqual([`agent-run-end-${receipt.runId}`])
         expect(messages[0]?.message).toEqual({
@@ -399,5 +401,13 @@ test(
       },
       { type: "error", message: "forged \u202e error" },
     ]),
+  120000,
+)
+
+// The job of a slow queue: the run reaches its box's ready line more than seven minutes after its
+// dispatch, while the daemon's reconcile and heartbeat run. Only the runner's own windows end it.
+test(
+  "the daemon's sandbox workers end no runner run whose dispatch is older than seven minutes",
+  () => sealedDispatch([], 8 * 60000),
   120000,
 )
