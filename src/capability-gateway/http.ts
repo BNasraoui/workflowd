@@ -1,5 +1,5 @@
-import { createServer, type ServerResponse } from "node:http"
-import { Readable } from "node:stream"
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http"
+import { PassThrough, Readable } from "node:stream"
 import { pipeline } from "node:stream/promises"
 import {
   BlockList,
@@ -165,6 +165,25 @@ function peerRequests() {
 }
 
 /**
+ * The body of `incoming` as a web stream. A route that cancels the stream, as one does a body
+ * above its bound, ends only its own reading: the rest of the body is read and dropped, as for a
+ * body that no route reads, so the route's answer is sent and the connection carries the next
+ * request. `incoming` itself is not destroyed: in Bun that aborts the answer and the connection
+ * before the route's refusal is sent. An error of `incoming` ends the stream with that error.
+ */
+function requestBody(incoming: IncomingMessage) {
+  const body = new PassThrough()
+  incoming.on("error", (error) => body.destroy(error))
+  body.once("close", () => {
+    if (incoming.readableEnded) return
+    incoming.unpipe(body)
+    incoming.resume()
+  })
+  incoming.pipe(body)
+  return Readable.toWeb(body)
+}
+
+/**
  * The gateway's HTTP server, behind the gate of `serveCapabilityListener`. A request without the
  * front's headers for `service` (`frontPeer`) gets an empty 403 and reaches no route. A runner's
  * request above `maxPeerRequests` is refused as the gate refuses a connection: its connection
@@ -178,12 +197,14 @@ function capabilityHttpServer(handle: (request: Request) => Promise<Response>, s
   const responses = new Set<ServerResponse>()
   const peers = peerRequests()
   const server = createServer({ maxHeaderSize: maxHeaderBytes }, (incoming, outgoing) => {
+    // The request's connection, taken once: Bun clears `incoming.socket` when the request ends.
+    const socket = incoming.socket
     const peer = frontPeer(incoming.rawHeaders, service)
-    if (peer !== undefined && !peers.take(peer)) return void incoming.socket.destroy()
+    if (peer !== undefined && !peers.take(peer)) return void socket.destroy()
     responses.add(outgoing)
     const lifetime = new AbortController()
     const abort = () => lifetime.abort()
-    incoming.socket.once("close", abort)
+    socket.once("close", abort)
     const work = (async () => {
       try {
         if (peer === undefined) {
@@ -202,9 +223,7 @@ function capabilityHttpServer(handle: (request: Request) => Promise<Response>, s
         const request = new Request(`${capabilityOrigin}${incoming.url}`, {
           method: incoming.method ?? "GET",
           headers,
-          body: ["GET", "HEAD"].includes(incoming.method ?? "GET")
-            ? null
-            : Readable.toWeb(incoming),
+          body: ["GET", "HEAD"].includes(incoming.method ?? "GET") ? null : requestBody(incoming),
           duplex: "half",
           signal: lifetime.signal,
         })
@@ -216,7 +235,7 @@ function capabilityHttpServer(handle: (request: Request) => Promise<Response>, s
         // Sending a terminal chunk here would turn a revoked/partial response into success.
         outgoing.destroy()
       } finally {
-        incoming.socket.removeListener("close", abort)
+        socket.removeListener("close", abort)
       }
     })()
     pending.add(work)

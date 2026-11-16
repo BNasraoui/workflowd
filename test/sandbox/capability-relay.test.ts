@@ -484,8 +484,12 @@ test("the relay refuses a config whose channel or session key is missing or not 
 /**
  * Opens the run's session through the front with a token that may be renewed at once, and starts
  * the real relay in `root` with its grant, channel and session key; the relay renews `renewIn`
- * milliseconds after its start. Each successor outlives its predecessor, so the gateway grants a
- * renewal. Runs `body` once the relay is ready; then ends the relay and waits for its exit.
+ * milliseconds after its start. Each successor lives the gateway's own run token life: it outlives
+ * its predecessor, so the gateway grants a renewal, and the successor's own renewal is due 10 to
+ * 12 minutes later, after the test. A successor of 300 s would be due 0 to 120 s later, and in its
+ * first minute the gateway refuses its renewal, which would extend it by less than a minute: the
+ * refusal ends the relay and each of its connections. Runs `body` once the relay is ready; then
+ * ends the relay and waits for its exit.
  */
 async function withRelayOfRun(
   f: Fixture,
@@ -504,7 +508,7 @@ async function withRelayOfRun(
   await f.tokenSeconds(200)
   const { audience, channel } = await runner.audience()
   const grant = await runner.grant(await runner.session(proof(audience, "jti-relay")))
-  await f.tokenSeconds(300)
+  await f.tokenSeconds(null)
   const child = Bun.spawn(
     [
       fixtureExecutable("node"),
