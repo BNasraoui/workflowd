@@ -1819,6 +1819,42 @@ test(
   }),
 )
 
+for (const [name, checkedTarget, message] of [
+  [
+    "a target ref whose name starts with a dash",
+    { ref: "refs/heads/-x", expectedHead: null },
+    "Invalid target ref",
+  ],
+  [
+    "a target ref with a .. component",
+    { ref: "refs/heads/a/../b", expectedHead: null },
+    "Invalid target ref",
+  ],
+  [
+    "an expected head that is not a full commit id",
+    { ref: "refs/heads/agent-run/run", expectedHead: "abc1234" },
+    "Invalid expected head",
+  ],
+] as const)
+  test(
+    `the daemon's target is checked before a token or a git child: ${name} is a fault`,
+    withFixture(async (f) => {
+      const recorder = await recordingGit(f)
+      let minted = 0
+      const opts = options(f, {
+        binary: recorder.path,
+        token: Effect.sync(() => {
+          minted += 1
+          return Redacted.make(token)
+        }),
+      })
+      const error = failure(await publish(await sealedResult(f), opts, undefined, checkedTarget))
+      expect(error).toMatchObject({ _tag: "SealedResultFault", operation: "target", message })
+      expect(minted).toBe(0)
+      expect(await Bun.file(join(f.root, "git-calls.jsonl")).exists()).toBe(false)
+    }),
+  )
+
 /** Remotes that the daemon's runner refuses: each is not https://github.com/<path>. */
 const refusedRemotes = (f: Fixture) => [
   f.remote,
