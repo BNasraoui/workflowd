@@ -167,6 +167,29 @@ for (const [mode, start] of gateways) {
     )
   }, 30000)
 
+  test(`[${mode}] of four calls that start at once with a budget that holds three, three are served and one gets 429`, async () => {
+    await withBudget(
+      start,
+      { ...small, outputTokens: 900 },
+      async (f, gateway) => {
+        const token = await runToken(gateway)
+        const runner = client(gateway)
+        using upstream = heldUpstream(f, 3)
+        // The gateway counts and reserves each call under its run-lifetime permit, which one call
+        // holds at a time, so each call that starts at once sees the reservations of the others.
+        const answers = Array.from({ length: 4 }, () => runner.call(token, 300))
+        await upstream.holding
+        upstream.letGo(3)
+        const statuses = (await Promise.all(answers.map(answered))).map(({ status }) => status)
+        expect(statuses.sort()).toEqual([200, 200, 200, 429])
+        expect(f.upstreamRequests().length).toBe(3)
+        await eventually(async () => (await openReservations(f))[0]?.n === 0)
+        expect(await usage(f)).toMatchObject({ calls: 3, outputTokens: 3, spent: false })
+      },
+      { maxStreamsPerRun: 4 },
+    )
+  }, 30000)
+
   test(`[${mode}] a call that the budget cannot hold even with no call open gets the budget body and spends the run, while one that open calls hold back gets 429`, async () => {
     await withBudget(
       start,

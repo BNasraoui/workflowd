@@ -115,6 +115,26 @@ for (const [mode, start] of gateways) {
     }
   }, 30000)
 
+  test(`[${mode}] a body that names max_tokens twice is checked and sent with its last value, once`, async () => {
+    await withBudget(start, small, async (f, gateway) => {
+      const token = await runToken(gateway)
+      const runner = client(gateway)
+      const body = (first: number, last: number) =>
+        `{"model":"fixture-model","stream":true,"messages":[],"max_tokens":${first},"max_tokens":${last}}`
+      // 200 is within the cap of 400; 1000 is not.
+      expect((await answered(runner.provider(token, body(1000, 200)))).status).toBe(200)
+      expect(await answered(runner.provider(token, body(200, 1000)))).toEqual({
+        status: 403,
+        text: "",
+      })
+      expect(f.upstreamRequests().map((request) => request.body)).toEqual([
+        '{"model":"fixture-model","stream":true,"messages":[],"max_tokens":200}',
+      ])
+      await eventually(async () => (await openReservations(f))[0]?.n === 0)
+      expect(await usage(f)).toMatchObject({ calls: 1, outputTokens: 1 })
+    })
+  }, 30000)
+
   test(`[${mode}] a stream that ends with an error event of the provider, with no message_delta, is charged its max_tokens`, async () => {
     await withBudget(start, small, async (f, gateway) => {
       const stream =

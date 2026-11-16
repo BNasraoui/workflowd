@@ -4,7 +4,6 @@ import {
   fixture,
   gateways,
   processGateway,
-  streamEnd,
   usageStream,
   type Gateway,
 } from "./gateway-process"
@@ -12,8 +11,10 @@ import {
   answered,
   eventually,
   openReservations,
+  readToEnd,
   runToken,
   small,
+  spentBody,
   usage,
   withBudget,
 } from "./budget-fixture"
@@ -25,9 +26,9 @@ for (const [mode, start] of gateways) {
   test(`[${mode}] a client that goes away in the middle of a stream is charged the max_tokens of its call`, async () => {
     await withBudget(start, small, async (f, gateway) => {
       const token = await runToken(gateway)
-      // The upstream's answer ends after 3 s. A gateway that its HTTP server tells that the client
-      // went away releases the stream then; one that it does not tell (Bun 1.3.14) releases it at
-      // the end of the answer. Either way the stream's reservation is settled once.
+      // The upstream's answer ends after 3 s. A gateway whose HTTP server reports a client that
+      // left releases the stream then; a server that does not report a client that left has it
+      // released at the end of the answer. Either way the stream's reservation is settled once.
       f.setTrickle(60, 50)
       const answer = await client(gateway).call(token, 300)
       expect(answer.status).toBe(200)
@@ -49,7 +50,7 @@ for (const [mode, start] of gateways) {
         f.setStall(true)
         const answer = await client(gateway).call(token, 300)
         expect(answer.status).toBe(200)
-        expect(await streamEnd(answer.body!.getReader(), 5000)).toBe("ended")
+        await readToEnd(answer.body!.getReader())
         await eventually(async () => (await openReservations(f))[0]?.n === 0)
         expect(await usage(f)).toMatchObject({ calls: 1, outputTokens: 300 })
       },
@@ -112,6 +113,26 @@ for (const [mode, start] of gateways) {
         outputTokens: 300 * bad.length + 7,
         cacheReadInputTokens: maxReportedTokens,
       })
+    })
+  }, 30000)
+
+  test(`[${mode}] a provider that reports more output tokens than the call reserved is charged what it reports, and the next call sees that charge`, async () => {
+    await withBudget(start, small, async (f, gateway) => {
+      const token = await runToken(gateway)
+      const runner = client(gateway)
+      f.setAnswerText(usageStream({ output_tokens: 1 }, { output_tokens: 500 }))
+      // 300 reserved, 500 reported.
+      expect((await answered(runner.call(token, 300))).status).toBe(200)
+      await eventually(async () => (await openReservations(f))[0]?.n === 0)
+      expect(await usage(f)).toMatchObject({ calls: 1, outputTokens: 500, spent: false })
+      // 500 charged and 400 asked fits 1000; it reports 500 too.
+      expect((await answered(runner.call(token, 400))).status).toBe(200)
+      await eventually(async () => (await openReservations(f))[0]?.n === 0)
+      expect(await usage(f)).toMatchObject({ calls: 2, outputTokens: 1000, spent: false })
+      const refused = await runner.call(token, 1)
+      expect(refused.status).toBe(403)
+      expect(await refused.json()).toEqual(spentBody)
+      expect(await usage(f)).toMatchObject({ calls: 2, outputTokens: 1000, spent: true })
     })
   }, 30000)
 
