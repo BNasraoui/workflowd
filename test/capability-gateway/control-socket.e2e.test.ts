@@ -1,10 +1,12 @@
 import { expect, test } from "bun:test"
 import { chmod, mkdir, symlink, writeFile } from "node:fs/promises"
 import { join } from "node:path"
+import { maxControlFrame } from "../../src/capability-control/protocol"
 import { fixture } from "./gateway-process"
 import {
   framed,
   gatewayConfig,
+  halfOpenConnection,
   openConnection,
   rawFrame,
   socketOf,
@@ -20,21 +22,6 @@ test("the gateway refuses to start when its control directory grants more than t
     await chmod(join(f.root, "control"), 0o755)
     await expect(startGateway(f)).rejects.toThrow()
   } finally {
-    await f.close()
-  }
-})
-
-test("the gateway answers a caller that is not the daemon before it reads a byte, and ends the connection", async () => {
-  const f = await fixture()
-  const gateway = await startGateway(f, gatewayConfig(f, process.getuid!() + 1))
-  try {
-    // The caller sends nothing at all.
-    const caller = openConnection(socketOf(f))
-    const opened = await caller.opened
-    expect(JSON.parse(await caller.closed)).toEqual({ ok: false, error: "caller" })
-    expect(performance.now() - opened).toBeLessThan(1500)
-  } finally {
-    await gateway.stop()
     await f.close()
   }
 })
@@ -161,6 +148,82 @@ test("the gateway refuses to start on a control directory or socket path that is
       await first.stop()
     }
   } finally {
+    await f.close()
+  }
+})
+
+const reconcileFrame = framed(JSON.stringify({ verb: "reconcile", body: { live: [] } }))
+
+test("the gateway answers a refused caller that sends nothing and ends its side, then reads the caller's request until the caller ends", async () => {
+  const f = await fixture()
+  const gateway = await startGateway(f, gatewayConfig(f, process.getuid!() + 1))
+  try {
+    const caller = halfOpenConnection(socketOf(f))
+    // The caller has sent nothing when the answer and the end of the gateway's side come.
+    expect(JSON.parse(await caller.answer)).toEqual({ ok: false, error: "caller" })
+    caller.connection.end(reconcileFrame)
+    await caller.closed
+    expect(caller.errors).toEqual([])
+  } finally {
+    await gateway.stop()
+    await f.close()
+  }
+})
+
+test("a refused caller's request of more than one chunk meets no write error, and gets the caller answer", async () => {
+  const f = await fixture()
+  const gateway = await startGateway(f, gatewayConfig(f, process.getuid!() + 1))
+  try {
+    const request = framed(Buffer.alloc(maxControlFrame - 1, "x"))
+    const caller = halfOpenConnection(socketOf(f))
+    await caller.opened
+    // One part of the request before the answer, and the rest after it.
+    caller.connection.write(request.subarray(0, 4096))
+    expect(JSON.parse(await caller.answer)).toEqual({ ok: false, error: "caller" })
+    caller.connection.end(request.subarray(4096))
+    await caller.closed
+    expect(caller.errors).toEqual([])
+  } finally {
+    await gateway.stop()
+    await f.close()
+  }
+})
+
+test("the gateway closes a refused caller that sends more than one frame's bytes", async () => {
+  const f = await fixture()
+  const gateway = await startGateway(f, gatewayConfig(f, process.getuid!() + 1))
+  try {
+    const caller = halfOpenConnection(socketOf(f))
+    expect(JSON.parse(await caller.answer)).toEqual({ ok: false, error: "caller" })
+    // Twice the bound, more than the socket's buffers hold: the write completes only if the
+    // gateway reads it all, and fails if the gateway closes the connection past the bound.
+    caller.connection.end(Buffer.alloc(2 * maxControlFrame))
+    await caller.closed
+    expect(["EPIPE", "ECONNRESET"]).toContain(String(caller.errors[0]))
+  } finally {
+    await gateway.stop()
+    await f.close()
+  }
+})
+
+test("the gateway holds 16 refused connections at once; the next one is closed with no answer until one ends", async () => {
+  const f = await fixture()
+  const gateway = await startGateway(f, gatewayConfig(f, process.getuid!() + 1))
+  try {
+    const held = Array.from({ length: 16 }, () => halfOpenConnection(socketOf(f)))
+    for (const caller of held)
+      expect(JSON.parse(await caller.answer)).toEqual({ ok: false, error: "caller" })
+    const over = halfOpenConnection(socketOf(f))
+    expect(await over.answer).toBe("closed")
+    // Once one of the 16 ends, a new caller is answered: the gateway frees the place when it
+    // reads the end, which the caller does not see, so a caller tries until it is answered.
+    held[0]!.connection.end()
+    let next = "closed"
+    while (next === "closed") next = await halfOpenConnection(socketOf(f)).answer
+    expect(JSON.parse(next)).toEqual({ ok: false, error: "caller" })
+    for (const caller of held) caller.connection.end()
+  } finally {
+    await gateway.stop()
     await f.close()
   }
 })

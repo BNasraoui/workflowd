@@ -64,3 +64,26 @@ export const framed = (body: string | Buffer, length?: number) => {
   header.writeUInt32BE(length ?? bytes.length)
   return Buffer.concat([header, bytes])
 }
+
+/**
+ * A connection to the control socket that keeps its own side open after the gateway ends its
+ * side. `answer` resolves to the answer when the gateway ends its side, or "closed" when the
+ * connection closes first; `closed` resolves when it closes; `errors` holds each error's code.
+ */
+export function halfOpenConnection(socket: string) {
+  const connection = createConnection({ path: socket, allowHalfOpen: true })
+  const errors: string[] = []
+  let answer = Buffer.alloc(0)
+  connection.on("data", (chunk) => {
+    answer = Buffer.concat([answer, Buffer.from(chunk)])
+  })
+  connection.on("error", (error: NodeJS.ErrnoException) => errors.push(error.code ?? "error"))
+  const text = () => (answer.length >= 4 ? answer.subarray(4).toString("utf8") : "closed")
+  const closed = new Promise<void>((done) => connection.on("close", () => done()))
+  const ended = new Promise<string>((done) => {
+    connection.on("end", () => done(text()))
+    connection.on("close", () => done(text()))
+  })
+  const opened = new Promise<void>((done) => connection.on("connect", () => done()))
+  return { connection, opened, answer: ended, closed, errors }
+}

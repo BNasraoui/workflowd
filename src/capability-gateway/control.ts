@@ -15,10 +15,8 @@ import { CapabilityRefused } from "./store"
 
 /** The daemon's connections that the gateway holds open at once; another one gets `unavailable`. */
 export const maxControlConnections = 16
-/** A connection ends this long after the gateway accepted it, whatever it sent. */
+/** A connection, refused or not, ends this long after the gateway accepted it, whatever it sent. */
 export const controlConnectionMs = 10000
-/** A refused connection ends at most this long after its answer. */
-const refusedGraceMs = 1000
 
 /** A failure of the gateway's store or a refusal; a refusal is a CapabilityRefused. */
 export interface ControlFailure {
@@ -122,16 +120,19 @@ export const serveControl = (options: {
           refused.delete(socket)
         })
         socket.on("error", () => socket.destroy())
-        // A refused caller gets its answer at once; the connection ends once the caller's request
-        // has come and been dropped, so the caller's write never meets a closed socket and its
-        // answer is not lost to a reset. It ends a second later at most.
+        // A refused caller gets its answer, and the end of the gateway's side, as the gateway
+        // accepts the connection. The gateway then reads and drops the caller's bytes, up to one
+        // frame, until the caller ends its side: the caller's request never meets a closed socket.
+        // At most `maxControlConnections` refused connections are open at once.
         const refuse = (error: ControlError) => {
           if (refused.size >= maxControlConnections) return socket.destroy()
           refused.add(socket)
-          socket.once("data", () => socket.end())
-          socket.on("data", () => undefined)
-          socket.write(controlFrame({ ok: false, error }))
-          setTimeout(() => socket.destroy(), refusedGraceMs).unref()
+          let dropped = 0
+          socket.on("data", (chunk) => {
+            dropped += chunk.length
+            if (dropped > maxControlFrame + 4) socket.destroy()
+          })
+          socket.end(controlFrame({ ok: false, error }))
         }
         if (peerCredentials(socket)?.uid !== options.daemon.uid) return refuse("caller")
         if (sockets.size >= maxControlConnections) return refuse("unavailable")
