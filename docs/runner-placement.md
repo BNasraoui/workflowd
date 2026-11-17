@@ -12,7 +12,7 @@ The procedure has three parts:
 1. The owner's steps. The owner does them in the tailnet admin console, in the GitHub settings
    and on the host.
 2. The operator's steps. An operator agent does them on the host. Do them after the owner's
-   steps 1 to 5.
+   steps 1 to 6: they use the commit, the workflow SHA and the image digests of owner step 6.
 3. The start of the trial run.
 
 ## Names that the procedure uses
@@ -85,13 +85,14 @@ Check: the credential shows the issuer, the tag `tag:agent-runner` and the subje
 | --- | --- |
 | `TS_AGENT_CLIENT_ID` | the client ID of step 3 |
 | `TS_AGENT_AUDIENCE` | the audience of step 3 |
-| `SANDBOX_AGENT_IMAGE` | `ghcr.io/bnasraoui/workflowd-agent-base@sha256:<digest>`, the published image of the commit of step 6 |
 | `SANDBOX_GATEWAY_URL` | `https://<service-name>.<tailnet-name>.ts.net` |
+| `SANDBOX_AGENT_IMAGE` | do not set it yet; set it in step 6, with the digest of the image of the commit of step 6 |
 | `SANDBOX_BOOTSTRAP_MODE` | do not set it yet; set it in step 9 |
 
-Check: the **Variables** tab shows the four variables. The step header of a job shows each value
-that a step gets in its environment. The gateway's MagicDNS name is then visible in the public
-log of each private-mode run.
+Check: the **Variables** tab shows the three variables `TS_AGENT_CLIENT_ID`,
+`TS_AGENT_AUDIENCE` and `SANDBOX_GATEWAY_URL`. The step header of a job shows each value that a
+step gets in its environment. The gateway's MagicDNS name is then visible in the public log of
+each private-mode run.
 
 ### Step 5. Give the lease App the right to cancel runs (GitHub App settings)
 
@@ -116,11 +117,21 @@ and write** for `workflowd`.
    GitHub runs the caller workflow of the lease ref at this commit. The lease App has no
    **Workflows** permission, so the commit must be the tip of a branch when the daemon makes the
    lease ref, or a commit in the history of `main`.
-3. Wait for the image job of `main` to publish the agent image of that commit. Put its digest in
-   `SANDBOX_AGENT_IMAGE` (step 4).
+3. Wait for the image jobs of `main` to publish the images of that commit:
+   - the agent image: the job **Publish agent image to GHCR** of the workflow **Publish agent
+     base image** pushes the tag `<workflow-sha>`. Its step **Publish the tested image** writes
+     the digest in the line `<workflow-sha>: digest: sha256:<64 hex> size: <bytes>`;
+   - the gateway image: the job **Publish gateway image to GHCR by digest** of the workflow
+     **CI** writes the line `Published: ghcr.io/bnasraoui/workflowd-gateway@sha256:<64 hex>`.
+
+   Give both digests and `<workflow-sha>` to the operator.
+4. Set the repository variable `SANDBOX_AGENT_IMAGE` (step 4) to
+   `ghcr.io/bnasraoui/workflowd-agent-base@sha256:<agent-digest>`, with the agent image's digest.
 
 Check: `.github/workflows/agent-sandbox-caller.yml` at `<workflow-sha>` gives `bootstrap-mode`,
-`gateway-url` and `agent-image` to `agent-sandbox.yml`.
+`gateway-url` and `agent-image` to `agent-sandbox.yml`. The **Variables** tab now shows the four
+variables of step 4 that are set: `TS_AGENT_CLIENT_ID`, `TS_AGENT_AUDIENCE`,
+`SANDBOX_GATEWAY_URL` and `SANDBOX_AGENT_IMAGE`.
 
 ### Step 7. Install and start the gateway (host, as root)
 
@@ -157,11 +168,14 @@ configuration. Root runs only the Docker client of the unit. The container write
 
    Mode 0711 lets the daemon and tailscaled go through the directory to their sockets. They
    cannot list it.
-3. Install the provider-access template of operator step 1:
+3. Install the two noscope providers of operator step 1. The gateway mints each run's token
+   through `run-capability`, and takes its provider login through `provider-access`:
 
    ```sh
-   sudo install -o 10001 -g 10001 -m 0600 <staging-directory>/provider-access.toml \
-     /var/lib/workflowd-gateway/config/noscope/providers/provider-access.toml
+   for name in run-capability provider-access; do
+     sudo install -o 10001 -g 10001 -m 0600 <staging-directory>/$name.toml \
+       /var/lib/workflowd-gateway/config/noscope/providers/$name.toml
+   done
    ```
 
 4. Install the environment file of operator step 2:
@@ -198,8 +212,10 @@ Check:
   `<daemon-pid>` is the value that `systemctl --user show -p MainPID workflowd.service` writes
   as the daemon's user.
 - `sudo stat -c '%u %g %a %n' /var/lib/workflowd-gateway
+  /var/lib/workflowd-gateway/config/noscope/providers/run-capability.toml
   /var/lib/workflowd-gateway/config/noscope/providers/provider-access.toml
-  /etc/workflowd-gateway/gateway.env` shows `10001 10001 711`, `10001 10001 600` and `0 0 600`.
+  /etc/workflowd-gateway/gateway.env` shows `10001 10001 711`, `10001 10001 600`,
+  `10001 10001 600` and `0 0 600`.
 - `systemctl is-active workflowd-gateway.service` writes `active`.
 - `sudo docker top workflowd-gateway -eo uid,gid,args` shows uid 10001 and gid 10001 on each
   line.
@@ -208,21 +224,28 @@ Check:
 
 Do this step after operator step 3. The gateway keeps its own login. Only the owner gives it.
 
-1. On the host, run the gateway's command `import-login <provider>` in the gateway's container:
+1. On the host, run the gateway's command `import-login claude` in the gateway's container.
+   `claude` is the one provider of custody's table (`src/capability-gateway/custody.ts`) and
+   the value of `credentialRole`; the command refuses any other name:
 
    ```sh
    sudo docker exec --interactive workflowd-gateway \
-     /bin/bun /app/src/capability-gateway-server.ts import-login <provider>
+     /bin/bun /app/src/capability-gateway-server.ts import-login claude
    ```
 
-   The Docker client needs root. The command runs as the gateway's user, uid 10001, never as
-   root. Do not add `--user`. Give the login on standard input only.
+   The command reads `WORKFLOWD_CAPABILITY_GATEWAY` from its environment and writes the login
+   in its `login.directory`. `docker exec` gives it the environment of the gateway's
+   container: the unit's `--env WORKFLOWD_CAPABILITY_GATEWAY` and the image's `PATH` and
+   `HOME`. Run outside the container, with no such variable, it refuses. The Docker client
+   needs root. The command runs as the image's user, uid 10001, never as root. Do not add
+   `--user` or `--env`. Give the login on standard input only: the JSON of a Claude login, with
+   `claudeAiOauth` and the scope `user:inference`.
 2. Do not put the login in an argument, in an environment variable or in a file that another
    user can read.
 3. Restart the gateway: `sudo systemctl restart workflowd-gateway.service`.
 
-Check: the command writes `imported the <provider> login, owned by uid 10001` or
-`replaced the <provider> login, owned by uid 10001`. It writes no value of the login.
+Check: the command writes `imported the claude login, owned by uid 10001` or
+`replaced the claude login, owned by uid 10001`. It writes no value of the login.
 
 ### Step 9. Select private mode (GitHub repository settings)
 
@@ -247,26 +270,39 @@ The operator writes two files in a staging directory of its own, `<staging-direc
 owner installs them in owner step 7. Run the commands from the checkout of the commit of owner
 step 6.
 
-### Operator step 1. Write the gateway's provider-access template
+### Operator step 1. Write the gateway's two noscope providers
 
-1. Make the staging directory and copy the template into it:
+The gateway runs two noscope providers. `run-capability` mints each run's token, and
+`provider-access` gives the gateway its provider login. Both templates of `deploy/noscope/`
+name the paths of the gateway image: its Bun at `/bin/bun` and its source at `/app`.
+
+1. Make the staging directory and copy both templates into it:
 
    ```sh
    install -d -m 0700 <staging-directory>
+   install -m 0600 deploy/noscope/run-capability.toml <staging-directory>/run-capability.toml
    install -m 0600 deploy/noscope/provider-access.toml <staging-directory>/provider-access.toml
    ```
 
-2. Replace `LOGIN_DIRECTORY` with the value of `login.directory`,
-   `/var/lib/workflowd-gateway/login`:
+2. In `provider-access.toml`, replace `LOGIN_DIRECTORY` with the value of `login.directory`,
+   `/var/lib/workflowd-gateway/login`. `run-capability.toml` has no placeholder.
 
    ```sh
    sed -i '/^mint = /s|LOGIN_DIRECTORY|/var/lib/workflowd-gateway/login|' \
      <staging-directory>/provider-access.toml
    ```
 
-Check: `grep -c '^mint = .* access /var/lib/workflowd-gateway/login ' <staging-directory>/provider-access.toml`
-writes `1`. The file holds no secret. After owner step 7, the owner's `stat` shows the gateway's
-uid 10001 and mode 0600 (owner step 7, check).
+Check: these two commands each write `1`:
+
+```sh
+grep -c '^mint = "/bin/bun /app/src/capability-gateway/noscope-provider.ts run {ttl}"$' \
+  <staging-directory>/run-capability.toml
+grep -c '^mint = "/bin/bun /app/src/capability-gateway/custody-process.ts access /var/lib/workflowd-gateway/login {role} {ttl}"$' \
+  <staging-directory>/provider-access.toml
+```
+
+The files hold no secret. After owner step 7, the owner's `stat` shows the gateway's uid 10001
+and mode 0600 for each (owner step 7, check).
 
 ### Operator step 2. Write the gateway's environment file
 
@@ -292,7 +328,12 @@ uid 10001 and mode 0600 (owner step 7, check).
      `id -g <daemon-user>`).
    - `login.directory`: keep `/var/lib/workflowd-gateway/login`. The gateway's uid owns it, mode
      0700; owner step 8 makes it.
-   - `providerId`, `credentialRole`: the provider id of the model route and the noscope role.
+   - `providerId`: keep `anthropic`, the id of the gateway's model route in each runner
+     request path (`/capabilities/v1/providers/anthropic/...`). The gateway gives it to the
+     runner, so any id of lower-case letters, digits and hyphens works.
+   - `credentialRole`: keep `claude`, the one provider of custody's table
+     (`src/capability-gateway/custody.ts`). The gateway passes it to `provider-access` as
+     `{role}`, and refuses to start with any other value.
    - `maxStreams`, `maxStreamsPerRun`: for example 64 and 4.
    - `gitRead`: `true`. The runner reads the source through the gateway's Git route.
    - `listen.socket`: keep `/var/lib/workflowd-gateway/front/gateway.sock`, the path of the
@@ -340,9 +381,11 @@ After owner step 8, the journal of the restart has no login error.
    `tailscale serve --service=svc:<service-name> --https=443 unix:/var/lib/workflowd-gateway/front/gateway.sock`.
 
 Check: `tailscale serve status` shows `svc:<service-name>` on port 443 with the target
-`unix:/var/lib/workflowd-gateway/front/gateway.sock`. From the host, a request to
-`https://<service-name>.<tailnet-name>.ts.net/` gets an empty 403: the gateway accepts only a
-tagged node.
+`unix:/var/lib/workflowd-gateway/front/gateway.sock`, and the Service page of the admin console
+shows the host as a host of the Service. Do not check the Service with a request from the host:
+the host is itself a tagged node that serves the Service, so its answer shows neither the path
+of a runner nor the gateway's rule for it. The probe line `service-body-16mib` of the trial run
+(Part 3) checks the path from a runner.
 
 ### Operator step 5. Configure the daemon
 
@@ -361,9 +404,20 @@ Edit the daemon's environment file. Keep a copy of the old file.
    `{"socket": "/var/lib/workflowd-gateway/control/control.sock"}`, the value of `controlSocket`.
 4. Do not set `WORKFLOWD_RUNNER_MAX_RUNS` for the trial. The default is 4.
 
-Check: the daemon loads the configuration at its next start with no error. A `runner`
-placement with no `actions-native` policy, or with no `WORKFLOWD_CAPABILITY_CONTROL`, stops the
-start with an error that names it.
+Check: the daemon's loader accepts the file; this command, from the checkout, writes `valid`:
+
+```sh
+(set -a; . <daemon-environment-file>; bun -e 'import { loadConfig } from "./src/config.ts"; await loadConfig(process.env); console.log("valid")')
+```
+
+A fault stops the command, and the daemon's next start, with one of these errors:
+
+- a `runner` placement whose alias has no `actions-native` policy: `A runner placement needs an
+  actions-native sandbox policy for its alias`;
+- an `actions-native` policy with no `WORKFLOWD_CAPABILITY_CONTROL`: `Native Actions requires an
+  explicit capability gateway configuration`. The error does not name the variable;
+- `WORKFLOWD_CAPABILITY_GATEWAY` in the daemon's file: `WORKFLOWD_CAPABILITY_GATEWAY belongs to
+  the gateway process`.
 
 ### Operator step 6. Restart the daemon
 
@@ -389,7 +443,10 @@ A good result:
    - `workflowd.probe service-body-16mib: passed status=403 sent=16777216`, or `headers-only`.
      `headers-only` shows that the Service forwards the request, but not that it takes the whole
      body. `refused status=413` shows that the Service refuses the body: the result must then go
-     in parts.
+     in parts. `failed error=ENOTFOUND` shows that the runner's own tailscaled gives no address
+     for the Service's name: the runner joins with `--accept-dns=false` and asks tailscaled's
+     resolver for the name (`deploy/sandbox/gateway-address.mjs`), so check the grant of owner
+     step 2 and the Service of owner step 1.
    - `workflowd.probe box-flags: passed`
    - `workflowd.probe box-network: passed dropped=4`
 3. The steps **Prepare private first contact** and **Hold the lease** end with outcome `ok`. No
