@@ -22,7 +22,7 @@ boot() {
     --addr unix:///run/workflowd-engine/engine.sock --group 65532 >/dev/null
   addresses=$(ip -o -4 addr show | awk '$2 != "lo" {split($4, a, "/"); print a[1]}')
   mapfile -t runner_addresses <<< "$addresses"
-  # Nested CNI traffic to the engine itself never reaches host DOCKER-USER.
+  # Nested CNI traffic to the engine itself never reaches the host FORWARD rules.
   docker exec -i workflowd-sandbox-engine sh -s -- engine "$subnet" "${runner_addresses[@]}" < "$directory/network.sh"
   docker run -d --name workflowd-sandbox-tooling --network workflowd-sandbox \
     --memory=2g --memory-swap=2g --group-add 65532 \
