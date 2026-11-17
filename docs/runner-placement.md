@@ -217,8 +217,8 @@ Check:
   /etc/workflowd-gateway/gateway.env` shows `10001 10001 711`, `10001 10001 600`,
   `10001 10001 600` and `0 0 600`.
 - `systemctl is-active workflowd-gateway.service` writes `active`.
-- `sudo docker top workflowd-gateway -eo uid,gid,args` shows uid 10001 and gid 10001 on each
-  line.
+- `sudo docker top workflowd-gateway -eo pid,uid,gid,args` shows uid 10001 and gid 10001 on
+  each line. Docker needs the `pid` column.
 
 ### Step 8. Import the gateway's provider login (host, as root)
 

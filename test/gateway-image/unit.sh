@@ -135,10 +135,10 @@ for _ in $(seq 1 120); do
 done
 grep -qxF "$listening" "$root/stdout" || { head -c 2000 "$root/stderr" >&2; fail "no listening line"; }
 
-# Each process of the container runs as uid 10001 and gid 10001.
-docker top workflowd-gateway -eo uid,gid,args | tail -n +2 > "$root/top"
+# Each process of the container runs as uid 10001 and gid 10001. docker top needs the pid column.
+docker top workflowd-gateway -eo pid,uid,gid,args | tail -n +2 > "$root/top"
 [[ -s $root/top ]] || fail "the container has no process"
-if awk '$1 != 10001 || $2 != 10001 { bad = 1 } END { exit !bad }' "$root/top"; then
+if awk '$2 != 10001 || $3 != 10001 { bad = 1 } END { exit !bad }' "$root/top"; then
   cat "$root/top" >&2
   fail "a process of the container runs as another user"
 fi
