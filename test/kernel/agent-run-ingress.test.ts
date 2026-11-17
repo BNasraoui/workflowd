@@ -1181,20 +1181,28 @@ describe("runner placement", () => {
   })
 
   test("a failed visibility read refuses the dispatch and never counts as public", async () => {
-    for (const repository of [
-      () => new Response(null, { status: 500 }),
-      () => new Response(null, { status: 404 }),
-      visible({ id: 999 }),
-      visible({ full_name: "fixture/other" }),
-      () => Response.json({ id: runnerPolicy.repositoryId }),
-    ]) {
+    for (const [repository, cause] of [
+      [() => new Response(null, { status: 500 }), '"httpStatus":500'],
+      [() => new Response(null, { status: 404 }), '"httpStatus":404'],
+      [visible({ id: 999 }), "Sandbox repository identity mismatch"],
+      [visible({ full_name: "fixture/other" }), "Sandbox repository identity mismatch"],
+      [() => Response.json({ id: runnerPolicy.repositoryId }), "Schema validation failed"],
+    ] as const) {
       const { refusal, revoked } = await dispatchRunner(repository)
       expect(refusal.reason).toBe("repository_visibility_unknown")
+      // The refusal names the cause of the failed read, never the token of the read.
+      expect(refusal.detail).toStartWith(
+        "The visibility of the repository could not be read; a runner run needs a public repository: ",
+      )
+      expect(refusal.detail).toContain(cause)
+      expect(refusal.detail).not.toContain("fixture-token")
       // The token is revoked also when the read fails.
       expect(revoked).toHaveLength(1)
     }
-    // No visibility reader at all is a failed read too.
-    expect((await dispatchRunner()).refusal.reason).toBe("repository_visibility_unknown")
+    // No visibility reader at all is a failed read too, and the refusal says so.
+    const unread = (await dispatchRunner()).refusal
+    expect(unread.reason).toBe("repository_visibility_unknown")
+    expect(unread.detail).toContain("no reader of repository visibility is configured")
   })
 
   test("a host placement dispatches as before", async () => {
