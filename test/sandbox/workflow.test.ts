@@ -18,6 +18,7 @@ const Workflow = Schema.Struct({
     Schema.Struct({
       uses: Schema.optionalKey(Schema.String),
       if: Schema.optionalKey(Schema.String),
+      with: Schema.optionalKey(Schema.Record(Schema.String, Schema.Json)),
       secrets: Schema.optionalKey(Schema.Json),
       permissions: Schema.optionalKey(Schema.Json),
       "runs-on": Schema.optionalKey(Schema.String),
@@ -65,6 +66,17 @@ test("only App lease pushes can invoke the repository-bound reusable workflow", 
   expect(caller.jobs.sandbox?.if).toContain("github.actor_id == '306741873'")
   expect(caller.jobs.sandbox?.if).toContain("github.repository_id == '1306107007'")
   expect(caller.jobs.sandbox?.secrets).toBeUndefined()
+})
+
+test("the caller selects the bootstrap mode, the gateway URL and the image from the repository's variables, legacy-artifact when no mode is set", async () => {
+  const caller = Schema.decodeUnknownSync(Workflow)(
+    Bun.YAML.parse(await Bun.file(`${root}/.github/workflows/agent-sandbox-caller.yml`).text()),
+  )
+  expect(caller.jobs.sandbox?.with).toMatchObject({
+    "bootstrap-mode": "${{ vars.SANDBOX_BOOTSTRAP_MODE || 'legacy-artifact' }}",
+    "gateway-url": "${{ vars.SANDBOX_GATEWAY_URL }}",
+    "agent-image": "${{ vars.SANDBOX_AGENT_IMAGE }}",
+  })
 })
 
 test("runner workflow grants only read/OIDC and pins third-party actions", async () => {
@@ -300,6 +312,7 @@ test("a private runner gets the gateway URL, waits at most five minutes for its 
   const step = (name: string) => workflow.jobs.runner.steps.find((entry) => entry.name === name)
   expect(step("Prepare private first contact")?.env).toEqual({
     SANDBOX_GATEWAY_URL: "${{ inputs.gateway-url }}",
+    SANDBOX_AGENT_IMAGE: "${{ inputs.agent-image }}",
   })
   expect(step("Prepare private first contact")?.["timeout-minutes"]).toBe(5)
   expect(step("Join the restricted tailnet")?.env?.SANDBOX_BOOTSTRAP_MODE).toBe(

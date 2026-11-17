@@ -13,8 +13,11 @@ export function portOf(server: { address(): string | AddressInfo | null }) {
   return address.port
 }
 
-/** A self-signed certificate for 127.0.0.1 under `root`: the TLS of the gateway's front. */
-export async function loopbackCertificate(root: string) {
+/**
+ * A self-signed certificate for 127.0.0.1 under `root`: the TLS of the gateway's front. With
+ * `name`, it holds that DNS name alone, as the certificate of a Service's MagicDNS name does.
+ */
+export async function loopbackCertificate(root: string, name?: string) {
   const key = join(root, "tls.key")
   const cert = join(root, "tls.pem")
   const child = Bun.spawn(
@@ -36,7 +39,7 @@ export async function loopbackCertificate(root: string) {
       "-subj",
       "/CN=127.0.0.1",
       "-addext",
-      "subjectAltName=IP:127.0.0.1",
+      `subjectAltName=${name === undefined ? "IP:127.0.0.1" : `DNS:${name}`}`,
     ],
     { stdin: "ignore", stdout: "ignore", stderr: "pipe" },
   )

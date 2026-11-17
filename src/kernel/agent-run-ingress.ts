@@ -4,6 +4,8 @@ import { sandboxDiagnostic } from "../sandbox/diagnostics"
 import { canonicalJson } from "./session-store-support"
 import type { SandboxPolicy } from "../sandbox/config"
 import { SandboxDispatch } from "../sandbox/dispatch"
+import { RepositoryVisibility } from "../sandbox/github"
+import type { Placement } from "./executor"
 import { ExecutionDiscovery } from "../execution-capabilities"
 import {
   resolveExecutionSelection,
@@ -74,6 +76,8 @@ export type AgentRunRefusalReason =
   | "repository_busy"
   | "invalid_base_ref"
   | "worktree_failed"
+  | "repository_visibility_unknown"
+  | "runner_requires_public_repository"
   | SelectionRefusal
 
 /**
@@ -130,6 +134,8 @@ export const AgentRunProvider = Context.Service<AgentRunProviderPort>(
 
 export type AgentRunIngressOptions = {
   readonly sandboxRepositories?: ReadonlyArray<SandboxPolicy>
+  /** A repository's placement; an alias that is absent is `host`. */
+  readonly placements?: Readonly<Record<string, Placement>> | undefined
   readonly routes: ReadonlyArray<AgentRunRoute>
   /** Codex CLI routes, resolved after `routes` and refused ambiguous when a
    * name or bare model id is served by both providers. */
@@ -277,6 +283,48 @@ const make = (options: AgentRunIngressOptions) =>
       options.sandboxRepositories?.some((policy) => policy.alias === repository) ?? false
     const sandboxFailure = (cause: unknown) =>
       refuse("executor_unavailable", sandboxDiagnostic("ingress.custody", cause).message)
+    const visibility = Option.getOrUndefined(yield* Effect.serviceOption(RepositoryVisibility))
+    // A runner run needs a public repository; a read that fails never counts as public.
+    const checkRunnerRepository = (alias: string) =>
+      Effect.gen(function* () {
+        const policy = options.sandboxRepositories?.find((candidate) => candidate.alias === alias)
+        const read =
+          policy === undefined || visibility === undefined
+            ? undefined
+            : yield* visibility.read(policy).pipe(Effect.option)
+        if (read === undefined || Option.isNone(read))
+          return yield* refuse(
+            "repository_visibility_unknown",
+            "The visibility of the repository could not be read; a runner run needs a public repository",
+          )
+        if (read.value !== "public")
+          return yield* refuse(
+            "runner_requires_public_repository",
+            "A runner run needs a public repository",
+          )
+      })
+    /**
+     * The selection of a runner run: Claude with an explicit model, on the host `github-actions`
+     * with the executor `claude:actions`. The run needs no login on this host, so no readiness of
+     * a local client is read. A Claude selection comes only from an alias, which refuses any
+     * thinking request before this.
+     */
+    const runnerSelection = (selection: ResolvedSelection) =>
+      Effect.gen(function* () {
+        if (selection.executorKind !== "claude")
+          return yield* refuse("executor_unavailable", "A runner runs Claude only")
+        if (selection.model === null)
+          return yield* refuse(
+            "executor_unavailable",
+            "A runner run needs an explicit configured model",
+          )
+        return {
+          ...selection,
+          host: "github-actions",
+          executor: "claude:actions",
+          provider: "anthropic",
+        } satisfies ResolvedSelection
+      })
     const sessions = yield* KernelSessionStore
     const providerOption = yield* Effect.serviceOption(AgentRunProvider)
     const provider = Option.getOrUndefined(providerOption)
@@ -821,6 +869,11 @@ const make = (options: AgentRunIngressOptions) =>
             `repository "${submission.repository}" is not in the dispatch allow-list`,
           )
         }
+        const runner = options.placements?.[repository.name] === "runner"
+        if (runner) {
+          yield* checkRunnerRepository(repository.name)
+          if (keyed?.resolvedSelection == null) selection = yield* runnerSelection(selection)
+        }
         if (dispatch.sandboxRepositories?.some((policy) => policy.alias === repository.name)) {
           if (sandbox === undefined)
             return yield* refuse(
@@ -828,8 +881,9 @@ const make = (options: AgentRunIngressOptions) =>
               "The required repository sandbox is unavailable",
             )
         }
-        if (keyed !== null && keyed.state !== "accepted") {
-          // Already-launched duplicates need no fresh launch preflight.
+        if ((keyed !== null && keyed.state !== "accepted") || runner) {
+          // Already-launched duplicates need no fresh launch preflight, nor does a runner run,
+          // which runs no client on this host.
         } else if (resolution.provider === "opencode" && submission.model === undefined) {
           yield* preflightRoute(resolution.route)
         } else if (resolution.provider !== "opencode") {
@@ -1013,6 +1067,10 @@ const make = (options: AgentRunIngressOptions) =>
         if (run.state === "completed" || run.state === "cancelled" || run.state === "failed") {
           return yield* refuse("run_conflict", `run ${runId} is already ${run.state}`)
         }
+        // A runner run's end releases its lease, so one that ended operator_required has nothing
+        // left to stop. Any other runner run is stopped through the sandbox dispatch below.
+        if (run.resolvedSelection?.host === "github-actions" && run.state === "operator_required")
+          return yield* refuse("run_conflict", `run ${runId} is already ${run.state}`)
         if (
           sandbox !== undefined &&
           (yield* sandbox.owns(runId).pipe(Effect.mapError(sandboxFailure)))

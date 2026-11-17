@@ -139,6 +139,10 @@ interface GatewayKeys {
   readonly maxStreamsPerRun?: number
   readonly streamIdleMs?: number
   readonly staleSweepMs?: number
+  /** The Git read route of a run's own repository, which a runner run clones through. */
+  readonly gitRead?: boolean
+  /** The gateway's provider id; `anthropic` unless named. */
+  readonly providerId?: string
 }
 
 /**
@@ -216,6 +220,8 @@ process.stdout.write(JSON.stringify({token:"fixture-access",token_id:"fixture",e
   let onUpstream: ((request: Request) => Promise<void>) | undefined
   let answer: UpstreamAnswer = "events"
   let cancelled = 0
+  /** When the gateway cancelled each held upstream answer before its release. */
+  const heldCancels: Array<number> = []
   const received: UpstreamRequest[] = []
   const upstream = Bun.serve({
     hostname: host,
@@ -252,6 +258,9 @@ process.stdout.write(JSON.stringify({token:"fixture-access",token_id:"fixture",e
                   // The gateway cancelled the stream before its release.
                 }
               })
+            },
+            cancel() {
+              heldCancels.push(Date.now())
             },
           }),
           { headers: { "content-type": "text/event-stream" } },
@@ -447,6 +456,8 @@ process.stdout.write(JSON.stringify({token:"fixture-access",token_id:"fixture",e
     },
     /** How many upstream answers the gateway cancelled before their end. */
     upstreamCancels: () => cancelled,
+    /** When the gateway cancelled each held answer before its release, in order. */
+    heldCancels: (): ReadonlyArray<number> => heldCancels,
     /** Runs before the model upstream records and answers each request. */
     onUpstream: (hook: ((request: Request) => Promise<void>) | undefined) => {
       onUpstream = hook

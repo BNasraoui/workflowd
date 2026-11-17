@@ -15,6 +15,7 @@ from pathlib import Path
 import subprocess
 import sys
 import urllib.parse
+import tarfile
 
 if sys.flags.optimize:
     raise RuntimeError('Python optimization is not supported')
@@ -30,7 +31,7 @@ def commit_id(value):
     return value
 
 
-def git(repo, *args):
+def git(repo, *args, input=None, identity=None):
     def bounds():
         resource.setrlimit(resource.RLIMIT_AS, (1024**3, 1024**3))
         resource.setrlimit(resource.RLIMIT_FSIZE, (128 * 1024**2, 128 * 1024**2))
@@ -46,8 +47,8 @@ def git(repo, *args):
             env={'PATH': '/usr/bin:/bin', 'HOME': '/nonexistent',
                  'GIT_CONFIG_NOSYSTEM': '1', 'GIT_CONFIG_GLOBAL': '/dev/null',
                  'GIT_NO_REPLACE_OBJECTS': '1', 'GIT_TERMINAL_PROMPT': '0',
-                 'GIT_ALLOW_PROTOCOL': 'https:file'},
-            stdout=output, stderr=subprocess.DEVNULL, timeout=60,
+                 'GIT_ALLOW_PROTOCOL': 'https:file', **(identity or {})},
+            input=input, stdout=output, stderr=subprocess.DEVNULL, timeout=60,
             check=True, preexec_fn=bounds)
         if output.tell() > 16 * 1024**2:
             raise ValueError('Git inventory exceeded bound')
@@ -61,6 +62,75 @@ if UNICODE['version'] != '15.0.0' or unicodedata.unidata_version != UNICODE['ver
     raise RuntimeError('Unsupported publication Unicode runtime')
 CASEFOLD = json.loads(Path(__file__).with_name('casefold.json').read_text())
 INVISIBLE = re.compile('[' + UNICODE['forbidden'] + ']')
+# Default_Ignorable_Code_Point, written once from DerivedCoreProperties.txt of Unicode
+# 15.0.0 (Python has no table of this property). A test of the daemon compares each
+# range with the regular expression class \p{Default_Ignorable_Code_Point} of Bun.
+DEFAULT_IGNORABLE = (
+    (0x00AD, 0x00AD), (0x034F, 0x034F), (0x061C, 0x061C), (0x115F, 0x1160),
+    (0x17B4, 0x17B5), (0x180B, 0x180F), (0x200B, 0x200F), (0x202A, 0x202E),
+    (0x2060, 0x206F), (0x3164, 0x3164), (0xFE00, 0xFE0F), (0xFEFF, 0xFEFF),
+    (0xFFA0, 0xFFA0), (0xFFF0, 0xFFF8), (0x1BCA0, 0x1BCA3), (0x1D173, 0x1D17A),
+    (0xE0000, 0xE0FFF),
+)
+IGNORABLE = re.compile('[' + ''.join(f'{chr(a)}-{chr(b)}' for a, b in DEFAULT_IGNORABLE) + ']')
+
+
+def invisible(c):
+    """A code point that a reader cannot see: a format character (Cf) or a default-ignorable code point."""
+    return unicodedata.category(c) == 'Cf' or IGNORABLE.match(c) is not None
+
+
+# The Emoji property, written from emoji-data.txt of Unicode 17.0.0, the data of the
+# daemon's engine (Python has no table of this property, and its other Unicode data here is
+# 15.0.0). A test of the daemon compares each range with the class \p{Emoji} of Bun.
+EMOJI = (
+    (0x0023, 0x0023), (0x002A, 0x002A), (0x0030, 0x0039), (0x00A9, 0x00A9), (0x00AE, 0x00AE),
+    (0x203C, 0x203C), (0x2049, 0x2049), (0x2122, 0x2122), (0x2139, 0x2139), (0x2194, 0x2199),
+    (0x21A9, 0x21AA), (0x231A, 0x231B), (0x2328, 0x2328), (0x23CF, 0x23CF), (0x23E9, 0x23F3),
+    (0x23F8, 0x23FA), (0x24C2, 0x24C2), (0x25AA, 0x25AB), (0x25B6, 0x25B6), (0x25C0, 0x25C0),
+    (0x25FB, 0x25FE), (0x2600, 0x2604), (0x260E, 0x260E), (0x2611, 0x2611), (0x2614, 0x2615),
+    (0x2618, 0x2618), (0x261D, 0x261D), (0x2620, 0x2620), (0x2622, 0x2623), (0x2626, 0x2626),
+    (0x262A, 0x262A), (0x262E, 0x262F), (0x2638, 0x263A), (0x2640, 0x2640), (0x2642, 0x2642),
+    (0x2648, 0x2653), (0x265F, 0x2660), (0x2663, 0x2663), (0x2665, 0x2666), (0x2668, 0x2668),
+    (0x267B, 0x267B), (0x267E, 0x267F), (0x2692, 0x2697), (0x2699, 0x2699), (0x269B, 0x269C),
+    (0x26A0, 0x26A1), (0x26A7, 0x26A7), (0x26AA, 0x26AB), (0x26B0, 0x26B1), (0x26BD, 0x26BE),
+    (0x26C4, 0x26C5), (0x26C8, 0x26C8), (0x26CE, 0x26CF), (0x26D1, 0x26D1), (0x26D3, 0x26D4),
+    (0x26E9, 0x26EA), (0x26F0, 0x26F5), (0x26F7, 0x26FA), (0x26FD, 0x26FD), (0x2702, 0x2702),
+    (0x2705, 0x2705), (0x2708, 0x270D), (0x270F, 0x270F), (0x2712, 0x2712), (0x2714, 0x2714),
+    (0x2716, 0x2716), (0x271D, 0x271D), (0x2721, 0x2721), (0x2728, 0x2728), (0x2733, 0x2734),
+    (0x2744, 0x2744), (0x2747, 0x2747), (0x274C, 0x274C), (0x274E, 0x274E), (0x2753, 0x2755),
+    (0x2757, 0x2757), (0x2763, 0x2764), (0x2795, 0x2797), (0x27A1, 0x27A1), (0x27B0, 0x27B0),
+    (0x27BF, 0x27BF), (0x2934, 0x2935), (0x2B05, 0x2B07), (0x2B1B, 0x2B1C), (0x2B50, 0x2B50),
+    (0x2B55, 0x2B55), (0x3030, 0x3030), (0x303D, 0x303D), (0x3297, 0x3297), (0x3299, 0x3299),
+    (0x1F004, 0x1F004), (0x1F0CF, 0x1F0CF), (0x1F170, 0x1F171), (0x1F17E, 0x1F17F),
+    (0x1F18E, 0x1F18E), (0x1F191, 0x1F19A), (0x1F1E6, 0x1F1FF), (0x1F201, 0x1F202),
+    (0x1F21A, 0x1F21A), (0x1F22F, 0x1F22F), (0x1F232, 0x1F23A), (0x1F250, 0x1F251),
+    (0x1F300, 0x1F321), (0x1F324, 0x1F393), (0x1F396, 0x1F397), (0x1F399, 0x1F39B),
+    (0x1F39E, 0x1F3F0), (0x1F3F3, 0x1F3F5), (0x1F3F7, 0x1F4FD), (0x1F4FF, 0x1F53D),
+    (0x1F549, 0x1F54E), (0x1F550, 0x1F567), (0x1F56F, 0x1F570), (0x1F573, 0x1F57A),
+    (0x1F587, 0x1F587), (0x1F58A, 0x1F58D), (0x1F590, 0x1F590), (0x1F595, 0x1F596),
+    (0x1F5A4, 0x1F5A5), (0x1F5A8, 0x1F5A8), (0x1F5B1, 0x1F5B2), (0x1F5BC, 0x1F5BC),
+    (0x1F5C2, 0x1F5C4), (0x1F5D1, 0x1F5D3), (0x1F5DC, 0x1F5DE), (0x1F5E1, 0x1F5E1),
+    (0x1F5E3, 0x1F5E3), (0x1F5E8, 0x1F5E8), (0x1F5EF, 0x1F5EF), (0x1F5F3, 0x1F5F3),
+    (0x1F5FA, 0x1F64F), (0x1F680, 0x1F6C5), (0x1F6CB, 0x1F6D2), (0x1F6D5, 0x1F6D8),
+    (0x1F6DC, 0x1F6E5), (0x1F6E9, 0x1F6E9), (0x1F6EB, 0x1F6EC), (0x1F6F0, 0x1F6F0),
+    (0x1F6F3, 0x1F6FC), (0x1F7E0, 0x1F7EB), (0x1F7F0, 0x1F7F0), (0x1F90C, 0x1F93A),
+    (0x1F93C, 0x1F945), (0x1F947, 0x1F9FF), (0x1FA70, 0x1FA7C), (0x1FA80, 0x1FA8A),
+    (0x1FA8E, 0x1FAC6), (0x1FAC8, 0x1FAC8), (0x1FACD, 0x1FADC), (0x1FADF, 0x1FAEA),
+    (0x1FAEF, 0x1FAF8),
+)
+# U+FE0F where it selects the emoji form: directly after a code point of EMOJI that is not
+# ASCII (so not after a digit, '#' or '*').
+EMOJI_PRESENTATION = re.compile('(?<=[' + ''.join(
+    f'{chr(max(a, 0x80))}-{chr(b)}' for a, b in EMOJI if b >= 0x80) + '])\ufe0f')
+
+
+def without_presentation(value):
+    """The text with each U+FE0F that selects the emoji form left out: a commit message or a
+    final message may hold one there and nowhere else. A path holds no U+FE0F."""
+    return EMOJI_PRESENTATION.sub('', value)
+
+
 LETTERS = re.compile('[' + UNICODE['letters'] + ']')
 STACKED_MARKS = re.compile('[' + UNICODE['marks'] + ']{3}')
 LANGUAGES = {'', 'text', 'diff', 'ts', 'typescript', 'tsx', 'js', 'json', 'sh', 'bash', 'python', 'rust', 'go', 'sql', 'yaml', 'toml'}
@@ -96,7 +166,7 @@ def closes_github_path(text):
 def safe_publication(value):
     if INVISIBLE.search(value):
         raise ValueError('Invisible publication content')
-    if not all(unicodedata.category(c) not in ('Cc', 'Cf') or c == '\n' for c in value):
+    if any((unicodedata.category(c) == 'Cc' and c != '\n') or invisible(c) for c in value):
         raise ValueError('Invalid publication text')
     if re.search(r'&(#[0-9]+|#[xX][0-9a-fA-F]+|[A-Za-z][A-Za-z0-9]*);', value):
         raise ValueError('Character reference')
@@ -139,7 +209,7 @@ def publication_text(value, message=False):
     encoded = value.encode('utf8', errors='strict')
     if (len(encoded) > 10240) if message else (len(value) > 200):
         raise ValueError('Invalid publication text')
-    if not all(unicodedata.category(c) not in ('Cc', 'Cf') or (message and c == '\n') for c in value):
+    if any((unicodedata.category(c) == 'Cc' and not (message and c == '\n')) or invisible(c) for c in value):
         raise ValueError('Invalid publication text')
     if not message and any(c in value for c in ('\u2028', '\u2029')):
         raise ValueError('Invalid publication text')
@@ -148,12 +218,28 @@ def publication_text(value, message=False):
     safe_publication(value)
 
 
+def commit_message(value):
+    """The rules of a run's commit message: U+FE0F only where it selects the emoji form, then
+    the publication rules of a commit message, as the daemon's check holds them."""
+    if not isinstance(value, str):
+        raise ValueError('Invalid publication text')
+    publication_text(without_presentation(value), True)
+
+
 def publication_body(value):
     if not isinstance(value, str) or not value.strip():
         raise ValueError('body must be non-empty Markdown')
     if len(value.encode('utf8', errors='strict')) > 32768:
         raise ValueError('body exceeds 32 KiB UTF-8')
     safe_publication(value)
+
+
+def final_message(value):
+    # Data to the caller: newlines and tabs, and no other control or invisible character.
+    if not isinstance(value, str) or len(value.encode('utf8', errors='strict')) > 65536 or any(
+            (unicodedata.category(c) == 'Cc' and c not in '\n\t') or invisible(c)
+            for c in without_presentation(value)):
+        raise ValueError('Invalid final message')
 
 
 def seal(source):
@@ -210,17 +296,39 @@ def seal(source):
     print(json.dumps({**manifest, 'manifestSha256': sha(encoded)}, separators=(',', ':')))
 
 
+# The bounds of one result's change, as the daemon's check and the agent's prompt state them
+# (result-rules.mjs resultBounds; a test of the daemon compares the two).
+RESULT_BOUNDS = {'blobBytes': 1024**2, 'changedBytes': 8 * 1024**2, 'changedPaths': 100,
+                 'commits': 100, 'objects': 10000, 'objectBytes': 64 * 1024**2}
+
+
+def refused_in_path(c):
+    """A code point that a path may not hold: a control character, a backslash, an invisible code
+    point, a line or paragraph separator, a space separator other than U+0020, or the blank Braille
+    pattern U+2800 (result-rules.mjs refusedInPath)."""
+    category = unicodedata.category(c)
+    return (c in '\\\u2028\u2029\u2800' or category == 'Cc' or invisible(c)
+            or (c != ' ' and category == 'Zs'))
+
+
 def safe_path(raw):
+    """The rules of a path that a change adds, changes or removes, as the daemon's check holds them
+    (result-rules.mjs pathRefusal). Gives the key under which a checkout on macOS or Windows reads
+    the path."""
     name = raw.decode('utf8', errors='strict')
-    parts = name.split('/')
-    if any(p in ('', '.', '..') or p.lower().startswith('.git') for p in parts):
-        raise ValueError('Unsafe path component')
-    if name.startswith('deploy/sandbox/') or name == 'deploy/sandbox':
-        raise ValueError('Sandbox tooling path is forbidden')
-    if '\\' in name or any(ord(c) < 32 for c in name):
+    if any(refused_in_path(c) for c in name):
         raise ValueError('Invalid path characters')
-    if unicodedata.normalize('NFC', name) != name:
-        raise ValueError('Path must be NFC normalized')
+    if unicodedata.normalize('NFKC', name) != name:
+        raise ValueError('Path must be NFKC normalized')
+    parts = name.split('/')
+    if any(p in ('', '.', '..') or p.endswith((' ', '.')) for p in parts):
+        raise ValueError('Unsafe path component')
+    if '~' in parts[0] or ':' in parts[0]:
+        raise ValueError('Unsafe first path component')
+    if any(p.lower().startswith('.git') or p.upper().startswith('.GIT') for p in parts):
+        raise ValueError('Unsafe path component')
+    if name.lower() == 'deploy/sandbox' or name.lower().startswith('deploy/sandbox/'):
+        raise ValueError('Sandbox tooling path is forbidden')
     return name.casefold()
 
 
@@ -238,19 +346,239 @@ def content_check(data, sensitive):
             raise ValueError('Sensitive public content')
 
 
+def agent_identity(identity):
+    if not isinstance(identity, dict) or set(identity) != {'name', 'email'}:
+        raise ValueError('Invalid identity')
+    name, email = identity['name'], identity['email']
+    if not isinstance(name, str) or not name.strip() or re.search(r'[\r\n\0<>]', name) or len(name) > 200 or any(
+            invisible(c) for c in name):
+        raise ValueError('Invalid identity')
+    if not isinstance(email, str) or not re.fullmatch(r'[^\s<>@\0]+@[^\s<>@\0]+', email) or len(email) > 200:
+        raise ValueError('Invalid identity')
+    return {'GIT_AUTHOR_NAME': name, 'GIT_COMMITTER_NAME': name,
+            'GIT_AUTHOR_EMAIL': email, 'GIT_COMMITTER_EMAIL': email,
+            'GIT_AUTHOR_DATE': '2000-01-01T00:00:00Z', 'GIT_COMMITTER_DATE': '2000-01-01T00:00:00Z'}
+
+
+def tree_entries(repo, commit):
+    """Each entry of the tree of `commit`, by its path as bytes: its mode, its object and its size
+    (None for an entry that is not a blob)."""
+    entries = {}
+    for line in git(repo, 'ls-tree', '-r', '-z', '-l', '--full-tree', commit).split(b'\0'):
+        if not line: continue
+        meta, path = line.split(b'\t', 1)
+        mode, _, oid, size = meta.split()
+        entries[path] = (mode, oid.decode('ascii'), None if size == b'-' else int(size))
+    return entries
+
+
+def source_repository(directory, source):
+    """A bare repository in `directory` with the objects of the source commit from source.git, which
+    no agent wrote, and the source tree as its index."""
+    if Path('source.git').is_symlink(): raise ValueError('Unsafe source path')
+    Path(directory).mkdir(mode=0o700, exist_ok=True)
+    repo = str(Path(directory).absolute())
+    git(repo, 'init', '--bare', '.')
+    git(repo, 'fetch', '--no-tags', '--', str(Path('source.git').absolute()), source)
+    git(repo, 'read-tree', source)
+    return repo
+
+
+def blob_id(data):
+    return hashlib.sha1(b'blob %d\0' % len(data) + data).hexdigest()
+
+
+class PathRefused(ValueError):
+    """A refusal of one path of the run's change, whose cause names the path."""
+    def __init__(self, reason, path):
+        super().__init__(reason)
+        self.reason, self.path = reason, path
+
+    def text(self):
+        shown = json.dumps(self.path.decode('utf8', errors='backslashreplace'), ensure_ascii=True)
+        return self.reason + ': ' + (shown if len(shown) <= 160 else shown[:156] + '..."')
+
+
+def workspace_entries(stream):
+    """The entries of the workspace archive on `stream`, in its order, with each name as bytes. No
+    entry is extracted by tar, and no name leaves the workspace."""
+    with tarfile.open(fileobj=stream, mode='r|') as archive:
+        for item in archive:
+            if item.size < 0: raise ValueError('Invalid export size')
+            name = item.name.removeprefix('./').rstrip('/')
+            if name in ['', '.']: continue
+            parts = name.split('/')
+            if name.startswith('/') or any(p in ['', '.', '..'] for p in parts): raise ValueError('Unsafe export path')
+            yield archive, item, os.fsencode(name), parts
+
+
+def native_select(source):
+    """The first read of the workspace archive on standard input: the paths that Git would commit on
+    the source commit, each tracked path and each new path that the workspace's ignore rules do not
+    ignore, written to `selection`. Git reads a skeleton of the archive, an empty file for each entry
+    and the content of each .gitignore, so no ignored entry is read or bounded."""
+    source = commit_id(source)
+    with tempfile.TemporaryDirectory(prefix='native-selection-', dir='.') as directory:
+        skeleton = Path(directory, 'tree')
+        skeleton.mkdir(mode=0o700)
+        for archive, item, _, parts in workspace_entries(sys.stdin.buffer):
+            if parts[0] == '.git': continue
+            path = skeleton.joinpath(*parts)
+            if item.isdir():
+                path.mkdir(parents=True, exist_ok=True, mode=0o700)
+                continue
+            path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            with path.open('xb') as output:
+                if item.isfile() and parts[-1] == '.gitignore':
+                    data = archive.extractfile(item)
+                    while chunk := data.read(1024**2): output.write(chunk)
+        repo = source_repository(Path(directory, 'index.git'), source)
+        selected = set(git(repo, '--work-tree=' + str(skeleton.absolute()),
+                           'ls-files', '--cached', '--others', '--exclude-standard', '-z').split(b'\0')) - {b''}
+        if len(selected - set(tree_entries(repo, source))) > 10000: raise ValueError('Native export capacity')
+    Path('selection').write_bytes(b'\0'.join(sorted(selected)))
+
+
+def native_export(source):
+    """The second read of the workspace archive on standard input. Of each selected path: an entry
+    that equals its entry of the source commit is listed in `present`; a regular file that the run
+    added or changed is written below `repository`; a link or a special file that the run added or
+    changed is refused by its path. Nothing that the run left as it is counts against a bound."""
+    source = commit_id(source)
+    selected = set(Path('selection').read_bytes().split(b'\0')) - {b''}
+    with tempfile.TemporaryDirectory(prefix='native-source-', dir='.') as directory:
+        tracked = tree_entries(source_repository(directory, source), source)
+    root = Path('repository')
+    root.mkdir(mode=0o700)
+    present, seen, count, total = set(), set(), 0, 0
+    for archive, item, name, parts in workspace_entries(sys.stdin.buffer):
+        if name not in selected: continue
+        if name in seen: raise ValueError('Duplicate export path')
+        seen.add(name)
+        entry = tracked.get(name)
+        if item.isdir():
+            # A submodule stays as it is; a tracked file that became a directory is removed.
+            if entry is not None and entry[0] == b'160000': present.add(name)
+        elif item.isfile():
+            mode = b'100755' if item.mode & 0o111 else b'100644'
+            data = archive.extractfile(item)
+            same = entry is not None and entry[0] == mode and entry[2] == item.size
+            if item.size > RESULT_BOUNDS['blobBytes']:
+                digest = hashlib.sha1(b'blob %d\0' % item.size)
+                while same and (chunk := data.read(1024**2)): digest.update(chunk)
+                if not (same and digest.hexdigest() == entry[1]):
+                    raise PathRefused('Changed file over the bound of a blob', name)
+                present.add(name)
+                continue
+            content = data.read(RESULT_BOUNDS['blobBytes'] + 1)
+            if same and blob_id(content) == entry[1]:
+                present.add(name)
+                continue
+            count += 1
+            total += len(content)
+            if count > 10000 or total > 64 * 1024**2: raise ValueError('Native export capacity')
+            path = root.joinpath(*parts)
+            path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            with path.open('xb') as output: output.write(content)
+            path.chmod(0o700 if mode == b'100755' else 0o600)
+        elif item.issym():
+            if entry is not None and entry[0] == b'120000' and entry[1] == blob_id(os.fsencode(item.linkname)):
+                present.add(name)
+                continue
+            raise PathRefused('Symbolic link in the change', name)
+        else: raise PathRefused('Special file in the change', name)
+    Path('present').write_bytes(b'\0'.join(sorted(present)))
+
+
+def native_seal(source):
+    """Called only after the supervisor stops the container and reads its workspace (native_select,
+    native_export).
+
+    source.git is controller-created and never mounted in the agent. The result is the source tree
+    with the run's change: each tracked path that `present` lists stays as the source holds it, each
+    file below `repository` is added or replaces its path, and each other tracked path is removed.
+    The rules of a result apply to that change alone (inspect_changes). No agent Git command is run.
+    The run names no branch: the daemon chooses the target ref after its own checks.
+    """
+    source = commit_id(source)
+    raw = sys.stdin.buffer.read(262145)
+    if len(raw) > 262144: raise ValueError('Native input exceeded bound')
+    request = json.loads(raw)
+    if set(request) != {'completion', 'sensitiveValues', 'identity'}: raise ValueError('Invalid native request')
+    completion, sensitive = request['completion'], request['sensitiveValues']
+    # The daemon gives the identity of agent runs; its check requires each commit to carry it.
+    author = agent_identity(request['identity'])
+    if not isinstance(completion, dict) or set(completion) != {'title', 'commitMessage', 'body', 'finalMessage'}:
+        raise ValueError('Invalid native metadata')
+    if not isinstance(sensitive, list) or len(sensitive) > 32 or any(not isinstance(v, str) or not 16 <= len(v) <= 4096 for v in sensitive):
+        raise ValueError('Invalid sensitive values')
+    publication_text(completion['title'])
+    commit_message(completion['commitMessage'])
+    publication_body(completion['body'])
+    final_message(completion['finalMessage'])
+    content_check(json.dumps(completion, ensure_ascii=False).encode(), sensitive)
+    root = Path('repository')
+    if root.is_symlink(): raise ValueError('Unsafe source path')
+    present = set(Path('present').read_bytes().split(b'\0')) - {b''}
+    written = {}
+    for base, _, files in os.walk(root):
+        for name in files:
+            path = Path(base, name)
+            written[os.fsencode(path.relative_to(root))] = path
+    with tempfile.TemporaryDirectory(prefix='native-capture-', dir='.') as directory:
+        repo = source_repository(directory, source)
+        # Removals first, so a path may turn from a file into a directory or back.
+        index = [b'0 ' + b'0' * 40 + b'\t' + path + b'\0'
+                 for path in sorted(set(tree_entries(repo, source)) - present - set(written))]
+        for relative in sorted(written):
+            info = written[relative].lstat()
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1: raise ValueError('Unsafe native file')
+            blob = git(repo, 'hash-object', '-w', '--no-filters', '--stdin', input=written[relative].read_bytes()).strip()
+            mode = b'100755' if info.st_mode & 0o111 else b'100644'
+            index.append(mode + b' ' + blob + b'\t' + relative + b'\0')
+        git(repo, 'update-index', '-z', '--index-info', input=b''.join(index))
+        tree = git(repo, 'write-tree').decode().strip()
+        if tree == git(repo, 'rev-parse', source + '^{tree}').decode().strip():
+            print(json.dumps({'empty': True, 'sourceSha': source}))
+            return
+        # The message is stdin data, never an argument.
+        result = git(repo, 'commit-tree', tree, '-p', source,
+                     input=completion['commitMessage'].encode('utf8'), identity=author).decode().strip()
+        inspect_changes(repo, source, result, sensitive)
+        # Only validated, source-relative objects become an intended-public artifact.
+        output = Path('result')
+        output.mkdir(mode=0o700)
+        bundle = output / 'result.bundle'
+        git(repo, 'update-ref', 'refs/workflowd/result', result)
+        git(repo, 'bundle', 'create', str(bundle.absolute()), 'refs/workflowd/result', '^' + source)
+        if bundle.stat().st_size > 16 * 1024**2: raise ValueError('Bundle exceeded bound')
+        # result.json holds exactly the SealedResult keys; the daemon refuses any other.
+        # The commit message is in the commit object only.
+        manifest = {'sourceSha': source, 'title': completion['title'], 'body': completion['body'],
+                    'finalMessage': completion['finalMessage']}
+        encoded = json.dumps(manifest, ensure_ascii=True, separators=(',', ':')).encode()
+        (output / 'result.json').write_bytes(encoded)
+        print(json.dumps({'sourceSha': source, 'resultSha': result, 'bundleSha256': sha(bundle.read_bytes()),
+                          'manifestSha256': sha(encoded)}, separators=(',', ':')))
+
+
 def inspect_changes(repo, source, result, sensitive=()):
     commits = git(repo, 'rev-list', '--reverse', source + '..' + result).decode().splitlines()
-    if not (1 <= len(commits) <= 100):
+    if not (1 <= len(commits) <= RESULT_BOUNDS['commits']):
         raise ValueError('Commit count exceeded bound')
     objects = git(repo, 'rev-list', '--objects', source + '..' + result).splitlines()
-    if len(objects) > 10000:
+    if len(objects) > RESULT_BOUNDS['objects']:
         raise ValueError('Object count exceeded bound')
     total = 0
-    for obj in objects:
-        total += int(git(repo, 'cat-file', '-s', obj.split(b' ')[0].decode()))
-        if total > 64 * 1024 * 1024:
+    ids = b''.join(obj.split(b' ')[0] + b'\n' for obj in objects)
+    for line in git(repo, 'cat-file', '--batch-check=%(objectname) %(objecttype) %(objectsize)', input=ids).splitlines():
+        oid, kind, size = line.decode('ascii').split()
+        total += int(size)
+        if total > RESULT_BOUNDS['objectBytes']:
             raise ValueError('Object bytes exceeded bound')
-        content_check(git(repo, 'cat-file', '-p', obj.split(b' ')[0].decode()), sensitive)
+        # Each new commit: its message. Each added or changed file is checked below, by its diff.
+        if kind == 'commit':
+            content_check(git(repo, 'cat-file', '-p', oid), sensitive)
     parent = source
     content = 0
     changed = set()
@@ -273,7 +601,7 @@ def inspect_changes(repo, source, result, sensitive=()):
             content_check(path, sensitive)
             safe_path(path)
             changed.add(path)
-            if len(changed) > 100:
+            if len(changed) > RESULT_BOUNDS['changedPaths']:
                 raise ValueError('Changed path count exceeded bound')
             if not (old in ('000000', '100644', '100755') and new in ('000000', '100644', '100755')):
                 raise ValueError('Unsupported file mode')
@@ -281,16 +609,17 @@ def inspect_changes(repo, source, result, sensitive=()):
                 raise ValueError('Forbidden file mode change')
             if new != '000000':
                 size = int(git(repo, 'cat-file', '-s', blob))
-                if size > 1024 * 1024:
+                if size > RESULT_BOUNDS['blobBytes']:
                     raise ValueError('Blob exceeded bound')
                 content += size
-                if content > 8 * 1024 * 1024:
+                if content > RESULT_BOUNDS['changedBytes']:
                     raise ValueError('Content exceeded bound')
+                content_check(git(repo, 'cat-file', 'blob', blob), sensitive)
         # Detect case/normalization collisions against the complete tree, including base paths.
         names = git(repo, 'ls-tree', '-r', '-z', '--name-only', commit).split(b'\0')[:-1]
         folded = {}
         for name in names:
-            key = unicodedata.normalize('NFC', name.decode('utf8')).casefold()
+            key = unicodedata.normalize('NFC', name.decode('utf8', errors='replace')).casefold()
             if name in changed:
                 if not (key not in folded or folded[key] == name):
                     raise ValueError('Path collision')
@@ -401,8 +730,20 @@ if __name__ == '__main__':
     try:
         signal.alarm(180)
         if sys.argv[1] == 'seal': seal(*sys.argv[2:])
+        elif sys.argv[1] == 'native-seal': native_seal(*sys.argv[2:])
+        elif sys.argv[1] == 'native-select': native_select(*sys.argv[2:])
+        elif sys.argv[1] == 'native-export': native_export(*sys.argv[2:])
         elif sys.argv[1] == 'validate': validate(*sys.argv[2:])
         elif sys.argv[1] == 'tree': tree(*sys.argv[2:])
         else: raise ValueError('Unknown operation')
+    except PathRefused as error:
+        # The path of the change, as printable ASCII of a bounded length.
+        sys.exit('Sandbox result sealing failed: ' + error.text())
+    except ValueError as error:
+        # Only the fixed reasons of this script are printed: a reason of Python itself
+        # (lower case, quoted) or of a ValueError subclass may hold input text.
+        reason = error.args[0] if type(error) is ValueError and len(error.args) == 1 else ''
+        fixed = isinstance(reason, str) and re.fullmatch(r'[A-Z][A-Za-z0-9 ,./-]{0,80}', reason)
+        sys.exit('Sandbox result sealing failed' + (': ' + reason if fixed else ''))
     except Exception:
         sys.exit('Sandbox result sealing failed')

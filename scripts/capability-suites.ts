@@ -10,6 +10,8 @@ export const gatewayTestDirectory = "test/capability-gateway"
 export const ownStep: Readonly<Record<string, string>> = {
   "test/capability-gateway/claude-pinned.launcher.test.ts":
     "the pinned Claude Code client; a step of the Tests job runs it with loopback as its only network",
+  "test/runner/runner-box.launcher.test.ts":
+    "a runner run in a Docker box of the agent image; a step of the agent image job runs it",
 }
 
 /** The test files of `directory` and of each directory below it, relative to `root`, by name. */

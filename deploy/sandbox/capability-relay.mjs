@@ -5,15 +5,25 @@ import { writeFileSync } from "node:fs"
 import { chmod } from "node:fs/promises"
 import { pathToFileURL } from "node:url"
 import { gatewayOrigin } from "./bootstrap-helper.mjs"
-import { maxRenewalAttempt, renewalRequests, renewalTryMs, signRenewal } from "./renewal.mjs"
+import { pinnedLookup } from "./gateway-address.mjs"
+import {
+  maxRenewalAttempt,
+  renewalRequests,
+  renewalTryMs,
+  runSignatureHeader,
+  signRenewal,
+  signRunBody,
+} from "./renewal.mjs"
 import {
   maxHeaderBytes,
+  maxModelBodyBytes,
   maxRelaySockets,
   maxStreamIdleMs,
   maxStreamsPerRun,
   providerIdPattern,
 } from "./capability-limits.mjs"
 import { createHash } from "node:crypto"
+import { isIP } from "node:net"
 
 const root = "/run/workflowd-sandbox"
 
@@ -82,11 +92,23 @@ export async function serveRunnerRelay(config, directory = root) {
     !Number.isSafeInteger(config.deadline) ||
     config.expiresAt > config.deadline ||
     typeof config.providerId !== "string" ||
-    !providerIdPattern.test(config.providerId)
+    !providerIdPattern.test(config.providerId) ||
+    (config.gatewayAddress !== undefined &&
+      (typeof config.gatewayAddress !== "string" || isIP(config.gatewayAddress) !== 4))
   )
     throw new Error("relay configuration refused")
   const origin = gatewayOrigin(config.gateway)
-  const agent = new Agent({ keepAlive: true, maxSockets: maxRelaySockets })
+  // The address of the gateway's Service name that tailscaled gave the bootstrap, if any: each
+  // connection goes there, with the name kept for TLS and the Host header (gateway-address.mjs).
+  const lookup =
+    config.gatewayAddress === undefined
+      ? undefined
+      : pinnedLookup(new URL(origin).hostname, config.gatewayAddress)
+  const agent = new Agent({
+    keepAlive: true,
+    maxSockets: maxRelaySockets,
+    ...(lookup === undefined ? {} : { lookup }),
+  })
   let credential = config
   let renewal
   let streams = 0
@@ -136,41 +158,91 @@ export async function serveRunnerRelay(config, directory = root) {
       const path = request.url.startsWith("/capabilities/v1/")
         ? request.url
         : `/capabilities/v1/providers/${config.providerId}${request.url}`
+      // A model call's body is held (the gateway reads at most `maxModelBodyBytes` of it), so the
+      // call can be sent once again; a Git read streams.
+      const model = !request.url.startsWith("/capabilities/v1/")
       streams++
       let counted = true
-      const upstream = httpsRequest(
-        new URL(path, origin),
-        {
-          method: request.method,
-          headers: { ...headers, authorization: `Bearer ${credential.token}` },
-          agent,
-          maxHeaderSize: maxHeaderBytes,
-        },
-        (reply) => {
-          const output = Object.fromEntries(
-            Object.entries(reply.headers).filter(
-              ([key]) => !["connection", "transfer-encoding", "keep-alive"].includes(key),
-            ),
-          )
-          response.writeHead(reply.statusCode ?? 503, output)
-          // An answer cut upstream stays cut here: no terminal chunk turns it into success.
-          pipeline(reply, response, (error) => {
-            if (error) upstream.destroy()
-          })
-        },
-      )
-      upstream.setTimeout(maxStreamIdleMs, () => upstream.destroy())
-      upstream.once("close", () => {
-        if (counted) streams--
-        counted = false
-        if (!response.writableEnded) response.destroy()
-      })
-      upstream.once("error", () => response.destroy())
+      /**
+       * Sends the call upstream with `token`. The gateway refuses a token whose successor has made
+       * a call, before any upstream request: a model call that a renewal overtook on its way, sent
+       * with the predecessor and refused (403) while the relay holds the successor, is sent once
+       * again with the successor. No other answer is sent again, and the predecessor's own power
+       * at the gateway is unchanged.
+       */
+      const send = (token, again) => {
+        const upstream = httpsRequest(
+          new URL(path, origin),
+          {
+            method: request.method,
+            headers: { ...headers, authorization: `Bearer ${token}` },
+            agent,
+            maxHeaderSize: maxHeaderBytes,
+          },
+          (reply) => {
+            if (again && reply.statusCode === 403 && token !== credential.token && !closed) {
+              reply.resume()
+              current = send(credential.token, false)
+              current.end(body)
+              return
+            }
+            const output = Object.fromEntries(
+              Object.entries(reply.headers).filter(
+                ([key]) => !["connection", "transfer-encoding", "keep-alive"].includes(key),
+              ),
+            )
+            response.writeHead(reply.statusCode ?? 503, output)
+            // An answer cut upstream stays cut here: no terminal chunk turns it into success.
+            pipeline(reply, response, (error) => {
+              if (error) upstream.destroy()
+            })
+          },
+        )
+        upstream.setTimeout(maxStreamIdleMs, () => upstream.destroy())
+        upstream.once("close", () => {
+          if (upstream !== current) return
+          if (counted) streams--
+          counted = false
+          if (!response.writableEnded) response.destroy()
+        })
+        upstream.once("error", () => {
+          if (upstream === current) response.destroy()
+        })
+        return upstream
+      }
+      let body
+      let current
       response.once("close", () => {
-        if (!response.writableFinished) upstream.destroy()
+        if (!response.writableFinished) current?.destroy()
+        if (current === undefined && counted) {
+          streams--
+          counted = false
+        }
       })
-      pipeline(request, upstream, (error) => {
-        if (error) upstream.destroy()
+      if (!model) {
+        current = send(credential.token, false)
+        pipeline(request, current, (error) => {
+          if (error) current.destroy()
+        })
+        return
+      }
+      const chunks = []
+      let size = 0
+      request.on("data", (chunk) => {
+        size += chunk.length
+        if (size > maxModelBodyBytes) {
+          // The gateway refuses a model call of this size: the relay refuses it at once.
+          request.destroy()
+          if (!response.headersSent) response.writeHead(403)
+          response.end()
+        } else chunks.push(chunk)
+      })
+      request.once("error", () => response.destroy())
+      request.once("end", () => {
+        if (response.writableEnded || response.destroyed) return
+        body = Buffer.concat(chunks)
+        current = send(credential.token, true)
+        current.end(body)
       })
     },
   )
@@ -290,12 +362,47 @@ export async function serveRunnerRelay(config, directory = root) {
     agent.destroy()
     http.close()
   }
+  /**
+   * One request of the run routes, which only the job's own run client makes, in this process: the
+   * box reaches none of them. It carries the current run token and, with a body, the session key's
+   * signature over that body. Resolves to the status and at most 1 MiB of the answer.
+   */
+  function runRoute(route, body) {
+    if (closed) return Promise.reject(new Error("relay stopped"))
+    const headers = { authorization: `Bearer ${credential.token}` }
+    if (body !== undefined) {
+      headers["content-length"] = String(body.length)
+      headers[runSignatureHeader] = signRunBody(config.sessionKey, config.channel, route, body)
+    }
+    return new Promise((resolve, reject) => {
+      const call = httpsRequest(
+        new URL(`/capabilities/v1/run/${route}`, origin),
+        { method: body === undefined ? "GET" : "POST", headers, agent, timeout: 120000 },
+        (reply) => {
+          const chunks = []
+          let size = 0
+          reply.on("data", (bytes) => {
+            size += bytes.length
+            if (size > 1048576) reply.destroy(new Error("run route answer too long"))
+            else chunks.push(bytes)
+          })
+          reply.once("end", () =>
+            resolve({ status: reply.statusCode ?? 0, body: Buffer.concat(chunks) }),
+          )
+          reply.once("error", reject)
+        },
+      )
+      call.once("timeout", () => call.destroy(new Error("run route unavailable")))
+      call.once("error", reject)
+      call.end(body)
+    })
+  }
   await new Promise((resolve, reject) => {
     http.once("error", reject)
     http.listen(`${directory}/gateway.sock`, resolve)
   })
   await chmod(`${directory}/gateway.sock`, 0o600)
-  return { close: stop }
+  return { close: stop, runRoute }
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

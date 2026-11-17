@@ -33,3 +33,20 @@ export function verifyRenewal(
   time: unknown,
   signature: unknown,
 ): boolean
+export const runSignedRoutes: ReadonlyArray<string>
+export const runSignatureHeader: string
+export function runMessage(channel: string, route: string, bodyDigest: string): Buffer
+export function bodyDigest(body: Uint8Array | string): string
+export function signRunBody(
+  privateKey: string,
+  channel: string,
+  route: string,
+  body: Uint8Array | string,
+): string
+export function verifyRunBody(
+  publicKey: string,
+  channel: string,
+  route: string,
+  digest: unknown,
+  signature: unknown,
+): boolean

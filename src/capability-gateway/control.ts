@@ -27,11 +27,20 @@ export interface ControlTarget {
   readonly authorize: (grant: CapabilityGrant) => Effect.Effect<void, ControlFailure>
   readonly revoke: (runId: string) => Effect.Effect<void, ControlFailure>
   readonly reconcile: (live: ReadonlyArray<CapabilityGrant>) => Effect.Effect<void, ControlFailure>
+  readonly provider: Effect.Effect<string, ControlFailure>
   readonly sessionBound: (
     runId: string,
     actionsRunId: number,
     actionsAttempt: number,
   ) => Effect.Effect<boolean, ControlFailure>
+  readonly readEvents: (
+    runId: string,
+    after: number,
+  ) => Effect.Effect<(typeof controlProtocol.readEvents.response)["Type"], ControlFailure>
+  readonly readResult: (
+    runId: string,
+    offset: number,
+  ) => Effect.Effect<(typeof controlProtocol.readResult.response)["Type"], ControlFailure>
 }
 
 /** The request's body does not decode as its verb's request. */
@@ -74,9 +83,18 @@ const controlVerbs: Record<ControlVerb, ReturnType<typeof verb>> = {
     controlProtocol.reconcile,
     (target) => (body) => Effect.as(target.reconcile(body.live), null),
   ),
+  provider: verb(controlProtocol.provider, (target) => () => target.provider),
   sessionBound: verb(
     controlProtocol.sessionBound,
     (target) => (body) => target.sessionBound(body.runId, body.actionsRunId, body.actionsAttempt),
+  ),
+  readEvents: verb(
+    controlProtocol.readEvents,
+    (target) => (body) => target.readEvents(body.runId, body.after),
+  ),
+  readResult: verb(
+    controlProtocol.readResult,
+    (target) => (body) => target.readResult(body.runId, body.offset),
   ),
 }
 const isControlVerb = (name: string): name is ControlVerb => Object.hasOwn(controlVerbs, name)

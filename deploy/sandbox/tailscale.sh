@@ -28,7 +28,9 @@ request = urllib.request.Request(url, headers={'Authorization': 'Bearer ' + os.e
 with urllib.request.urlopen(request, timeout=30) as response:
     token = json.load(response)['value']
 clean = {k: v for k, v in os.environ.items() if not k.startswith('ACTIONS_ID_TOKEN_REQUEST_')}
-# A private runner calls the gateway itself; nothing on the tailnet logs in to it.
+# A private runner calls the gateway itself; nothing on the tailnet logs in to it. With
+# --accept-dns=false the runner's resolver does not know the gateway's *.ts.net name:
+# gateway-address.mjs asks this tailscaled's own resolver for it.
 ssh = [] if os.environ.get('SANDBOX_BOOTSTRAP_MODE') == 'private' else ['--ssh']
 result = subprocess.run(['sudo', '-n', 'tailscale', 'up', '--timeout=60s', *ssh,
     '--accept-routes=false', '--accept-dns=false', '--advertise-tags=tag:agent-runner',

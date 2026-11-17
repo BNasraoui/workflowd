@@ -101,8 +101,9 @@ test("the capability security job runs each suite", async () => {
   expect(matrix?.split(",").map((suite) => suite.trim())).toEqual(Object.keys(suites))
 })
 
-test("one step of the Tests job runs each own-step file, with loopback as its only network", async () => {
-  const workflow = Schema.decodeUnknownSync(
+/** The steps of each job of the workflow `name`, by job. */
+const workflowSteps = async (name: string) =>
+  Schema.decodeUnknownSync(
     Schema.Struct({
       jobs: Schema.Record(
         Schema.String,
@@ -114,15 +115,33 @@ test("one step of the Tests job runs each own-step file, with loopback as its on
         }),
       ),
     }),
-  )(Bun.YAML.parse(await Bun.file(".github/workflows/ci.yml").text()))
-  for (const file of Object.keys(ownStep)) {
-    const runs = Object.entries(workflow.jobs).flatMap(([job, { steps = [] }]) =>
-      steps.flatMap(({ run }) => (run?.includes(file) ? [{ job, run }] : [])),
-    )
-    expect(runs.map(({ job }) => job)).toEqual(["tests"])
-    expect(runs[0]!.run).toStartWith("sudo /usr/bin/unshare --net /bin/sh -c")
-    expect(runs[0]!.run).toContain("'ip link set lo up && exec setpriv --reuid=")
-  }
+  )(Bun.YAML.parse(await Bun.file(`.github/workflows/${name}`).text())).jobs
+
+/** The jobs of the workflow `name` with a step that runs `file`, and those steps. */
+const stepsRunning = async (name: string, file: string) =>
+  Object.entries(await workflowSteps(name)).flatMap(([job, { steps = [] }]) =>
+    steps.flatMap(({ run }) => (run?.includes(file) ? [{ job, run }] : [])),
+  )
+
+test("one step of its own job runs each own-step file: the pinned client with loopback as its only network, the runner box in the agent image job", async () => {
+  expect(Object.keys(ownStep).sort()).toEqual([
+    "test/capability-gateway/claude-pinned.launcher.test.ts",
+    "test/runner/runner-box.launcher.test.ts",
+  ])
+  const pinned = await stepsRunning(
+    "ci.yml",
+    "test/capability-gateway/claude-pinned.launcher.test.ts",
+  )
+  expect(pinned.map(({ job }) => job)).toEqual(["tests"])
+  expect(pinned[0]!.run).toStartWith("sudo /usr/bin/unshare --net /bin/sh -c")
+  expect(pinned[0]!.run).toContain("'ip link set lo up && exec setpriv --reuid=")
+  expect(await stepsRunning("ci.yml", "test/runner/runner-box.launcher.test.ts")).toEqual([])
+  expect(await stepsRunning("agent-image.yml", "test/runner/runner-box.launcher.test.ts")).toEqual([
+    {
+      job: "build",
+      run: "bun test --path-ignore-patterns= test/runner/runner-box.launcher.test.ts",
+    },
+  ])
 })
 
 test("the gateway suites take the test files of each depth below the gateway directory", async () => {

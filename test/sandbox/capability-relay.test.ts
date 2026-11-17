@@ -842,3 +842,43 @@ test("through the relay, a model call of a run whose budget is spent gets the bu
     { calls: 1, outputTokens: 1000, maxTokens: 400 },
   )
 }, 40000)
+
+// A model call on its way with the token that a renewal then replaces: the successor's first call
+// retires the predecessor, and the gateway refuses the call before any upstream request. The relay
+// sends that call once again with the current token; the predecessor's own power is unchanged.
+test("a model call sent with the token that a renewal replaced while it was on its way is sent once again with the successor, and the copied predecessor stays refused", async () => {
+  await withGateway(processGateway, async (f, gateway) => {
+    const renewals = renewalAnswers()
+    const released = Promise.withResolvers<void>()
+    let models = 0
+    f.front.hook({
+      lost: (path, status) => {
+        if (path === "/capabilities/v1/renew") renewals.record(status)
+        return false
+      },
+      // The first model call waits at the front until the successor has made a call.
+      held: (path) =>
+        path?.startsWith("/capabilities/v1/providers/") && ++models === 1
+          ? released.promise
+          : undefined,
+    })
+    await inDirectory("relay-hand-over-", (root) =>
+      withRelayOfRun(f, gateway, root, 3000, async ({ runner, grant, child, call }) => {
+        const first = call()
+        await renewals.reach(1)
+        expect(renewals.statuses).toEqual([200])
+        const second = await call()
+        expect(second.status).toBe(200)
+        expect(await second.text()).toBe(sse)
+        released.resolve()
+        const answer = await first
+        expect(answer.status).toBe(200)
+        expect(await answer.text()).toBe(sse)
+        // Each call reached the model once: the refused send launched no upstream request.
+        expect(f.upstreamRequests().length).toBe(2)
+        expect((await runner.call(grant.token)).status).toBe(403)
+        await runGoesOn(f, child)
+      }),
+    )
+  })
+}, 40000)

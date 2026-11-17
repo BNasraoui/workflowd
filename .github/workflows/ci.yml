@@ -123,6 +123,9 @@ jobs:
           systemd-analyze --user --recursive-errors=no --man=no --generators=no \
             verify deploy/systemd/workflowd.service \
               deploy/systemd/workflowd-runner.service deploy/systemd/workflowd-mcp.service
+          # The gateway's unit is a system unit: it runs the Docker client of the runner.
+          systemd-analyze --recursive-errors=no --man=no --generators=no \
+            verify deploy/systemd/workflowd-gateway.service
 
   tests:
     name: Tests and changed-line coverage
@@ -502,6 +505,14 @@ jobs:
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: gateway-image
+      # The build job passed its tests; the archive must still be the bytes its build step wrote.
+      - name: Require the archive that the build wrote
+        env:
+          ARCHIVE: ${{ needs.gateway-image.outputs.archive }}
+        run: |
+          set -euo pipefail
+          [[ "$ARCHIVE" =~ ^[a-f0-9]{64}$ ]]
+          echo "$ARCHIVE  gateway-image.tar.gz" | sha256sum -c -
       - name: Publish the tested image
         env:
           GHCR_TOKEN: ${{ github.token }}

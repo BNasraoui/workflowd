@@ -32,6 +32,10 @@ on:
         type: string
         required: false
         default: ""
+    outputs:
+      bootstrap-mode:
+        description: The bootstrap mode of the run; a caller's legacy publish job runs only after a legacy-artifact run.
+        value: ${{ jobs.runner.outputs.bootstrap-mode }}
 
 permissions: {}
 
@@ -45,6 +49,8 @@ jobs:
       github.event.repository.fork == false
     runs-on: ubuntu-24.04
     timeout-minutes: 300
+    outputs:
+      bootstrap-mode: ${{ inputs.bootstrap-mode }}
     permissions:
       contents: read
       id-token: write
@@ -83,13 +89,26 @@ jobs:
           path: /run/workflowd-sandbox/ready.json
           if-no-files-found: error
           retention-days: 1
+      - name: Probe the gateway Service and the box
+        if: inputs.bootstrap-mode == 'private'
+        # Two named lines of fixed words and numbers: a 16 MiB body through the Service, and the
+        # box's flags and network rules on this runner. A probe that fails, or that passes its
+        # time limit, does not end the job (src/sandbox/ci-policy.ts).
+        continue-on-error: true
+        timeout-minutes: 20
+        env:
+          SANDBOX_GATEWAY_URL: ${{ inputs.gateway-url }}
+          SANDBOX_AGENT_IMAGE: ${{ inputs.agent-image }}
+        run: node deploy/sandbox/trial-probe.mjs
       - name: Prepare private first contact
         if: inputs.bootstrap-mode == 'private'
         # The helper waits up to 180 seconds for the gateway to know the run, then proves itself.
         timeout-minutes: 5
-        # bootstrap.mjs reads only GITHUB_REF, GITHUB_SHA and the gateway URL of this step.
+        # bootstrap.mjs reads GITHUB_REF, GITHUB_SHA, and the gateway URL and the job's image of this
+        # step; the run client refuses a launch of another image.
         env:
           SANDBOX_GATEWAY_URL: ${{ inputs.gateway-url }}
+          SANDBOX_AGENT_IMAGE: ${{ inputs.agent-image }}
         run: node deploy/sandbox/public-output.mjs bootstrap -- bash deploy/sandbox/runner.sh prepare-private
       - name: Hold the lease
         # The runner injects OIDC variables after step env overrides. Strip them
@@ -97,7 +116,8 @@ jobs:
         shell: /usr/bin/env -u ACTIONS_ID_TOKEN_REQUEST_TOKEN -u ACTIONS_ID_TOKEN_REQUEST_URL /bin/bash --noprofile --norc -e -o pipefail {0}
         run: exec node deploy/sandbox/public-output.mjs audit -- /usr/local/bin/container-use hold
       - name: Upload sealed result
-        if: success()
+        # A private-mode run's sealed result goes to the daemon through the gateway alone.
+        if: success() && inputs.bootstrap-mode == 'legacy-artifact'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: sandbox-result-${{ github.run_id }}-${{ github.run_attempt }}

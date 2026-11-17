@@ -238,11 +238,14 @@ const observeFirstToken = (
         }
       }
     })
-    const timedOut: Effect.Effect<FirstToken> = Effect.as(Effect.sleep(timeoutMs), {
-      outcome: "refused" as const,
-      reason: "no_first_token" as const,
-      detail: `${cliName} produced no model output within ${timeoutMs}ms of spawn`,
-    })
+    const timedOut: Effect.Effect<FirstToken> = (initial.ready ?? Effect.void).pipe(
+      Effect.andThen(Effect.sleep(timeoutMs)),
+      Effect.as({
+        outcome: "refused" as const,
+        reason: "no_first_token" as const,
+        detail: `${cliName} produced no model output within ${timeoutMs}ms of ${initial.ready === undefined ? "spawn" : "being ready"}`,
+      }),
+    )
     const result = yield* Effect.race(streamed, timedOut)
     if (result.outcome === "generating") {
       return {
@@ -663,7 +666,7 @@ export const makeAgentRunCliDispatcher = (dependencies: {
                   ? run.prompt
                   : yield* dependencies.workerPrompt(run),
               model: run.resolvedSelection?.model ?? route.modelID,
-              ...(attachment === undefined
+              ...(attachment?.sandboxBindingFile === undefined
                 ? {}
                 : { sandboxBindingFile: attachment.sandboxBindingFile }),
               ...(run.resolvedSelection?.provider == null
@@ -723,6 +726,10 @@ export const makeAgentRunCliDispatcher = (dependencies: {
             resourceId,
             createdAt: run.createdAt,
             kind,
+            // A run on a GitHub Actions runner holds its session there, not on this host.
+            ...(run.resolvedSelection?.executor.endsWith(":actions") === true
+              ? { host: run.resolvedSelection.host }
+              : {}),
           })
           yield* store.markSpawned({
             runId: run.runId,

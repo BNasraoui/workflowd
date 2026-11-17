@@ -2,6 +2,10 @@ name: Agent image reusable build
 
 on:
   workflow_call:
+    outputs:
+      digest:
+        description: The SHA-256 of agent-image.tar.gz as the build step wrote it, before any test ran
+        value: ${{ jobs.build.outputs.digest }}
 
 permissions: {}
 
@@ -9,8 +13,10 @@ jobs:
   build:
     name: Agent image build and container-use E2E
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 60
     permissions: {}
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
     steps:
       - name: Anonymous checkout
         env:
@@ -37,14 +43,37 @@ jobs:
           curl --proto '=https' --proto-redir '=https' -fsSL https://raw.githubusercontent.com/cachix/install-nix-action/13d8dd58da0234aa297dedd986986ccb8e7f3e24/install-nix.sh -o "$installer"
           echo "836671507d9b4ea84252f968bd0622c5c2fa72f5deea93f5764f1c60821062f6  $installer" | sha256sum -c -
           env -u GITHUB_TOKEN -u INPUT_GITHUB_ACCESS_TOKEN bash "$installer"
+      # The archive that the publish job pushes is the one this step writes, before any test code
+      # runs; its digest is this step's output, which no later step can change.
       - name: Build locked image and verify deterministic streaming
+        id: build
         run: |
+          set -euo pipefail
           nix build .#agent-image --no-update-lock-file
           ./result > agent-image.tar
           first=$(sha256sum agent-image.tar | cut -d' ' -f1)
           second=$(./result | sha256sum | cut -d' ' -f1)
           test "$first" = "$second"
-          docker load -i agent-image.tar
+          gzip -n agent-image.tar
+          digest=$(sha256sum agent-image.tar.gz | cut -d' ' -f1)
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          printf 'Archive sha256: %s\n' "$digest" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Save the built image for publication
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: agent-image
+          path: agent-image.tar.gz
+          compression-level: 0
+          retention-days: 1
+      - name: Load the image and record its size
+        run: |
+          set -euo pipefail
+          docker load -i agent-image.tar.gz
+          {
+            printf 'Uncompressed image: %s bytes\n' "$(docker image inspect workflowd-agent-base:local --format '{{.Size}}')"
+            printf 'Compressed archive: %s bytes\n' "$(stat -c %s agent-image.tar.gz)"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Set up Bun for the test resource guard
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
         with:
@@ -53,21 +82,37 @@ jobs:
           no-cache: true
       - name: Exercise real container-use and Dagger with local image
         run: timeout 900 bash test/agent-image/e2e.sh
-      - name: Record image size
-        run: |
-          gzip -n agent-image.tar
-          docker image inspect workflowd-agent-base:local --format '{{.Size}}' > image-size.txt
-          {
-            printf 'Uncompressed image: %s bytes\n' "$(cat image-size.txt)"
-            printf 'Compressed archive: %s bytes\n' "$(stat -c %s agent-image.tar.gz)"
-          } | tee -a "$GITHUB_STEP_SUMMARY"
-      - name: Save tested image for publication
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - name: Install test dependencies without scripts
+        run: bun install --frozen-lockfile --ignore-scripts
+      - name: Pin the runner run's Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
-          name: agent-image
-          path: |
-            agent-image.tar.gz
-            image-size.txt
-          compression-level: 0
-          retention-days: 1
+          node-version: 24.11.1
+          token: ""
+      - name: Find the gateway's noscope for the runner run fixtures
+        run: echo "WORKFLOWD_FIXTURE_NOSCOPE=$(nix build .#gateway-noscope --no-update-lock-file --no-link --print-out-paths)/bin/noscope" >> "$GITHUB_ENV"
+      # A runner pulls its image by its ghcr.io digest. A registry on loopback, with a certificate
+      # that only this job's Docker trusts, serves the image under that name.
+      - name: Serve the image by its registry digest on loopback
+        run: |
+          set -euo pipefail
+          certs="$RUNNER_TEMP/registry"
+          mkdir -p "$certs"
+          openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=ghcr.io \
+            -addext subjectAltName=DNS:ghcr.io -keyout "$certs/key.pem" -out "$certs/cert.pem" 2>/dev/null
+          sudo install -D -m 644 "$certs/cert.pem" /etc/docker/certs.d/ghcr.io/ca.crt
+          echo "127.0.0.1 ghcr.io" | sudo tee -a /etc/hosts >/dev/null
+          docker run -d --name registry -p 127.0.0.1:443:443 -v "$certs:/certs:ro" \
+            -e REGISTRY_HTTP_ADDR=0.0.0.0:443 -e REGISTRY_HTTP_TLS_CERTIFICATE=/certs/cert.pem \
+            -e REGISTRY_HTTP_TLS_KEY=/certs/key.pem \
+            registry@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373 >/dev/null
+          docker tag workflowd-agent-base:local ghcr.io/bnasraoui/workflowd-agent-base:runner-test
+          for attempt in 1 2 3 4 5; do
+            docker push --quiet ghcr.io/bnasraoui/workflowd-agent-base:runner-test >/dev/null && break
+            sleep 2
+          done
+          digest=$(docker image inspect --format '{{index .RepoDigests 0}}' ghcr.io/bnasraoui/workflowd-agent-base:runner-test)
+          echo "WORKFLOWD_RUNNER_IMAGE=$digest" >> "$GITHUB_ENV"
+      - name: Run a runner run on the real runner scripts in the image's box
+        timeout-minutes: 20
+        run: bun test --path-ignore-patterns= test/runner/runner-box.launcher.test.ts

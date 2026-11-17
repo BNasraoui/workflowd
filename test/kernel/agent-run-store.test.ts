@@ -152,8 +152,45 @@ describe("agent-run store", () => {
       })
       expect(message.end_reason).toBeString()
       expect(message.final_message).toBe(terminal === "completed" ? "finished task" : null)
+      expect(message.placement).toBe("host")
+      expect(message.ended).toBeUndefined()
     })
   }
+  test("a runner run's message names its placement, and the gateway's end with the counts used", async () => {
+    const selection = {
+      host: "github-actions",
+      executor: "claude:actions",
+      executorKind: "claude" as const,
+      provider: "anthropic",
+      model: "claude-opus-5-5",
+      selectionModel: "claude-opus-5-5",
+      thinking: {},
+      availability: "unknown" as const,
+      evidence: "configured" as const,
+    }
+    const result = await run(
+      Effect.gen(function* () {
+        const store = yield* AgentRunStore
+        const sql = yield* SqlClient.SqlClient
+        yield* store.create({ ...input, resolvedSelection: selection })
+        yield* spawn(store)
+        yield* store.markVerified({ runId: input.runId, outputTokens: 1, now: at })
+        yield* store.operatorRequired({
+          runId: input.runId,
+          now: later,
+          diagnostic: "gateway_ended: ended: budget (3 calls, 900 output tokens)",
+          ended: { reason: "budget", calls: 3, outputTokens: 900 },
+        })
+        return yield* sql<{ prompt: string }>`SELECT prompt FROM resident_inbox`
+      }),
+    )
+    expect(JSON.parse(result[0]!.prompt)).toMatchObject({
+      status: "operator_required",
+      placement: "runner",
+      ended: "budget",
+      used: { calls: 3, output_tokens: 900 },
+    })
+  })
   test("create is exact-match idempotent and conflicts on divergent identity", async () => {
     const result = await run(
       Effect.gen(function* () {

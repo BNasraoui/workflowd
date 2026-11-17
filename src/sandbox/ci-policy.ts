@@ -12,14 +12,18 @@ const setupBun = "oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6"
 const setupNode = "actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020"
 // Reviewed in full: anonymous checkout, credential-free pinned Nix installation,
 // tokenless pinned Bun setup, locked build/determinism/E2E, and artifact upload
-// restricted to main pushes.
+// restricted to main pushes, directly after the build and before any test code runs, with
+// the archive's SHA-256 as the workflow's output for the publish job to check.
 // Any dependency, permission, input or script edit requires a fresh review.
-// gateway-image.yml: the same checkout, Nix, Bun and main-only upload, plus a job that finds
-// whether a pull request changes an input of the image, a second build of the commit and a job
-// that requires equal digests and the recorded noscope output hash.
+// gateway-image.yml: the same checkout, Nix, Bun, and main-only upload directly after the build
+// with the archive's SHA-256 as the workflow's output, plus a job that finds
+// whether a pull request changes an input of the image (the gateway's unit, its example
+// environment and the noscope templates among them, which test/gateway-image/unit.sh runs on the
+// image), a second build of the commit and a job that requires equal digests and the recorded
+// noscope output hash.
 const imageWorkflowSha256 = new Map([
-  ["agent-image.yml", "5cbed263784fda5a91137a9c935d7f1ba4ccb809b31d479b329a76aa9a79a857"],
-  ["gateway-image.yml", "b5f6d7ce48d94f53ddf94ff2932d6df93118db25d622e0d794af11f16024dc57"],
+  ["agent-image.yml", "961aca0273512625017cd483913e369bd750714083f26250d8746ec0ad77115f"],
+  ["gateway-image.yml", "1298bc0bdce6e525d78f469dd0249c2e76fd37a83ee004364295df494f257cbb"],
 ])
 const head = "${{ github.event.pull_request.head.sha || github.sha }}"
 const base = "${{ github.event.pull_request.base.sha || github.event.before }}"
@@ -186,7 +190,91 @@ function assertPublishIsolation(
  * Other local/composite/reusable dependencies and inherited secrets are refused. This
  * runs against the PR head to aid review; untrusted code cannot secure its own edits.
  */
+const legacyMode = "inputs.bootstrap-mode == 'legacy-artifact'"
+/** The conditions under which a step of agent-sandbox.yml may upload an artifact. */
+const legacyUploads = new Set([legacyMode, `success() && ${legacyMode}`])
+
+/**
+ * A runner run's sealed result is no artifact of a private-mode run: each upload step of
+ * agent-sandbox.yml runs only in the legacy-artifact mode, the workflow gives its mode to its
+ * caller, and a caller's agent-publish job, the legacy publisher of that artifact, runs only
+ * after a legacy-artifact run of agent-sandbox.yml.
+ */
+function assertSandboxResultIsolation(workflows: Record<string, string>) {
+  const sandboxSource = workflows["agent-sandbox.yml"]
+  if (sandboxSource === undefined) return
+  const sandbox = object(Bun.YAML.parse(sandboxSource))
+  const outputs = object(object(object(sandbox.on).workflow_call).outputs ?? {})
+  const runner = object(object(sandbox.jobs).runner)
+  if (
+    object(outputs["bootstrap-mode"] ?? {}).value !== "${{ jobs.runner.outputs.bootstrap-mode }}" ||
+    object(runner.outputs ?? {})["bootstrap-mode"] !== "${{ inputs.bootstrap-mode }}"
+  )
+    throw new Error("Sealed result isolation: agent-sandbox.yml must give its caller its mode")
+  for (const job of Object.values(object(sandbox.jobs)))
+    for (const value of Schema.decodeUnknownSync(Schema.Array(Schema.Json))(
+      object(job).steps ?? [],
+    )) {
+      const step = object(value)
+      const { uses, if: condition } = step
+      // The trial probe is advice for the owner: a failure or its time limit never ends the job.
+      if (
+        typeof step.run === "string" &&
+        step.run.includes("trial-probe.mjs") &&
+        (step["continue-on-error"] !== true || typeof step["timeout-minutes"] !== "number")
+      )
+        throw new Error("Trial probe: its step goes on after a failure and has a time limit")
+      if (
+        typeof uses === "string" &&
+        uses.startsWith("actions/upload-artifact@") &&
+        (typeof condition !== "string" || !legacyUploads.has(condition))
+      )
+        throw new Error("Sealed result isolation: an artifact is uploaded only by a legacy run")
+    }
+  for (const [name, source] of Object.entries(workflows)) {
+    if (name === "ben-approval.yml") continue
+    const jobs = object(object(Bun.YAML.parse(source)).jobs ?? {})
+    for (const job of Object.values(jobs)) assertRunnerCaller(name, object(job))
+    if (jobs["agent-publish"] === undefined) continue
+    const publish = object(jobs["agent-publish"])
+    if (
+      publish.needs !== "sandbox" ||
+      object(jobs.sandbox ?? {}).uses !== "./.github/workflows/agent-sandbox.yml" ||
+      publish.if !== "needs.sandbox.outputs.bootstrap-mode == 'legacy-artifact'"
+    )
+      throw new Error(`Sealed result isolation: ${name} publishes only after a legacy run`)
+  }
+}
+
+/** A value that only the repository's administrator sets: a literal, or a repository variable with a literal fallback. */
+const administratorValue =
+  /^(?:[^$]*|\$\{\{\s*vars\.[A-Z][A-Z0-9_]*(?:\s*\|\|\s*'[A-Za-z0-9-]*')?\s*\}\})$/
+
+/**
+ * A job that calls agent-sandbox.yml gives each input from a literal or a repository variable,
+ * never from the event or another context of the push; and a caller that gives the bootstrap
+ * mode, which can select private mode, also gives the gateway URL and the job's image, which the
+ * private first contact reads.
+ */
+function assertRunnerCaller(name: string, job: ReturnType<typeof object>) {
+  if (job.uses !== "./.github/workflows/agent-sandbox.yml") return
+  const inputs = object(job.with ?? {})
+  for (const [input, value] of Object.entries(inputs))
+    if (typeof value !== "string" || !administratorValue.test(value))
+      throw new Error(
+        `Runner caller: ${name} gives ${input} from a value other than a literal or a repository variable`,
+      )
+  if (
+    inputs["bootstrap-mode"] !== undefined &&
+    (inputs["gateway-url"] === undefined || inputs["agent-image"] === undefined)
+  )
+    throw new Error(
+      `Runner caller: ${name} selects a bootstrap mode without the gateway URL and the image`,
+    )
+}
+
 export function assertUnprivilegedPrWorkflows(workflows: Record<string, string>): void {
+  assertSandboxResultIsolation(workflows)
   let pullRequests = 0
   for (const [name, source] of Object.entries(workflows)) {
     if (name === "ben-approval.yml") {

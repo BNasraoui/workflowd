@@ -55,3 +55,6 @@ fi
 [[ $(ls -A "$root"/fs/nix/store/*-workflowd-node-modules) == node_modules ]]
 [[ -z $(ls -A "$root/fs/var/lib/workflowd-gateway") ]]
 echo "gateway image: user, entrypoint and contents passed"
+
+# The gateway's system unit, with the commands of its unit file, on this image.
+bash "$repository_root/test/gateway-image/unit.sh"

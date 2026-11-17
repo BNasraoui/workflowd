@@ -4,7 +4,10 @@ import { chmod, mkdtemp, mkdir, rm, writeFile, symlink } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { createHash } from "node:crypto"
+import { finalMessageText } from "../../deploy/sandbox/hidden-text.mjs"
 import { command } from "./harness"
+import { commitChange } from "../kernel/sealed-change"
+import { pathBytes, sealedChangeCases, sealedTextCases } from "../kernel/sealed-text-cases"
 
 const wording = {
   body: "## Result\n\nReadable agent description.",
@@ -479,3 +482,422 @@ test("real SSH completion seals on the container-use runner and ends hold withou
     await runner.close()
   }
 }, 300000)
+
+// Native seal and export: the runner's workspace becomes one bundle and a result.json
+// with exactly the SealedResult keys. The run names no branch.
+const native = {
+  title: "Native result",
+  commitMessage: "Native change\n\nOne file.",
+  body: "## Result\n\nNative change.",
+  finalMessage: "Done.\n\tA tab and a newline stay.",
+}
+const secret = "fixture-sensitive-value-93b28a5d"
+// The identity the daemon gives agent runs; the seal commits with it.
+const identity = { name: "Fixture Agent", email: "agent@example.invalid" }
+
+async function nativeSource(root: string) {
+  const work = join(root, "work")
+  await mkdir(work)
+  const git = (...args: string[]) =>
+    command(
+      ["git", "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", ...args],
+      work,
+    )
+  await git("init", "-q", "-b", "main")
+  await writeFile(join(work, ".gitignore"), "/build-cache/\n")
+  await writeFile(join(work, "base.txt"), "base\n")
+  await git("add", ".")
+  await git("commit", "-q", "-m", "source")
+  const source = await git("rev-parse", "HEAD")
+  await command(["git", "clone", "-q", "--bare", work, join(root, "source.git")])
+  return { work, git, source }
+}
+
+const nativeSeal = async (root: string, source: string, request: unknown) => {
+  const child = Bun.spawn(["python3", "-I", script, "native-seal", source], {
+    cwd: root,
+    stdin: new Blob([JSON.stringify(request)]),
+    stdout: "pipe",
+    stderr: "pipe",
+  })
+  const [status, stdout, stderr] = await Promise.all([
+    child.exited,
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+  ])
+  return { status, stdout, stderr: stderr.trim() }
+}
+
+/**
+ * The seal's two reads of the workspace archive `archive` in `root` on the source commit `source`:
+ * what Git would commit, then what the run added or changed.
+ */
+async function exportArchive(root: string, archive: string, source: string) {
+  for (const operation of ["native-select", "native-export"]) {
+    const child = Bun.spawn(["python3", "-I", script, operation, source], {
+      cwd: root,
+      stdin: Bun.file(join(root, archive)),
+      stdout: "pipe",
+      stderr: "pipe",
+    })
+    const [status, stderr] = await Promise.all([child.exited, new Response(child.stderr).text()])
+    if (status !== 0) throw new Error(`${operation} exited ${status}: ${stderr.trim()}`)
+  }
+}
+
+test("native export writes only what the run added or changed, lists what it left, and drops .git", async () => {
+  const root = await mkdtemp(join(tmpdir(), "native-export-"))
+  try {
+    const { work, source } = await nativeSource(root)
+    await writeFile(join(work, "added.txt"), "added\n")
+    await command(["tar", "-cf", join(root, "workspace.tar"), "-C", work, "."])
+    await exportArchive(root, "workspace.tar", source)
+    expect(await Bun.file(join(root, "repository/added.txt")).text()).toBe("added\n")
+    expect(await Bun.file(join(root, "repository/base.txt")).exists()).toBe(false)
+    expect(await Bun.file(join(root, "repository/.git/HEAD")).exists()).toBe(false)
+    expect((await Bun.file(join(root, "present")).text()).split("\0")).toEqual([
+      ".gitignore",
+      "base.txt",
+    ])
+    await rm(join(root, "repository"), { recursive: true, force: true })
+    await command(
+      [
+        "python3",
+        "-I",
+        "-c",
+        "import tarfile; f=tarfile.open('bad.tar','w'); i=tarfile.TarInfo('../escaped'); i.size=0; f.addfile(i); f.close()",
+      ],
+      root,
+    )
+    await expect(exportArchive(root, "bad.tar", source)).rejects.toThrow("Unsafe export path")
+    expect(await Bun.file(join(root, "escaped")).exists()).toBe(false)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+for (const variant of ["ignored", "selected", "negative size"] as const)
+  test(`native export never materializes a workspace link: ${variant}`, async () => {
+    const root = await mkdtemp(join(tmpdir(), "native-export-link-"))
+    try {
+      const { work, source } = await nativeSource(root)
+      await mkdir(join(work, "build-cache"))
+      await writeFile(join(root, "outside"), "untouched\n")
+      await symlink(
+        join(root, "outside"),
+        join(work, variant === "selected" ? "link" : "build-cache/link"),
+      )
+      await command(["tar", "--exclude=.git", "-cf", join(root, "workspace.tar"), "-C", work, "."])
+      if (variant === "negative size")
+        await command(
+          [
+            "python3",
+            "-I",
+            "-c",
+            "import tarfile\nwith tarfile.open('workspace.tar') as source, tarfile.open('malformed.tar','w',format=tarfile.GNU_FORMAT) as target:\n for item in source:\n  if item.issym(): item.size=-1\n  target.addfile(item,source.extractfile(item) if item.isfile() else None)\n",
+          ],
+          root,
+        )
+      const archive = variant === "negative size" ? "malformed.tar" : "workspace.tar"
+      const exported = exportArchive(root, archive, source)
+      if (variant === "ignored") {
+        await exported
+        expect(await Bun.file(join(root, "repository/build-cache/link")).exists()).toBe(false)
+      } else if (variant === "selected")
+        await expect(exported).rejects.toThrow(
+          'Sandbox result sealing failed: Symbolic link in the change: "link"',
+        )
+      else await expect(exported).rejects.toThrow("Invalid export size")
+      expect(await Bun.file(join(root, "outside")).text()).toBe("untouched\n")
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+// Each refused variant and the reason the seal gives for it.
+const refusedSeals = new Map([
+  ["encoded canary", "Sensitive public content"],
+  ["metadata canary", "Sensitive public content"],
+  ["symlink", 'Symbolic link in the change: "link"'],
+  ["forbidden path", "Unsafe path component"],
+  ["branch key", "Invalid native metadata"],
+  ["missing final message", "Invalid native metadata"],
+  ["NUL in the final message", "Invalid final message"],
+  ["terminal control sequence in the final message", "Invalid final message"],
+  ["bidirectional control in the final message", "Invalid final message"],
+  ["newline in the title", "Invalid publication text"],
+  ["an identity with an angle bracket", "Invalid identity"],
+  ["an identity with an invisible character", "Invalid identity"],
+  ["no identity", "Invalid native request"],
+])
+const sealVariants = ["ordinary", ...refusedSeals.keys()]
+
+for (const variant of sealVariants)
+  test(`native seal checks before it writes a result: ${variant}`, async () => {
+    const root = await mkdtemp(join(tmpdir(), "native-seal-"))
+    try {
+      const { work, git, source } = await nativeSource(root)
+      // History and local Git configuration of the workspace never enter the result or run.
+      await writeFile(join(work, "removed.txt"), secret)
+      await git("add", ".")
+      await git("commit", "-q", "-m", secret)
+      await rm(join(work, "removed.txt"))
+      await git("config", "core.fsmonitor", `touch ${join(root, "executed")}`)
+      await writeFile(
+        join(work, "result.txt"),
+        variant === "encoded canary"
+          ? Buffer.from(secret).toString("base64")
+          : "intended public content\n",
+      )
+      await mkdir(join(work, "build-cache"))
+      await writeFile(join(work, "build-cache/private.txt"), secret)
+      if (variant === "symlink") await symlink("/etc/passwd", join(work, "link"))
+      if (variant === "forbidden path") {
+        await mkdir(join(work, ".github"))
+        await writeFile(join(work, ".github", "bad.yml"), "bad")
+      }
+      await command(["tar", "--exclude=.git", "-cf", join(root, "workspace.tar"), "-C", work, "."])
+      const exported = exportArchive(root, "workspace.tar", source)
+      if (variant === "symlink") {
+        // A selected link is refused at export, before any seal.
+        await expect(exported).rejects.toThrow(
+          `Sandbox result sealing failed: ${refusedSeals.get("symlink")}`,
+        )
+        expect(await Bun.file(join(root, "result")).exists()).toBe(false)
+        return
+      }
+      await exported
+      const completions: Record<string, Record<string, unknown>> = {
+        "metadata canary": { ...native, body: secret },
+        "branch key": { ...native, branch: "main" },
+        "missing final message": {
+          title: native.title,
+          commitMessage: native.commitMessage,
+          body: native.body,
+        },
+        "NUL in the final message": { ...native, finalMessage: "a\u0000b" },
+        "terminal control sequence in the final message": {
+          ...native,
+          finalMessage: "a \u001b[2J b",
+        },
+        "bidirectional control in the final message": { ...native, finalMessage: "abc\u202edef" },
+        "newline in the title": { ...native, title: "one\ntwo" },
+      }
+      const identities: Record<string, unknown> = {
+        "an identity with an angle bracket": { name: "Fixture <Agent>", email: identity.email },
+        "an identity with an invisible character": {
+          name: "Fixture\u200bAgent",
+          email: identity.email,
+        },
+      }
+      const sealed = await nativeSeal(root, source, {
+        completion: completions[variant] ?? native,
+        sensitiveValues: [secret],
+        ...(variant === "no identity" ? {} : { identity: identities[variant] ?? identity }),
+      })
+      expect(await Bun.file(join(root, "executed")).exists()).toBe(false)
+      if (variant !== "ordinary") {
+        expect(sealed.status).not.toBe(0)
+        expect(sealed.stderr).toBe(`Sandbox result sealing failed: ${refusedSeals.get(variant)}`)
+        expect(await Bun.file(join(root, "result/result.bundle")).exists()).toBe(false)
+        expect(await Bun.file(join(root, "result/result.json")).exists()).toBe(false)
+        return
+      }
+      expect(sealed.status).toBe(0)
+      const json = await Bun.file(join(root, "result/result.json")).bytes()
+      const bundle = await Bun.file(join(root, "result/result.bundle")).bytes()
+      // The commit message is in the commit object only.
+      const { commitMessage: _commitMessage, ...wording } = native
+      expect(JSON.parse(new TextDecoder().decode(json))).toEqual({ sourceSha: source, ...wording })
+      const metadata = Schema.decodeUnknownSync(
+        Schema.Struct({
+          sourceSha: Schema.String,
+          resultSha: Schema.String,
+          bundleSha256: Schema.String,
+          manifestSha256: Schema.String,
+        }),
+      )(JSON.parse(sealed.stdout))
+      expect(metadata).toEqual({
+        sourceSha: source,
+        resultSha: metadata.resultSha,
+        bundleSha256: digest(bundle),
+        manifestSha256: digest(json),
+      })
+      const clean = join(root, "clean.git")
+      await command(["git", "clone", "-q", "--bare", join(root, "source.git"), clean])
+      await command(
+        [
+          "git",
+          "fetch",
+          "-q",
+          join(root, "result/result.bundle"),
+          "refs/workflowd/result:refs/heads/result",
+        ],
+        clean,
+      )
+      expect(await command(["git", "rev-parse", "result"], clean)).toBe(metadata.resultSha)
+      expect(await command(["git", "rev-list", "--count", `${source}..result`], clean)).toBe("1")
+      expect(await command(["git", "log", "-1", "--format=%B", "result"], clean)).toBe(
+        native.commitMessage,
+      )
+      expect(
+        await command(["git", "show", "-s", "--format=%an <%ae>%n%cn <%ce>", "result"], clean),
+      ).toBe(`${identity.name} <${identity.email}>\n${identity.name} <${identity.email}>`)
+      expect(await command(["git", "show", "result:result.txt"], clean)).toBe(
+        "intended public content",
+      )
+      expect(await command(["git", "ls-tree", "-r", "--name-only", "result"], clean)).not.toContain(
+        "build-cache",
+      )
+      expect(await command(["git", "ls-tree", "-r", "--name-only", "result"], clean)).not.toContain(
+        "removed.txt",
+      )
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+/** Whether the seal's rule of each item's field admits its value; a path as its bytes. */
+async function sealAdmits(
+  items: ReadonlyArray<{ readonly field: string; readonly value: string }>,
+): Promise<ReadonlyArray<boolean>> {
+  const child = Bun.spawn(
+    [
+      "python3",
+      "-I",
+      "-B",
+      "-c",
+      `
+import base64, importlib.util, json, sys
+spec = importlib.util.spec_from_file_location('result', sys.argv[1])
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+rules = {
+    'title': lambda value: m.publication_text(value),
+    'commitMessage': m.commit_message,
+    'body': m.publication_body,
+    'finalMessage': m.final_message,
+    'path': lambda value: (m.content_check(base64.b64decode(value), ()), m.safe_path(base64.b64decode(value))),
+}
+results = []
+for item in json.load(sys.stdin):
+    try:
+        rules[item['field']](item['value'])
+        results.append(True)
+    except ValueError:
+        results.append(False)
+print(json.dumps(results))
+`,
+      script,
+    ],
+    { stdin: new Blob([JSON.stringify(items)]), stdout: "pipe", stderr: "pipe" },
+  )
+  const [status, stdout, stderr] = await Promise.all([
+    child.exited,
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+  ])
+  expect({ status, stderr }).toEqual({ status: 0, stderr: "" })
+  return Schema.decodeUnknownSync(Schema.Array(Schema.Boolean))(JSON.parse(stdout))
+}
+
+// The seal's rules for each text and path, run on the cases that the daemon's check
+// runs on too.
+test("the seal gives each text and path of the shared table its expected result", async () => {
+  const results = await sealAdmits(
+    sealedTextCases.map((item) => ({
+      field: item.field,
+      value: item.field === "path" ? pathBytes(item).toString("base64") : item.value,
+    })),
+  )
+  expect(sealedTextCases.map((item, index) => ({ ...item, accepted: results[index] }))).toEqual([
+    ...sealedTextCases,
+  ])
+})
+
+// A runner's harness gives the seal the run's reply as its final message: what the seal refuses
+// in a final message is never in it, so a reply never costs the run its result.
+test("the seal admits the final message that a runner's harness makes of each final message of the shared table, and one that it admits is kept as it is", async () => {
+  const messages = sealedTextCases.filter((item) => item.field === "finalMessage")
+  const made = messages.map((item) => finalMessageText(item.value))
+  expect(await sealAdmits(made.map((value) => ({ field: "finalMessage", value })))).toEqual(
+    made.map(() => true),
+  )
+  expect(
+    made.filter((value, index) => messages[index]!.accepted && value !== messages[index]!.value),
+  ).toEqual([])
+})
+
+// The seal's rules for each change of the shared table (result.py inspect_changes), which the
+// daemon's check runs too: each change is one commit on the table's base.
+test("the seal gives each change of the shared table its expected result", async () => {
+  const root = await mkdtemp(join(tmpdir(), "seal-changes-"))
+  try {
+    const changes: Array<{
+      readonly repo: string
+      readonly base: string
+      readonly result: string
+    }> = []
+    for (const [index, item] of sealedChangeCases.entries()) {
+      const repo = join(root, String(index))
+      await mkdir(repo)
+      const git = (...args: string[]) =>
+        command(
+          [
+            "git",
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "-c",
+            "core.quotePath=false",
+            ...args,
+          ],
+          repo,
+        )
+      await git("init", "-q", "-b", "main")
+      await writeFile(join(repo, "README.md"), "fixture\n")
+      await writeFile(join(repo, "run.sh"), "#!/bin/sh\n")
+      await chmod(join(repo, "run.sh"), 0o755)
+      await git("add", ".")
+      await git("commit", "-q", "-m", "source")
+      changes.push({ repo, ...(await commitChange(git, repo, item)) })
+    }
+    const child = Bun.spawn(
+      [
+        "python3",
+        "-I",
+        "-B",
+        "-c",
+        `
+import importlib.util, json, sys
+spec = importlib.util.spec_from_file_location('result', sys.argv[1])
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+results = []
+for change in json.load(sys.stdin):
+    try:
+        m.inspect_changes(change['repo'], change['base'], change['result'])
+        results.append(True)
+    except ValueError:
+        results.append(False)
+print(json.dumps(results))
+`,
+        script,
+      ],
+      { stdin: new Blob([JSON.stringify(changes)]), stdout: "pipe", stderr: "pipe" },
+    )
+    const [status, stdout, stderr] = await Promise.all([
+      child.exited,
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+    ])
+    expect({ status, stderr }).toEqual({ status: 0, stderr: "" })
+    const results = Schema.decodeUnknownSync(Schema.Array(Schema.Boolean))(JSON.parse(stdout))
+    expect(
+      sealedChangeCases.map((item, index) => ({ name: item.name, accepted: results[index] })),
+    ).toEqual(sealedChangeCases.map((item) => ({ name: item.name, accepted: item.accepted })))
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+}, 120_000)

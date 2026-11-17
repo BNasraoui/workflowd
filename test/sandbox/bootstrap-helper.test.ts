@@ -242,8 +242,9 @@ test("the runner's bootstrap names an untrusted gateway certificate and stops at
         fixtureExecutable("node"),
         "--input-type=module",
         "-e",
-        `import { prepare } from ${JSON.stringify(resolve("deploy/sandbox/bootstrap.mjs"))}
+        `import { boxHarness, prepare } from ${JSON.stringify(resolve("deploy/sandbox/bootstrap.mjs"))}
 await prepare({
+  harness: boxHarness,
   directory: ${JSON.stringify(directory)},
   identity: async () => Response.json({ value: "fixture-proof" }),
 }).catch((error) => { process.stderr.write(error.message + "\\n"); process.exitCode = 1 })`,
@@ -252,6 +253,7 @@ await prepare({
         env: {
           PATH: "/usr/bin:/bin",
           GITHUB_SHA: "a".repeat(40),
+          SANDBOX_AGENT_IMAGE: `ghcr.io/bnasraoui/workflowd-agent-base@sha256:${"b".repeat(64)}`,
           GITHUB_REF: "refs/heads/workflowd/leases/lease",
           GITHUB_REPOSITORY: "fixture/repo",
           SANDBOX_GATEWAY_URL: gateway.url,

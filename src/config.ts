@@ -7,6 +7,7 @@ import {
   parseSandboxRepositories,
   type SandboxPolicy,
 } from "./sandbox/config"
+import { maxRunnerRuns, type Placement } from "./kernel/executor"
 import { Schema } from "effect"
 import { parseInstallationAccountIds } from "./installation-policy"
 import {
@@ -118,6 +119,13 @@ export interface QrspiConfig {
 
 export interface AgentRunConfig {
   readonly capabilityControl?: CapabilityControlConfig
+  /** Repositories placed off the host; an alias that is absent is `host`. */
+  readonly placements?: Readonly<Record<string, Placement>>
+  /**
+   * The runner runs at one time (`WORKFLOWD_RUNNER_MAX_RUNS`), with a runner placement only; a
+   * further dispatch is refused.
+   */
+  readonly runnerMaxRuns?: number
   readonly sandboxRepositories?: ReadonlyArray<SandboxPolicy>
   readonly token: string
   readonly claudeBinary: string
@@ -424,6 +432,60 @@ async function loadSecrets(
   }
 }
 
+const isJsonObject = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value)
+
+/**
+ * `WORKFLOWD_AGENT_RUN_PLACEMENTS`, such as `{"<alias>": "runner"}`. A `runner`
+ * alias needs an actions-native sandbox policy of its own.
+ */
+export function parseAgentRunPlacements(
+  value: string | undefined,
+  repositories: ReadonlyArray<AgentRunRepository>,
+  sandboxRepositories: ReadonlyArray<SandboxPolicy>,
+): Readonly<Record<string, Placement>> {
+  if (value === undefined) return {}
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(value)
+  } catch {
+    throw new Error("WORKFLOWD_AGENT_RUN_PLACEMENTS must be a JSON object")
+  }
+  if (!isJsonObject(parsed)) throw new Error("WORKFLOWD_AGENT_RUN_PLACEMENTS must be a JSON object")
+  const placements: Record<string, Placement> = {}
+  for (const [alias, placement] of Object.entries(parsed)) {
+    if (!repositories.some((repository) => repository.name === alias))
+      throw new Error(`WORKFLOWD_AGENT_RUN_PLACEMENTS names an unknown repository alias`)
+    if (placement !== "host" && placement !== "runner")
+      throw new Error(`WORKFLOWD_AGENT_RUN_PLACEMENTS values must be "host" or "runner"`)
+    if (
+      placement === "runner" &&
+      !sandboxRepositories.some(
+        (policy) => policy.alias === alias && policy.privateBootstrap?.mode === "actions-native",
+      )
+    )
+      throw new Error("A runner placement needs an actions-native sandbox policy for its alias")
+    placements[alias] = placement
+  }
+  return placements
+}
+
+/**
+ * `WORKFLOWD_RUNNER_MAX_RUNS`, the runner runs at one time; 4 when absent. Each runner run sends
+ * one sealed result, and the daemon lets at most `maxRunnerRuns` checks of a sealed result wait for
+ * a slot, so a setting above that bound would refuse a result that a run sent in time: it is
+ * refused at startup.
+ */
+export function parseRunnerMaxRuns(value: string | undefined): number {
+  const bound = maxRunnerRuns
+  if (value === undefined) return bound
+  if (!/^[1-9][0-9]*$/.test(value) || Number(value) > bound)
+    throw new Error(
+      `WORKFLOWD_RUNNER_MAX_RUNS must be an integer from 1 to ${bound}: each runner run sends one sealed result, and at most ${bound} checks of a sealed result wait for a slot`,
+    )
+  return Number(value)
+}
+
 function loadAgentRunConfig(
   env: Record<string, string | undefined>,
   token: string | undefined,
@@ -434,6 +496,7 @@ function loadAgentRunConfig(
       env.WORKFLOWD_AGENT_RUN_CODEX_ROUTES !== undefined ||
       env.WORKFLOWD_AGENT_RUN_CLAUDE_ROUTES !== undefined ||
       env.WORKFLOWD_AGENT_RUN_SANDBOX_REPOSITORIES !== undefined ||
+      env.WORKFLOWD_AGENT_RUN_PLACEMENTS !== undefined ||
       env.WORKFLOWD_CAPABILITY_GATEWAY !== undefined
     ) {
       throw new Error("WORKFLOWD_AGENT_RUN_TOKEN is required when agent-run settings are present")
@@ -468,8 +531,16 @@ function loadAgentRunConfig(
     )
   )
     throw new Error("Unknown sandbox alias")
+  const runnerMaxRuns = parseRunnerMaxRuns(env.WORKFLOWD_RUNNER_MAX_RUNS)
+  const placements = parseAgentRunPlacements(
+    env.WORKFLOWD_AGENT_RUN_PLACEMENTS,
+    repositories,
+    sandboxRepositories,
+  )
   return {
     ...(sandboxRepositories.length === 0 ? {} : { sandboxRepositories }),
+    ...(Object.keys(placements).length === 0 ? {} : { placements }),
+    ...(Object.values(placements).includes("runner") ? { runnerMaxRuns } : {}),
     ...(capabilityControl === undefined ? {} : { capabilityControl }),
     token,
     claudeBinary: env.WORKFLOWD_AGENT_RUN_CLAUDE_BIN ?? "claude",

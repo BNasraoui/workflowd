@@ -1,0 +1,935 @@
+import { SqliteClient } from "@effect/sql-sqlite-bun"
+import { OpenCode } from "@opencode-ai/client/effect"
+import { Cause, Effect, Layer, Logger, ManagedRuntime, type Scope } from "effect"
+import { FetchHttpClient } from "effect/unstable/http"
+import { SqlClient } from "effect/unstable/sql"
+import { mkdir, readdir, readFile, writeFile } from "node:fs/promises"
+import { join, resolve } from "node:path"
+import { AgentRunIngressLive } from "../../src/kernel/agent-run-ingress"
+import { AgentRunStoreLive } from "../../src/kernel/agent-run-store"
+import { AgentRunWorktrees } from "../../src/kernel/agent-run-worktrees"
+import { ClaudeDispatchCli } from "../../src/kernel/claude-dispatch"
+import { CodexCli } from "../../src/kernel/codex-session"
+import { KernelEventStoreLive } from "../../src/kernel/event-store"
+import {
+  makeSealedResultGit,
+  sealedResultLimits,
+  SealedResultGit,
+  type SealedResultGitPort,
+} from "../../src/kernel/sealed-result"
+import { KernelSessionStoreLive } from "../../src/kernel/session-store"
+import { KernelJobStoreLive } from "../../src/kernel/job-store"
+import { makeOpenCodeSdkClient, SdkOpenCodeAdapter } from "../../src/opencode/adapter"
+import {
+  controlClient,
+  makeDaemonCapability,
+  type DaemonCapability,
+} from "../../src/sandbox/capability-control"
+import { defaultRunBudget } from "../../src/sandbox/config"
+import { makeSandboxDispatch, SandboxDispatch } from "../../src/sandbox/dispatch"
+import { RepositoryVisibility } from "../../src/sandbox/github"
+import { makeSandboxLeaseService } from "../../src/sandbox/lease"
+import { WorkflowStoreLive } from "../../src/store"
+import { WorkSignal, WorkSignalLive } from "../../src/work-signal"
+import { loadConfig } from "../../src/config"
+import { startHookService } from "../../src/runtime"
+import { AgentRunProvider } from "../../src/kernel/agent-run-ingress"
+import { AgentRunWatchdogLive } from "../../src/kernel/agent-run-watchdog"
+import {
+  AGENT_RUN_WORKTREE_BATCH_SIZE,
+  AgentRunWorktreeJanitorLive,
+} from "../../src/kernel/agent-run-worktree-janitor"
+import {
+  fixture,
+  gatewaySource,
+  proof,
+  startGatewayProcess,
+  type Fixture,
+  type Gateway,
+} from "../capability-gateway/gateway-process"
+import { fixtureExecutable } from "../helpers/fixture-executable.mjs"
+import { makeCodexCli } from "../kernel/agent-run-ingress-harness"
+import { githubApiStub } from "../sandbox/github-api-stub"
+
+/** The module of the line that a harness writes first, once its box is ready. */
+export const boxReadyModule = resolve("deploy/sandbox/box-ready.mjs")
+/** The module that reads a harness's workspace as its box's stopped workspace is read. */
+export const workspaceArchiveModule = resolve("test/helpers/workspace-archive.mjs")
+
+/**
+ * A harness of the run client in place of the box: it reads the launch on its standard input,
+ * writes the line of its ready box and Claude's stream-json lines for it, and leaves `result` (its result.json and its bundle)
+ * in the run directory. It names the launch's prompt and model in its lines, so a test sees that
+ * the launch reached it.
+ */
+export async function writeHarness(
+  directory: string,
+  result: { readonly manifest: string; readonly bundle: Uint8Array } | null,
+  options: {
+    readonly extraLines?: number
+    readonly exitCode?: number
+    /** The cause that the harness leaves in the run directory, as the box's harness does when it fails. */
+    readonly failure?: { readonly cause: string; readonly detail: string }
+    /** A line of the agent, written into the stream, that starts as the run client's failure line. */
+    readonly forgedFailure?: string
+  } = {},
+) {
+  const path = join(directory, "harness.mjs")
+  if (result !== null) {
+    await mkdir(join(directory, "result"), { recursive: true })
+    await writeFile(join(directory, "fixture-result.json"), result.manifest)
+    await writeFile(join(directory, "fixture-result.bundle"), result.bundle)
+  }
+  await writeFile(
+    path,
+    `import { copyFileSync, readFileSync, writeFileSync } from "node:fs"
+import { boxReadyLine } from ${JSON.stringify(boxReadyModule)}
+const launch = JSON.parse(readFileSync(0, "utf8"))
+const directory = ${JSON.stringify(directory)}
+const line = (value) => process.stdout.write(JSON.stringify(value) + "\\n")
+process.stdout.write(boxReadyLine + "\\n")
+line({ type: "system", subtype: "init", session_id: "fixture-session", model: launch.model })
+for (let index = 0; index < ${options.extraLines ?? 0}; index++)
+  line({ type: "assistant", message: { content: [{ type: "text", text: "x".repeat(1000) }] } })
+line({ type: "assistant", message: { content: [{ type: "text", text: "prompt: " + launch.prompt + " at " + launch.sourceSha }] } })
+${options.forgedFailure === undefined ? "" : `process.stdout.write(${JSON.stringify(options.forgedFailure)} + "\\n")`}
+line({ type: "result", subtype: "success", is_error: false, result: "Done for " + launch.sourceSha })
+${options.failure === undefined ? "" : `writeFileSync(directory + "/harness-failure.json", ${JSON.stringify(JSON.stringify(options.failure))})`}
+${
+  result === null
+    ? ""
+    : `copyFileSync(directory + "/fixture-result.json", directory + "/result/result.json")
+copyFileSync(directory + "/fixture-result.bundle", directory + "/result/result.bundle")`
+}
+process.exitCode = ${options.exitCode ?? 0}
+`,
+  )
+  return path
+}
+
+/** The agent Git identity of the daemon, which the launch gives the seal and the check requires. */
+export const runnerIdentity = { name: "Fixture Agent", email: "agent@example.invalid" }
+/** The model of the runner route: a family whose anthropic-beta values the gateway's list holds. */
+export const runnerModel = "claude-sonnet-4-5"
+/** The Actions run of the runner job, which the GitHub stub lists for the lease ref. */
+const actionsRunId = 79
+const workflowSha = "a".repeat(40)
+
+/** Runs a command and gives its standard output, trimmed; fails with `step` and its error. */
+export function run(step: string, argv: ReadonlyArray<string>, cwd?: string, input?: string) {
+  const child = Bun.spawnSync([...argv], {
+    ...(cwd === undefined ? {} : { cwd }),
+    stdin: input === undefined ? "ignore" : new TextEncoder().encode(input),
+    env: {
+      PATH: "/usr/bin:/bin",
+      HOME: "/nonexistent",
+      GIT_CONFIG_NOSYSTEM: "1",
+      GIT_CONFIG_GLOBAL: "/dev/null",
+      GIT_AUTHOR_NAME: "Fixture",
+      GIT_AUTHOR_EMAIL: "fixture@example.invalid",
+      GIT_COMMITTER_NAME: "Fixture",
+      GIT_COMMITTER_EMAIL: "fixture@example.invalid",
+    },
+  })
+  if (child.exitCode !== 0)
+    throw new Error(
+      `step ${step}: ${argv.join(" ")} exited ${child.exitCode}: ${child.stderr.toString()}`,
+    )
+  return child.stdout.toString().trim()
+}
+
+/**
+ * The fixture repository's Git remote, served over HTTP by `git http-backend` as GitHub serves
+ * a public repository: upload-pack only. Its one commit is the run's source; the daemon pushes
+ * the run's branch into the same bare repository.
+ */
+export async function gitRemote(
+  root: string,
+  /** A repository whose HEAD is the run's source, as `main`; a new one of one file when not named. */
+  source?: string,
+) {
+  const work = source ?? join(root, "work")
+  const projects = join(root, "remote")
+  const bare = join(projects, "fixture", "repo.git")
+  if (source === undefined) {
+    await mkdir(work, { recursive: true })
+    run("source", ["git", "init", "--quiet", "-b", "main"], work)
+    await writeFile(join(work, "README.md"), "fixture\n")
+    run("source", ["git", "add", "README.md"], work)
+    run("source", ["git", "commit", "--quiet", "-m", "Source"], work)
+  }
+  const sourceSha = run("source", ["git", "rev-parse", "HEAD"], work)
+  await mkdir(join(projects, "fixture"), { recursive: true })
+  run("source", ["git", "init", "--quiet", "--bare", "-b", "main", bare])
+  run("source", ["git", "-C", bare, "fetch", "--quiet", "--no-tags", work, "HEAD:refs/heads/main"])
+  // GitHub serves any commit of a public repository by its id.
+  run("source", ["git", "-C", bare, "config", "uploadpack.allowAnySHA1InWant", "true"])
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    async fetch(request) {
+      const url = new URL(request.url)
+      const body = new Uint8Array(await request.arrayBuffer())
+      const child = Bun.spawn(["/usr/bin/git", "http-backend"], {
+        env: {
+          PATH: "/usr/bin:/bin",
+          GIT_PROJECT_ROOT: projects,
+          GIT_HTTP_EXPORT_ALL: "1",
+          GIT_CONFIG_NOSYSTEM: "1",
+          GIT_CONFIG_GLOBAL: "/dev/null",
+          REQUEST_METHOD: request.method,
+          PATH_INFO: url.pathname,
+          QUERY_STRING: url.search.slice(1),
+          CONTENT_TYPE: request.headers.get("content-type") ?? "",
+          CONTENT_LENGTH: String(body.length),
+          GIT_PROTOCOL: request.headers.get("git-protocol") ?? "",
+          HTTP_GIT_PROTOCOL: request.headers.get("git-protocol") ?? "",
+          REMOTE_ADDR: "127.0.0.1",
+        },
+        stdin: body,
+        stdout: "pipe",
+        stderr: "ignore",
+      })
+      const output = Buffer.from(await new Response(child.stdout).arrayBuffer())
+      await child.exited
+      const end = output.indexOf("\r\n\r\n")
+      const head = output.subarray(0, end).toString("latin1").split("\r\n")
+      const headers = new Headers()
+      let status = 200
+      for (const line of head) {
+        const [name, ...rest] = line.split(":")
+        const value = rest.join(":").trim()
+        if (name?.toLowerCase() === "status") status = Number.parseInt(value, 10)
+        else if (name) headers.set(name, value)
+      }
+      return new Response(output.subarray(end + 4), { status, headers })
+    },
+  })
+  return {
+    url: server.url.origin,
+    bare,
+    sourceSha,
+    /** The commit of `ref` in the remote, or null when it has none. */
+    ref: (ref: string) => {
+      const child = Bun.spawnSync(["git", "-C", bare, "rev-parse", "--verify", "--quiet", ref])
+      return child.exitCode === 0 ? child.stdout.toString().trim() : null
+    },
+    close: () => server.stop(true),
+  }
+}
+
+/**
+ * A GitHub API stub of the fixture repository, public: its lease refs, the Actions run that a
+ * lease ref starts (`actionsRunId`), its commits and its workflows. `started` runs once for each
+ * lease ref that the daemon creates, as GitHub starts the caller workflow on its push.
+ */
+export async function githubStub(
+  sourceSha: string,
+  started: (leaseId: string) => void,
+  /** Whether the repository holds the workflows of the runner job. */
+  workflows = true,
+) {
+  const leases = new Set<string>()
+  /** The conclusion of each lease's Actions run that ended; a cancel ends it `cancelled`. */
+  const ended = new Map<string, string>()
+  /** The lease refs that the daemon created, also once deleted. */
+  const created = new Set<string>()
+  /** The Actions runs whose cancel the daemon asked for. */
+  const cancels: Array<number> = []
+  /** Whether a read of the Actions run fails, as when GitHub's API does not answer. */
+  let unreadable = false
+  const repository = "/repos/fixture/repo"
+  const runOf = (leaseId: string) => ({
+    id: actionsRunId,
+    run_attempt: 1,
+    event: "push",
+    head_sha: workflowSha,
+    head_branch: `workflowd/leases/${leaseId}`,
+    path: ".github/workflows/agent-sandbox-caller.yml",
+    repository: { id: 12, fork: false },
+    head_repository: { id: 12, fork: false },
+    actor: { id: 56 },
+    triggering_actor: { id: 56 },
+    status: ended.has(leaseId) ? "completed" : "in_progress",
+    conclusion: ended.get(leaseId) ?? null,
+  })
+  let stub: Awaited<ReturnType<typeof githubApiStub>> | undefined = undefined
+  const runs = () => [...leases].map(runOf)
+  stub = await githubApiStub((path, method) => {
+    if (path === repository)
+      return Response.json({
+        id: 12,
+        full_name: "fixture/repo",
+        fork: false,
+        private: false,
+        visibility: "public",
+      })
+    if (path.startsWith(`${repository}/contents/.github/workflows/`))
+      return workflows ? Response.json({}) : new Response(null, { status: 404 })
+    if (path === `${repository}/commits/HEAD`) return Response.json({ sha: sourceSha })
+    if (method === "POST" && path === `${repository}/git/refs`) {
+      const body: unknown = stub?.requests.at(-1)?.body
+      const ref = typeof body === "object" && body !== null ? Reflect.get(body, "ref") : undefined
+      const leaseId = /^refs\/heads\/workflowd\/leases\/([a-zA-Z0-9-]+)$/.exec(String(ref))?.[1]
+      if (leaseId === undefined) return new Response(null, { status: 422 })
+      leases.add(leaseId)
+      created.add(leaseId)
+      started(leaseId)
+      return Response.json({ ref, object: { sha: workflowSha } }, { status: 201 })
+    }
+    const lease =
+      /^\/repos\/fixture\/repo\/git\/refs?\/heads\/workflowd\/leases\/([a-zA-Z0-9-]+)$/.exec(
+        path,
+      )?.[1]
+    if (lease !== undefined && method === "DELETE") {
+      leases.delete(lease)
+      return new Response(null, { status: 204 })
+    }
+    if (lease !== undefined)
+      return leases.has(lease)
+        ? Response.json({
+            ref: `refs/heads/workflowd/leases/${lease}`,
+            object: { sha: workflowSha },
+          })
+        : new Response(null, { status: 404 })
+    if (path === `${repository}/actions/runs`)
+      return Response.json({ total_count: runs().length, workflow_runs: runs() })
+    if (path === `${repository}/actions/runs/${actionsRunId}`) {
+      if (unreadable) return new Response(null, { status: 503 })
+      // The Actions run stays readable once its lease ref is deleted, as on GitHub.
+      const [first] = [...created].map(runOf)
+      return first === undefined ? new Response(null, { status: 404 }) : Response.json(first)
+    }
+    if (method === "POST" && path === `${repository}/actions/runs/${actionsRunId}/cancel`) {
+      cancels.push(actionsRunId)
+      for (const leaseId of created) if (!ended.has(leaseId)) ended.set(leaseId, "cancelled")
+      return new Response(null, { status: 202 })
+    }
+    return undefined
+  })
+  return {
+    ...stub,
+    /** Ends the Actions run of `leaseId` with `conclusion`, as GitHub reports a job's end. */
+    endRun: (leaseId: string, conclusion = "success") => {
+      ended.set(leaseId, conclusion)
+    },
+    /** From now on, each read of the Actions run fails, as when GitHub's API does not answer. */
+    unreadable: () => {
+      unreadable = true
+    },
+    /** The lease refs that exist now. */
+    leaseRefs: (): ReadonlyArray<string> => [...leases],
+    /** The Actions runs whose cancel the daemon asked for, in order. */
+    cancels: (): ReadonlyArray<number> => cancels,
+  }
+}
+
+/** The policy of the runner repository: public, actions-native, with the job's own image. */
+export const runnerPolicy = (agentImage: string) => ({
+  alias: "runner",
+  repository: "fixture/repo",
+  repositoryId: 12,
+  installationId: 1,
+  workflowSha,
+  appActorId: 56,
+  agentImage,
+  tailscaleClientId: "fixture",
+  tailscaleAudience: "fixture",
+  privateBootstrap: { mode: "actions-native" as const, repositoryOwnerId: 1 },
+})
+
+/**
+ * The gateway as its own process, with Git reads: its github.com reads go to the fixture remote,
+ * as its model calls go to the fixture model.
+ */
+async function gitGateway(f: Fixture, gitUrl: string): Promise<Gateway> {
+  const github = "https://github.com/"
+  const source = `const real = globalThis.fetch
+globalThis.fetch = (url, init) =>
+  real(typeof url === "string" && url.startsWith(${JSON.stringify(github)}) ? ${JSON.stringify(`${gitUrl}/`)} + url.slice(${github.length}) : url, init)
+${gatewaySource(f)}`
+  return startGatewayProcess([process.execPath, "-e", source], f.env, f.front)
+}
+
+/** What a runner job of the test runs: its directory, its harness and its image. */
+export interface RunnerJob {
+  /** The run directory of the job; `/run/workflowd-sandbox` on a real runner. */
+  readonly directory: string
+  /**
+   * The harness command of the run client, given the fixture remote's bare repository; the box of
+   * `native-runner.mjs` when not named.
+   */
+  readonly harness?: (bare: string) => Promise<ReadonlyArray<string>>
+  /** The job's agent image. */
+  readonly image: string
+  /** A repository whose HEAD is the run's source; a new one of one file when not named. */
+  readonly source?: string
+  /**
+   * The job that the lease push starts, in place of the fixture's start of bootstrap.mjs: it
+   * resolves once the job's last step ended. It gets the lease, the fixture OIDC issuer's token
+   * URL and the gateway fixture.
+   */
+  readonly start?: (lease: {
+    readonly leaseId: string
+    readonly issuer: string
+    readonly f: Fixture
+  }) => Promise<void>
+  /** Whether the daemon runs the background workers of a production start (`startHookService`). */
+  readonly productionWorkers?: boolean
+}
+
+/**
+ * The runner job of one lease, as the job's private first contact runs it: bootstrap.mjs opens
+ * the gateway session with the job's OIDC proof (signed by the fixture key, for the lease ref)
+ * and starts the run client, which runs the harness. Resolves once bootstrap ended; the run
+ * client goes on in its own process, whose id is in `relay.pid`.
+ */
+async function startJob(
+  f: Fixture,
+  job: RunnerJob,
+  harness: ReadonlyArray<string> | undefined,
+  leaseId: string,
+  issuer: string,
+) {
+  const child = Bun.spawn(
+    [
+      fixtureExecutable("node"),
+      "--input-type=module",
+      "-e",
+      `import { boxHarness, prepare } from ${JSON.stringify(resolve("deploy/sandbox/bootstrap.mjs"))}
+await prepare({
+  harness: ${harness === undefined ? "boxHarness" : JSON.stringify(harness)},
+  directory: ${JSON.stringify(job.directory)},
+  identity: (url, init) => fetch(${JSON.stringify(issuer)} + url.search, init),
+}).catch((error) => { process.stderr.write(String(error?.message) + "\\n"); process.exitCode = 1 })`,
+    ],
+    {
+      env: {
+        PATH: "/usr/bin:/bin",
+        GITHUB_SHA: workflowSha,
+        GITHUB_REF: `refs/heads/workflowd/leases/${leaseId}`,
+        GITHUB_REPOSITORY: "fixture/repo",
+        SANDBOX_GATEWAY_URL: f.front.origin,
+        SANDBOX_AGENT_IMAGE: job.image,
+        ACTIONS_ID_TOKEN_REQUEST_URL:
+          "https://fixture.actions.githubusercontent.com/token?api-version=2",
+        ACTIONS_ID_TOKEN_REQUEST_TOKEN: "fixture-request",
+        NODE_EXTRA_CA_CERTS: f.tls.cert,
+      },
+      stdout: "ignore",
+      stderr: "pipe",
+    },
+  )
+  const [code, errors] = await Promise.all([child.exited, new Response(child.stderr).text()])
+  if (code !== 0) throw new Error(`step job bootstrap: exit ${code}: ${errors}`)
+}
+
+/** The process id of a job's run client, or undefined before bootstrap started it. */
+const runClientPid = (directory: string) =>
+  readFile(join(directory, "relay.pid"), "utf8").then(Number, () => undefined)
+
+/** Whether the process `pid` is alive. */
+const alive = (pid: number) => {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** What the daemon's runner placement uses of the gateway: the lease's calls and the run's reads. */
+export type RunnerControl = Pick<
+  DaemonCapability,
+  "authorize" | "revoke" | "sessionBound" | "startRevoke" | "readEvents" | "readResult"
+>
+
+/**
+ * The daemon of the runner placement on workflowd's store `database`: its ingress, and its
+ * sandbox dispatch with the gateway's control socket, the GitHub stub and the check of sealed
+ * results, which pushes to the fixture remote `bare` in place of github.com.
+ */
+export function daemonRuntime(
+  f: { readonly root: string; readonly database: string },
+  github: Awaited<ReturnType<typeof githubStub>>,
+  bare: string,
+  policy: ReturnType<typeof runnerPolicy>,
+  /** workflowd's side of the gateway: its control client, or a test's script of the gateway. */
+  gateway: Effect.Effect<RunnerControl, never, SqlClient.SqlClient | Scope.Scope>,
+  options: {
+    /** The window for a run's first model output from its box's ready line; 120 s, as configured by default. */
+    readonly verifyTimeoutMs?: number
+    /** The pause between two passes of the sandbox workers (30 s in the daemon). */
+    readonly reconcileEveryMs?: number
+    /** Runs as the push of a checked result starts. */
+    readonly beforePush?: () => Promise<void>
+    /** The git of the check and the push; /usr/bin/git unless named. */
+    readonly gitBinary?: string
+    /**
+     * Whether the daemon runs the background workers of a production start: `startHookService`
+     * of an execution host, with the agent-run watchdog, the worktree janitor and the sandbox
+     * heartbeat and reconcile at their production pace, on the daemon's own work signal.
+     */
+    readonly productionWorkers?: boolean
+  } = {},
+) {
+  const stores = Layer.mergeAll(KernelSessionStoreLive, AgentRunStoreLive, KernelJobStoreLive).pipe(
+    Layer.provideMerge(
+      KernelEventStoreLive.pipe(
+        Layer.provideMerge(
+          WorkflowStoreLive.pipe(Layer.provideMerge(SqliteClient.layer({ filename: f.database }))),
+        ),
+      ),
+    ),
+  )
+  const sealed = Layer.effect(
+    SealedResultGit,
+    Effect.gen(function* () {
+      // The check makes its scratch root, or takes the one of a daemon that ran before.
+      const live = yield* makeSealedResultGit({
+        scratchRoot: join(f.root, "sealed-scratch"),
+        binary: options.gitBinary ?? "/usr/bin/git",
+        timeLimitMs: sealedResultLimits.timeLimitMs,
+        waitLimitMs: sealedResultLimits.waitLimitMs,
+        protocols: ["file"],
+        remoteAllowed: () => true,
+      })
+      // The daemon pushes to https://github.com/fixture/repo.git; here, to the fixture remote.
+      const port: SealedResultGitPort = {
+        check: (result, target, check) =>
+          live.check(result, target, { ...check, remote: bare }).pipe(
+            Effect.map((checked) => ({
+              ...checked,
+              push: () =>
+                Effect.promise(() => options.beforePush?.() ?? Promise.resolve()).pipe(
+                  Effect.andThen(checked.push()),
+                ),
+            })),
+          ),
+      }
+      return port
+    }),
+  )
+  // The daemon's lease service, for a test that runs its cleanup as the daemon's reconcile does.
+  let leaseService: Effect.Success<ReturnType<typeof makeSandboxLeaseService>> | undefined
+  const sandbox = Layer.effect(
+    SandboxDispatch,
+    Effect.gen(function* () {
+      const control = yield* gateway
+      const leases = yield* makeSandboxLeaseService(
+        github.github,
+        join(f.root, "control-root"),
+        undefined,
+        { native: { gateway: control } },
+      )
+      leaseService = leases
+      const client = yield* OpenCode.make({ baseUrl: "http://127.0.0.1:1" }).pipe(
+        Effect.provide(FetchHttpClient.layer),
+      )
+      return yield* makeSandboxDispatch({
+        policies: [policy],
+        github: github.github,
+        leases,
+        client,
+        executor: new SdkOpenCodeAdapter(makeOpenCodeSdkClient(Effect.succeed(client))),
+        executorId: "opencode:unused",
+        endpointIdentity: "http://127.0.0.1:1",
+        runner: {
+          aliases: [policy.alias],
+          maxRuns: 1,
+          gateway: control,
+          sealed: yield* SealedResultGit,
+          agentGit: { ...runnerIdentity, blockedEmails: [] },
+        },
+      })
+    }),
+  ).pipe(Layer.provide(sealed), Layer.provide(stores))
+  // The daemon's sandbox workers, as runtime.ts runs them: the reconcile and the heartbeat, each
+  // pass after the one before it, for the life of the runtime.
+  const sandboxWorkers = Layer.effectDiscard(
+    Effect.gen(function* () {
+      const dispatch = yield* SandboxDispatch
+      for (const [name, operation] of [
+        ["reconcile", dispatch.iteration],
+        ["heartbeat", dispatch.heartbeat],
+      ] as const)
+        yield* Effect.forkScoped(
+          Effect.forever(
+            operation.pipe(
+              Effect.catchCause((cause) =>
+                Effect.logError(`Sandbox ${name} failed: ${Cause.pretty(cause)}`),
+              ),
+              Effect.andThen(Effect.sleep(options.reconcileEveryMs ?? 250)),
+            ),
+          ),
+        )
+    }),
+  )
+  const production = options.productionWorkers === true
+  const workers = Layer.mergeAll(
+    production ? Layer.empty : sandboxWorkers,
+    production ? productionWorkers(f.root) : Layer.empty,
+  )
+  // Each line that the daemon logs, for a test that reads what its workers did.
+  const logs: Array<string> = []
+  const logger = Logger.layer([
+    Logger.make<unknown, void>(({ logLevel, message }) => {
+      logs.push(`${logLevel}: ${typeof message === "string" ? message : JSON.stringify(message)}`)
+    }),
+  ])
+  const unused = Effect.die("a runner run uses no client of this host")
+  const ingress = AgentRunIngressLive({
+    routes: [],
+    codexRoutes: [],
+    claudeRoutes: [{ name: "claude", modelID: runnerModel }],
+    placements: { [policy.alias]: "runner" },
+    repositories: [{ name: policy.alias, directory: "/unused/repository" }],
+    sandboxRepositories: [policy],
+    agent: "sandbox",
+    worktreeRoot: join(f.root, "worktrees"),
+    verifyTimeoutMs: options.verifyTimeoutMs ?? 120000,
+    verifyPollIntervalMs: 50,
+    progressWindowMs: 900000,
+    maxAttempts: 1,
+    claudeHosts: [],
+    identity: {
+      owningHostId: "mint",
+      providerId: "opencode-primary",
+      serverId: "opencode-primary",
+      endpointAlias: "local",
+      endpointIdentity: "http://127.0.0.1:4096",
+      providerVersion: 1,
+    },
+  }).pipe(
+    Layer.provideMerge(sandbox),
+    Layer.provideMerge(stores),
+    Layer.provideMerge(
+      options.productionWorkers === true
+        ? WorkSignalLive
+        : Layer.succeed(WorkSignal, {
+            wake: () => Effect.void,
+            subscribe: () => Effect.die("unused"),
+          }),
+    ),
+    Layer.provideMerge(
+      Layer.succeed(RepositoryVisibility, { read: github.github.repositoryVisibility }),
+    ),
+    Layer.provideMerge(Layer.succeed(AgentRunWorktrees, { create: () => unused })),
+    Layer.provideMerge(Layer.succeed(CodexCli, makeCodexCli([]).port)),
+    Layer.provideMerge(
+      Layer.succeed(ClaudeDispatchCli, {
+        ownership: "resident-thread",
+        preflight: Effect.void,
+        spawn: () => unused,
+        cancelRun: () => unused,
+      }),
+    ),
+  )
+  return Object.assign(
+    ManagedRuntime.make(workers.pipe(Layer.provideMerge(ingress), Layer.provideMerge(logger))),
+    {
+      /** The lines that the daemon logged. */
+      logs: (): ReadonlyArray<string> => logs,
+      /**
+       * Runs the release cleanup of the lease of `runId` again, as the daemon's reconcile does once
+       * GitHub reports its Actions run completed: the ref of an ended run is removed then.
+       */
+      cleanup: (runId: string) =>
+        leaseService === undefined ? Effect.void : Effect.ignore(leaseService.release(runId)),
+    },
+  )
+}
+
+/**
+ * The background workers of a production start of the daemon: `startHookService` of an execution
+ * host, which starts each worker whose service the layer holds, at its production pace. It holds
+ * the agent-run watchdog (with the options of `src/layers.ts`), the worktree janitor and the
+ * sandbox dispatch's heartbeat and reconcile. The watchdog's provider of OpenCode sessions fails
+ * the run's test at any use: a runner run has no OpenCode session.
+ */
+function productionWorkers(root: string) {
+  const verifyTimeoutMs = 120000
+  const noSession = Effect.die("a runner run has no OpenCode session")
+  return Layer.effectDiscard(
+    Effect.gen(function* () {
+      const loaded = yield* Effect.promise(() =>
+        loadConfig({ WORKFLOWD_MODE: "execution" }, { home: root }),
+      )
+      yield* startHookService({ ...loaded, http: { ...loaded.http, host: "127.0.0.1", port: 0 } })
+    }),
+  ).pipe(
+    Layer.provide(
+      Layer.mergeAll(
+        AgentRunWatchdogLive({
+          progressWindowMs: 900000,
+          staleAfterMs: verifyTimeoutMs * 10,
+          directoryLeaseMs: 90000,
+          unsupervisedExecutorKinds: ["codex", "claude"],
+          now: () => new Date(),
+        }),
+        AgentRunWorktreeJanitorLive({
+          owningHostId: "mint",
+          worktreeRoot: join(root, "worktrees"),
+          repositories: [],
+          retentionMs: 7 * 24 * 3600000,
+          batchSize: AGENT_RUN_WORKTREE_BATCH_SIZE,
+          now: () => new Date(),
+        }),
+      ).pipe(
+        Layer.provide(
+          Layer.succeed(AgentRunProvider, {
+            createSession: () => noSession,
+            promptSession: () => noSession,
+            abortSession: () => noSession,
+            listProviders: () => noSession,
+            listModels: () => noSession,
+            sessionTelemetry: () => noSession,
+          }),
+        ),
+      ),
+    ),
+  )
+}
+
+/**
+ * The daemon and a runner job of the fixture repository, placed on a runner: the real gateway
+ * process with Git reads, the daemon's ingress and sandbox dispatch with its runner placement on
+ * workflowd's store, a GitHub API stub, the fixture Git remote, and the job that the lease ref
+ * starts. `use` gets the daemon's runtime and the parts a test reads; everything ends after it.
+ */
+export async function withRunnerDaemon<A>(
+  job: RunnerJob,
+  use: (daemon: {
+    readonly f: Fixture
+    readonly runtime: ReturnType<typeof daemonRuntime>
+    readonly remote: Awaited<ReturnType<typeof gitRemote>>
+    /** Settles once the job's run client ended; fails with the job's failure. */
+    readonly jobEnded: () => Promise<void>
+    /** The GitHub API stub: the lease refs, the Actions run's end and the cancels asked. */
+    readonly github: Awaited<ReturnType<typeof githubStub>>
+    /** The lease id of the run, once the daemon created its ref. */
+    readonly leaseId: () => string
+    /** The process id of the job's run client, once bootstrap started it. */
+    readonly runClient: () => Promise<number | undefined>
+    /**
+     * Stops the daemon and starts it again on the same store, as a restart of the daemon's
+     * service does; the gateway process, the job and GitHub go on, and `between` runs while no
+     * daemon does. Gives the new daemon's runtime.
+     */
+    readonly restart: (between?: () => Promise<void>) => Promise<ReturnType<typeof daemonRuntime>>
+    /**
+     * The job's record: the files of its run directory, its harness's record of its steps, the
+     * model calls that reached the fixture model and the end of the gateway's output.
+     */
+    readonly record: () => Promise<string>
+  }) => Promise<A>,
+): Promise<A> {
+  // A provider id other than `anthropic`: each grant of the run must name the gateway's own.
+  const f = await fixture({ gitRead: true, providerId: "fixture-provider" })
+  const remote = await gitRemote(join(f.root, "git"), job.source)
+  const lease = { id: "none" }
+  let jobStart: Promise<void> | undefined
+  const issuer = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch: (request) =>
+      Response.json({
+        value: proof(
+          new URL(request.url).searchParams.get("audience") ?? "",
+          `jti-${crypto.randomUUID()}`,
+          { lease: lease.id, claims: { run_id: String(actionsRunId) } },
+        ),
+      }),
+  })
+  const harness = await job.harness?.(remote.bare)
+  const github = await githubStub(remote.sourceSha, (leaseId) => {
+    lease.id = leaseId
+    jobStart =
+      job.start === undefined
+        ? startJob(f, job, harness, leaseId, `${issuer.url.origin}/token`)
+        : job.start({ leaseId, issuer: `${issuer.url.origin}/token`, f })
+    // A failed start is read by `jobEnded`; the daemon's wait for the lease ends on its own.
+    jobStart.catch(() => undefined)
+  })
+  let gateway: Gateway | undefined
+  let runtime: ReturnType<typeof daemonRuntime> | undefined
+  try {
+    gateway = await gitGateway(f, remote.url)
+    // The daemon's own store: not the gateway fixture's, which holds a host sandbox's run and
+    // lease for the gateway's own tests. A restart keeps it.
+    const store = { root: f.root, database: join(f.root, "runner-daemon.db") }
+    const daemon = () =>
+      daemonRuntime(
+        store,
+        github,
+        remote.bare,
+        runnerPolicy(job.image),
+        makeDaemonCapability({
+          socket: f.config.controlSocket,
+          reconcileEveryMs: 3600000,
+          budget: defaultRunBudget,
+          runner: { aliases: ["runner"], identity: runnerIdentity },
+        }),
+        { productionWorkers: job.productionWorkers === true },
+      )
+    runtime = daemon()
+    // The daemon's host in its directory, as its start binds it: each run is then its own.
+    await runtime.runPromise(
+      Effect.flatMap(
+        SqlClient.SqlClient,
+        (sql) =>
+          sql`INSERT INTO directory_local_identity(singleton,host_id) VALUES(1,'fixture-controller')
+            ON CONFLICT DO NOTHING`,
+      ),
+    )
+    const jobEnded = async () => {
+      for (let tries = 0; jobStart === undefined; tries++) {
+        if (tries > 6000) throw new Error("step job: the daemon created no lease ref")
+        await Bun.sleep(100)
+      }
+      await jobStart
+      const pid = await runClientPid(job.directory)
+      if (pid === undefined) throw new Error("step job: bootstrap started no run client")
+      while (alive(pid)) await Bun.sleep(200)
+    }
+    return await use({
+      f,
+      runtime,
+      remote,
+      jobEnded,
+      github,
+      leaseId: () => lease.id,
+      runClient: () => runClientPid(job.directory),
+      restart: async (between) => {
+        await runtime?.dispose()
+        await between?.()
+        runtime = daemon()
+        return runtime
+      },
+      record: async () =>
+        [
+          `run directory: ${(await readdir(job.directory).catch(() => [])).sort().join(" ")}`,
+          `run client end: ${await readFile(join(job.directory, "relay-ended"), "utf8").catch(() => "none")}`,
+          `harness: ${await readFile(join(job.directory, "native", "harness.log"), "utf8").catch(() => "none")}`,
+          `model calls: ${f
+            .upstreamRequests()
+            .map((call) => call.path)
+            .join(" ")}`,
+          `events held: ${await Effect.runPromise(
+            controlClient(f.config.controlSocket)
+              .readEvents(lease.id, 0)
+              .pipe(
+                Effect.map((read) =>
+                  JSON.stringify(read.batches.flatMap((batch) => batch.lines)).slice(-3000),
+                ),
+                Effect.catch((error) => Effect.succeed(`unread: ${error._tag}`)),
+              ),
+          )}`,
+          `gateway: ${(gateway?.output?.() ?? "").slice(-3000)}`,
+        ].join("\n"),
+    })
+  } finally {
+    const pid = await runClientPid(job.directory)
+    if (pid !== undefined && alive(pid)) process.kill(pid, "SIGKILL")
+    await runtime?.dispose()
+    await gateway?.stop()
+    await issuer.stop(true)
+    await github.close()
+    await remote.close()
+    await f.close()
+  }
+}
+
+/**
+ * The reply of the run of `writeSealingHarness`, as Claude Code's result line gives it: with a
+ * Hangul filler, a Mongolian variation selector, a U+FE0F after a letter and one after an emoji.
+ * The seal refuses each of them in a final message but the last.
+ */
+export const sealingReply = "Runner run done.\u3164\u180B Ok\uFE0F \u{1F642}\uFE0F"
+/** `sealingReply` as the seal admits it, which is the run's final message. */
+export const sealedReply = "Runner run done. Ok \u{1F642}\uFE0F"
+
+/**
+ * The harness of the run client in place of the box, for a host with no Docker: it writes
+ * Claude's stream-json lines for the launch, makes the run's change on the source, which it
+ * fetches from the fixture remote `bare`, and seals it with the harness's own seal
+ * (native-seal.mjs), as the launch's agent identity, with the reply `sealingReply`.
+ */
+export async function writeSealingHarness(
+  directory: string,
+  bare: string,
+  /** Lines that the agent writes into Claude Code's stream after its reply, before its result. */
+  forged: ReadonlyArray<unknown> = [],
+) {
+  const path = join(directory, "sealing-harness.mjs")
+  await writeFile(
+    path,
+    `import { execFileSync } from "node:child_process"
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs"
+import { boxReadyLine } from ${JSON.stringify(boxReadyModule)}
+import { sealRun } from ${JSON.stringify(resolve("deploy/sandbox/native-seal.mjs"))}
+import { directoryArchive } from ${JSON.stringify(workspaceArchiveModule)}
+const launch = JSON.parse(readFileSync(0, "utf8"))
+const directory = process.env.WORKFLOWD_RUN_DIRECTORY
+const native = directory + "/native"
+const env = { PATH: "/usr/bin:/bin", HOME: "/nonexistent", GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" }
+const run = (argv) => execFileSync(argv[0], argv.slice(1), { cwd: native, env, encoding: "utf8" })
+const line = (value) => process.stdout.write(JSON.stringify(value) + "\\n")
+const reply = ${JSON.stringify(sealingReply)}
+process.stdout.write(boxReadyLine + "\\n")
+line({ type: "system", subtype: "init", session_id: "fixture-session", model: launch.model })
+line({ type: "assistant", message: { content: [{ type: "text", text: "prompt: " + launch.prompt }] } })
+mkdirSync(native + "/workspace", { recursive: true })
+run(["git", "init", "--quiet", "--bare", "source.git"])
+run(["git", "-C", "source.git", "fetch", "--quiet", "--no-tags", ${JSON.stringify(bare)}, launch.sourceSha])
+run(["sh", "-c", 'git -C source.git archive "$1" | tar -x -C workspace', "sh", launch.sourceSha])
+writeFileSync(native + "/workspace/runner-proof.txt", "written by the runner run\\n")
+line({ type: "assistant", message: { content: [{ type: "text", text: reply }] } })
+for (const forged of ${JSON.stringify(forged)}) line(forged)
+line({ type: "result", subtype: "success", is_error: false, result: reply })
+await sealRun({ directory, native, sourceSha: launch.sourceSha, identity: launch.identity, reply, workspace: () => directoryArchive(native + "/workspace") })
+`,
+  )
+  return path
+}
+
+/** The run's messages in the caller's mailbox: each prompt of the run's inbox rows, parsed. */
+export const mailbox = (runId: string) =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient
+    const rows = yield* sql<{ id: string; prompt: string }>`SELECT id,prompt FROM resident_inbox
+      WHERE id LIKE ${"%" + runId} ORDER BY id`
+    return rows.map((row): { readonly id: string; readonly message: unknown } => ({
+      id: row.id,
+      message: JSON.parse(row.prompt),
+    }))
+  })
+
+/**
+ * Runs `operation` within `timeoutMs`; a failure or a timeout names `name`, with `record`, the
+ * job's own record of what it did, when one is given.
+ */
+export async function step<A>(
+  name: string,
+  operation: () => Promise<A>,
+  record?: () => Promise<string>,
+  timeoutMs = 600000,
+) {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      operation(),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`timed out after ${timeoutMs} ms`)), timeoutMs)
+      }),
+    ])
+  } catch (error) {
+    const text = record === undefined ? "" : await record()
+    throw new Error(
+      `step ${name}: ${error instanceof Error ? error.message : String(error)}${text === "" ? "" : `\njob record:\n${text}`}`,
+      { cause: error },
+    )
+  } finally {
+    clearTimeout(timer)
+  }
+}

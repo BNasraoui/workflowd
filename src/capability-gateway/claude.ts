@@ -1,3 +1,4 @@
+import { maxModelBodyBytes } from "../../deploy/sandbox/capability-limits.mjs"
 import { maxCallTokens } from "../capability-control/protocol"
 import { credentialPatterns } from "./provider-evidence"
 import { checkHeaders, RequestRefused } from "./headers"
@@ -19,8 +20,9 @@ const forwarded = new Set([
   "x-stainless-timeout",
 ])
 /**
- * The anthropic-beta values the pinned Claude Code (test/resources/claude-code-version) sends on a messages call, for each
- * model family it knows. test/capability-gateway/claude-pinned.launcher.test.ts records them in CI and
+ * The anthropic-beta values the pinned Claude Code (test/resources/claude-code-version) sends on a
+ * messages call, for each model family it knows, in print mode and in the stream-json mode of a
+ * runner's box. test/capability-gateway/claude-pinned.launcher.test.ts records them in CI and
  * fails when the pinned client sends a value this list does not hold.
  */
 export const claudeBetas: ReadonlySet<string> = new Set([
@@ -37,6 +39,7 @@ export const claudeBetas: ReadonlySet<string> = new Set([
   "oauth-2025-04-20",
   "per-turn-control-2026-07-01",
   "prompt-caching-scope-2026-01-05",
+  "thinking-display-updates-2026-08-18",
   "thinking-token-count-2026-05-13",
 ])
 export interface ClaudeRequest {
@@ -233,7 +236,7 @@ export async function claudeRequest(
   )
     throw new RequestRefused()
   const headers = claudeHeaders(request)
-  const data = parsedBody(await readRequestBody(request, signal, 1048576))
+  const data = parsedBody(await readRequestBody(request, signal, maxModelBodyBytes))
   if (!("model" in data) || data.model !== model) throw new RequestRefused()
   const reservation = messages ? askedTokens(data, maxTokens) : 0
   const access = await credential()

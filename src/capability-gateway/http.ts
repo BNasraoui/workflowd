@@ -14,6 +14,7 @@ import { join } from "node:path"
 import { Cause, Effect, Exit } from "effect"
 import { readRequestBody } from "./claude"
 import { capabilityOrigin } from "./headers"
+import { runRoutePrefix } from "./run-routes"
 import {
   maxHeaderBytes,
   maxRelaySockets,
@@ -208,6 +209,18 @@ function capabilityHttpServer(handle: (request: Request) => Promise<Response>, s
     const work = (async () => {
       try {
         if (peer === undefined) {
+          outgoing.writeHead(403)
+          outgoing.end()
+          return
+        }
+        // A run route is matched on its path as the runner sent it: a path that a URL parser
+        // would change (dot segments, a backslash) and that would then name a run route is
+        // refused, so no route is reached by a path that differs from its own.
+        const parsed = new URL(`${capabilityOrigin}${incoming.url ?? ""}`)
+        if (
+          parsed.pathname.startsWith(runRoutePrefix) &&
+          `${parsed.pathname}${parsed.search}` !== incoming.url
+        ) {
           outgoing.writeHead(403)
           outgoing.end()
           return

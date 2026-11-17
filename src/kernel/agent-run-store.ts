@@ -1,6 +1,7 @@
 import { canonicalJson } from "./session-store-support"
 import { randomBytes } from "node:crypto"
 import { SqlClient } from "effect/unstable/sql"
+import type { GatewayEnd } from "../capability-control/protocol"
 import { Context, Data, Effect, Layer, Schema } from "effect"
 import { RequestedSelection, ResolvedSelection } from "../execution-selection"
 import { runLifetime } from "../store/run-lifetime"
@@ -172,7 +173,11 @@ export type AgentRunStorePort = {
     input: Authority & { readonly attempt: number; readonly diagnostic: string },
   ) => Effect.Effect<void, AgentRunStoreError>
   readonly complete: (
-    input: Authority & { readonly finalMessage?: string | null },
+    input: Authority & {
+      readonly finalMessage?: string | null
+      /** The end the caller's message names: `completed`, or `unchanged` for no change. */
+      readonly endReason?: "completed" | "unchanged"
+    },
   ) => Effect.Effect<void, AgentRunStoreError>
   readonly fail: (
     input: Authority & { readonly diagnostic: string; readonly finalMessage?: string | null },
@@ -181,7 +186,12 @@ export type AgentRunStorePort = {
     input: Authority & { readonly diagnostic?: string },
   ) => Effect.Effect<void, AgentRunStoreError>
   readonly operatorRequired: (
-    input: Authority & { readonly diagnostic: string; readonly finalMessage?: string | null },
+    input: Authority & {
+      readonly diagnostic: string
+      readonly finalMessage?: string | null
+      /** The gateway's own end of a runner run, which the caller's message names. */
+      readonly ended?: GatewayEnd | null
+    },
   ) => Effect.Effect<void, AgentRunStoreError>
   readonly nextWatchable: (input: {
     readonly now: Date
@@ -428,6 +438,7 @@ const make = Effect.gen(function* () {
     endReason: string,
     finalMessage: string | null,
     change: Effect.Effect<void, AgentRunStoreError>,
+    ended: GatewayEnd | null = null,
   ) =>
     lifetime.change(
       runId,
@@ -448,6 +459,14 @@ const make = Effect.gen(function* () {
             ended_at: now.toISOString(),
             final_message: finalMessage,
             final_message_ref: finalMessage === null ? run.nativeSessionId : null,
+            // Where the run ran: a run of the runner placement runs on the host github-actions.
+            placement: run.resolvedSelection?.host === "github-actions" ? "runner" : "host",
+            ...(ended === null
+              ? {}
+              : {
+                  ended: ended.reason,
+                  used: { calls: ended.calls, output_tokens: ended.outputTokens },
+                }),
           })
           yield* sql`INSERT INTO resident_inbox (id,thread_id,mailbox_id,prompt,state)
           VALUES (${"agent-run-end-" + runId},NULL,${run.callerMailboxId},${prompt},'prepared')
@@ -460,7 +479,7 @@ const make = Effect.gen(function* () {
     terminal(
       input.runId,
       input.now,
-      "completed",
+      input.endReason ?? "completed",
       input.finalMessage ?? null,
       transition(
         input.runId,
@@ -517,6 +536,7 @@ const make = Effect.gen(function* () {
         WHERE run_id = ${input.runId} AND state IN ('accepted', 'spawning', 'spawned', 'verified', 'operator_required')
         RETURNING run_id`,
       ),
+      input.ended ?? null,
     )
 
   const nextWatchable: AgentRunStorePort["nextWatchable"] = (input) =>

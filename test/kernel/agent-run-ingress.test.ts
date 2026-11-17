@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { SqlClient } from "effect/unstable/sql"
 import { Effect, Layer, Schema } from "effect"
 import { AgentRunStore } from "../../src/kernel/agent-run-store"
+import type { SandboxPolicy } from "../../src/sandbox/config"
 import { enqueueNextAgentHandoff } from "../../src/kernel/agent-handoff-reducer"
 import { KernelJobStore, KernelJobStoreLive } from "../../src/kernel/job-store"
 import { runKernelJobIteration } from "../../src/kernel/job-runner"
@@ -1062,4 +1063,185 @@ test("resident OpenCode dispatch provisions the run before its initial prompt", 
   expect(prepared).toEqual([result.runId])
   expect(state.prompted[0]?.text).toContain("Subscribe and end your turn.")
   expect(state.prompted[0]?.text).toContain(submission.prompt)
+})
+
+describe("runner placement", () => {
+  const runnerPolicy = {
+    alias: "workflowd",
+    repository: "fixture/workflowd",
+    repositoryId: 12,
+    installationId: 34,
+    workflowSha: "a".repeat(40),
+    appActorId: 56,
+    agentImage: `ghcr.io/bnasraoui/workflowd-agent-base@sha256:${"b".repeat(64)}`,
+    tailscaleClientId: "fixture-client",
+    tailscaleAudience: "fixture-audience",
+    privateBootstrap: { repositoryOwnerId: 78, mode: "actions-native" as const },
+  }
+
+  /** The shared GitHub API stub, whose one repository answers as `repository` says. */
+  const githubStub = async (repository: () => Response) => {
+    const { githubApiStub } = await import("../sandbox/github-api-stub")
+    return githubApiStub((path) =>
+      path === `/repos/${runnerPolicy.repository}` ? repository() : undefined,
+    )
+  }
+
+  const visible = (fields: Record<string, unknown>) => () =>
+    Response.json({
+      id: runnerPolicy.repositoryId,
+      full_name: runnerPolicy.repository,
+      fork: false,
+      private: false,
+      ...fields,
+    })
+
+  const dispatchRunner = async (
+    repository?: () => Response,
+    input: import("../../src/agent-run-contract").AgentRunSubmission = submission,
+    claudeModel: string | null = "claude-opus-5-5",
+  ) => {
+    const { RepositoryVisibility } = await import("../../src/sandbox/github")
+    const state = defaultState()
+    const trees: Array<{ repository: string; directory: string; branch: string }> = []
+    const stub = repository === undefined ? undefined : await githubStub(repository)
+    try {
+      const base = makeLayer(makeProvider(state), worktrees(trees), undefined, {
+        placements: { workflowd: "runner" },
+        sandboxRepositories: [runnerPolicy],
+        claudeRoutes: [{ name: "claude", modelID: claudeModel }],
+      })
+      const layer =
+        stub === undefined
+          ? base
+          : base.pipe(
+              Layer.provide(
+                Layer.succeed(RepositoryVisibility, { read: stub.github.repositoryVisibility }),
+              ),
+            )
+      const refusal = await refusalOf(
+        Effect.runPromise(register(input).pipe(Effect.provide(layer))),
+      )
+      expect(state.created).toHaveLength(0)
+      expect(trees).toHaveLength(0)
+      return {
+        refusal,
+        tokenRequests: stub?.minted() ?? [],
+        revoked: stub?.revoked() ?? [],
+      }
+    } finally {
+      await stub?.close()
+    }
+  }
+
+  test("a runner dispatch of a public repository reads its visibility once and runs Claude only", async () => {
+    const { refusal, tokenRequests, revoked } = await dispatchRunner(
+      visible({ visibility: "public" }),
+    )
+    expect(refusal.reason).toBe("executor_unavailable")
+    expect(refusal.detail).toBe("A runner runs Claude only")
+    expect(tokenRequests).toEqual([
+      { repository_ids: [runnerPolicy.repositoryId], permissions: { metadata: "read" } },
+    ])
+    // The token of the read is revoked once the read is done.
+    expect(revoked.map((request) => request.authorization)).toEqual(["token fixture-token"])
+  })
+
+  test("a Claude runner run is refused a thinking request", async () => {
+    const claude = { ...submission, route: "claude" }
+    const thinking = await dispatchRunner(visible({ visibility: "public" }), {
+      ...claude,
+      thinking: { effort: "high" },
+    })
+    expect(thinking.refusal.reason).toBe("unsupported_thinking")
+    // A Claude run within the bounds goes on to the runner's sandbox, which this harness lacks.
+    const accepted = await dispatchRunner(visible({ visibility: "public" }), claude)
+    expect(accepted.refusal.detail).toBe("The required repository sandbox is unavailable")
+  })
+
+  test("a Claude runner run of a route that names no model is refused", async () => {
+    const unnamed = await dispatchRunner(
+      visible({ visibility: "public" }),
+      { ...submission, route: "claude" },
+      null,
+    )
+    expect(unnamed.refusal).toMatchObject({
+      reason: "executor_unavailable",
+      detail: "A runner run needs an explicit configured model",
+    })
+  })
+
+  test("a private or internal repository is refused for a runner", async () => {
+    expect((await dispatchRunner(visible({ private: true }))).refusal.reason).toBe(
+      "runner_requires_public_repository",
+    )
+    expect((await dispatchRunner(visible({ visibility: "internal" }))).refusal.reason).toBe(
+      "runner_requires_public_repository",
+    )
+  })
+
+  test("a failed visibility read refuses the dispatch and never counts as public", async () => {
+    for (const repository of [
+      () => new Response(null, { status: 500 }),
+      () => new Response(null, { status: 404 }),
+      visible({ id: 999 }),
+      visible({ full_name: "fixture/other" }),
+      () => Response.json({ id: runnerPolicy.repositoryId }),
+    ]) {
+      const { refusal, revoked } = await dispatchRunner(repository)
+      expect(refusal.reason).toBe("repository_visibility_unknown")
+      // The token is revoked also when the read fails.
+      expect(revoked).toHaveLength(1)
+    }
+    // No visibility reader at all is a failed read too.
+    expect((await dispatchRunner()).refusal.reason).toBe("repository_visibility_unknown")
+  })
+
+  test("a host placement dispatches as before", async () => {
+    const state = defaultState()
+    const layer = makeLayer(makeProvider(state), worktrees([]), undefined, {
+      placements: { workflowd: "host" },
+    })
+    const receipt = await Effect.runPromise(register(submission).pipe(Effect.provide(layer)))
+    expect(receipt.status).toBe("dispatched")
+  })
+
+  test("the placement setting names known aliases, and a runner needs an actions-native policy", async () => {
+    const { parseAgentRunPlacements } = await import("../../src/config")
+    const repositories = [{ name: "workflowd", directory: "/fixture/workflowd" }]
+    const { privateBootstrap: _none, ...hostPolicy } = runnerPolicy
+    expect(parseAgentRunPlacements(undefined, repositories, [])).toEqual({})
+    expect(parseAgentRunPlacements('{"workflowd":"host"}', repositories, [])).toEqual({
+      workflowd: "host",
+    })
+    expect(parseAgentRunPlacements('{"workflowd":"runner"}', repositories, [runnerPolicy])).toEqual(
+      {
+        workflowd: "runner",
+      },
+    )
+    const cases: ReadonlyArray<readonly [string, ReadonlyArray<SandboxPolicy>, string]> = [
+      ['{"workflowd":"runner"}', [], "actions-native"],
+      ['{"workflowd":"runner"}', [hostPolicy], "actions-native"],
+      ['{"other":"runner"}', [runnerPolicy], "unknown repository alias"],
+      ['{"workflowd":"cloud"}', [runnerPolicy], '"host" or "runner"'],
+      ["[]", [], "JSON object"],
+      ["not json", [], "JSON object"],
+    ]
+    for (const [value, policies, message] of cases)
+      expect(() => parseAgentRunPlacements(value, repositories, policies)).toThrow(message)
+  })
+
+  test("the runner runs at one time follow the bound of waiting checks, and a larger setting is refused at startup", async () => {
+    const { parseRunnerMaxRuns } = await import("../../src/config")
+    const { sealedResultLimits } = await import("../../src/kernel/sealed-result")
+    expect(parseRunnerMaxRuns(undefined)).toBe(sealedResultLimits.waitingChecks)
+    expect(parseRunnerMaxRuns("1")).toBe(1)
+    expect(parseRunnerMaxRuns(String(sealedResultLimits.waitingChecks))).toBe(
+      sealedResultLimits.waitingChecks,
+    )
+    for (const value of [String(sealedResultLimits.waitingChecks + 1), "0", "-1", "2.5", "04", ""])
+      expect(() => parseRunnerMaxRuns(value)).toThrow(
+        `WORKFLOWD_RUNNER_MAX_RUNS must be an integer from 1 to ${sealedResultLimits.waitingChecks}`,
+      )
+  })
 })

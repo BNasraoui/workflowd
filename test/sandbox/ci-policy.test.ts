@@ -328,3 +328,84 @@ for (const environment of [
       "Publisher environment must be agent-publish",
     )
   })
+
+// A private-mode run's sealed result goes to the daemon through the gateway alone: the job never
+// uploads it as an artifact of the repository, and the legacy publish job never runs after it.
+test("the sealed result is an artifact only of a legacy run, and the legacy publish job runs only after one", async () => {
+  const files = await workflows()
+  expect(() => assertUnprivilegedPrWorkflows(files)).not.toThrow()
+  const sandbox = files["agent-sandbox.yml"]!
+  const caller = files["agent-sandbox-caller.yml"]!
+  const upload = "        if: success() && inputs.bootstrap-mode == 'legacy-artifact'\n"
+  const publish = "    if: needs.sandbox.outputs.bootstrap-mode == 'legacy-artifact'\n"
+  expect(sandbox).toContain(upload)
+  expect(caller).toContain(publish)
+  for (const changed of [
+    { "agent-sandbox.yml": sandbox.replace(upload, "        if: success()\n") },
+    { "agent-sandbox.yml": sandbox.replace(upload, "") },
+    {
+      "agent-sandbox.yml": sandbox.replace(
+        "      bootstrap-mode: ${{ inputs.bootstrap-mode }}",
+        "      bootstrap-mode: legacy-artifact",
+      ),
+    },
+    { "agent-sandbox-caller.yml": caller.replace(publish, "") },
+    {
+      "agent-sandbox-caller.yml": caller.replace(
+        publish,
+        "    if: needs.sandbox.result == 'success'\n",
+      ),
+    },
+  ])
+    expect(() => assertUnprivilegedPrWorkflows({ ...files, ...changed })).toThrow("Sealed result")
+})
+
+test("a caller of agent-sandbox.yml gives each input from a literal or a repository variable, and the private mode with its gateway URL and image", async () => {
+  const files = await workflows()
+  const caller = files["agent-sandbox-caller.yml"]!
+  const mode = "      bootstrap-mode: ${{ vars.SANDBOX_BOOTSTRAP_MODE || 'legacy-artifact' }}\n"
+  const gateway = "      gateway-url: ${{ vars.SANDBOX_GATEWAY_URL }}\n"
+  const image = "      agent-image: ${{ vars.SANDBOX_AGENT_IMAGE }}\n"
+  for (const line of [mode, gateway, image]) expect(caller).toContain(line)
+  expect(() =>
+    assertUnprivilegedPrWorkflows({
+      ...files,
+      "agent-sandbox-caller.yml": caller.replace(mode, "      bootstrap-mode: private\n"),
+    }),
+  ).not.toThrow()
+  for (const [changed, message] of [
+    [
+      caller.replace(mode, "      bootstrap-mode: ${{ github.event.head_commit.message }}\n"),
+      "gives bootstrap-mode from a value",
+    ],
+    [
+      caller.replace(gateway, "      gateway-url: ${{ github.event.ref }}\n"),
+      "gives gateway-url from a value",
+    ],
+    [
+      caller.replace(image, "      agent-image: ${{ vars.X }}-${{ github.sha }}\n"),
+      "gives agent-image from a value",
+    ],
+    [caller.replace(gateway, ""), "selects a bootstrap mode without the gateway URL"],
+    [caller.replace(image, ""), "selects a bootstrap mode without the gateway URL and the image"],
+  ] as const)
+    expect(() =>
+      assertUnprivilegedPrWorkflows({ ...files, "agent-sandbox-caller.yml": changed }),
+    ).toThrow(`Runner caller: agent-sandbox-caller.yml ${message}`)
+})
+
+test("the trial probe of agent-sandbox.yml never ends the job: its step goes on after a failure or its time limit", async () => {
+  const files = await workflows()
+  expect(() => assertUnprivilegedPrWorkflows(files)).not.toThrow()
+  const sandbox = files["agent-sandbox.yml"]!
+  const advisory = "        continue-on-error: true\n        timeout-minutes: 20\n"
+  expect(sandbox).toContain(advisory)
+  for (const changed of [
+    sandbox.replace(advisory, "        timeout-minutes: 20\n"),
+    sandbox.replace(advisory, "        continue-on-error: false\n        timeout-minutes: 20\n"),
+    sandbox.replace(advisory, "        continue-on-error: true\n"),
+  ])
+    expect(() => assertUnprivilegedPrWorkflows({ ...files, "agent-sandbox.yml": changed })).toThrow(
+      "Trial probe",
+    )
+})

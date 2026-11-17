@@ -163,3 +163,51 @@ export function verifyRenewal(publicKey, channel, predecessor, attempt, time, si
     verify(null, renewalMessage(channel, predecessor, attempt, time), key, bytes)
   )
 }
+
+/**
+ * The run routes that carry a body: the relay signs each such request with the session key, over
+ * the SHA-256 of the exact body bytes, under a prefix of its own, so that no renewal signature is
+ * a run signature and no signature of one route or body is one of another. The signature goes in
+ * the header `runSignatureHeader`.
+ */
+export const runSignedRoutes = ["events", "result"]
+export const runSignatureHeader = "x-workflowd-run-signature"
+
+/** The exact bytes that the relay signs to send `body` (its SHA-256 hex) on run route `route`. */
+export function runMessage(channel, route, bodyDigest) {
+  return Buffer.from(`workflowd-run:${channel}:${route}:${bodyDigest}`, "utf8")
+}
+
+/** The SHA-256 hex of a body's bytes. */
+export function bodyDigest(body) {
+  return createHash("sha256").update(body).digest("hex")
+}
+
+/** The relay's signature, in base64url, of `body` on run route `route` of `channel`. */
+export function signRunBody(privateKey, channel, route, body) {
+  if (!runSignedRoutes.includes(route)) throw new Error("run route refused")
+  const key = createPrivateKey({
+    key: Buffer.from(privateKey, "base64url"),
+    format: "der",
+    type: "pkcs8",
+  })
+  if (key.asymmetricKeyType !== "ed25519") throw new Error("session key refused")
+  return sign(null, runMessage(channel, route, bodyDigest(body)), key).toString("base64url")
+}
+
+/**
+ * True when `signature` is the base64url form of exactly 64 bytes and an Ed25519 signature by
+ * `publicKey` of the body whose SHA-256 hex is `digest` on run route `route` of `channel`.
+ */
+export function verifyRunBody(publicKey, channel, route, digest, signature) {
+  const key = publicSessionKey(publicKey)
+  const bytes = exactBytes(signature, 64)
+  return (
+    runSignedRoutes.includes(route) &&
+    typeof digest === "string" &&
+    /^[a-f0-9]{64}$/.test(digest) &&
+    key !== undefined &&
+    bytes !== undefined &&
+    verify(null, runMessage(channel, route, digest), key, bytes)
+  )
+}

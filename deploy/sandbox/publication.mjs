@@ -7,9 +7,18 @@ import unicode from "./publication-unicode.json" with { type: "json" }
 if (unicode.version !== "15.0.0" || !unicode.javascript[process.versions.unicode]?.includes(process.versions.icu?.split(".")[0]))
   throw new Error("Unsupported publication Unicode runtime")
 const fold = value => [...value.normalize("NFKC")].map(c => casefold[c] ?? c).join("")
-const stackedMarks = new RegExp(`[${unicode.marks}]{3}`, "u")
+// Each class tests one code point at a time: the engine of Bun 1.3 reads a code unit in
+// U+F800–U+FBFF and the next in U+FC00–U+FFFF as one pair, so a class tested on a whole text
+// misses the second of them.
+const mark = new RegExp(`^[${unicode.marks}]$`, "u")
+const stackedMarks = value => {
+  let run = 0
+  for (const character of value) if ((run = mark.test(character) ? run + 1 : 0) === 3) return true
+  return false
+}
 const languages = new Set(["", "text", "diff", "ts", "typescript", "tsx", "js", "json", "sh", "bash", "python", "rust", "go", "sql", "yaml", "toml"])
-const invisible = new RegExp(`[${unicode.forbidden}]`, "u")
+const invisible = new RegExp(`^[${unicode.forbidden}]$`, "u")
+const holdsInvisible = value => [...value].some(character => character !== "\n" && invisible.test(character))
 const references = /&(#[0-9]+|#[xX][0-9a-fA-F]+|[A-Za-z][A-Za-z0-9]*);/u
 const keyword = String.raw`(?<![${unicode.letters}])(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)(?::\s*|\s+)`
 const closing = new RegExp(String.raw`${keyword}(?:#[0-9]|gh-[0-9]|[a-z0-9_.-]+\/[a-z0-9_.-]+#|https?:\/\/)`, "u")
@@ -41,8 +50,8 @@ function closesGithubPath(text) {
 
 /** Validate literal Markdown; return false on every ambiguous fence. */
 export function safePublication(value, message = false) {
-  if (!value.isWellFormed() || invisible.test(value.replaceAll("\n", "")) || references.test(value)) return false
-  if (stackedMarks.test(value.normalize("NFD"))) return false
+  if (!value.isWellFormed() || holdsInvisible(value) || references.test(value)) return false
+  if (stackedMarks(value.normalize("NFD"))) return false
   const folded = fold(value)
   if (message && (/[<@$\\]/.test(value) || folded.includes("\\"))) return false
   // Check both concatenated emphasis and punctuation acting as a separator.

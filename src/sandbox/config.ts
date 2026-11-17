@@ -9,11 +9,19 @@ import {
 } from "../../deploy/sandbox/capability-limits.mjs"
 import { configuredRunBudget } from "../capability-control/protocol"
 
+// Each code point is tested alone: the engine of Bun 1.3 reads a code unit in U+F800–U+FBFF and
+// the next in U+FC00–U+FFFF as one pair, so a class tested on a whole text misses the second.
+const controlOrFormat = /^[\p{Cc}\p{Cf}]$/u
+/** Whether `value` holds a control or a format character that is not one of `allowed`. */
+const holdsControlOrFormat = (value: string, allowed = "") =>
+  [...value].some((character) => !allowed.includes(character) && controlOrFormat.test(character))
+
 const PublicationCoAuthor = Schema.String.check(
   Schema.makeFilter(
     (value) =>
       value.isWellFormed() &&
-      !/[\p{Cc}\p{Cf}\u2028\u2029]/u.test(value) &&
+      !holdsControlOrFormat(value) &&
+      !/[\u2028\u2029]/u.test(value) &&
       /^[^\s<>][^<>]* <[^\s<>@]+@[^\s<>@]+>$/u.test(value),
   ),
 )
@@ -155,7 +163,8 @@ export const PublicationTitle = Schema.NonEmptyString.check(
     (value) =>
       safePublication(value) &&
       [...value].length <= 200 &&
-      !/[\p{Cc}\p{Cf}\u2028\u2029]/u.test(value),
+      !holdsControlOrFormat(value) &&
+      !/[\u2028\u2029]/u.test(value),
   ),
 )
 export const PublicationMessage = Schema.NonEmptyString.check(
@@ -163,7 +172,7 @@ export const PublicationMessage = Schema.NonEmptyString.check(
     (value) =>
       safePublication(value, true) &&
       Buffer.byteLength(value, "utf8") <= 10240 &&
-      !/[\p{Cc}\p{Cf}]/u.test(value.replaceAll("\n", "")),
+      !holdsControlOrFormat(value, "\n"),
   ),
 )
 

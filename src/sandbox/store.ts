@@ -212,13 +212,15 @@ export const makeSandboxStore = Effect.gen(function* () {
     policy: SandboxPolicy
     sourceSha: string
     now: number
+    /** The lease's deadline; 285 minutes after `now` when not named. */
+    deadline?: number
   }) {
     const policy = yield* Schema.encodeEffect(Schema.fromJsonString(SandboxPolicy))(input.policy)
     yield* Schema.decodeUnknownEffect(SandboxPolicy.fields.workflowSha)(input.sourceSha)
     return yield* sql.withTransaction(
       Effect.gen(function* () {
         yield* sql`INSERT INTO sandbox_leases(run_id,lease_id,policy,source_sha,state,created_at,heartbeat_at,deadline)
-        VALUES(${input.runId},${input.leaseId},${policy},${input.sourceSha},'requested',${input.now},${input.now},${input.now + 285 * 60000})
+        VALUES(${input.runId},${input.leaseId},${policy},${input.sourceSha},'requested',${input.now},${input.now},${input.deadline ?? input.now + 285 * 60000})
         ON CONFLICT(run_id) DO NOTHING`
         const row = yield* read(input.runId)
         if (

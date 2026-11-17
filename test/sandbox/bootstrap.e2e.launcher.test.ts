@@ -76,6 +76,14 @@ const keyForms = (privateKey: string) => [
  * standard output and error, each file in the sandbox directory, and the relay's environment and
  * arguments; with the gateway's output.
  */
+/**
+ * The harness of this test's run client: it holds the run, as the box does, and ends once the run
+ * client that started it has ended, when a write to its output (an empty line, which the run
+ * client skips) finds no reader.
+ */
+const holdingHarness =
+  'process.stdout.on("error", () => process.exit(0)); setInterval(() => process.stdout.write("\\n"), 100)'
+
 async function runnerOutputs(
   sandbox: string,
   relay: number,
@@ -345,9 +353,14 @@ for (const race of [
             now: now.getTime(),
           })
           // workflowd's side: its control client of the gateway and the lease service.
+          // The repository is placed on a runner, so each grant of the run carries its launch.
           const local = yield* makeDaemonCapability({
             socket: config.controlSocket,
             reconcileEveryMs: 3600000,
+            runner: {
+              aliases: ["fixture"],
+              identity: { name: "Fixture Agent", email: "agent@example.invalid" },
+            },
           })
           const api = yield* makeSandboxGithub(
             { appId: 1, privateKeyPath: join(root, "app.pem") },
@@ -399,12 +412,15 @@ await prepare({
   // The fixture's gateway answers at once: a new proof after a lost or refused one need not wait.
   backoff: () => 0,
   sessionKey: ${JSON.stringify(sessionKey)},
+  // A harness that holds the run until the run client ends, so the relay serves this test.
+  harness: [process.execPath, "-e", ${JSON.stringify(holdingHarness)}],
 })`,
             ],
             {
               env: {
                 PATH: "/usr/bin:/bin",
                 GITHUB_SHA: policy.workflowSha,
+                SANDBOX_AGENT_IMAGE: policy.agentImage,
                 GITHUB_REF: "refs/heads/workflowd/leases/lease",
                 GITHUB_REPOSITORY: policy.repository,
                 SANDBOX_GATEWAY_URL: front.origin,

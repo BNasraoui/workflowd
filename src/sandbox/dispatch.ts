@@ -1,5 +1,18 @@
 import { sandboxDiagnostic, retainSandboxFailure } from "./diagnostics"
-import { Context, Effect, Schedule, Schema } from "effect"
+import { visibleText } from "../../deploy/sandbox/hidden-text.mjs"
+import { Context, Deferred, Effect, Schedule, Schema, Stream } from "effect"
+import type { AgentGitConfig } from "../agent-git/config"
+import type { GatewayEnd } from "../capability-control/protocol"
+import {
+  makeRunnerExecutor,
+  type RunnerGateway,
+  type RunnerHandle,
+  RunnerRunFailed,
+  runnerWindows,
+} from "../kernel/runner-executor"
+import { SealedResultRefused, type SealedResultGitPort } from "../kernel/sealed-result"
+import { WorkspaceError } from "../workspace/errors"
+import { githubHost } from "./github"
 import { mkdir } from "node:fs/promises"
 import { dirname, join } from "node:path"
 import { AgentRunStore, type AgentRunRecord } from "../kernel/agent-run-store"
@@ -35,7 +48,8 @@ export type SandboxDispatchPort = {
   readonly prepareNative?: (run: AgentRunRecord) => Effect.Effect<
     {
       readonly cli: CliPort
-      readonly sandboxBindingFile: string
+      /** The binding of a local sandbox run; a runner run has none. */
+      readonly sandboxBindingFile?: string
     },
     SandboxError
   >
@@ -68,6 +82,14 @@ export type SandboxDispatchPort = {
 
 export const SandboxDispatch = Context.Service<SandboxDispatchPort>("workflowd/SandboxDispatch")
 
+/** A runner run's time from its start: the deadline of its lease (`store.request`). */
+/** The states of a runner run that has not ended. */
+const activeRunStates = new Set(["accepted", "spawning", "spawned", "verified"])
+/** The time from a runner run's lease to the session of its job, after which its start fails. */
+/** The most code points of a runner run's diagnostic that reach its caller. */
+const runnerTextCharacters = 1000
+const workspaceFailure = (detail: string) =>
+  new WorkspaceError({ operation: "runner", cause: new Error(`Runner run failed: ${detail}`) })
 const failure = (cause?: unknown) =>
   new SandboxError(
     sandboxDiagnostic(
@@ -85,6 +107,14 @@ export const makeSandboxDispatch = (options: {
   readonly executorId: string
   readonly endpointIdentity: string
   readonly nativeExecutors?: Partial<Record<"codex" | "claude", CliPort>>
+  /** The runner placement: its aliases, its bound of runs, the gateway and the check of results. */
+  readonly runner?: {
+    readonly aliases: ReadonlyArray<string>
+    readonly maxRuns: number
+    readonly gateway: RunnerGateway
+    readonly sealed: SealedResultGitPort
+    readonly agentGit: AgentGitConfig
+  }
 }) =>
   Effect.gen(function* () {
     const store = yield* makeSandboxStore
@@ -329,8 +359,26 @@ export const makeSandboxDispatch = (options: {
         (effect) => sandboxStage("dispatch.settle", effect),
         Effect.tapError((cause) => retainSandboxFailure(run.directory, "dispatch.settle", cause)),
       )
+    /**
+     * The stop of a runner run: its events end `cancelled`, and the gateway revokes it at once. A
+     * revoke that fails is logged; the run's release revokes it again. A run that no executor holds
+     * is settling already (a coordinator's start settles every runner run that it finds live).
+     */
+    const stopRunner = (run: AgentRunRecord) =>
+      runnerExecutor === undefined
+        ? Effect.void
+        : runnerExecutor.stopRun(run.runId).pipe(
+            Effect.asVoid,
+            Effect.catch((error) =>
+              Effect.logWarning("Runner run revoke at its stop failed; its release revokes it", {
+                runId: run.runId,
+                reason: error.reason,
+              }),
+            ),
+          )
     const cancel = (run: AgentRunRecord) =>
       Effect.suspend(() => {
+        if (runnerPolicy(run.repository) !== undefined) return stopRunner(run)
         cancelling.add(run.runId)
         return settle(run, {
           state: "cancelled",
@@ -341,6 +389,7 @@ export const makeSandboxDispatch = (options: {
       })
     const finishNative: NonNullable<SandboxDispatchPort["finishNative"]> = (run, terminal) =>
       Effect.gen(function* () {
+        if (runnerPolicy(run.repository) !== undefined) return yield* finishRunner(run, terminal)
         // Stopping a CLI also wakes its exit observer. The cancellation caller owns
         // settlement until its terminal record is saved or custody reports failure.
         if (cancelling.has(run.runId)) return
@@ -348,11 +397,327 @@ export const makeSandboxDispatch = (options: {
         if (current === null) return yield* Effect.fail(failure())
         yield* settle(current, { ...terminal, sessionId: current.nativeSessionId })
       }).pipe((effect) => sandboxStage("dispatch.finishNative", effect))
+    /**
+     * The runner placement. A runner run's lease ref starts its job; the run is the job's, and the
+     * daemon reads its events and its one result from the gateway, checks the result and pushes
+     * `agent-run/<id>`. What ended the run is kept for its settlement: the final message of a run
+     * that completed is its sealed result's, which the check read; its events are its progress.
+     */
+    const runnerOptions = options.runner
+    const runnerEnds = new Map<
+      string,
+      | { readonly kind: "ended"; readonly diagnostic: string; readonly ended: GatewayEnd | null }
+      | { readonly kind: "cancelled" }
+      | { readonly kind: "sealed"; readonly finalMessage: string; readonly unchanged: boolean }
+    >()
+    /** The runner runs whose settlement failed in this process; `observe` tries each again. */
+    const unsettled = new Set<string>()
+    const runnerPolicy = (alias: string) =>
+      runnerOptions?.aliases.includes(alias) === true
+        ? options.policies.find(
+            (entry) => entry.alias === alias && entry.privateBootstrap?.mode === "actions-native",
+          )
+        : undefined
+    const runnerExecutor =
+      runnerOptions === undefined
+        ? undefined
+        : makeRunnerExecutor({
+            gateway: runnerOptions.gateway,
+            maxRuns: runnerOptions.maxRuns,
+            // The Actions run of the lease, once the lease holds one. A failed read is no news:
+            // the run goes on to its deadline.
+            job: (runId) =>
+              Effect.gen(function* () {
+                const lease = yield* store.read(runId)
+                if (lease?.actions_run_id == null || lease.actions_attempt == null) return null
+                const run = yield* github.savedRun(
+                  lease.policy,
+                  lease.lease_id,
+                  lease.actions_run_id,
+                  lease.actions_attempt,
+                )
+                return { status: run.status, conclusion: run.conclusion }
+              }).pipe(Effect.orElseSucceed(() => null)),
+            begin: (launch, stopped) =>
+              Effect.gen(function* () {
+                const policy = runnerPolicy(launch.repository)
+                if (policy === undefined) return yield* Effect.fail(failure())
+                yield* github.verifyWorkflow(policy)
+                yield* store.request({
+                  runId: launch.runId,
+                  leaseId: launch.runId,
+                  policy,
+                  sourceSha: launch.sourceSha,
+                  now: Date.now(),
+                  deadline: launch.deadline.getTime() + runnerWindows.leaseGraceMs,
+                })
+                // The lease is ready once the job holds its gateway session. The wait ends at
+                // the session, at a stop of the run (its events then end it) or after
+                // `sessionWaitMs`; a stop of the daemon ends it between two reads.
+                const until = Date.now() + runnerWindows.sessionWaitMs
+                for (;;) {
+                  const lease = yield* leases.acquire(launch.runId)
+                  if (lease.state === "ready" || stopped()) return
+                  if (Date.now() >= until)
+                    return yield* new RunnerRunFailed({
+                      reason: "runner_start",
+                      message: `the run's job held no gateway session within ${runnerWindows.sessionWaitMs / 60000} minutes`,
+                    })
+                  yield* Effect.interruptible(Effect.sleep("2 seconds"))
+                }
+              }).pipe(
+                Effect.mapError((cause) =>
+                  cause instanceof RunnerRunFailed
+                    ? cause
+                    : new RunnerRunFailed({
+                        reason: "runner_start",
+                        message: sandboxDiagnostic("runner.start", cause).message,
+                      }),
+                ),
+              ),
+          })
+    const runnerExit = (runId: string, diagnostic: string, ended: GatewayEnd | null = null) =>
+      Effect.sync(() => {
+        runnerEnds.set(runId, { kind: "ended", diagnostic, ended })
+        return { exitCode: 1, stderr: diagnostic }
+      })
+    /** The end of a run whose stop came: it pushes nothing, whatever else ended it. */
+    const runnerCancelled = (runId: string) =>
+      Effect.sync(() => {
+        runnerEnds.set(runId, { kind: "cancelled" })
+        return { exitCode: 1, stderr: "cancelled" }
+      })
+    /**
+     * Checks the run's sealed result and pushes it to `agent-run/<id>`, which must be new. A stop
+     * before the push ends the run cancelled with nothing pushed; a push that began runs to its end,
+     * also through a stop of the run or of the daemon, and its end is the run's: completed once
+     * the target holds the result, or the push's fault.
+     */
+    const publishRunner = (
+      run: AgentRunRecord,
+      handle: RunnerHandle,
+      policy: SandboxPolicy,
+      /** A result of a daemon before this one, which may have pushed it before it stopped. */
+      resumed = false,
+    ) => {
+      let pushing = false
+      return Effect.scoped(
+        Effect.gen(function* () {
+          const lease = yield* store.read(run.runId)
+          if (lease === null || runnerExecutor === undefined || runnerOptions === undefined)
+            return yield* Effect.fail(failure())
+          const result = yield* runnerExecutor.result(handle)
+          if (handle.stopping) return yield* runnerCancelled(run.runId)
+          // A run that changed nothing posts its completion with an empty bundle: it ends with its
+          // final message, and nothing is pushed.
+          if (result.bundle.length === 0) {
+            if (result.sourceSha !== lease.source_sha)
+              return yield* Effect.fail(
+                new SealedResultRefused({
+                  check: "source",
+                  detail: "",
+                  message: "result_refused: source",
+                }),
+              )
+            runnerEnds.set(run.runId, {
+              kind: "sealed",
+              finalMessage: result.finalMessage,
+              unchanged: true,
+            })
+            return { exitCode: 0, stderr: "" }
+          }
+          const checked = yield* runnerOptions.sealed.check(
+            result,
+            {
+              ref: `refs/heads/agent-run/${run.runId.replace(/^agent-run-/, "").slice(0, 16)}`,
+              expectedHead: null,
+              ...(resumed ? { resumed } : {}),
+            },
+            {
+              remote: `https://${githubHost}/${policy.repository}.git`,
+              sourceSha: lease.source_sha,
+              token: github.pushToken(policy),
+              agentGit: runnerOptions.agentGit,
+            },
+          )
+          if (handle.stopping) return yield* runnerCancelled(run.runId)
+          pushing = true
+          yield* Effect.uninterruptible(checked.push())
+          runnerEnds.set(run.runId, {
+            kind: "sealed",
+            finalMessage: result.finalMessage,
+            unchanged: false,
+          })
+          return { exitCode: 0, stderr: "" }
+        }),
+      ).pipe(
+        Effect.catch((error) =>
+          handle.stopping && !pushing
+            ? runnerCancelled(run.runId)
+            : runnerExit(
+                run.runId,
+                error instanceof SealedResultRefused
+                  ? `result_refused: ${error.check}`
+                  : error instanceof RunnerRunFailed
+                    ? `${error.reason}: ${error.message}`
+                    : sandboxDiagnostic("runner.result", error).message,
+              ),
+        ),
+      )
+    }
+    /** The CLI of one runner run: its events from the gateway, its exit once its result is pushed. */
+    const runnerCli = (run: AgentRunRecord, policy: SandboxPolicy, sourceSha: string): CliPort => ({
+      ownership: "transient-exec",
+      preflight: Effect.void,
+      executionId: (runId) => runId,
+      attach: () => Effect.succeed(null),
+      spawn: (input) =>
+        Effect.gen(function* () {
+          if (runnerExecutor === undefined) return yield* Effect.fail(workspaceFailure("runner"))
+          const handle = yield* runnerExecutor
+            .start({
+              runId: run.runId,
+              repository: run.repository,
+              imageDigest: policy.agentImage,
+              sourceSha,
+              prompt: input.prompt,
+              model: input.model ?? "",
+              deadline: new Date(Date.now() + runnerWindows.deadlineMs),
+            })
+            .pipe(
+              // A start that fails or that a stop of the daemon ends leaves its cause for the
+              // run's settlement, which releases the lease if one was made.
+              Effect.tapError((error) =>
+                runnerExit(run.runId, `${error.reason}: ${error.message}`),
+              ),
+              Effect.onInterrupt(() =>
+                runnerExit(
+                  run.runId,
+                  "runner_start: the daemon stopped before the run's job held its gateway session",
+                ),
+              ),
+              Effect.mapError((error) => workspaceFailure(`${error.reason}: ${error.message}`)),
+            )
+          const eventsEnded = yield* Deferred.make<RunnerRunFailed | null>()
+          // The observer's stop of a run whose events stalled: the run ends with its diagnostic.
+          const halted = yield* Deferred.make<void>()
+          const events = runnerExecutor.events(handle).pipe(
+            Stream.catch((error) =>
+              Stream.fromEffect(Deferred.succeed(eventsEnded, error)).pipe(Stream.drain),
+            ),
+            Stream.ensuring(Deferred.succeed(eventsEnded, null)),
+          )
+          return {
+            executionId: run.runId,
+            events: Stream.toAsyncIterable(events),
+            ready: Deferred.await(handle.boxReady),
+            exited: Effect.raceFirst(
+              Deferred.await(eventsEnded).pipe(
+                Effect.flatMap((ended) =>
+                  ended === null
+                    ? publishRunner(run, handle, policy)
+                    : ended.reason === "cancelled" || handle.stopping
+                      ? runnerCancelled(run.runId)
+                      : runnerExit(run.runId, `${ended.reason}: ${ended.message}`, handle.ended),
+                ),
+              ),
+              Deferred.await(halted).pipe(
+                Effect.andThen(runnerExit(run.runId, "runner_stalled: the run's events stalled")),
+              ),
+            ),
+            cancel: runnerExecutor.stop(handle).pipe(
+              Effect.mapError(() => workspaceFailure("stop")),
+              Effect.ensuring(Deferred.succeed(halted, undefined)),
+            ),
+          }
+        }),
+    })
+    /** A runner run's start: its source commit, then its executor, which starts its job. */
+    const prepareRunner = (run: AgentRunRecord, policy: SandboxPolicy) =>
+      Effect.gen(function* () {
+        if (run.agent !== "sandbox" || run.resolvedSelection?.executor !== "claude:actions")
+          return yield* Effect.fail(failure())
+        yield* Effect.tryPromise(async () => {
+          await mkdir(dirname(run.directory), { recursive: true, mode: 0o700 })
+          await mkdir(run.directory, { mode: 0o700 })
+        })
+        const sourceSha = yield* github.resolveSource(
+          policy,
+          policy.publish?.baseRef ?? run.baseRef ?? "HEAD",
+        )
+        return { cli: runnerCli(run, policy, sourceSha) }
+      }).pipe(Effect.timeout("5 minutes"), (effect) =>
+        sandboxStage("dispatch.prepareRunner", effect),
+      )
+    /**
+     * Settles a runner run: its lease is released (the gateway's run revoked, the lease ref
+     * removed), then the run ends as a host run does, with the gateway's own end when there is one.
+     * The end is what the run's executor recorded (`runnerEnds`): its stop, its checked sealed
+     * result, or the cause of its end (the deadline, the gateway, the Actions run, the lost runner,
+     * the check). An event line, which the agent can write, decides neither the end nor its text:
+     * a run whose sealed result was checked completes with that result's final message, whatever
+     * its events said; a run that ends otherwise has no final message. Each diagnostic reaches the
+     * caller without control or invisible code points and at most `runnerTextCharacters` long.
+     */
+    const finishRunner = (
+      run: AgentRunRecord,
+      terminal: Parameters<NonNullable<SandboxDispatchPort["finishNative"]>>[1],
+    ) =>
+      Effect.gen(function* () {
+        // The executor's end stays until the run's end is written: a settlement that fails keeps
+        // it for the next try (`unsettled`).
+        const end = runnerEnds.get(run.runId)
+        runnerExecutor?.release(run.runId)
+        if ((yield* store.read(run.runId)) !== null)
+          yield* leases.release(run.runId).pipe(Effect.ignore)
+        // A run ends once: a second settlement of a run that ended (the dispatch settles a start
+        // that it refused, then its error) keeps the first end.
+        const current = yield* runs.read(run.runId)
+        if (current === null || !activeRunStates.has(current.state)) return yield* settled(run)
+        const now = new Date()
+        if (end?.kind === "cancelled")
+          yield* runs.cancel({ runId: run.runId, now, diagnostic: "cancelled" })
+        else if (end?.kind === "sealed")
+          yield* runs.complete({
+            runId: run.runId,
+            now,
+            finalMessage: end.finalMessage,
+            ...(end.unchanged ? { endReason: "unchanged" } : {}),
+          })
+        else
+          yield* runs.operatorRequired({
+            runId: run.runId,
+            now,
+            // With no end of the executor, the settlement is the daemon's own (a restart, a
+            // start that failed before the executor held the run).
+            diagnostic: visibleText(
+              end?.kind === "ended" ? end.diagnostic : terminal.diagnostic,
+              runnerTextCharacters,
+            ),
+            finalMessage: null,
+            ended: end?.kind === "ended" ? end.ended : null,
+          })
+        yield* settled(run)
+      }).pipe(
+        Effect.catchTag("AgentRunStoreConflictError", () => settled(run)),
+        // Any other fault leaves the run active, its lease perhaps released: the sandbox's next
+        // pass tries its settlement again (`observe`), and a start of the daemon does too.
+        Effect.tapError(() => Effect.sync(() => unsettled.add(run.runId))),
+        (effect) => sandboxStage("dispatch.finishRunner", effect),
+      )
+    /** The end of a runner run's settlement: nothing of it is kept for another try. */
+    const settled = (run: AgentRunRecord) =>
+      Effect.sync(() => {
+        runnerEnds.delete(run.runId)
+        unsettled.delete(run.runId)
+      })
     const prepareNative: NonNullable<SandboxDispatchPort["prepareNative"]> = (run) =>
       Effect.gen(function* () {
         const policy = options.policies.find((entry) => entry.alias === run.repository)
         // A runner of an actions-native repository opens a gateway session and has no SSH peer
-        // to start the harness through, so such a run is refused before any lease or GitHub call.
+        // to start the harness through: only the runner placement starts such a run.
+        const runner = runnerPolicy(run.repository)
+        if (runner !== undefined) return yield* prepareRunner(run, runner)
         if (policy?.privateBootstrap?.mode === "actions-native")
           return yield* Effect.fail(failure(new Error("Actions-native harness start unavailable")))
         const cli = yield* Effect.try(() => nativeCli(run))
@@ -502,6 +867,17 @@ export const makeSandboxDispatch = (options: {
       )
     const observe = (run: AgentRunRecord) =>
       Effect.gen(function* () {
+        // A runner run's executor owns each of its ends and windows (runnerWindows); a run that no
+        // executor holds after a restart is settled by the startup sweep. A run whose settlement
+        // failed is settled again here, with the end that its executor recorded.
+        if (runnerPolicy(run.repository) !== undefined)
+          return unsettled.has(run.runId)
+            ? yield* finishRunner(run, {
+                state: "operator_required",
+                finalMessage: null,
+                diagnostic: "Sandbox run settlement retried",
+              })
+            : undefined
         const lease = yield* store.read(run.runId)
         if (lease === null) return
         // Notify the caller of uncertain remote custody; reconciliation continues after delivery.
@@ -593,10 +969,38 @@ export const makeSandboxDispatch = (options: {
         (effect) => sandboxStage("dispatch.observe", effect),
         Effect.tapError((cause) => retainSandboxFailure(run.directory, "dispatch.observe", cause)),
       )
-    // A new coordinator never resumes an abandoned execution or injects resident tools.
+    /**
+     * The result of a runner run that a daemon before this one dispatched, when the gateway holds
+     * it: checked and pushed, as its executor would have, so the run completes with it.
+     */
+    const recoverRunner = (run: AgentRunRecord) =>
+      Effect.gen(function* () {
+        const policy = runnerPolicy(run.repository)
+        if (policy === undefined || runnerOptions === undefined || runnerExecutor === undefined)
+          return
+        const read = yield* runnerOptions.gateway.readEvents(run.runId, 0)
+        if (read.result && read.ended === null)
+          yield* publishRunner(run, runnerExecutor.held(run.runId), policy, true)
+      })
+    // A new coordinator never resumes an abandoned execution or injects resident tools. A runner
+    // run's events are read by no executor of this coordinator: a result that the gateway holds
+    // for it is checked and pushed, then its lease is released, which revokes it and cancels its
+    // Actions run, and it ends once: completed with that result, or operator_required.
     for (const lease of yield* store.active()) {
       const run = yield* runs.read(lease.run_id)
-      if (run !== null)
+      if (run !== null && runnerPolicy(run.repository) !== undefined)
+        yield* recoverRunner(run).pipe(
+          Effect.ignore,
+          Effect.andThen(
+            finishRunner(run, {
+              state: "operator_required",
+              finalMessage: null,
+              diagnostic: "Sandbox coordinator restarted",
+            }),
+          ),
+          Effect.ignore,
+        )
+      else if (run !== null)
         yield* settle(run, {
           state: "operator_required",
           sessionId: run.nativeSessionId,
@@ -607,10 +1011,26 @@ export const makeSandboxDispatch = (options: {
         yield* store.sessionCleanupError(lease.run_id)
       else yield* store.beginRelease(lease.run_id)
     }
+    // A runner run that is still active with its lease released or gone: a daemon before this one
+    // released its lease and could not write its end. It ends here, once.
+    if (runnerOptions !== undefined)
+      for (const run of yield* runs.listActiveByExecutor("claude"))
+        if (
+          runnerPolicy(run.repository) !== undefined &&
+          ((yield* store.read(run.runId))?.state ?? "released") === "released"
+        )
+          yield* finishRunner(run, {
+            state: "operator_required",
+            finalMessage: null,
+            diagnostic: "Sandbox coordinator restarted",
+          }).pipe(Effect.ignore)
+    // The heartbeat of a host sandbox's SSH transport; a runner lease has none, its job posts to
+    // the gateway.
     const heartbeat = Effect.gen(function* () {
       for (const lease of yield* store.active())
         if (
           lease.state === "ready" &&
+          runnerPolicy(lease.policy.alias) === undefined &&
           (lease.policy.publish === undefined || (yield* publications.read(lease.run_id)) === null)
         )
           yield* leases.heartbeat(lease.run_id).pipe(
