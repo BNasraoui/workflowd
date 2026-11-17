@@ -69,19 +69,88 @@ test("the network line names each blocked destination that the box reached", () 
   expect(probeLine("box-flags", "passed")).toBe("workflowd.probe box-flags: passed")
 })
 
-test("a box probe names the step that failed and removes what it made", async () => {
-  const calls: Array<ReadonlyArray<string>> = []
-  const lines = await probeBox({
-    image: `ghcr.io/bnasraoui/workflowd-agent-base@sha256:${"c".repeat(64)}`,
-    run: (step: string, args: ReadonlyArray<string>) => {
-      calls.push(args)
-      return step === "network" ? Promise.reject(new Error("network: exit 1")) : Promise.resolve("")
+/**
+ * A box module of the probe in place of native-docker.mjs: each docker call and box action is
+ * recorded; `fail` names a docker step that fails, `reach` the hosts that a connection reaches.
+ */
+const scriptedBox = (options: { fail?: string; reach?: ReadonlyArray<string>; bind?: boolean }) => {
+  const calls: Array<string> = []
+  const box = {
+    boxNetwork: { name: "workflowd-sandbox", subnet: "172.30.0.0/24" },
+    docker: (step: string, args: ReadonlyArray<string>) => {
+      calls.push(args.join(" "))
+      return step === options.fail
+        ? Promise.reject(new Error(`${step}: exit 1`))
+        : Promise.resolve("")
     },
-    sudo: "/bin/true",
-  })
-  expect(lines).toEqual(["workflowd.probe box-flags: failed step=network"])
-  expect(calls.at(-1)).toEqual(["network", "rm", "workflowd-sandbox"])
-  expect(
-    await probeBox({ image: "not-an-image", run: () => Promise.resolve(""), sudo: "/bin/true" }),
-  ).toEqual(["workflowd.probe box-flags: failed step=binding"])
+    makeBox: (binding: {
+      readonly directory: string
+      readonly image: string
+      readonly name: string
+    }) => {
+      if (options.bind === false) throw new Error("box binding refused")
+      calls.push(`make ${binding.name}`)
+      return {
+        start: () => {
+          calls.push("start")
+          return options.fail === "box" ? Promise.reject(new Error("box")) : Promise.resolve()
+        },
+        exec: (_: string, args: ReadonlyArray<string>) =>
+          options.reach?.includes(args.at(-2) ?? "")
+            ? Promise.reject(new Error("connect: exit 10"))
+            : Promise.resolve(""),
+        remove: () => {
+          calls.push("remove")
+          return Promise.resolve()
+        },
+      }
+    },
+  }
+  return { box, calls }
+}
+const image = `ghcr.io/bnasraoui/workflowd-agent-base@sha256:${"c".repeat(64)}`
+
+test("a box probe on a runner where the box starts reports its flags passed and each blocked destination dropped, then removes the box and the network", async () => {
+  const { box, calls } = scriptedBox({})
+  expect(await probeBox({ image, sudo: "/bin/true", box })).toEqual([
+    "workflowd.probe box-flags: passed",
+    `workflowd.probe box-network: passed dropped=${blockedDestinations.length}`,
+  ])
+  expect(calls).toEqual([
+    `make workflowd-native-${"0".repeat(32)}`,
+    "network create --subnet 172.30.0.0/24 -o com.docker.network.bridge.name=wfd-sandbox0 workflowd-sandbox",
+    `image pull --quiet ${image}`,
+    "start",
+    "remove",
+    "network rm workflowd-sandbox",
+  ])
+})
+
+test("a box probe names each blocked destination that the box reached", async () => {
+  const { box } = scriptedBox({ reach: ["169.254.169.254", "100.100.100.100"] })
+  expect(await probeBox({ image, sudo: "/bin/true", box })).toEqual([
+    "workflowd.probe box-flags: passed",
+    "workflowd.probe box-network: failed reached=metadata,tailnet",
+  ])
+})
+
+test("a box probe names the step that failed and removes what it made", async () => {
+  for (const [options, step, removed] of [
+    [{ fail: "network" }, "network", []],
+    [{ fail: "image" }, "image", ["network rm workflowd-sandbox"]],
+    [{ fail: "box" }, "box", ["remove", "network rm workflowd-sandbox"]],
+    [{ bind: false }, "binding", []],
+  ] as const) {
+    const { box, calls } = scriptedBox(options)
+    expect(await probeBox({ image, sudo: "/bin/true", box })).toEqual([
+      `workflowd.probe box-flags: failed step=${step}`,
+    ])
+    expect(calls.filter((call) => call === "remove" || call.startsWith("network rm"))).toEqual([
+      ...removed,
+    ])
+  }
+  const { box } = scriptedBox({})
+  expect(await probeBox({ image, sudo: "/bin/false", box })).toEqual([
+    "workflowd.probe box-flags: failed step=network-rules",
+  ])
 })

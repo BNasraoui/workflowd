@@ -10,7 +10,6 @@ import { dirname, join } from "node:path"
 import { fileURLToPath, pathToFileURL } from "node:url"
 import { gatewayOrigin } from "./bootstrap-helper.mjs"
 import { command } from "./command.mjs"
-import { boxNetwork, docker, makeBox } from "./native-docker.mjs"
 
 const tooling = dirname(fileURLToPath(import.meta.url))
 /** The bound of a sealed result that the run client posts to the result route. */
@@ -106,9 +105,12 @@ export const networkLine = (reached) =>
 /**
  * Starts a box of the job's `image` with the flags of a run's box (native-docker.mjs), on the
  * run's network with its rules (network.sh host), and tries each blocked destination from it.
- * It removes the box, the network and the rules after, so the run's own harness makes them anew.
+ * It removes the box, the network and the rules that it made, so the run's own harness makes them
+ * anew; it removes nothing that it did not make.
  */
-export async function probeBox({ image, run = docker, sudo = "/usr/bin/sudo" }) {
+export async function probeBox({ image, sudo = "/usr/bin/sudo", box: boxModule }) {
+  // The box of a run (native-docker.mjs), unless a test names its own.
+  const { boxNetwork, docker: run, makeBox } = boxModule ?? (await import("./native-docker.mjs"))
   const lines = []
   const directory = await mkdtemp(join(tmpdir(), "wfd-probe-"))
   // The box mounts the relay's socket; the probe's own listener stands in for it.
@@ -118,6 +120,8 @@ export async function probeBox({ image, run = docker, sudo = "/usr/bin/sudo" }) 
   )
   let box
   let step = "binding"
+  // What the probe made, which it alone removes.
+  const made = { network: false, rules: false, box: false }
   try {
     box = makeBox({ directory, image, name: `workflowd-native-${"0".repeat(32)}` })
     step = "network"
@@ -125,13 +129,16 @@ export async function probeBox({ image, run = docker, sudo = "/usr/bin/sudo" }) 
       "network", "create", "--subnet", boxNetwork.subnet,
       "-o", "com.docker.network.bridge.name=wfd-sandbox0", boxNetwork.name,
     ])
+    made.network = true
     step = "network rules"
+    made.rules = true
     await command("network rules", sudo, [
       "-n", "/bin/bash", join(tooling, "network.sh"), "host", boxNetwork.subnet,
     ])
     step = "image"
     await run("image", ["image", "pull", "--quiet", image], { timeoutMs: 900000 })
     step = "box"
+    made.box = true
     await box.start()
     lines.push(probeLine("box-flags", "passed"))
     const reached = []
@@ -148,11 +155,13 @@ export async function probeBox({ image, run = docker, sudo = "/usr/bin/sudo" }) 
   } catch {
     lines.push(probeLine("box-flags", "failed", `step=${step.replace(" ", "-")}`))
   } finally {
-    await box?.remove().catch(() => undefined)
-    await run("network remove", ["network", "rm", boxNetwork.name]).catch(() => undefined)
-    await command("network stop", sudo, ["-n", "/bin/bash", join(tooling, "network.sh"), "stop"]).catch(
-      () => undefined,
-    )
+    if (made.box) await box?.remove().catch(() => undefined)
+    if (made.network)
+      await run("network remove", ["network", "rm", boxNetwork.name]).catch(() => undefined)
+    if (made.rules)
+      await command("network stop", sudo, [
+        "-n", "/bin/bash", join(tooling, "network.sh"), "stop",
+      ]).catch(() => undefined)
     socket.close()
     await rm(directory, { recursive: true, force: true })
   }
