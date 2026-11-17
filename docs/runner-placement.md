@@ -30,7 +30,7 @@ The procedure has three parts:
 | `WORKFLOWD_AGENT_RUN_PLACEMENTS` | Daemon environment file on the host | JSON object, `{"<alias>": "runner"}` | workflowd |
 | `WORKFLOWD_CAPABILITY_CONTROL` | Daemon environment file on the host | JSON object, `{"socket": "<control-socket-path>"}` | workflowd |
 | `WORKFLOWD_RUNNER_MAX_RUNS` | Daemon environment file on the host | Positive integer; 4 when absent | workflowd |
-| `WORKFLOWD_CAPABILITY_GATEWAY` | Gateway environment on the host | JSON object (`src/sandbox/config.ts`, `CapabilityGatewayConfig`) | the gateway process only |
+| `WORKFLOWD_CAPABILITY_GATEWAY` | Gateway environment file on the host, `/etc/workflowd-gateway/gateway.env` | JSON object (`src/sandbox/config.ts`, `CapabilityGatewayConfig`) | the gateway process only |
 
 The daemon refuses `WORKFLOWD_CAPABILITY_GATEWAY` in its own environment. The gateway reads it.
 
@@ -87,7 +87,7 @@ Check: the credential shows the issuer, the tag `tag:agent-runner` and the subje
 | `TS_AGENT_AUDIENCE` | the audience of step 3 |
 | `SANDBOX_AGENT_IMAGE` | `ghcr.io/bnasraoui/workflowd-agent-base@sha256:<digest>`, the published image of the commit of step 6 |
 | `SANDBOX_GATEWAY_URL` | `https://<service-name>.<tailnet-name>.ts.net` |
-| `SANDBOX_BOOTSTRAP_MODE` | do not set it yet; set it in step 7 |
+| `SANDBOX_BOOTSTRAP_MODE` | do not set it yet; set it in step 9 |
 
 Check: the **Variables** tab shows the four variables. The step header of a job shows each value
 that a step gets in its environment. The gateway's MagicDNS name is then visible in the public
@@ -122,19 +122,109 @@ and write** for `workflowd`.
 Check: `.github/workflows/agent-sandbox-caller.yml` at `<workflow-sha>` gives `bootstrap-mode`,
 `gateway-url` and `agent-image` to `agent-sandbox.yml`.
 
-### Step 7. Import the gateway's provider login (host)
+### Step 7. Install and start the gateway (host, as root)
+
+Do this step after operator step 2. Each command of this step needs root. Do it one time. Do not
+give root to the operator agent for it.
+
+The gateway runs as the system unit `workflowd-gateway.service`
+(`deploy/systemd/workflowd-gateway.service`). The unit starts a container of the published
+gateway image. The container runs as the image's own uid and gid, 10001, never as root and never
+as the daemon's user. So the daemon cannot read the gateway's login, its store or its noscope
+configuration. Root runs only the Docker client of the unit. The container writes only
+`/var/lib/workflowd-gateway` and a private `/tmp`.
+
+1. Make sure that the daemon's user cannot use Docker. A user who can use the Docker socket can
+   run a command in the gateway's container and read the login. Run `id -nG <daemon-user>`. If
+   the output shows `docker`, remove the user from the group:
+
+   ```sh
+   sudo gpasswd --delete <daemon-user> docker
+   ```
+
+   The processes of the daemon's user that started before this command keep the group. They
+   lose it only when the systemd instance of the user (`user@<daemon-uid>.service`) starts
+   again, for example at the next start of the host. Do not give the go-ahead (step 10) before
+   the check of this item passes.
+2. Make the gateway's state directory and its noscope configuration directory, owned by uid
+   10001:
+
+   ```sh
+   sudo install -d -o 10001 -g 10001 -m 0711 /var/lib/workflowd-gateway
+   sudo install -d -o 10001 -g 10001 -m 0700 /var/lib/workflowd-gateway/config \
+     /var/lib/workflowd-gateway/config/noscope /var/lib/workflowd-gateway/config/noscope/providers
+   ```
+
+   Mode 0711 lets the daemon and tailscaled go through the directory to their sockets. They
+   cannot list it.
+3. Install the provider-access template of operator step 1:
+
+   ```sh
+   sudo install -o 10001 -g 10001 -m 0600 <staging-directory>/provider-access.toml \
+     /var/lib/workflowd-gateway/config/noscope/providers/provider-access.toml
+   ```
+
+4. Install the environment file of operator step 2:
+
+   ```sh
+   sudo install -d -o root -g root -m 0755 /etc/workflowd-gateway
+   sudo install -o root -g root -m 0600 <staging-directory>/gateway.env /etc/workflowd-gateway/gateway.env
+   ```
+
+5. Pull the gateway image by its digest, the value of `WORKFLOWD_GATEWAY_IMAGE` in the
+   environment file. The unit does not pull it.
+
+   ```sh
+   sudo docker pull ghcr.io/bnasraoui/workflowd-gateway@sha256:<gateway-digest>
+   ```
+
+6. Install, enable and start the unit, from the checkout of the commit of step 6:
+
+   ```sh
+   sudo install -o root -g root -m 0644 <checkout>/deploy/systemd/workflowd-gateway.service \
+     /etc/systemd/system/workflowd-gateway.service
+   sudo systemctl daemon-reload
+   sudo systemctl enable --now workflowd-gateway.service
+   ```
+
+7. Tell the operator that the gateway started.
+
+A later restart of the unit also needs root: `sudo systemctl restart workflowd-gateway.service`.
+
+Check:
+
+- `sudo -u <daemon-user> id -nG` does not show `docker`. `grep '^Groups:'
+  /proc/<daemon-pid>/status` does not show the gid of `docker` (`getent group docker`).
+  `<daemon-pid>` is the value that `systemctl --user show -p MainPID workflowd.service` writes
+  as the daemon's user.
+- `sudo stat -c '%u %g %a %n' /var/lib/workflowd-gateway
+  /var/lib/workflowd-gateway/config/noscope/providers/provider-access.toml
+  /etc/workflowd-gateway/gateway.env` shows `10001 10001 711`, `10001 10001 600` and `0 0 600`.
+- `systemctl is-active workflowd-gateway.service` writes `active`.
+- `sudo docker top workflowd-gateway -eo uid,gid,args` shows uid 10001 and gid 10001 on each
+  line.
+
+### Step 8. Import the gateway's provider login (host, as root)
 
 Do this step after operator step 3. The gateway keeps its own login. Only the owner gives it.
 
-1. On the host, run the gateway's command `import-login <provider>` as the gateway's user, never
-   as root. Give the login on standard input only.
+1. On the host, run the gateway's command `import-login <provider>` in the gateway's container:
+
+   ```sh
+   sudo docker exec --interactive workflowd-gateway \
+     /bin/bun /app/src/capability-gateway-server.ts import-login <provider>
+   ```
+
+   The Docker client needs root. The command runs as the gateway's user, uid 10001, never as
+   root. Do not add `--user`. Give the login on standard input only.
 2. Do not put the login in an argument, in an environment variable or in a file that another
    user can read.
+3. Restart the gateway: `sudo systemctl restart workflowd-gateway.service`.
 
-Check: the command writes `imported the <provider> login, owned by uid <gateway-uid>` or
-`replaced the <provider> login, owned by uid <gateway-uid>`. It writes no value of the login.
+Check: the command writes `imported the <provider> login, owned by uid 10001` or
+`replaced the <provider> login, owned by uid 10001`. It writes no value of the login.
 
-### Step 8. Select private mode (GitHub repository settings)
+### Step 9. Select private mode (GitHub repository settings)
 
 Do this step after operator step 6.
 
@@ -143,60 +233,114 @@ Do this step after operator step 6.
 Check: the **Variables** tab shows `SANDBOX_BOOTSTRAP_MODE` = `private`. From now on, each lease
 push of `workflowd` runs in private mode: no artifact, and no `agent-publish` job.
 
-### Step 9. Give the go-ahead
+### Step 10. Give the go-ahead
 
 1. Tell the operator that the trial run can start.
 
 ## Part 2: the operator's steps on the host
 
 An operator agent does these steps. Do them in this order. Do the check after each step. If a
-check fails, stop and tell the owner. Do not change the tailnet or the GitHub settings.
+check fails, stop and tell the owner. Do not change the tailnet or the GitHub settings. The
+operator does not use root: the owner does each step that needs root (owner steps 7 and 8).
 
-### Operator step 1. Install the gateway's provider-access template
+The operator writes two files in a staging directory of its own, `<staging-directory>`, and the
+owner installs them in owner step 7. Run the commands from the checkout of the commit of owner
+step 6.
 
-1. Copy `deploy/noscope/provider-access.toml` to the noscope configuration directory of the
-   gateway (`noscope.configHome`).
-2. Replace `LOGIN_DIRECTORY` with the value of `login.directory`.
-3. Set the owner to the gateway's uid and the mode to 0600.
+### Operator step 1. Write the gateway's provider-access template
 
-Check: `stat` shows the gateway's uid and mode 0600. The file holds no secret.
+1. Make the staging directory and copy the template into it:
 
-### Operator step 2. Write the gateway configuration
+   ```sh
+   install -d -m 0700 <staging-directory>
+   install -m 0600 deploy/noscope/provider-access.toml <staging-directory>/provider-access.toml
+   ```
 
-Write `WORKFLOWD_CAPABILITY_GATEWAY` into the environment of the gateway process. Use the keys
-of `docs/capability-gateway.md`:
+2. Replace `LOGIN_DIRECTORY` with the value of `login.directory`,
+   `/var/lib/workflowd-gateway/login`:
 
-- `noscope.binary`, `noscope.configHome`: the paths of the gateway image.
-- `storePath`, `controlSocket`: absolute paths of the gateway's store and control socket.
-- `daemon.uid`, `daemon.gid`: the uid and gid of the workflowd daemon.
-- `login.directory`: an absolute path that the gateway's uid owns, mode 0700.
-- `providerId`, `credentialRole`: the provider id of the model route and the noscope role.
-- `maxStreams`, `maxStreamsPerRun`: for example 64 and 4.
-- `gitRead`: `true`. The runner reads the source through the gateway's Git route.
-- `listen.socket`: the path of the gateway's Unix socket.
-- `listen.front.uid`, `listen.front.gid`: the uid and gid of the process that runs Tailscale
-  Serve.
-- `listen.service`: `<service-name>.<tailnet-name>.ts.net`, in lower case.
+   ```sh
+   sed -i '/^mint = /s|LOGIN_DIRECTORY|/var/lib/workflowd-gateway/login|' \
+     <staging-directory>/provider-access.toml
+   ```
 
-Check: the gateway process starts and writes `listening <listen.socket>`. It writes no other
-error.
+Check: `grep -c '^mint = .* access /var/lib/workflowd-gateway/login ' <staging-directory>/provider-access.toml`
+writes `1`. The file holds no secret. After owner step 7, the owner's `stat` shows the gateway's
+uid 10001 and mode 0600 (owner step 7, check).
 
-### Operator step 3. Start the gateway
+### Operator step 2. Write the gateway's environment file
 
-1. Start the gateway as its own uid, as a unit or a container of the gateway image. Set the stop
-   timeout to at least 15 seconds (`TimeoutStopSec=15`, or `docker stop --time 15`).
-2. Tell the owner to do owner step 7.
+1. Copy the example environment file:
 
-Check: the control socket exists with the daemon's group. After owner step 7, a restart of the
-gateway writes no login error.
+   ```sh
+   install -m 0600 deploy/gateway.env.example <staging-directory>/gateway.env
+   ```
+
+2. Replace each placeholder in `<staging-directory>/gateway.env`. The file sets
+   `WORKFLOWD_CAPABILITY_GATEWAY`, the configuration of the gateway process, with the keys of
+   `docs/capability-gateway.md`, and three variables of the unit:
+   - `WORKFLOWD_GATEWAY_IMAGE`: `ghcr.io/bnasraoui/workflowd-gateway@sha256:<gateway-digest>`.
+     The job **Publish gateway image to GHCR by digest** of the commit of owner step 6 writes
+     the digest in its line `Published:`.
+   - `WORKFLOWD_GATEWAY_DAEMON_GID`: the same value as `daemon.gid`.
+   - `WORKFLOWD_GATEWAY_FRONT_GID`: the same value as `listen.front.gid`.
+   - `noscope.binary`, `noscope.configHome`: keep `/bin/noscope`, the path of the gateway image,
+     and `/var/lib/workflowd-gateway/config`.
+   - `storePath`, `controlSocket`: keep `/var/lib/workflowd-gateway/gateway.db` and
+     `/var/lib/workflowd-gateway/control/control.sock`.
+   - `daemon.uid`, `daemon.gid`: the uid and gid of the workflowd daemon (`id -u <daemon-user>`,
+     `id -g <daemon-user>`).
+   - `login.directory`: keep `/var/lib/workflowd-gateway/login`. The gateway's uid owns it, mode
+     0700; owner step 8 makes it.
+   - `providerId`, `credentialRole`: the provider id of the model route and the noscope role.
+   - `maxStreams`, `maxStreamsPerRun`: for example 64 and 4.
+   - `gitRead`: `true`. The runner reads the source through the gateway's Git route.
+   - `listen.socket`: keep `/var/lib/workflowd-gateway/front/gateway.sock`, the path of the
+     gateway's Unix socket.
+   - `listen.front.uid`, `listen.front.gid`: the uid and gid of the process that runs Tailscale
+     Serve (`ps -o uid=,gid= -C tailscaled`).
+   - `listen.service`: `<service-name>.<tailnet-name>.ts.net`, in lower case.
+3. Tell the owner to do owner step 7.
+
+Check: `grep -v '^#' <staging-directory>/gateway.env | grep -c '<'` writes `0`. The gateway's
+schema accepts the configuration; this command writes `valid`:
+
+```sh
+(set -a; . <staging-directory>/gateway.env; bun -e 'import { loadCapabilityGatewayConfig } from "./src/config.ts"; loadCapabilityGatewayConfig(process.env); console.log("valid")')
+```
+
+### Operator step 3. Check the gateway
+
+Do this step after owner step 7.
+
+1. Read the state of the unit and of its sockets:
+
+   ```sh
+   systemctl is-active workflowd-gateway.service
+   stat -c '%u %g %a %n' /var/lib/workflowd-gateway/control \
+     /var/lib/workflowd-gateway/control/control.sock /var/lib/workflowd-gateway/front
+   journalctl -u workflowd-gateway.service -b --no-pager | tail -n 20
+   ```
+
+   `journalctl` of a system unit needs the group `systemd-journal` or `adm`. If the operator's
+   user has neither, ask the owner for the lines.
+2. Tell the owner to do owner step 8.
+
+Check: the unit is `active`. The control socket exists with the daemon's group: the `stat` lines
+show `10001 <daemon-gid> 710` for `control`, `10001 <daemon-gid> 660` for `control.sock`,
+and `10001 <front-gid> 710` for `front`. The journal
+has the line `listening /var/lib/workflowd-gateway/front/gateway.sock` and no other error. The
+stop timeout of the unit is 15 seconds from SIGTERM to SIGKILL (`docker stop --time 15`); `systemctl
+show -p TimeoutStopUSec workflowd-gateway.service` writes `TimeoutStopUSec=30s`, which covers it.
+After owner step 8, the journal of the restart has no login error.
 
 ### Operator step 4. Serve the Service
 
 1. Point the Service at the gateway's socket:
-   `tailscale serve --service=svc:<service-name> --https=443 unix:<listen.socket>`.
+   `tailscale serve --service=svc:<service-name> --https=443 unix:/var/lib/workflowd-gateway/front/gateway.sock`.
 
 Check: `tailscale serve status` shows `svc:<service-name>` on port 443 with the target
-`unix:<listen.socket>`. From the host, a request to
+`unix:/var/lib/workflowd-gateway/front/gateway.sock`. From the host, a request to
 `https://<service-name>.<tailnet-name>.ts.net/` gets an empty 403: the gateway accepts only a
 tagged node.
 
@@ -213,7 +357,8 @@ Edit the daemon's environment file. Keep a copy of the old file.
    - `"repositoryId"`, `"installationId"`, `"appActorId"`: as before.
 2. Set `WORKFLOWD_AGENT_RUN_PLACEMENTS` to `{"<alias>": "runner"}`, with the alias of
    `workflowd` in `WORKFLOWD_AGENT_RUN_REPOSITORIES`.
-3. Set `WORKFLOWD_CAPABILITY_CONTROL` to `{"socket": "<controlSocket>"}`.
+3. Set `WORKFLOWD_CAPABILITY_CONTROL` to
+   `{"socket": "/var/lib/workflowd-gateway/control/control.sock"}`, the value of `controlSocket`.
 4. Do not set `WORKFLOWD_RUNNER_MAX_RUNS` for the trial. The default is 4.
 
 Check: the daemon loads the configuration at its next start with no error. A `runner`
@@ -224,13 +369,13 @@ start with an error that names it.
 
 1. Restart the workflowd unit only after the owner gives the go-ahead for this step. No run of
    the host must be live.
-2. Tell the owner to do owner step 8.
+2. Tell the owner to do owner step 9.
 
 Check: the unit is active. Its journal has no `Sandbox reconciliation failed` line.
 
 ## Part 3: the start of the trial run
 
-After owner step 9, send one dispatch to the daemon:
+After owner step 10, send one dispatch to the daemon:
 
 - `POST /workflows/agent-runs` on the daemon, with `Authorization: Bearer
   <WORKFLOWD_AGENT_RUN_TOKEN>`, and the body
