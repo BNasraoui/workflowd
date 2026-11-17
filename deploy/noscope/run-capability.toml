@@ -1,6 +1,8 @@
-# Template only: install owner-only (0600) and select reviewed absolute binary/source paths.
-# No run grant exists until the controller stores the digest in its current run binding.
+# Template only: install owner-only (0600) for the gateway's uid, with the image's paths: the
+# image's Bun at /bin/bun and the gateway's source at /app (nix/gateway-image.nix). The command
+# names no value. No run grant exists until the controller stores the digest in its current run
+# binding.
 contract_version = 1
 
 [commands]
-mint = "/usr/local/bin/bun /opt/workflowd/src/capability-gateway/noscope-provider.ts run {ttl}"
+mint = "/bin/bun /app/src/capability-gateway/noscope-provider.ts run {ttl}"
