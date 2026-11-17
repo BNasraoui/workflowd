@@ -288,16 +288,26 @@ const make = (options: AgentRunIngressOptions) =>
     const checkRunnerRepository = (alias: string) =>
       Effect.gen(function* () {
         const policy = options.sandboxRepositories?.find((candidate) => candidate.alias === alias)
-        const read =
-          policy === undefined || visibility === undefined
-            ? undefined
-            : yield* visibility.read(policy).pipe(Effect.option)
-        if (read === undefined || Option.isNone(read))
-          return yield* refuse(
+        const unknown = (cause: string) =>
+          refuse(
             "repository_visibility_unknown",
-            "The visibility of the repository could not be read; a runner run needs a public repository",
+            `The visibility of the repository could not be read; a runner run needs a public repository: ${cause}`,
           )
-        if (read.value !== "public")
+        if (policy === undefined || visibility === undefined)
+          return yield* unknown(
+            policy === undefined
+              ? "no sandbox policy names the repository"
+              : "no reader of repository visibility is configured",
+          )
+        // The diagnostic keeps messages and statuses only, never a token or a request.
+        const read = yield* visibility
+          .read(policy)
+          .pipe(
+            Effect.mapError((error) =>
+              unknown(sandboxDiagnostic("ingress.visibility", error).message),
+            ),
+          )
+        if (read !== "public")
           return yield* refuse(
             "runner_requires_public_repository",
             "A runner run needs a public repository",

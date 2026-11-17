@@ -1,6 +1,6 @@
 import { App } from "@octokit/app"
 import { Octokit } from "@octokit/rest"
-import { Cause, Effect, Layer, Option } from "effect"
+import { Cause, Context, Effect, Layer, Option } from "effect"
 import { SqlClient } from "effect/unstable/sql"
 import { readFile } from "node:fs/promises"
 import { dirname, join } from "node:path"
@@ -59,7 +59,7 @@ import { OpenCodeMailboxLive } from "./resident/opencode"
 import { ResidentCodex, ResidentCodexLive } from "./resident/service"
 import { reviewServerId } from "./review-harness"
 import { SandboxDispatch, makeSandboxDispatch } from "./sandbox/dispatch"
-import { makeSandboxGithub } from "./sandbox/github"
+import { makeSandboxGithub, RepositoryVisibility } from "./sandbox/github"
 import { makeSandboxLeaseService } from "./sandbox/lease"
 import { makeDaemonCapability, type DaemonCapability } from "./sandbox/capability-control"
 import { SealedResultGit, SealedResultGitLive } from "./kernel/sealed-result"
@@ -416,8 +416,7 @@ const makeAutomationLayer = (config: AutomationConfig) => {
   const sandboxLayer =
     sandboxPolicies.length === 0
       ? Layer.empty
-      : Layer.effect(
-          SandboxDispatch,
+      : Layer.effectContext(
           Effect.gen(function* () {
             const github = yield* makeSandboxGithub(config.github)
             const controlRoot = join(dirname(config.storage.databasePath), "sandboxes")
@@ -438,7 +437,7 @@ const makeAutomationLayer = (config: AutomationConfig) => {
               undefined,
               native === undefined ? undefined : { native },
             )
-            return yield* makeSandboxDispatch({
+            const dispatch = yield* makeSandboxDispatch({
               policies: sandboxPolicies,
               github,
               leases,
@@ -470,6 +469,10 @@ const makeAutomationLayer = (config: AutomationConfig) => {
                 }),
               },
             })
+            // Agent-run ingress reads the visibility of a runner repository with the same App.
+            return Context.make(SandboxDispatch, dispatch).pipe(
+              Context.add(RepositoryVisibility, { read: github.repositoryVisibility }),
+            )
           }),
         ).pipe(Layer.provideMerge(AgentRunStoreLive.pipe(Layer.provideMerge(kernelStoreLayer))))
   const sandboxProviderLayer =
