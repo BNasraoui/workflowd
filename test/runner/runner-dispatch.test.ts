@@ -170,6 +170,8 @@ const scripted = (script: {
   readonly ended?: GatewayEnd
   /** What the gateway answers after the first batch: its fault, or nothing yet, ever. */
   readonly later?: "unavailable" | "nothing"
+  /** Whether the gateway holds the run's result from its first read, as at a start of the daemon. */
+  readonly held?: boolean
   /** Runs at each read after the first batch. */
   readonly reading?: () => void
   readonly parts?: (offset: number) => { size: number; sha256: string; part: string }
@@ -188,7 +190,7 @@ const scripted = (script: {
             Date.now() - firstRead >= (script.readyAfterMs ?? 0)
               ? [{ sequence: 1, lines: script.first ?? lines }]
               : [],
-          result: false,
+          result: script.held === true,
           ended: null,
         })
       script.reading?.()
@@ -696,4 +698,84 @@ test("a stop during the push of a checked result, whose answer the remote loses 
   } finally {
     await rm(root, { recursive: true, force: true })
   }
+})
+
+/**
+ * A run that one daemon starts and a second daemon, on the same store, the same GitHub and the
+ * same remote, finds live at its start. Between the two, `between` runs with the remote and the
+ * result that the job posted, which the gateway holds for the second daemon. Gives the run's end.
+ */
+async function restartWithHeldResult(
+  between: (remote: Remote, root: string, sealed: Sealed) => Promise<void> | void,
+) {
+  const root = await mkdtemp(join(tmpdir(), "runner-restart-"))
+  const remote = await gitRemote(join(root, "git"))
+  const github = await githubStub(remote.sourceSha, () => undefined)
+  const policy = runnerPolicy(image)
+  const daemon = (control: RunnerControl) =>
+    daemonRuntime(
+      { root, database: join(root, "workflowd.db") },
+      github,
+      remote.bare,
+      policy,
+      Effect.succeed(control),
+    )
+  try {
+    const sealed = await seal(root, remote)
+    const first = daemon(scripted({ later: "nothing" }))
+    try {
+      const receipt = await register(first)
+      if (receipt._tag === "Failure") throw new Error(JSON.stringify(receipt.failure))
+    } finally {
+      await first.dispose()
+    }
+    await between(remote, root, sealed)
+    const second = daemon(scripted({ held: true, body: bodyOf(sealed) }))
+    try {
+      return await ended(second, remote, runId)
+    } finally {
+      await second.dispose()
+    }
+  } finally {
+    await github.close()
+    await remote.close()
+    await rm(root, { recursive: true, force: true })
+  }
+}
+
+/** Writes the result commit of `sealed` into the remote as the run's branch, as a push does. */
+async function pushedByHand(remote: Remote, root: string, sealed: Sealed) {
+  const bundle = join(await mkdtemp(join(root, "bundle-")), "result.bundle")
+  await writeFile(bundle, sealed.bundle)
+  const [sha] = run("unbundle", ["git", "-C", remote.bare, "bundle", "unbundle", bundle]).split(" ")
+  run("branch", ["git", "-C", remote.bare, "update-ref", branch, sha!])
+  return sha!
+}
+
+// The daemon stops while it pushes a checked result: the push runs to its end, but the stop lands
+// before the daemon records it, so the run's lease and the gateway's result are still there at the
+// next start, with the result already on the run's branch.
+test("a result that the run's branch already holds at a start of the daemon counts as pushed, and the run completes", async () => {
+  let pushed: string | undefined
+  const end = await restartWithHeldResult(async (remote, root, sealed) => {
+    pushed = await pushedByHand(remote, root, sealed)
+  })
+  expect({ state: end.run.state, diagnostic: end.run.diagnostic }).toEqual({
+    state: "completed",
+    diagnostic: null,
+  })
+  expect(end.branch).toBe(pushed!)
+  expect(end.message).toMatchObject({ status: "completed", final_message: "Done." })
+})
+
+test("a run's branch that holds another commit at a start of the daemon stays refused: the run ends target_exists and the branch keeps its commit", async () => {
+  let other: string | undefined
+  const end = await restartWithHeldResult(async (remote, root) => {
+    other = await pushedByHand(remote, root, await committed(root, remote, "other.txt"))
+  })
+  expect({ state: end.run.state, diagnostic: end.run.diagnostic }).toEqual({
+    state: "operator_required",
+    diagnostic: "result_refused: target_exists",
+  })
+  expect(end.branch).toBe(other!)
 })

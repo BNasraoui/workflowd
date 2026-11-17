@@ -491,7 +491,13 @@ export const makeSandboxDispatch = (options: {
      * also through a stop of the run or of the daemon, and its end is the run's: completed once
      * the target holds the result, or the push's fault.
      */
-    const publishRunner = (run: AgentRunRecord, handle: RunnerHandle, policy: SandboxPolicy) => {
+    const publishRunner = (
+      run: AgentRunRecord,
+      handle: RunnerHandle,
+      policy: SandboxPolicy,
+      /** A result of a daemon before this one, which may have pushed it before it stopped. */
+      resumed = false,
+    ) => {
       let pushing = false
       return Effect.scoped(
         Effect.gen(function* () {
@@ -523,6 +529,7 @@ export const makeSandboxDispatch = (options: {
             {
               ref: `refs/heads/agent-run/${run.runId.replace(/^agent-run-/, "").slice(0, 16)}`,
               expectedHead: null,
+              ...(resumed ? { resumed } : {}),
             },
             {
               remote: `https://${githubHost}/${policy.repository}.git`,
@@ -952,7 +959,7 @@ export const makeSandboxDispatch = (options: {
           return
         const read = yield* runnerOptions.gateway.readEvents(run.runId, 0)
         if (read.result && read.ended === null)
-          yield* publishRunner(run, runnerExecutor.held(run.runId), policy)
+          yield* publishRunner(run, runnerExecutor.held(run.runId), policy, true)
       })
     // A new coordinator never resumes an abandoned execution or injects resident tools. A runner
     // run's events are read by no executor of this coordinator: a result that the gateway holds

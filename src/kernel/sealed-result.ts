@@ -94,6 +94,12 @@ export type SealedResultTarget = {
   readonly ref: string
   /** The head the target must have, or null when the target must not exist yet. */
   readonly expectedHead: string | null
+  /**
+   * A result that a daemon before this one may have pushed, with `expectedHead` null: a target
+   * that holds exactly this result counts as pushed, and its push sends nothing. A target that
+   * holds any other commit is refused as before.
+   */
+  readonly resumed?: boolean
 }
 
 export type SealedResultOptions<E = never> = {
@@ -1249,7 +1255,14 @@ export const makeSealedResultGit = (
         const network = networkContext(inRepository, options.remote, token)
         const offline: GitContext = { ...inRepository, secrets: network.secrets }
         const head = yield* readTarget(network, options.remote, target.ref)
-        if (target.expectedHead === null && head !== null) return yield* refused("target_exists")
+        // The target of a resumed result that holds exactly that result: it was pushed.
+        const pushed =
+          target.resumed === true &&
+          target.expectedHead === null &&
+          head !== null &&
+          head === bundle.resultSha
+        if (target.expectedHead === null && head !== null && !pushed)
+          return yield* refused("target_exists")
         if (target.expectedHead !== null && head !== target.expectedHead)
           return yield* refused("target_moved")
         yield* gitOk(network, [
@@ -1290,12 +1303,14 @@ export const makeSealedResultGit = (
           resultSha: bundle.resultSha,
           target,
           push: () =>
-            pushChecked(
-              { ...network, deadline: Date.now() + settings.timeLimitMs },
-              options.remote,
-              target,
-              bundle.resultSha,
-            ),
+            pushed
+              ? Effect.succeed({ ref: target.ref, sha: bundle.resultSha })
+              : pushChecked(
+                  { ...network, deadline: Date.now() + settings.timeLimitMs },
+                  options.remote,
+                  target,
+                  bundle.resultSha,
+                ),
         }
       })
     return { check }
