@@ -9,6 +9,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises"
 import { createServer } from "node:https"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { prepare } from "../../../deploy/sandbox/bootstrap.mjs"
 import { serveRunnerRelay } from "../../../deploy/sandbox/capability-relay.mjs"
 import { pinnedFetch } from "../../../deploy/sandbox/gateway-address.mjs"
 import { relayConfig } from "./relay-config.mjs"
@@ -111,4 +112,37 @@ test("the relay sends each call to the address that the bootstrap gave for the S
     await assert.rejects(serveRunnerRelay({ ...config, gatewayAddress }, root), {
       message: "relay configuration refused",
     })
+})
+
+test("the runner's bootstrap opens its gateway session through the transport of the gateway's Service name", async () => {
+  const asked = []
+  const sent = []
+  await assert.rejects(
+    prepare({
+      harness: ["/bin/false"],
+      directory: "/nonexistent",
+      environment: {
+        GITHUB_SHA: "a".repeat(40),
+        GITHUB_REF: "refs/heads/workflowd/leases/lease",
+        GITHUB_REPOSITORY: "fixture/repo",
+        SANDBOX_AGENT_IMAGE: `ghcr.io/bnasraoui/workflowd-agent-base@sha256:${"b".repeat(64)}`,
+        SANDBOX_GATEWAY_URL: `https://${service}`,
+        ACTIONS_ID_TOKEN_REQUEST_URL: "https://fixture.actions.githubusercontent.com/token",
+        ACTIONS_ID_TOKEN_REQUEST_TOKEN: "fixture-request",
+      },
+      identity: () => Promise.reject(new Error("no proof is asked")),
+      transport: (gateway) => {
+        asked.push(gateway)
+        return Promise.resolve({
+          send: (url) => {
+            sent.push(url.host)
+            return Promise.resolve(new Response(null, { status: 400 }))
+          },
+          address: "100.101.102.103",
+        })
+      },
+    }),
+  )
+  assert.deepEqual(asked, [`https://${service}`])
+  assert.deepEqual(sent, [service])
 })

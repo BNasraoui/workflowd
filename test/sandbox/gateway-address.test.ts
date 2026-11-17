@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test"
-import { mkdtemp, rm } from "node:fs/promises"
+import { mkdtemp, readFile, rm } from "node:fs/promises"
+import { Agent, createServer } from "node:https"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import {
@@ -7,11 +8,11 @@ import {
   gatewayTransport,
   localApiSocket,
   localDnsQuery,
+  pinnedFetch,
   serviceAddress,
 } from "../../deploy/sandbox/gateway-address.mjs"
-import { prepare } from "../../deploy/sandbox/bootstrap.mjs"
 import { fixtureExecutable } from "../helpers/fixture-executable.mjs"
-import { loopbackCertificate } from "../helpers/loopback-tls"
+import { loopbackCertificate, portOf } from "../helpers/loopback-tls"
 
 /**
  * The runner's lookup of the gateway's Service name (gateway-address.mjs): the answer of
@@ -140,13 +141,87 @@ test("a Service name is asked again until tailscaled answers it, at most the num
   expect(asked).toEqual([])
 })
 
-// The runner's job runs these modules with Node: its pinned fetch and its relay are tested there.
-test("in Node, the pinned fetch and the relay reach the Service's address with its name kept for TLS and Host", async () => {
+test("in Bun, the pinned fetch connects to the Service's address with its name kept for Host, sends a body, and reads the answer", async () => {
+  const root = await mkdtemp(join(tmpdir(), "gateway-address-"))
+  const tls = await loopbackCertificate(root, service)
+  // The certificate names the Service alone, no address: TLS passes only when the client checks
+  // it against the name.
+  const seen: Array<{ host?: string; body: string }> = []
+  const server = createServer(
+    { key: await readFile(tls.key), cert: await readFile(tls.cert) },
+    (request, response) => {
+      let body = ""
+      request.on("data", (bytes: Buffer) => (body += bytes.toString()))
+      request.on("end", () => {
+        seen.push({
+          ...(request.headers.host === undefined ? {} : { host: request.headers.host }),
+          body,
+        })
+        response.writeHead(request.url === "/empty" ? 204 : 403, { "x-fixture": "yes" })
+        response.end(request.url === "/empty" ? undefined : "refused")
+      })
+    },
+  )
+  await new Promise<void>((done) => server.listen(0, "127.0.0.1", done))
+  const port = portOf(server)
+  const agent = new Agent({ ca: await readFile(tls.cert) })
+  try {
+    const send = pinnedFetch(service, "127.0.0.1", agent)
+    const body = new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode("one "))
+        controller.enqueue(new TextEncoder().encode("two"))
+        controller.close()
+      },
+    })
+    const response = await send(`https://${service}:${port}/result`, {
+      method: "POST",
+      body,
+      duplex: "half",
+      headers: { "content-type": "application/octet-stream" },
+    })
+    expect(response.status).toBe(403)
+    expect(response.headers.get("x-fixture")).toBe("yes")
+    expect(await response.text()).toBe("refused")
+    expect(seen[0]).toEqual({ host: `${service}:${port}`, body: "one two" })
+    const posted = await send(`https://${service}:${port}/text`, { method: "POST", body: "three" })
+    await posted.text()
+    expect(seen[1]).toEqual({ host: `${service}:${port}`, body: "three" })
+    const empty = await send(new URL(`https://${service}:${port}/empty`))
+    expect({ status: empty.status, body: empty.body }).toEqual({ status: 204, body: null })
+    // Another name is not the Service's: its connection has no address.
+    await expect(send(`https://other.fixture.ts.net:${port}/`)).rejects.toMatchObject({
+      code: "ENOTFOUND",
+    })
+    // A signal's reason ends the request, as fetch's does. The end of a request under way is
+    // checked in Node (fixtures/pinned-gateway.mjs): Bun 1.3.14's client reports a request that
+    // it destroyed as ECONNREFUSED.
+    const aborted = new AbortController()
+    aborted.abort(new Error("stopped before"))
+    await expect(send(`https://${service}:${port}/`, { signal: aborted.signal })).rejects.toThrow(
+      "stopped before",
+    )
+  } finally {
+    agent.destroy()
+    server.closeAllConnections()
+    server.close()
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+// The runner's job runs these modules with Node: its bootstrap, its pinned fetch and its relay are
+// tested there.
+test("in Node, the bootstrap, the pinned fetch and the relay reach the Service's address with its name kept for TLS and Host", async () => {
   const root = await mkdtemp(join(tmpdir(), "gateway-address-"))
   try {
     const tls = await loopbackCertificate(root, service)
     const child = Bun.spawn(
-      [fixtureExecutable("node"), "--test", resolve("test/sandbox/fixtures/pinned-gateway.mjs")],
+      [
+        fixtureExecutable("node"),
+        "--test",
+        "--test-reporter=tap",
+        resolve("test/sandbox/fixtures/pinned-gateway.mjs"),
+      ],
       {
         env: { PATH: "/usr/bin:/bin", NODE_EXTRA_CA_CERTS: tls.cert, PINNED_KEY: tls.key },
         stdin: "ignore",
@@ -160,7 +235,7 @@ test("in Node, the pinned fetch and the relay reach the Service's address with i
       new Response(child.stderr).text(),
     ])
     expect({ code, output: stdout + stderr }).toMatchObject({ code: 0 })
-    expect(stdout).toContain("# pass 2")
+    expect(stdout).toContain("# pass 3")
   } finally {
     await rm(root, { recursive: true, force: true })
   }
@@ -194,36 +269,4 @@ test("a gateway at a Service name is reached at tailscaled's address; any other 
       tries: 1,
     }),
   ).rejects.toMatchObject({ code: "ENOTFOUND" })
-})
-
-test("the runner's bootstrap opens its gateway session through the transport of the gateway's Service name", async () => {
-  const asked: Array<string> = []
-  const sent: Array<string> = []
-  const failure = await prepare({
-    harness: ["/bin/false"],
-    directory: "/nonexistent",
-    environment: {
-      GITHUB_SHA: "a".repeat(40),
-      GITHUB_REF: "refs/heads/workflowd/leases/lease",
-      GITHUB_REPOSITORY: "fixture/repo",
-      SANDBOX_AGENT_IMAGE: `ghcr.io/bnasraoui/workflowd-agent-base@sha256:${"b".repeat(64)}`,
-      SANDBOX_GATEWAY_URL: `https://${service}`,
-      ACTIONS_ID_TOKEN_REQUEST_URL: "https://fixture.actions.githubusercontent.com/token",
-      ACTIONS_ID_TOKEN_REQUEST_TOKEN: "fixture-request",
-    },
-    identity: () => Promise.reject(new Error("no proof is asked")),
-    transport: (gateway: string) => {
-      asked.push(gateway)
-      return Promise.resolve({
-        send: (url: URL) => {
-          sent.push(url.host)
-          return Promise.resolve(new Response(null, { status: 400 }))
-        },
-        address: "100.101.102.103",
-      })
-    },
-  }).catch((error: unknown) => error)
-  expect(failure).toBeInstanceOf(Error)
-  expect(asked).toEqual([`https://${service}`])
-  expect(sent).toEqual([service])
 })
