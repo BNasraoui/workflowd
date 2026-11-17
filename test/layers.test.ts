@@ -13,6 +13,7 @@ import { loadConfig } from "../src/config"
 import { AgentHarness } from "../src/agent-harness"
 import { GitHub } from "../src/github"
 import { SandboxDispatch } from "../src/sandbox/dispatch"
+import { RepositoryVisibility } from "../src/sandbox/github"
 import { AgentRunIngress } from "../src/kernel/agent-run-ingress"
 import { AgentRunWatchdog } from "../src/kernel/agent-run-watchdog"
 import { ClaudeResumeWorker } from "../src/kernel/claude-resume-worker"
@@ -194,6 +195,8 @@ test.each(["host", "sandbox", "runner"] as const)(
             const testJobs = yield* TestJobCanary
             const agentRuns = yield* AgentRunIngress
             expect(Option.isSome(yield* Effect.serviceOption(SandboxDispatch))).toBe(sandbox)
+            // Agent-run ingress reads the visibility of a sandbox repository before a runner run.
+            expect(Option.isSome(yield* Effect.serviceOption(RepositoryVisibility))).toBe(sandbox)
             const watchdog = yield* AgentRunWatchdog
             const claudeResume = yield* ClaudeResumeWorker
             const dogfood = yield* DogfoodStore
