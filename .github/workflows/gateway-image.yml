@@ -44,8 +44,10 @@ jobs:
           set -euo pipefail
           changed=true
           if [[ $EVENT == pull_request ]]; then
-            # The files of nix/gateway-image.nix and what builds, checks and runs them.
-            inputs='^(flake\.(nix|lock)|nix/|src/|package\.json|bun\.lock|tsconfig\.json|deploy/opencode/sandbox\.json|deploy/sandbox/(capability-limits\.mjs|publication\.mjs|casefold\.json|publication-unicode\.json|public-status\.mjs|renewal\.mjs|skills/catalog\.json)|\.github/workflows/gateway-image\.yml|test/gateway-image/|test/capability-gateway/|test/resources/)'
+            # The files of nix/gateway-image.nix and what builds, checks and runs them, with the
+            # unit, its example environment and the noscope templates that test/gateway-image/
+            # unit.sh runs on the image.
+            inputs='^(flake\.(nix|lock)|nix/|src/|package\.json|bun\.lock|tsconfig\.json|deploy/systemd/workflowd-gateway\.service|deploy/gateway\.env\.example|deploy/noscope/|deploy/opencode/sandbox\.json|deploy/sandbox/(capability-limits\.mjs|publication\.mjs|casefold\.json|publication-unicode\.json|public-status\.mjs|renewal\.mjs|skills/catalog\.json)|\.github/workflows/gateway-image\.yml|test/gateway-image/|test/capability-gateway/|test/resources/)'
             base=$(git merge-base "$BASE_SHA" "$HEAD_SHA")
             git diff --name-only "$base" "$HEAD_SHA" > "$RUNNER_TEMP/changed-files"
             status=0

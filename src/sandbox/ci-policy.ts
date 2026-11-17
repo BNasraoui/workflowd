@@ -17,11 +17,13 @@ const setupNode = "actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020"
 // Any dependency, permission, input or script edit requires a fresh review.
 // gateway-image.yml: the same checkout, Nix, Bun, and main-only upload directly after the build
 // with the archive's SHA-256 as the workflow's output, plus a job that finds
-// whether a pull request changes an input of the image, a second build of the commit and a job
-// that requires equal digests and the recorded noscope output hash.
+// whether a pull request changes an input of the image (the gateway's unit, its example
+// environment and the noscope templates among them, which test/gateway-image/unit.sh runs on the
+// image), a second build of the commit and a job that requires equal digests and the recorded
+// noscope output hash.
 const imageWorkflowSha256 = new Map([
   ["agent-image.yml", "961aca0273512625017cd483913e369bd750714083f26250d8746ec0ad77115f"],
-  ["gateway-image.yml", "09f93d492c338033611e9746163f2b65b9925fdadc34a1300ef06084b0cf4531"],
+  ["gateway-image.yml", "1298bc0bdce6e525d78f469dd0249c2e76fd37a83ee004364295df494f257cbb"],
 ])
 const head = "${{ github.event.pull_request.head.sha || github.sha }}"
 const base = "${{ github.event.pull_request.base.sha || github.event.before }}"
