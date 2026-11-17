@@ -7,23 +7,23 @@ case "$1" in
   host)
     subnet=${2:?Docker subnet required}
     for firewall in iptables ip6tables; do
-      # Docker may not create the IPv6 hook on an IPv4-only network.
-      "$firewall" -w -N DOCKER-USER 2>/dev/null || "$firewall" -w -S DOCKER-USER >/dev/null
-      if ! "$firewall" -w -C FORWARD -j DOCKER-USER 2>/dev/null; then
-        "$firewall" -w -I FORWARD 1 -j DOCKER-USER
-      fi
-      "$firewall" -w -N "$chain"
-      "$firewall" -w -A "$chain" -o tailscale0 -j DROP
+      # The forward rules are in the mangle table, which the kernel reads before the filter
+      # table. In the filter table, tailscaled puts its own jump (ts-forward) first in FORWARD,
+      # above Docker's DOCKER-USER, and ts-forward accepts each packet out of tailscale0: the
+      # box then reaches the tailnet, 100.100.100.100 (tailscaled's resolver) too. The runner's
+      # own packets go through OUTPUT, not FORWARD, and these rules do not see them.
+      "$firewall" -w -t mangle -N "$chain"
+      "$firewall" -w -t mangle -A "$chain" -o tailscale0 -j DROP
       if [ "$firewall" = iptables ]; then
         for destination in "$subnet" 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 100.64.0.0/10 169.254.0.0/16 168.63.129.16/32; do
-          "$firewall" -w -A "$chain" -d "$destination" -j DROP
+          "$firewall" -w -t mangle -A "$chain" -d "$destination" -j DROP
         done
       else
         for destination in ::1/128 fc00::/7 fe80::/10 ff00::/8; do
-          "$firewall" -w -A "$chain" -d "$destination" -j DROP
+          "$firewall" -w -t mangle -A "$chain" -d "$destination" -j DROP
         done
       fi
-      "$firewall" -w -I DOCKER-USER 1 -i wfd-sandbox0 -j "$chain"
+      "$firewall" -w -t mangle -I FORWARD 1 -i wfd-sandbox0 -j "$chain"
       # All local addresses, including eth0 and docker0, traverse INPUT.
       "$firewall" -w -N WFD-HOST
       "$firewall" -w -A WFD-HOST -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
@@ -57,15 +57,17 @@ case "$1" in
     ;;
   stop)
     for firewall in iptables ip6tables; do
-      for entry in "DOCKER-USER:$chain" INPUT:WFD-HOST; do
-        parent=${entry%:*}
-        owned=${entry#*:}
-        if "$firewall" -w -C "$parent" -i wfd-sandbox0 -j "$owned" 2>/dev/null; then
-          "$firewall" -w -D "$parent" -i wfd-sandbox0 -j "$owned"
+      for entry in "mangle:FORWARD:$chain" filter:INPUT:WFD-HOST; do
+        table=${entry%%:*}
+        parent=${entry#*:}
+        parent=${parent%:*}
+        owned=${entry##*:}
+        if "$firewall" -w -t "$table" -C "$parent" -i wfd-sandbox0 -j "$owned" 2>/dev/null; then
+          "$firewall" -w -t "$table" -D "$parent" -i wfd-sandbox0 -j "$owned"
         fi
-        if "$firewall" -w -S "$owned" >/dev/null 2>&1; then
-          "$firewall" -w -F "$owned"
-          "$firewall" -w -X "$owned"
+        if "$firewall" -w -t "$table" -S "$owned" >/dev/null 2>&1; then
+          "$firewall" -w -t "$table" -F "$owned"
+          "$firewall" -w -t "$table" -X "$owned"
         fi
       done
     done

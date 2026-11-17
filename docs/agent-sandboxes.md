@@ -249,8 +249,11 @@ success never substitutes for authenticated live evidence.
 
 The pinned engine exposes a Unix socket shared only with tooling. It has no TCP
 control listener and rejects `insecureRootCapabilities`. Agent containers never
-receive the socket volume. The disposable VM installs owned `DOCKER-USER` rules
-before booting tooling: forwarded container traffic cannot reach the bridge subnet,
+receive the socket volume. The disposable VM installs owned rules in the `mangle`
+table's `FORWARD` chain before booting tooling, ahead of every `filter` rule: tailscaled
+puts its `ts-forward` jump above Docker's `DOCKER-USER` and accepts each packet out of
+`tailscale0`, so a `DOCKER-USER` rule never sees that traffic. Forwarded container
+traffic cannot reach the bridge subnet,
 `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `100.64.0.0/10`,
 `169.254.0.0/16`, or Azure's `168.63.129.16`. No forwarded RFC1918 exception
 is needed: Dagger DNS stays inside the engine and tooling uses the Unix socket. Both IPv4 and IPv6

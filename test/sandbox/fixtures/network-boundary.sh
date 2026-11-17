@@ -61,8 +61,18 @@ ip -n target link set tailpeer up
 ip addr add 2001:db8:2::1/64 dev tailscale0 nodad
 ip -n target addr add 2001:db8:2::2/64 dev tailpeer nodad
 ip -6 neigh replace 2001:db8:2::2 lladdr "$(mac -n target -o link show tailpeer)" dev tailscale0 nud permanent
-iptables -N DOCKER-USER
-iptables -A FORWARD -j DOCKER-USER
+# tailscaled's resolver: tailscaled routes 100.100.100.100 into tailscale0 and answers there.
+ip -n target addr add 100.100.100.100/32 dev tailpeer
+ip route add 100.100.100.100/32 via 198.51.100.2 dev tailscale0
+# Docker's hook, then tailscaled's (v1.94.2 util/linuxfw, iptables mode): tailscaled starts after
+# Docker, puts its jump first in FORWARD, and its chain accepts each packet out of tailscale0.
+for firewall in iptables ip6tables; do
+  "$firewall" -N DOCKER-USER
+  "$firewall" -A FORWARD -j DOCKER-USER
+  "$firewall" -N ts-forward
+  "$firewall" -A ts-forward -o tailscale0 -j ACCEPT
+  "$firewall" -I FORWARD 1 -j ts-forward
+done
 probe() {
   destination=$1
   ip netns exec agent ping -c 1 -W 2 "$destination" >/dev/null 2>&1
@@ -73,6 +83,7 @@ probe 2001:db8:1::1
 probe 2001:db8:1::2
 probe 198.51.100.2
 probe 2001:db8:2::2
+probe 100.100.100.100
 sh /network.sh host 172.30.0.0/24
 for address in 2001:db8:30::1 2001:db8:1::1; do
   if probe "$address"; then exit 1; fi
@@ -82,22 +93,25 @@ for address in 172.30.0.1 192.0.2.1 172.17.0.1 100.64.0.9 169.254.169.254 169.25
   if probe "$address"; then exit 1; fi
 done
 # Both INPUT and forwarding must record actual drops, not just rule presence.
-for chain in WFD-HOST WFD-SANDBOX; do
-  iptables -nvxL "$chain" | awk '$3 == "DROP" {n += $1} END {exit !(n > 0)}'
+for chain in filter:WFD-HOST mangle:WFD-SANDBOX; do
+  iptables -t "${chain%%:*}" -nvxL "${chain#*:}" | awk '$3 == "DROP" {n += $1} END {exit !(n > 0)}'
 done
 # Public egress, Docker DNS and replies to host-initiated connections still work.
 getent hosts github.com >/dev/null
 ping -c 1 -W 1 172.30.0.2 >/dev/null
 probe 192.0.2.2
 ip netns exec target ping -c 1 -W 1 172.30.0.1 >/dev/null
-# An accepted subnet route must not bypass the tailnet boundary in either family.
-for address in 198.51.100.2 2001:db8:2::2; do
+# An accepted subnet route must not bypass the tailnet boundary in either family, and
+# tailscaled's own accept rule ahead of DOCKER-USER must not open it either.
+for address in 198.51.100.2 2001:db8:2::2 100.100.100.100; do
   if probe "$address"; then exit 1; fi
 done
 for firewall in iptables ip6tables; do
-  "$firewall" -nvxL WFD-SANDBOX | awk '$3 == "DROP" && $7 == "tailscale0" {n += $1} END {exit !(n > 0)}'
+  "$firewall" -t mangle -nvxL WFD-SANDBOX | awk '$3 == "DROP" && $7 == "tailscale0" {n += $1} END {exit !(n > 0)}'
 done
+# The runner itself still reaches tailscaled's resolver.
+ping -c 1 -W 1 100.100.100.100 >/dev/null
 sh /network.sh stop
 sh /network.sh stop
-for address in 172.30.0.1 192.0.2.1 172.17.0.1 100.64.0.9 169.254.169.254 169.254.1.1 168.63.129.16 10.23.0.2 172.20.0.2 192.168.23.2; do probe "$address"; done
+for address in 172.30.0.1 192.0.2.1 172.17.0.1 100.64.0.9 169.254.169.254 169.254.1.1 168.63.129.16 10.23.0.2 172.20.0.2 192.168.23.2 100.100.100.100; do probe "$address"; done
 printf 'network-boundary-passed\n'
