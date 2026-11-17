@@ -92,7 +92,9 @@ jobs:
       - name: Probe the gateway Service and the box
         if: inputs.bootstrap-mode == 'private'
         # Two named lines of fixed words and numbers: a 16 MiB body through the Service, and the
-        # box's flags and network rules on this runner. A probe that fails does not end the job.
+        # box's flags and network rules on this runner. A probe that fails, or that passes its
+        # time limit, does not end the job (src/sandbox/ci-policy.ts).
+        continue-on-error: true
         timeout-minutes: 20
         env:
           SANDBOX_GATEWAY_URL: ${{ inputs.gateway-url }}

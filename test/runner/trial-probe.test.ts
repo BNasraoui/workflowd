@@ -118,8 +118,9 @@ test("a box probe on a runner where the box starts reports its flags passed and 
   ])
   expect(calls).toEqual([
     `make workflowd-native-${"0".repeat(32)}`,
-    "network create --subnet 172.30.0.0/24 -o com.docker.network.bridge.name=wfd-sandbox0 workflowd-sandbox",
+    // The pull, the long step, comes first: a time limit there leaves nothing of the probe.
     `image pull --quiet ${image}`,
+    "network create --subnet 172.30.0.0/24 -o com.docker.network.bridge.name=wfd-sandbox0 workflowd-sandbox",
     "start",
     "remove",
     "network rm workflowd-sandbox",
@@ -137,7 +138,7 @@ test("a box probe names each blocked destination that the box reached", async ()
 test("a box probe names the step that failed and removes what it made", async () => {
   for (const [options, step, removed] of [
     [{ fail: "network" }, "network", []],
-    [{ fail: "image" }, "image", ["network rm workflowd-sandbox"]],
+    [{ fail: "image" }, "image", []],
     [{ fail: "box" }, "box", ["remove", "network rm workflowd-sandbox"]],
     [{ bind: false }, "binding", []],
   ] as const) {

@@ -393,3 +393,19 @@ test("a caller of agent-sandbox.yml gives each input from a literal or a reposit
       assertUnprivilegedPrWorkflows({ ...files, "agent-sandbox-caller.yml": changed }),
     ).toThrow(`Runner caller: agent-sandbox-caller.yml ${message}`)
 })
+
+test("the trial probe of agent-sandbox.yml never ends the job: its step goes on after a failure or its time limit", async () => {
+  const files = await workflows()
+  expect(() => assertUnprivilegedPrWorkflows(files)).not.toThrow()
+  const sandbox = files["agent-sandbox.yml"]!
+  const advisory = "        continue-on-error: true\n        timeout-minutes: 20\n"
+  expect(sandbox).toContain(advisory)
+  for (const changed of [
+    sandbox.replace(advisory, "        timeout-minutes: 20\n"),
+    sandbox.replace(advisory, "        continue-on-error: false\n        timeout-minutes: 20\n"),
+    sandbox.replace(advisory, "        continue-on-error: true\n"),
+  ])
+    expect(() => assertUnprivilegedPrWorkflows({ ...files, "agent-sandbox.yml": changed })).toThrow(
+      "Trial probe",
+    )
+})

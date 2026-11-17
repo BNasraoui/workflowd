@@ -124,6 +124,10 @@ export async function probeBox({ image, sudo = "/usr/bin/sudo", box: boxModule }
   const made = { network: false, rules: false, box: false }
   try {
     box = makeBox({ directory, image, name: `workflowd-native-${"0".repeat(32)}` })
+    // The pull, the long step, comes before the probe makes anything: a time limit of the step
+    // that ends the probe during the pull leaves no network and no rules for the run's harness.
+    step = "image"
+    await run("image", ["image", "pull", "--quiet", image], { timeoutMs: 900000 })
     step = "network"
     await run("network", [
       "network", "create", "--subnet", boxNetwork.subnet,
@@ -135,8 +139,6 @@ export async function probeBox({ image, sudo = "/usr/bin/sudo", box: boxModule }
     await command("network rules", sudo, [
       "-n", "/bin/bash", join(tooling, "network.sh"), "host", boxNetwork.subnet,
     ])
-    step = "image"
-    await run("image", ["image", "pull", "--quiet", image], { timeoutMs: 900000 })
     step = "box"
     made.box = true
     await box.start()

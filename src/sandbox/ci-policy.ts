@@ -213,7 +213,15 @@ function assertSandboxResultIsolation(workflows: Record<string, string>) {
     for (const value of Schema.decodeUnknownSync(Schema.Array(Schema.Json))(
       object(job).steps ?? [],
     )) {
-      const { uses, if: condition } = object(value)
+      const step = object(value)
+      const { uses, if: condition } = step
+      // The trial probe is advice for the owner: a failure or its time limit never ends the job.
+      if (
+        typeof step.run === "string" &&
+        step.run.includes("trial-probe.mjs") &&
+        (step["continue-on-error"] !== true || typeof step["timeout-minutes"] !== "number")
+      )
+        throw new Error("Trial probe: its step goes on after a failure and has a time limit")
       if (
         typeof uses === "string" &&
         uses.startsWith("actions/upload-artifact@") &&
