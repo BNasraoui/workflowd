@@ -410,6 +410,8 @@ export const makeSandboxDispatch = (options: {
       | { readonly kind: "cancelled" }
       | { readonly kind: "sealed"; readonly finalMessage: string; readonly unchanged: boolean }
     >()
+    /** The runner runs whose settlement failed in this process; `observe` tries each again. */
+    const unsettled = new Set<string>()
     const runnerPolicy = (alias: string) =>
       runnerOptions?.aliases.includes(alias) === true
         ? options.policies.find(
@@ -662,15 +664,16 @@ export const makeSandboxDispatch = (options: {
       terminal: Parameters<NonNullable<SandboxDispatchPort["finishNative"]>>[1],
     ) =>
       Effect.gen(function* () {
+        // The executor's end stays until the run's end is written: a settlement that fails keeps
+        // it for the next try (`unsettled`).
         const end = runnerEnds.get(run.runId)
-        runnerEnds.delete(run.runId)
         runnerExecutor?.release(run.runId)
         if ((yield* store.read(run.runId)) !== null)
           yield* leases.release(run.runId).pipe(Effect.ignore)
         // A run ends once: a second settlement of a run that ended (the dispatch settles a start
         // that it refused, then its error) keeps the first end.
         const current = yield* runs.read(run.runId)
-        if (current === null || !activeRunStates.has(current.state)) return
+        if (current === null || !activeRunStates.has(current.state)) return yield* settled(run)
         const now = new Date()
         if (end?.kind === "cancelled")
           yield* runs.cancel({ runId: run.runId, now, diagnostic: "cancelled" })
@@ -694,10 +697,20 @@ export const makeSandboxDispatch = (options: {
             finalMessage: null,
             ended: end?.kind === "ended" ? end.ended : null,
           })
+        yield* settled(run)
       }).pipe(
-        Effect.catchTag("AgentRunStoreConflictError", () => Effect.void),
+        Effect.catchTag("AgentRunStoreConflictError", () => settled(run)),
+        // Any other fault leaves the run active, its lease perhaps released: the sandbox's next
+        // pass tries its settlement again (`observe`), and a start of the daemon does too.
+        Effect.tapError(() => Effect.sync(() => unsettled.add(run.runId))),
         (effect) => sandboxStage("dispatch.finishRunner", effect),
       )
+    /** The end of a runner run's settlement: nothing of it is kept for another try. */
+    const settled = (run: AgentRunRecord) =>
+      Effect.sync(() => {
+        runnerEnds.delete(run.runId)
+        unsettled.delete(run.runId)
+      })
     const prepareNative: NonNullable<SandboxDispatchPort["prepareNative"]> = (run) =>
       Effect.gen(function* () {
         const policy = options.policies.find((entry) => entry.alias === run.repository)
@@ -855,8 +868,16 @@ export const makeSandboxDispatch = (options: {
     const observe = (run: AgentRunRecord) =>
       Effect.gen(function* () {
         // A runner run's executor owns each of its ends and windows (runnerWindows); a run that no
-        // executor holds after a restart is settled by the startup sweep.
-        if (runnerPolicy(run.repository) !== undefined) return
+        // executor holds after a restart is settled by the startup sweep. A run whose settlement
+        // failed is settled again here, with the end that its executor recorded.
+        if (runnerPolicy(run.repository) !== undefined)
+          return unsettled.has(run.runId)
+            ? yield* finishRunner(run, {
+                state: "operator_required",
+                finalMessage: null,
+                diagnostic: "Sandbox run settlement retried",
+              })
+            : undefined
         const lease = yield* store.read(run.runId)
         if (lease === null) return
         // Notify the caller of uncertain remote custody; reconciliation continues after delivery.
@@ -990,6 +1011,19 @@ export const makeSandboxDispatch = (options: {
         yield* store.sessionCleanupError(lease.run_id)
       else yield* store.beginRelease(lease.run_id)
     }
+    // A runner run that is still active with its lease released or gone: a daemon before this one
+    // released its lease and could not write its end. It ends here, once.
+    if (runnerOptions !== undefined)
+      for (const run of yield* runs.listActiveByExecutor("claude"))
+        if (
+          runnerPolicy(run.repository) !== undefined &&
+          ((yield* store.read(run.runId))?.state ?? "released") === "released"
+        )
+          yield* finishRunner(run, {
+            state: "operator_required",
+            finalMessage: null,
+            diagnostic: "Sandbox coordinator restarted",
+          }).pipe(Effect.ignore)
     // The heartbeat of a host sandbox's SSH transport; a runner lease has none, its job posts to
     // the gateway.
     const heartbeat = Effect.gen(function* () {

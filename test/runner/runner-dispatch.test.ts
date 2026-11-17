@@ -1,4 +1,5 @@
 import { expect, setSystemTime, test } from "bun:test"
+import { Database } from "bun:sqlite"
 import { createHash } from "node:crypto"
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
@@ -779,3 +780,100 @@ test("a run's branch that holds another commit at a start of the daemon stays re
   })
   expect(end.branch).toBe(other!)
 })
+
+// The end of a run that the store does not take: the daemon's own write of the run's end fails, once
+// or for a while, with a fault of the store (here a trigger that refuses the run's completion while
+// the table `fixture_fault` holds a row). An owner tries the end again, so the run does not stay
+// active with no owner, and it ends with the end that its executor recorded.
+test("a runner run whose end the store refuses for a while ends once the store takes it, with the end of its executor", async () => {
+  const end = await withDispatch(
+    async (remote, root) => scripted({ body: bodyOf(await seal(root, remote)) }),
+    async (runtime, remote) => {
+      await runtime.runPromise(AgentRunStore)
+      // The daemon's store: withDispatch's root holds it and git/remote/fixture/repo.git.
+      const database = new Database(join(remote.bare, "../../../../workflowd.db"))
+      try {
+        database.run("CREATE TABLE fixture_fault (id INTEGER)")
+        database.run("INSERT INTO fixture_fault VALUES (1)")
+        database.run(`CREATE TRIGGER fixture_refuse_end BEFORE UPDATE OF state ON kernel_agent_runs
+          WHEN NEW.state = 'completed' AND EXISTS (SELECT 1 FROM fixture_fault)
+          BEGIN SELECT RAISE(ABORT, 'fixture store fault'); END`)
+        const receipt = await register(runtime)
+        if (receipt._tag === "Failure") throw new Error(JSON.stringify(receipt.failure))
+        // The result is pushed, and its end is refused for some passes of the daemon's workers.
+        for (let tries = 0; remote.ref(branch) === null; tries++) {
+          if (tries > 300) throw new Error("the result was not pushed")
+          await Bun.sleep(50)
+        }
+        await Bun.sleep(1500)
+        const runs = await runtime.runPromise(AgentRunStore)
+        expect((await runtime.runPromise(runs.read(receipt.success.runId)))?.state).toBe("verified")
+        database.run("DELETE FROM fixture_fault")
+        return await ended(runtime, remote, receipt.success.runId)
+      } finally {
+        database.close()
+      }
+    },
+  )
+  expect({ state: end.run.state, diagnostic: end.run.diagnostic }).toEqual({
+    state: "completed",
+    diagnostic: null,
+  })
+  expect(end.branch).not.toBeNull()
+  expect(end.message).toMatchObject({ status: "completed", final_message: "Done." })
+}, 60000)
+
+test("a runner run that a daemon released but could not end is ended once at the next start of the daemon", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-unsettled-"))
+  const remote = await gitRemote(join(root, "git"))
+  const github = await githubStub(remote.sourceSha, () => undefined)
+  const daemon = (control: RunnerControl) =>
+    daemonRuntime(
+      { root, database: join(root, "workflowd.db") },
+      github,
+      remote.bare,
+      runnerPolicy(image),
+      Effect.succeed(control),
+    )
+  try {
+    const sealed = await seal(root, remote)
+    const first = daemon(scripted({ body: bodyOf(sealed) }))
+    const database = new Database(join(root, "workflowd.db"))
+    try {
+      await first.runPromise(AgentRunStore)
+      // Each end of a run is refused while the first daemon runs.
+      database.run(`CREATE TRIGGER fixture_refuse_end BEFORE UPDATE OF state ON kernel_agent_runs
+        WHEN NEW.state NOT IN ('spawning', 'spawned', 'verified')
+        BEGIN SELECT RAISE(ABORT, 'fixture store fault'); END`)
+      const receipt = await register(first)
+      if (receipt._tag === "Failure") throw new Error(JSON.stringify(receipt.failure))
+      for (let tries = 0; ; tries++) {
+        const lease = database
+          .query<{ state: string }, [string]>("SELECT state FROM sandbox_leases WHERE run_id = ?")
+          .get(runId)
+        if (lease?.state === "released") break
+        if (tries > 300) throw new Error("the lease was not released")
+        await Bun.sleep(50)
+      }
+    } finally {
+      await first.dispose()
+      database.run("DROP TRIGGER IF EXISTS fixture_refuse_end")
+      database.close()
+    }
+    const second = daemon(scripted({ later: "nothing" }))
+    try {
+      const end = await ended(second, remote, runId)
+      expect({ state: end.run.state, diagnostic: end.run.diagnostic }).toEqual({
+        state: "operator_required",
+        diagnostic: "Sandbox coordinator restarted",
+      })
+      expect((await second.runPromise(mailbox(runId))).length).toBe(1)
+    } finally {
+      await second.dispose()
+    }
+  } finally {
+    await github.close()
+    await remote.close()
+    await rm(root, { recursive: true, force: true })
+  }
+}, 60000)
