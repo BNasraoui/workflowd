@@ -123,6 +123,9 @@ jobs:
           systemd-analyze --user --recursive-errors=no --man=no --generators=no \
             verify deploy/systemd/workflowd.service \
               deploy/systemd/workflowd-runner.service deploy/systemd/workflowd-mcp.service
+          # The gateway's unit is a system unit: it runs the Docker client of the runner.
+          systemd-analyze --recursive-errors=no --man=no --generators=no \
+            verify deploy/systemd/workflowd-gateway.service
 
   tests:
     name: Tests and changed-line coverage
