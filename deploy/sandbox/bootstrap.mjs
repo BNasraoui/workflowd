@@ -3,6 +3,7 @@ import { spawn } from "node:child_process"
 import { dirname } from "node:path"
 import { fileURLToPath, pathToFileURL } from "node:url"
 import { openSession, takeJobIdentity } from "./bootstrap-helper.mjs"
+import { gatewayTransport } from "./gateway-address.mjs"
 import { sessionKeyPair } from "./renewal.mjs"
 
 const tooling = dirname(fileURLToPath(import.meta.url))
@@ -30,6 +31,11 @@ export async function prepare({
    * otherwise only in this process's memory and on the relay's standard input.
    */
   sessionKey = sessionKeyPair(),
+  /**
+   * How the runner reaches the gateway: for the Service's MagicDNS name, the address that
+   * tailscaled's resolver gives (gateway-address.mjs), which the relay then uses too.
+   */
+  transport = gatewayTransport,
 }) {
   const ref = environment.GITHUB_REF ?? ""
   if (!/^[a-f0-9]{40}$/.test(environment.GITHUB_SHA ?? "") || !ref.startsWith("refs/heads/workflowd/leases/"))
@@ -42,8 +48,11 @@ export async function prepare({
   const gateway = environment.SANDBOX_GATEWAY_URL ?? ""
   const issue = takeJobIdentity(environment, identity)
   let grant
+  let address
   try {
-    grant = await openSession({ gateway, leaseId, issue, backoff, sessionKey })
+    const reach = await transport(gateway)
+    address = reach.address
+    grant = await openSession({ gateway, leaseId, issue, backoff, sessionKey, send: reach.send })
   } finally {
     issue.clear()
   }
@@ -70,7 +79,13 @@ export async function prepare({
       stdio: ["pipe", "pipe", "ignore"],
     },
   )
-  child.stdin.end(JSON.stringify({ ...grant, gateway }))
+  child.stdin.end(
+    JSON.stringify({
+      ...grant,
+      gateway,
+      ...(address === undefined ? {} : { gatewayAddress: address }),
+    }),
+  )
   await new Promise((resolve, reject) => {
     child.once("error", reject)
     child.once("exit", () => reject(new Error("relay unavailable")))

@@ -5,6 +5,7 @@ import { writeFileSync } from "node:fs"
 import { chmod } from "node:fs/promises"
 import { pathToFileURL } from "node:url"
 import { gatewayOrigin } from "./bootstrap-helper.mjs"
+import { pinnedLookup } from "./gateway-address.mjs"
 import {
   maxRenewalAttempt,
   renewalRequests,
@@ -22,6 +23,7 @@ import {
   providerIdPattern,
 } from "./capability-limits.mjs"
 import { createHash } from "node:crypto"
+import { isIP } from "node:net"
 
 const root = "/run/workflowd-sandbox"
 
@@ -90,11 +92,23 @@ export async function serveRunnerRelay(config, directory = root) {
     !Number.isSafeInteger(config.deadline) ||
     config.expiresAt > config.deadline ||
     typeof config.providerId !== "string" ||
-    !providerIdPattern.test(config.providerId)
+    !providerIdPattern.test(config.providerId) ||
+    (config.gatewayAddress !== undefined &&
+      (typeof config.gatewayAddress !== "string" || isIP(config.gatewayAddress) !== 4))
   )
     throw new Error("relay configuration refused")
   const origin = gatewayOrigin(config.gateway)
-  const agent = new Agent({ keepAlive: true, maxSockets: maxRelaySockets })
+  // The address of the gateway's Service name that tailscaled gave the bootstrap, if any: each
+  // connection goes there, with the name kept for TLS and the Host header (gateway-address.mjs).
+  const lookup =
+    config.gatewayAddress === undefined
+      ? undefined
+      : pinnedLookup(new URL(origin).hostname, config.gatewayAddress)
+  const agent = new Agent({
+    keepAlive: true,
+    maxSockets: maxRelaySockets,
+    ...(lookup === undefined ? {} : { lookup }),
+  })
   let credential = config
   let renewal
   let streams = 0

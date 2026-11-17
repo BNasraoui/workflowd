@@ -155,3 +155,31 @@ test("a box probe names the step that failed and removes what it made", async ()
     "workflowd.probe box-flags: failed step=network-rules",
   ])
 })
+
+test("the Service probe reaches a MagicDNS name through tailscaled's address, and names a name that tailscaled does not resolve", async () => {
+  const name = "https://gateway.fixture.ts.net"
+  const asked: Array<string> = []
+  expect(
+    await probeServiceBody({
+      gateway: name,
+      transport: (gateway) => {
+        asked.push(gateway)
+        return Promise.resolve({
+          send: async (url: string, init: RequestInit) => {
+            expect(url).toBe(`${name}/capabilities/v1/run/result`)
+            await new Response(init.body).arrayBuffer()
+            return new Response(null, { status: 403 })
+          },
+        })
+      },
+    }),
+  ).toBe(`workflowd.probe service-body-16mib: passed status=403 sent=${resultBound}`)
+  expect(asked).toEqual([name])
+  expect(
+    await probeServiceBody({
+      gateway: name,
+      transport: () =>
+        Promise.reject(Object.assign(new Error("gateway name unresolved"), { code: "ENOTFOUND" })),
+    }),
+  ).toBe("workflowd.probe service-body-16mib: failed error=ENOTFOUND sent=0")
+})

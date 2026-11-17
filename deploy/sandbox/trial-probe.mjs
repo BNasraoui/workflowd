@@ -9,6 +9,7 @@ import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { fileURLToPath, pathToFileURL } from "node:url"
 import { gatewayOrigin } from "./bootstrap-helper.mjs"
+import { gatewayTransport } from "./gateway-address.mjs"
 import { command } from "./command.mjs"
 
 const tooling = dirname(fileURLToPath(import.meta.url))
@@ -34,11 +35,18 @@ const errorCode = (error) => {
  * `inconclusive` any other answer. Only a post with a run token, which the result route reads,
  * shows the whole bound; this probe has none.
  */
-export async function probeServiceBody({ gateway, send = fetch, size = resultBound }) {
+export async function probeServiceBody({
+  gateway,
+  send,
+  size = resultBound,
+  transport = gatewayTransport,
+}) {
   const name = "service-body-16mib"
   let sent = 0
   try {
     const url = `${gatewayOrigin(gateway)}/capabilities/v1/run/result`
+    // The Service's MagicDNS name, through tailscaled's resolver (gateway-address.mjs).
+    const post = send ?? (await transport(gateway)).send
     const chunk = new Uint8Array(65536)
     const body = new ReadableStream({
       pull(controller) {
@@ -48,7 +56,7 @@ export async function probeServiceBody({ gateway, send = fetch, size = resultBou
         controller.enqueue(part)
       },
     })
-    const response = await send(url, {
+    const response = await post(url, {
       method: "POST",
       body,
       duplex: "half",

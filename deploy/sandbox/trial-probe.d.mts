@@ -4,6 +4,10 @@ export function probeServiceBody(options: {
   readonly gateway: string
   readonly send?: (url: string, init: RequestInit & { duplex: "half" }) => Promise<Response>
   readonly size?: number
+  /** How the probe reaches the gateway when `send` is not named; gateway-address.mjs's own. */
+  readonly transport?: (gateway: string) => Promise<{
+    readonly send: (url: string, init: RequestInit & { duplex: "half" }) => Promise<Response>
+  }>
 }): Promise<string>
 export const blockedDestinations: ReadonlyArray<{
   readonly name: string
