@@ -126,6 +126,11 @@ jobs:
           # The gateway's unit is a system unit: it runs the Docker client of the runner.
           systemd-analyze --recursive-errors=no --man=no --generators=no \
             verify deploy/systemd/workflowd-gateway.service
+          # The front's unit is a system unit of a second tailscaled. The runner has no
+          # tailscaled; an executable fixture stands at its path for the check.
+          if [ ! -e /usr/sbin/tailscaled ]; then sudo install -D -m 0755 /bin/true /usr/sbin/tailscaled; fi
+          systemd-analyze --recursive-errors=no --man=no --generators=no \
+            verify deploy/systemd/workflowd-gateway-front.service
 
   tests:
     name: Tests and changed-line coverage
