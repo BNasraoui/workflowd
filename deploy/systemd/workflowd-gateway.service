@@ -32,6 +32,10 @@ ExecStart=/usr/bin/docker run --rm --name workflowd-gateway --pull never \
 # (docs/capability-gateway.md, Login custody). TimeoutStopSec covers that stop and the end of
 # the client.
 ExecStop=/usr/bin/docker stop --time 15 workflowd-gateway
+# The gateway ends a SIGTERM by interrupting its main fiber, and Effect's runMain exits 130 for an
+# end by interruption alone; `docker run` exits with the container's code. So 130 is the code of
+# a clean stop. A fault ends it with another code, and Restart=on-failure starts it again.
+SuccessExitStatus=130
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=30

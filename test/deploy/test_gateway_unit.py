@@ -120,6 +120,11 @@ class GatewayUnitTests(unittest.TestCase):
             ],
         )
 
+    def test_a_stop_by_sigterm_counts_as_clean(self):
+        # The gateway exits 130 after a SIGTERM (an end by interruption); test/gateway-image/
+        # unit.sh stops a container of the image with this unit's commands and reads the code.
+        self.assertEqual(values(self.entries, 'Service', 'SuccessExitStatus'), ['130'])
+
     def test_restarts_as_the_other_units(self):
         self.assertEqual(values(self.entries, 'Service', 'Restart'), ['on-failure'])
         self.assertEqual(values(self.entries, 'Service', 'RestartSec'), ['5'])

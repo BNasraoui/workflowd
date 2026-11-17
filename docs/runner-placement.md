@@ -373,6 +373,9 @@ and `10001 <front-gid> 710` for `front`. The journal
 has the line `listening /var/lib/workflowd-gateway/front/gateway.sock` and no other error. The
 stop timeout of the unit is 15 seconds from SIGTERM to SIGKILL (`docker stop --time 15`); `systemctl
 show -p TimeoutStopUSec workflowd-gateway.service` writes `TimeoutStopUSec=30s`, which covers it.
+The gateway ends a SIGTERM with exit code 130, which the unit counts as a clean stop
+(`SuccessExitStatus=130`): after `systemctl stop`, `systemctl is-failed workflowd-gateway.service`
+writes `inactive`.
 After owner step 8, the journal of the restart has no login error.
 
 ### Operator step 4. Serve the Service
