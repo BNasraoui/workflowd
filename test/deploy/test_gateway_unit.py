@@ -57,7 +57,7 @@ def example_entries():
 def example_config():
     """The example's WORKFLOWD_CAPABILITY_GATEWAY, with each bare placeholder made a number."""
     text = example_entries()['WORKFLOWD_CAPABILITY_GATEWAY']
-    return json.loads(re.sub(r'(?<!")<[a-z-]+>(?!")', '0', text))
+    return json.loads(re.sub(r'(?<=:)<[a-z-]+>(?=[,}])', '0', text))
 
 
 class GatewayUnitTests(unittest.TestCase):

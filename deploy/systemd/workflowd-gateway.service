@@ -1,0 +1,56 @@
+# The capability gateway as a container of the published gateway image (nix/gateway-image.nix).
+# A system unit: root runs the Docker client one time per start, and the gateway runs as the
+# image's own uid 10001, never as the daemon's user. See docs/runner-placement.md, owner step 7.
+#
+# The container writes only /var/lib/workflowd-gateway (its store, its control and listen
+# sockets, its login and its noscope configuration) and a private /tmp. The directory has the
+# same path on the host, so the daemon and Tailscale Serve reach the sockets at the paths of
+# WORKFLOWD_CAPABILITY_GATEWAY.
+[Unit]
+Description=Workflowd capability gateway
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/workflowd-gateway/gateway.env
+# A container that an earlier start left gets the same stop as below, never a kill.
+ExecStartPre=-/usr/bin/docker stop --time 15 workflowd-gateway
+ExecStartPre=-/usr/bin/docker rm workflowd-gateway
+# --group-add gives the gateway the groups of daemon.gid and listen.front.gid: it gives each
+# socket directory that group. --pull never: the owner pulls the image by its digest.
+ExecStart=/usr/bin/docker run --rm --name workflowd-gateway --pull never \
+  --read-only --tmpfs /tmp \
+  --cap-drop ALL --security-opt no-new-privileges --ulimit core=0 \
+  --group-add ${WORKFLOWD_GATEWAY_DAEMON_GID} --group-add ${WORKFLOWD_GATEWAY_FRONT_GID} \
+  --volume /var/lib/workflowd-gateway:/var/lib/workflowd-gateway \
+  --env WORKFLOWD_CAPABILITY_GATEWAY \
+  --stop-timeout 15 \
+  ${WORKFLOWD_GATEWAY_IMAGE}
+# SIGTERM to the gateway, then 15 seconds for a renewal in flight, the listener and the store
+# (docs/capability-gateway.md, Login custody). TimeoutStopSec covers that stop and the end of
+# the client.
+ExecStop=/usr/bin/docker stop --time 15 workflowd-gateway
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+UMask=0077
+# The Docker client only: it reaches the Docker socket and writes nothing.
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+LockPersonality=yes
+
+[Install]
+WantedBy=multi-user.target
