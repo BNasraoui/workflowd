@@ -1,0 +1,58 @@
+# The front of the capability gateway: a second tailscaled, a tagged node that serves the
+# gateway's Service to the gateway's Unix socket. See docs/runner-placement.md, owner step 7.
+#
+# A Service host must be a tagged node. The host's own tailscaled stays the node of its user:
+# this unit does not use its state, its socket, its port or its interface. It runs as its own
+# system user, workflowd-gateway-front, never as root, the daemon's user or the gateway's uid
+# 10001, and with userspace networking, so it needs no TUN device and no capability.
+#
+# The gateway serves the uid of this user only (listen.front.uid). The user reaches the gateway's
+# socket through its group only: the directory of the socket has mode 0710 and the group
+# listen.front.gid, and the socket has mode 0660 and the same group. Its state and its socket
+# are in directories of mode 0700: only this user and root reach them. The gateway's container
+# has the group listen.front.gid, so the group must not open them.
+[Unit]
+Description=Workflowd capability gateway front (tailscaled of the gateway Service)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+User=workflowd-gateway-front
+Group=workflowd-gateway-front
+StateDirectory=workflowd-gateway-front
+StateDirectoryMode=0700
+RuntimeDirectory=workflowd-gateway-front
+RuntimeDirectoryMode=0700
+# --port=0: tailscaled selects a free UDP port; the host's tailscaled keeps its own port.
+# --encrypt-state=false: the unit has no TPM device; the state directory is closed to others.
+ExecStart=/usr/sbin/tailscaled --tun=userspace-networking \
+  --statedir=/var/lib/workflowd-gateway-front \
+  --state=/var/lib/workflowd-gateway-front/tailscaled.state \
+  --socket=/run/workflowd-gateway-front/tailscaled.sock \
+  --port=0 --encrypt-state=false
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+UMask=0077
+# tailscaled with userspace networking: the network, its own directories, the gateway's socket.
+# A connect to a Unix socket needs no write to its file system, so ProtectSystem=strict keeps it.
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+
+[Install]
+WantedBy=multi-user.target

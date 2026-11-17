@@ -21,6 +21,8 @@ The procedure has three parts:
 | --- | --- | --- | --- |
 | `tag:agent-runner` | Tailnet policy file | Tag; the runner job asks for it (`deploy/sandbox/tailscale.sh`) | Tailscale |
 | `svc:<service-name>` | Tailnet admin console, Services | Service name | Tailscale Serve, the runner |
+| `tag:workflowd-gateway` | Tailnet policy file | Tag; the front node advertises it | Tailscale |
+| `workflowd-gateway-front` | Host, as root (owner step 7) | System user with a fixed uid `<front-uid>` and gid `<front-gid>`; host name of the front node | `workflowd-gateway-front.service`, the gateway |
 | `TS_AGENT_CLIENT_ID` | GitHub repository variable | Client ID of the trust credential, 1 to 128 ASCII identifier characters | `agent-sandbox-caller.yml` |
 | `TS_AGENT_AUDIENCE` | GitHub repository variable | Audience of the trust credential, 1 to 256 URI characters, no query, no user part | `agent-sandbox-caller.yml` |
 | `SANDBOX_AGENT_IMAGE` | GitHub repository variable | `ghcr.io/bnasraoui/workflowd-agent-base@sha256:<64 hex>` | `agent-sandbox-caller.yml`, `bootstrap.mjs`, the run client |
@@ -33,6 +35,17 @@ The procedure has three parts:
 | `WORKFLOWD_CAPABILITY_GATEWAY` | Gateway environment file on the host, `/etc/workflowd-gateway/gateway.env` | JSON object (`src/sandbox/config.ts`, `CapabilityGatewayConfig`) | the gateway process only |
 
 The daemon refuses `WORKFLOWD_CAPABILITY_GATEWAY` in its own environment. The gateway reads it.
+
+The front is the process that runs Tailscale Serve for the Service and reaches the gateway's Unix
+socket. A Service host must be a tagged node. The host's own tailscaled is the node of a user,
+and it stays so: on it, `tailscale serve --service` refuses with `service hosts must be tagged
+nodes`. So the front is a second Tailscale node on the host: a second tailscaled, with userspace
+networking, that runs as the system user `workflowd-gateway-front`
+(`deploy/systemd/workflowd-gateway-front.service`). It has its own state directory,
+`/var/lib/workflowd-gateway-front`, and its own socket,
+`/run/workflowd-gateway-front/tailscaled.sock`. It does not use the state, the socket, the port
+or the interface of the host's own tailscaled. It joins the tailnet with the tag
+`tag:workflowd-gateway`.
 
 ## Part 1: the owner's steps
 
@@ -54,11 +67,15 @@ Check: the Service `svc:<service-name>` shows in the list of Services, with port
 3. Add one grant: the source is `tag:agent-runner`, the destination is `svc:<service-name>`, the
    port is `tcp:443`.
 4. Do not add a grant from `tag:agent-runner` to the host, to a user device or to another tag.
-5. Let the host that serves the Service advertise it. Add the host's tag to
-   `autoApprovers.services` for `svc:<service-name>`, or approve the host in the Service page
-   after operator step 4.
+5. Add the front's tag to `tagOwners`, with the owner as its owner, for example
+   `"tag:workflowd-gateway": ["autogroup:admin"]`. The owner then can give the tag to the front
+   node in owner step 7.
+6. Let the front node advertise the Service. Add `tag:workflowd-gateway` to
+   `autoApprovers.services` for `svc:<service-name>`, or approve the front node in the Service
+   page after owner step 7.
+7. Do not add a grant to `tag:workflowd-gateway`. The front node serves the Service only.
 
-Check: the policy file saves with no error. The **Preview rules** page for `tag:agent-runner`
+Check: the policy file saves with no error. `tagOwners` has `tag:workflowd-gateway`. The **Preview rules** page for `tag:agent-runner`
 shows `svc:<service-name>` on `tcp:443` and no other destination.
 
 ### Step 3. Make the trust credential for the runner job (tailnet admin console)
@@ -145,6 +162,14 @@ as the daemon's user. So the daemon cannot read the gateway's login, its store o
 configuration. Root runs only the Docker client of the unit. The container writes only
 `/var/lib/workflowd-gateway` and a private `/tmp`.
 
+The front runs as the system unit `workflowd-gateway-front.service`, as its own system user
+`workflowd-gateway-front`, never as root, the daemon's user or uid 10001. The gateway serves the
+uid of this user only (`listen.front.uid`). The user reaches the gateway's socket through its
+group only (`listen.front.gid`): the gateway gives the socket's directory, `front`, this group
+and mode 0710, and the socket this group and mode 0660. The gateway's container also has this
+group, so the front's state and socket are in directories of mode 0700, which only the front's
+user and root reach. Each `tailscale --socket=...` command of the front needs root.
+
 1. Make sure that the daemon's user cannot use Docker. A user who can use the Docker socket can
    run a command in the gateway's container and read the login. Run `id -nG <daemon-user>`. If
    the output shows `docker`, remove the user from the group:
@@ -157,7 +182,17 @@ configuration. Root runs only the Docker client of the unit. The container write
    lose it only when the systemd instance of the user (`user@<daemon-uid>.service`) starts
    again, for example at the next start of the host. Do not give the go-ahead (step 10) before
    the check of this item passes.
-2. Make the gateway's state directory and its noscope configuration directory, owned by uid
+2. Make the front's system user, with the uid `<front-uid>` and the gid `<front-gid>` of
+   `listen.front.uid` and `listen.front.gid` in the environment file of operator step 2. The
+   user has no home and no login shell:
+
+   ```sh
+   sudo groupadd --system --gid <front-gid> workflowd-gateway-front
+   sudo useradd --system --uid <front-uid> --gid <front-gid> --no-create-home \
+     --home-dir /nonexistent --shell /usr/sbin/nologin workflowd-gateway-front
+   ```
+
+3. Make the gateway's state directory and its noscope configuration directory, owned by uid
    10001:
 
    ```sh
@@ -166,9 +201,9 @@ configuration. Root runs only the Docker client of the unit. The container write
      /var/lib/workflowd-gateway/config/noscope /var/lib/workflowd-gateway/config/noscope/providers
    ```
 
-   Mode 0711 lets the daemon and tailscaled go through the directory to their sockets. They
+   Mode 0711 lets the daemon and the front go through the directory to their sockets. They
    cannot list it.
-3. Install the two noscope providers of operator step 1. The gateway mints each run's token
+4. Install the two noscope providers of operator step 1. The gateway mints each run's token
    through `run-capability`, and takes its provider login through `provider-access`:
 
    ```sh
@@ -178,21 +213,21 @@ configuration. Root runs only the Docker client of the unit. The container write
    done
    ```
 
-4. Install the environment file of operator step 2:
+5. Install the environment file of operator step 2:
 
    ```sh
    sudo install -d -o root -g root -m 0755 /etc/workflowd-gateway
    sudo install -o root -g root -m 0600 <staging-directory>/gateway.env /etc/workflowd-gateway/gateway.env
    ```
 
-5. Pull the gateway image by its digest, the value of `WORKFLOWD_GATEWAY_IMAGE` in the
+6. Pull the gateway image by its digest, the value of `WORKFLOWD_GATEWAY_IMAGE` in the
    environment file. The unit does not pull it.
 
    ```sh
    sudo docker pull ghcr.io/bnasraoui/workflowd-gateway@sha256:<gateway-digest>
    ```
 
-6. Install, enable and start the unit, from the checkout of the commit of step 6:
+7. Install, enable and start the gateway's unit, from the checkout of the commit of step 6:
 
    ```sh
    sudo install -o root -g root -m 0644 <checkout>/deploy/systemd/workflowd-gateway.service \
@@ -201,9 +236,40 @@ configuration. Root runs only the Docker client of the unit. The container write
    sudo systemctl enable --now workflowd-gateway.service
    ```
 
-7. Tell the operator that the gateway started.
+8. Install, enable and start the front's unit, from the same checkout:
 
-A later restart of the unit also needs root: `sudo systemctl restart workflowd-gateway.service`.
+   ```sh
+   sudo install -o root -g root -m 0644 <checkout>/deploy/systemd/workflowd-gateway-front.service \
+     /etc/systemd/system/workflowd-gateway-front.service
+   sudo systemctl daemon-reload
+   sudo systemctl enable --now workflowd-gateway-front.service
+   ```
+
+9. Join the front node to the tailnet with the tag of owner step 2. Use no auth key: the command
+   writes a login URL. Open the URL and approve the login as the owner:
+
+   ```sh
+   sudo tailscale --socket=/run/workflowd-gateway-front/tailscaled.sock up \
+     --advertise-tags=tag:workflowd-gateway --hostname=workflowd-gateway-front
+   ```
+
+10. Point the Service at the gateway's socket, through the front node:
+
+    ```sh
+    sudo tailscale --socket=/run/workflowd-gateway-front/tailscaled.sock serve \
+      --service=svc:<service-name> --https=443 unix:/var/lib/workflowd-gateway/front/gateway.sock
+    ```
+
+    If the Service page shows the front node as a host that waits for approval, approve it.
+11. Tell the operator that the gateway and the front started.
+
+A later restart of a unit also needs root: `sudo systemctl restart workflowd-gateway.service`.
+The front node keeps its login and its Serve configuration in its state directory over a restart.
+
+The gateway makes a missing `front` directory with the group `listen.front.gid`. It does not
+change the group of a `front` directory that exists: it refuses to start. If the gateway ran
+before with another `listen.front.gid`, give the directory the new group before the restart:
+`sudo chown 10001:<front-gid> /var/lib/workflowd-gateway/front`.
 
 Check:
 
@@ -219,6 +285,17 @@ Check:
 - `systemctl is-active workflowd-gateway.service` writes `active`.
 - `sudo docker top workflowd-gateway -eo pid,uid,gid,args` shows uid 10001 and gid 10001 on
   each line. Docker needs the `pid` column.
+- `getent passwd workflowd-gateway-front` shows `<front-uid>:<front-gid>`.
+  `systemctl is-active workflowd-gateway-front.service` writes `active`.
+  `ps -o uid=,gid=,args= -C tailscaled` shows the front's line with `<front-uid> <front-gid>`,
+  and the line of the host's own tailscaled as before.
+- `sudo tailscale --socket=/run/workflowd-gateway-front/tailscaled.sock status --peers=false`
+  shows the node `workflowd-gateway-front` as `tagged-devices`. `tailscale status
+  --peers=false`, on the host's own tailscaled, shows the host's node of the user as before.
+- `sudo tailscale --socket=/run/workflowd-gateway-front/tailscaled.sock serve status` shows
+  `svc:<service-name>` on port 443 with the target
+  `unix:/var/lib/workflowd-gateway/front/gateway.sock`. The Service page of the admin console
+  shows the front node as a host of the Service.
 
 ### Step 8. Import the gateway's provider login (host, as root)
 
@@ -338,8 +415,11 @@ and mode 0600 for each (owner step 7, check).
    - `gitRead`: `true`. The runner reads the source through the gateway's Git route.
    - `listen.socket`: keep `/var/lib/workflowd-gateway/front/gateway.sock`, the path of the
      gateway's Unix socket.
-   - `listen.front.uid`, `listen.front.gid`: the uid and gid of the process that runs Tailscale
-     Serve (`ps -o uid=,gid= -C tailscaled`).
+   - `listen.front.uid`, `listen.front.gid`: the fixed uid and gid of the front's system user
+     `workflowd-gateway-front`, which the owner makes in owner step 7. If the user exists, use
+     `id -u workflowd-gateway-front` and `id -g workflowd-gateway-front`. If not, select a uid
+     and a gid above 10001 and below 60000 that `getent passwd <uid>` and `getent group <gid>`
+     do not show, and give them to the owner. Do not use 0, the daemon's ids or 10001.
    - `listen.service`: `<service-name>.<tailnet-name>.ts.net`, in lower case.
 3. Tell the owner to do owner step 7.
 
@@ -378,16 +458,24 @@ The gateway ends a SIGTERM with exit code 130, which the unit counts as a clean 
 writes `inactive`.
 After owner step 8, the journal of the restart has no login error.
 
-### Operator step 4. Serve the Service
+### Operator step 4. Check the front
 
-1. Point the Service at the gateway's socket:
-   `tailscale serve --service=svc:<service-name> --https=443 unix:/var/lib/workflowd-gateway/front/gateway.sock`.
+The owner serves the Service in owner step 7, through the front node. The operator cannot reach
+the front's socket.
 
-Check: `tailscale serve status` shows `svc:<service-name>` on port 443 with the target
-`unix:/var/lib/workflowd-gateway/front/gateway.sock`, and the Service page of the admin console
-shows the host as a host of the Service. Do not check the Service with a request from the host:
-the host is itself a tagged node that serves the Service, so its answer shows neither the path
-of a runner nor the gateway's rule for it. The probe line `service-body-16mib` of the trial run
+1. Read the state of the front's unit and process:
+
+   ```sh
+   systemctl is-active workflowd-gateway-front.service
+   ps -o uid=,gid=,args= -C tailscaled
+   ```
+
+Check: the unit is `active`. `ps` shows one `tailscaled` line with `<front-uid> <front-gid>` and
+`--socket=/run/workflowd-gateway-front/tailscaled.sock`. These values are `listen.front.uid` and
+`listen.front.gid` of the environment file. The owner's checks of owner step 7 show the Serve
+configuration and the Service page. Do not check the Service with a request from the host: no
+node of the host has the runner's tag, so the answer shows neither the path of a runner nor the
+gateway's rule for it. The probe line `service-body-16mib` of the trial run
 (Part 3) checks the path from a runner.
 
 ### Operator step 5. Configure the daemon
